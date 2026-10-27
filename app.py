@@ -23,6 +23,7 @@ from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from workflows import generate as gen
@@ -117,6 +118,16 @@ def files(path: str) -> FileResponse:
     if not str(target).startswith(str(ASSETS.resolve())) or not target.exists():
         raise HTTPException(404, "not found")
     return FileResponse(target)
+
+
+# 前端构建产物（web/dist）。存在就挂在根路径，API 路由在上面已注册，不会被抢。
+WEB_DIST = ROOT / "web" / "dist"
+if WEB_DIST.exists():
+    app.mount("/", StaticFiles(directory=str(WEB_DIST), html=True), name="web")
+else:  # pragma: no cover
+    @app.get("/")
+    def _no_web() -> Dict[str, str]:
+        return {"hint": "前端未构建：cd web && npm install && npm run build"}
 
 
 if __name__ == "__main__":

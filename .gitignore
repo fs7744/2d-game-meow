@@ -13,6 +13,11 @@ assets/
 *.log
 *.jsonl
 
+# ---- 前端 ----
+web/node_modules/
+web/dist/
+web/*.tsbuildinfo
+
 # ---- 本地临时与缓存 ----
 .workbuddy/
 .cache/
