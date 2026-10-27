@@ -75,6 +75,22 @@ def test_detector_agrees_with_whole_image(ex_auto, ex_nodet, walk_frames):
     assert float(np.median(errs)) < 0.3, f"两种后端差异过大: {np.median(errs):.2f}"
 
 
+def test_engine_holds_pose_extractor_singleton(eng, walk_frames):
+    """质量闸门每帧都要检姿态，引擎必须缓存会话（不然每帧重开 onnx 太亏）。"""
+    from workflows import quality
+
+    if not (MODEL_DIR / "dw-ll_ucoco_384.onnx").exists():
+        pytest.skip("未下载姿态模型")
+    ex = eng.pose_extractor()
+    assert ex is not None
+    assert eng.pose_extractor() is ex, "必须复用同一个 onnx 会话"
+
+    # 真实产物上跑一遍评分：字段齐全、关节数在合法区间（0~18）
+    ev = quality.evaluate(Image.open(walk_frames[0]), ex, min_points=8)
+    assert 0 <= ev["points"] <= 18
+    assert isinstance(ev["passed"], bool) and "score" in ev
+
+
 def test_cli_grid_mode(tmp_path, root, walk_frames):
     """精灵图按网格切片 -> 批量出骨架图。"""
     sheet = tmp_path / "sheet.png"

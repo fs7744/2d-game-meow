@@ -79,6 +79,56 @@ def test_poseswap_produces_frames_and_sheet(eng, pose_frames):
     assert len(list(Path(r["frames_dir"]).glob("frame_*.png"))) == 3
 
 
+def test_poseswap_gate_off_keeps_single_attempt(eng, pose_frames, monkeypatch):
+    """关掉闸门就只生成 candidates 个候选，不再补提。"""
+    monkeypatch.setattr(eng, "_pose", _FakePose(1), raising=False)
+    r = g.poseswap(eng, pose_images=list(pose_frames)[:1], prompt="white cat knight",
+                   steps=6, seed=11, width=256, height=256, cols=1, tag="gate_off",
+                   candidates=1, gate=False, gate_retries=2)
+    assert r["gate"] is False
+    assert r["attempts"] == 1
+    assert r["gate_retries"] == 0, "闸门关闭时不该预留补提额度"
+
+
+def test_poseswap_gate_retries_until_budget_spent(eng, pose_frames, monkeypatch):
+    """关节数一直不达标 -> 用满 1+retries 次，meta 里能看出重提过。"""
+    monkeypatch.setattr(eng, "_pose", _FakePose(2), raising=False)
+    r = g.poseswap(eng, pose_images=list(pose_frames)[:1], prompt="white cat knight",
+                   steps=6, seed=12, width=256, height=256, cols=1, tag="gate_retry",
+                   candidates=1, gate=True, gate_min_points=8, gate_retries=2)
+    assert r["attempts"] == 3
+    assert r["gate_passed"] == 0
+    assert r["frame_scores"][0]["attempts"] == 3
+    assert len(r["per_frame_seconds"]) == 1, "补提的耗时必须并进该帧，不能多出一帧"
+
+
+def test_poseswap_batch_picks_best_candidate(eng, pose_frames, monkeypatch):
+    """批量候选：第一个候选关节少，第二个够 -> 挑第二个，且不再补提。"""
+    seq = iter([3, 14])
+
+    class _Seq(_FakePose):
+        def visible_points(self, img, thr=0.25):   # noqa: ARG002
+            return {i: (0.5, 0.5) for i in range(next(seq, 14))}
+
+    monkeypatch.setattr(eng, "_pose", _Seq(0), raising=False)
+    r = g.poseswap(eng, pose_images=list(pose_frames)[:1], prompt="white cat knight",
+                   steps=6, seed=13, width=256, height=256, cols=1, tag="batch_pick",
+                   candidates=2, gate=True, gate_min_points=8, gate_retries=3)
+    assert r["attempts"] == 2, "第二个候选已过闸门，不该再动用补提额度"
+    assert r["gate_passed"] == 1
+    assert r["frame_scores"][0]["points"] == 14
+
+
+class _FakePose:
+    """替身姿态模型：固定返回 n 个可见关节（真实模型在 test_pose.py 里测）。"""
+
+    def __init__(self, n: int) -> None:
+        self.n = n
+
+    def visible_points(self, img, thr: float = 0.25):   # noqa: ARG002
+        return {i: (0.5, 0.5) for i in range(self.n)}
+
+
 def test_engine_free_clears_cache(eng):
     eng.txt2img_pipe()
     assert eng.stats()["loaded"]

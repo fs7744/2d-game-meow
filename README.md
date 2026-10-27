@@ -16,6 +16,7 @@
 | W1 文生图 / W2 图生图 | 已完成，实测通过 |
 | W3 局部重绘 | 已完成，实测通过 |
 | W4 姿态驱动 → 逐帧对齐 → 精灵图打包 | 已完成，实测通过（8 帧走路序列） |
+| **W4 批量候选 + 质量闸门**（关节数不足自动补提、按分数挑帧） | 已完成，实测通过 |
 | 后处理（像素化 / 16 色量化 / 锚点对齐 / 打包） | 已完成并自测（28px 漂移 → 0） |
 | IP-Adapter 角色身份锁定 | 已接通，效果待调（见「实测」） |
 | FastAPI 服务（单卡串行队列 + 资产索引） | 已完成 |
@@ -151,15 +152,19 @@ mkdir -p models/checkpoints/sdxl && ...   # 见 tools/fetch_modelscope.py
 | 原生分辨率 | 512²（768² 是甜点，1024² 会崩） | **1024²** |
 | W1 文生图实测 | 768²/30 步 ≈ 1.8s / 3.4GB | **1024²/30 步 ≈ 4.5s / 10.5GB** |
 | W4 姿态驱动实测 | 512²/25 步 ≈ 1.2s / 3.6GB | **1024²/28 步 ≈ 9.1s / 13.2GB** |
+| W3 局部重绘实测 | 512²/25 步 ≈ 0.75s / 4.6GB | **768²/10 步 ≈ 5.5s / 8.8GB**（base 权重） |
 | ControlNet | OpenPose/Canny/Tile 三套 | **三套都已装**（xinsir 版，各 2.4GB） |
 | IP-Adapter | ✅ | ✅ 已装（666MB，与 SD1.5 **共享** ViT-H encoder） |
-| W3 局部重绘 | ✅ 有专用 inpaint 权重 | ❌ 明确报错 |
+| W3 局部重绘 | ✅ 有专用 inpaint 权重 | ✅ 走 base 权重（无官方 inpaint 微调版） |
 | LoRA | 3 个精选 | **2 个可用**（见下） |
 
 **切换方式**：WebUI 左栏「设置 → 底模」。切换后 LoRA 列表会按 `base` 字段自动过滤——
 SD1.5 的 LoRA 装在 SDXL 上完全无效且会静默出废图，所以直接不让你选。
 
-W3 在 SDXL 下会**明确报错**而不是悄悄跑错。
+W3 在 SDXL 下用 `StableDiffusionXLInpaintPipeline` + **base 权重**：SDXL 没有官方
+inpaint 微调版，这是唯一可行路径。管线对 4 通道 UNet 是支持的（把 mask 与被遮图
+拼进 latent 只发生在 9 通道 UNet 上），所以不用额外下权重；质量略逊于 SD1.5 那套
+专用权重，换来的是 1024² 分辨率。选区外逐点不变的承诺两个底模都成立。
 
 > **IP-Adapter 的坑**：HF 上 `sdxl_models/image_encoder` 是 **ViT-bigG**
 > （hidden 1664 / projection 1280），而 `ip-adapter_sdxl_vit-h` 要的是 **ViT-H**
@@ -202,6 +207,44 @@ SDXL 三条 ControlNet 与 IP-Adapter 的实测（1024²）：
 | W4 + Tile 高清放大（1 帧） | 32s | **21.94GB**（接近 24GB 上限，别再叠加别的） |
 
 `poseswap` 新增 `controlnet="openpose|canny|tile"` 参数，三个底模无关地通用。
+
+## 挑帧：批量候选 + 质量闸门（W4）
+
+逐帧出图的老问题不是「画得丑」，而是**偶尔会出废帧**：没画出手、腿糊成一坨、
+脚被画布切掉。这类帧人眼一秒能挑出来，但自动化管线以前只能照单全收，打包出来的
+走路循环里突然抽一帧——不逐帧看根本发现不了。
+
+`poseswap` 现在默认开闸门（`gate=True`）：
+
+```
+每帧 -> 生成 candidates 个候选（种子 seed, seed+1000, ...）
+     -> 每个候选打一次分（workflows/quality.py）
+     -> 取分数最高的一个
+     -> 若最高分那个没过闸门，再补提最多 gate_retries 次
+     -> 仍不过就留最好的那个，并在 meta 里记 passed=false
+```
+
+**分数量什么**（全部从产物图上直接量，不看生成过程）：
+
+| 信号 | 含义 | 权重 |
+|---|---|---|
+| `points` | 姿态模型在**生成图**上重新检出的人形关节数（0~18）。手断了、画成两个半身，点数立刻掉 | +10/点 |
+| `coverage` | 抠图后前景占比。偏大=半身/糊成一坨，偏小=人太小（像素化后没细节） | +5 落在区间内 |
+| `edges` | 贴边（被画布切断）。精灵要对齐脚底，脚被裁掉则对齐必跳 | −8/条边 |
+| `drift` | 与上一帧的 alpha 质心偏移（按对角线归一化）。帧间跳太远播放会抖 | −20×偏移 |
+
+闸门判据是 `points >= gate_min_points（默认 8）` 且无贴边。**没有姿态模型时判定为
+「无法判定」而不是「不合格」**，闸门自动关闭并告警——否则会拿不到判据还无限重提。
+
+```python
+g.poseswap(eng, pose_images=poses, prompt="...", matte=True,
+           candidates=2, gate=True, gate_min_points=8, gate_retries=2)
+# meta 里能查到：attempts（总生成次数）、gate_passed（过闸门帧数）、
+#               frame_scores（每帧的 points/coverage/edge/drift/score/attempts）
+```
+
+代价：闸门每帧多几十毫秒（姿态模型跑 CPU，4090 上单帧约 10ms 量级），比重新出
+一帧便宜两个数量级。`candidates=1, gate_retries=0` 就退化成原来的行为。
 
 ## LoRA：装什么、怎么用
 
@@ -410,19 +453,20 @@ python tools/video.py i2v assets/cat.png "the same character walking" -o assets/
 ## 测试
 
 ```bash
-python -m pytest tests -q        # 132 个用例，约 220s（含几个慢用例）
+python -m pytest tests -q        # 148 个用例，约 440s（含几个慢用例）
 # 全套超过 2 分钟会被超时杀掉，分批跑：
-#   pytest tests --ignore=tests/test_models.py   # 122 个，约 147s
-#   pytest tests/test_models.py                  # 10 个，约 76s
+#   pytest tests --ignore=tests/test_models.py   # 138 个，约 117s
+#   pytest tests/test_models.py                  # 10 个，约 320s
 ```
 
 | 文件 | 覆盖 | 用例数 |
 |---|---|---|
 | `tests/test_postprocess.py` | 锚点、逐帧对齐、打包几何、色板上限、alpha 二值化、裁边 | 9 |
-| `tests/test_generate.py` | 同 seed 逐像素一致、不同 seed 相异、色板生效、**重绘选区外不变**、序列帧数、显存回收、缺权重报错 | 8 |
+| `tests/test_generate.py` | 同 seed 逐像素一致、不同 seed 相异、色板生效、**重绘选区外不变**、序列帧数、**闸门重提与批量挑帧**、显存回收、缺权重报错 | 11 |
 | `tests/test_controlnet.py` | Canny conditioning 生效、Tile 放大结构相关性 > 0.5、像素块均匀性 | 3 |
 | `tests/test_api.py` | 全部端点、队列串行性、路径穿越防护、400/404 | 9 |
-| `tests/test_pose.py` | 检测器切换、18 点完整性、关节在画面内且头高于髋、骨架渲染、双后端一致性、精灵图切片 CLI | 6 |
+| `tests/test_pose.py` | 检测器切换、18 点完整性、关节在画面内且头高于髋、骨架渲染、双后端一致性、引擎内的姿态提取器单例、精灵图切片 CLI | 7 |
+| `tests/test_quality.py` | 前景占比/质心/漂移、**贴边检测**（含未抠图时整体失效）、无模型时「无法判定」、关节数影响排序与闸门 | 11 |
 | `tests/test_io_paths.py` | 视频抽帧、GIF、精灵图切片（含空格子）、CLI 错误码、非 8 倍数尺寸重绘、cols 夹取、环境自检 JSON、LoRA 空接口 | 11 |
 | `tests/test_presets.py` | 契约拼接与优先级、77 token 预算、中文 token 估算、下载器过滤（safety_checker/bin/ckpt/fp16 优先） | 9 |
 | `tests/test_fetch.py` | Range 分块拼接、断点续传、**拒绝非 206 响应**（防 429 错误体污染）、超长残留文件重置 | 5 |
@@ -432,11 +476,12 @@ python -m pytest tests -q        # 132 个用例，约 220s（含几个慢用例
 | `tests/test_video.py` | numpy/PIL 帧兼容、mp4 落地、模型路径校验、Wan 真实生成（`RUN_WAN=1`） | 6 |
 | `tests/test_lora.py` | 注册表扫描/元数据/坏 JSON 容错、名称解析、去碎屑、贴边占比判定、武侠契约预算 | 13 |
 | `tests/test_train.py` | 数据集读取与兜底、步数规划、**端到端 6 步真训练**（导出的体积上限、可被 scan/apply_lora 认出）、`/train` 全流程 | 9 |
-| `tests/test_models.py` | `/models` 只列出本机已装的、未知底模报错、**W3 拒绝 SDXL**、SDXL 真实生成、**W4+SDXL 端到端**、SDXL 版 IPA 与三条 ControlNet | 10 |
+| `tests/test_models.py` | `/models` 只列出本机已装的、未知底模报错、**W3+SDXL 走 base 权重且选区外不变**、SDXL 真实生成、**W4+SDXL 端到端**、SDXL 版 IPA 与三条 ControlNet | 10 |
 | `tests/test_denoise.py` | `strip_fringe` 剥白边/迭代/不误伤主体、`clean_isolated` 内部改色/外挂删除/**斜向轮廓不被吃** | 9 |
 
 已知限制：骨架质量决定成败——实测 8 帧序列里有 2 帧只提取到 8/18 个关节（手臂与身体重叠），
-这两帧生成时会自由发挥，出现朝向漂移。产线上应当在提取后按「可见关节数」筛帧。
+这两帧生成时会自由发挥，出现朝向漂移。产线上应当在提取后按「可见关节数」筛帧；
+W4 侧对应的兜底是上面那套**质量闸门**（生成后再检一遍，点数不够就补提）。
 
 测试过程中修掉的两个真 bug：**inpaint 不传 width/height 时 diffusers 默认输出 512×512**（与源图不符，
 贴回时 `images do not match`）；**composite 的羽化是双向扩散**（会把选区外像素一起吃掉），
@@ -450,6 +495,7 @@ python -m pytest tests -q        # 132 个用例，约 220s（含几个慢用例
 ├── workflows/
 │   ├── engine.py           pipeline 懒加载、显存守卫、LoRA 热切换
 │   ├── generate.py         w1/w2/w3/w4 四个工作流
+│   ├── quality.py          帧质量评分（关节数 / 占比 / 贴边 / 漂移）——挑帧与闸门
 │   └── postprocess.py      像素化、调色板量化、锚点对齐、精灵图打包
 ├── tools/
 │   ├── fetch_weights.py    权重下载（走 hf-mirror）

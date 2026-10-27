@@ -49,11 +49,16 @@ def pose_frames(assets) -> list[Path]:
     return frames
 
 
+def _fixture_frames() -> list[Path]:
+    """上一次跑测试留下的夹具帧。poseswap 的目录名带时间戳，必须用 glob。"""
+    found = [p for d in ASSETS.glob("_fixture_walk*_frames") for p in d.glob("frame_*.png")]
+    return sorted(found)
+
+
 @pytest.fixture(scope="session")
 def walk_frames(eng, assets) -> list[Path]:
     """一套人形精灵帧。素材丢了就现场生成（约 5s），避免测试因缺素材而 skip。"""
-    d = assets / "_fixture_walk_frames"
-    have = sorted(d.glob("frame_*.png")) if d.exists() else []
+    have = _fixture_frames()
     if len(have) >= 4:
         return have
 
@@ -65,41 +70,13 @@ def walk_frames(eng, assets) -> list[Path]:
 
         gen_pose()
         poses = sorted(assets.glob("_pose_walk_*.png"))[:4]
-    r = g.poseswap(eng, pose_images=poses, prompt="white cat knight, red cape, front view",
-                   steps=12, seed=999, width=256, height=256, cols=4, tag="_fixture_walk")
-    return sorted(Path(r["frames_dir"]).glob("frame_*.png"))
-
-
-@pytest.fixture(scope="session")
-def walk_frames(eng, assets) -> list[Path]:
-    """一套人形精灵帧。素材丢了就现场生成（约 5s），避免测试因缺素材而 skip。"""
-    d = assets / "_fixture_walk_frames"
-    have = sorted(d.glob("frame_*.png")) if d.exists() else []
-    if len(have) >= 4:
-        return have
-
-    from workflows import generate as g
-
-    poses = sorted(assets.glob("_pose_walk_*.png"))[:4]
-    if len(poses) < 4:
-        from tools.make_pose import main as gen_pose
-
-        gen_pose()
-        poses = sorted(assets.glob("_pose_walk_*.png"))[:4]
-    r = g.poseswap(eng, pose_images=poses, prompt="white cat knight, red cape, front view",
-                   steps=12, seed=999, width=256, height=256, cols=4, tag="_fixture_walk")
-    return sorted(Path(r["frames_dir"]).glob("frame_*.png"))
-
-
-@pytest.fixture(scope="session")
-def client():
-    """FastAPI TestClient。训练测试也要用，所以放在 conftest 共用。"""
-    from fastapi.testclient import TestClient
-
-    import app as app_module
-
-    with TestClient(app_module.app) as c:
-        yield c
+    g.poseswap(eng, pose_images=poses, prompt="white cat knight, red cape, front view",
+               steps=12, seed=999, width=256, height=256, cols=4, tag="_fixture_walk",
+               gate=False)          # 夹具要的是「一定有 4 帧」，不是「尽量好」
+    have = _fixture_frames()
+    if len(have) < 4:              # pragma: no cover
+        raise AssertionError("夹具帧生成失败")
+    return have
 
 
 @pytest.fixture(scope="session")

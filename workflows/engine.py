@@ -28,6 +28,7 @@ from diffusers import (  # noqa: E402
     StableDiffusionPipeline,
     StableDiffusionXLControlNetPipeline,
     StableDiffusionXLImg2ImgPipeline,
+    StableDiffusionXLInpaintPipeline,
     StableDiffusionXLPipeline,
 )
 
@@ -90,6 +91,7 @@ class Engine:
         self._lora: Optional[str] = None
         # 语义分割抠图模型目录（isnet-general-use.onnx）。存在即启用 u2net 后端。
         self.matte_dir = self.root / "matte"
+        self._pose: Any = None       # 姿态提取器（CPU）。None=未初始化，False=不可用
 
     # ---------- 底模 ----------
 
@@ -175,19 +177,37 @@ class Engine:
         return self._cache[key]
 
     def inpaint_pipe(self, model: str = DEFAULT_MODEL):
-        """W3 局部重绘。只有 SD1.5 有专用 inpaint 权重（SDXL 的 inpaint 质量更差）。"""
-        if model != "sd15":
-            raise ValueError(f"W3 局部重绘目前只支持 SD1.5，收到 {model}")
-        if "inpaint" not in self._cache:
-            t0 = time.perf_counter()
+        """W3 局部重绘。
+
+        两个底模走不同来源：
+          sd15 —— 专用 inpaint 权重（runwayml 在 SD1.5 基础上额外训练过 inpainting）
+          sdxl —— 直接用 base 权重跑 StableDiffusionXLInpaintPipeline。
+                  SDXL 没有官方 inpaint 微调版，这是唯一可行路径，质量略逊于
+                  SD1.5 那套专用权重，但换来了 1024² 的分辨率。
+        """
+        key = f"inpaint:{model}"
+        if key in self._cache:
+            return self._cache[key]
+
+        t0 = time.perf_counter()
+        base = self._base_kwargs()
+        if model == "sdxl":
+            p = self._check_model(model)
+            # SDXL 管线没有 safety_checker 这个参数，传了只会落一条 warning
+            base.pop("safety_checker", None)
+            base.pop("requires_safety_checker", None)
+            pipe = StableDiffusionXLInpaintPipeline.from_pretrained(
+                p, variant=detect_variant(p), **base
+            )
+        else:
             p = self.path(SD15_INPAINT)
             pipe = StableDiffusionInpaintPipeline.from_pretrained(
-                p, variant=detect_variant(p), **self._base_kwargs()
+                p, variant=detect_variant(p), **base
             )
-            pipe.scheduler = _scheduler(pipe.scheduler.config)
-            self._cache["inpaint"] = self._fit(pipe, "inpaint")
-            log.info("inpaint 加载 %.1fs", time.perf_counter() - t0)
-        return self._cache["inpaint"]
+        pipe.scheduler = _scheduler(pipe.scheduler.config)
+        self._cache[key] = self._fit(pipe, key)
+        log.info("%s 加载 %.1fs", key, time.perf_counter() - t0)
+        return self._cache[key]
 
     def controlnet(self, which: str = "openpose", model: str = DEFAULT_MODEL) -> ControlNetModel:
         key = f"{which}:{model}"
@@ -275,6 +295,28 @@ class Engine:
         self._cache[key] = self._fit(pipe, key)
         log.info("%s 加载 %.1fs", key, time.perf_counter() - t0)
         return self._cache[key]
+
+    # ---------- 质量闸门用的姿态提取器 ----------
+
+    def pose_extractor(self):
+        """W4 质量闸门需要「把生成图再检一遍姿态」，所以引擎持有单例。
+
+        权重缺失/onnxruntime 没装时返回 None（闸门应据此关闭），不抛异常——
+        质量闸门是增强项，不该让它把整条出图链路拖死。
+        PoseExtractor 走 CPU（4090 上单帧约 10ms），不占显存。
+        """
+        if self._pose is not None:
+            return self._pose or None
+        try:
+            from .pose import PoseExtractor
+
+            self._pose = PoseExtractor(self.root / "pose_keypoint" / "dwpose",
+                                      detector="auto")
+            log.info("姿态提取器就绪（闸门后端 %s）", self._pose.backend)
+        except Exception as exc:              # noqa: BLE001
+            log.warning("姿态提取器不可用，质量闸门关闭：%s", exc)
+            self._pose = False
+        return self._pose or None
 
     # ---------- LoRA 热切换 ----------
 

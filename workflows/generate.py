@@ -18,6 +18,7 @@ from . import anim as anim_mod
 from . import matte as matte_mod
 from . import postprocess as pp
 from . import presets
+from . import quality
 from .engine import Engine
 
 ASSETS = Path(__file__).resolve().parent.parent / "assets"
@@ -140,9 +141,10 @@ def img2img(eng: Engine, *, init_image: str | Path, prompt: str,
 
 def inpaint(eng: Engine, *, image: str | Path, mask: str | Path, prompt: str,
             negative: Optional[str] = None, strength: float = 0.9, steps: int = 25,
-            cfg: float = 7.5, seed: int = -1, tag: str = "w3") -> Dict[str, Any]:
+            cfg: float = 7.5, seed: int = -1, model: str = "sd15",
+            tag: str = "w3") -> Dict[str, Any]:
     """只重画 mask 区域，并把结果按羽化蒙版贴回——选区外像素逐点不变。"""
-    pipe = eng.inpaint_pipe()
+    pipe = eng.inpaint_pipe(model)
     src = Image.open(image).convert("RGB")
     msk = Image.open(mask).convert("L")
     if msk.size != src.size:
@@ -164,7 +166,8 @@ def inpaint(eng: Engine, *, image: str | Path, mask: str | Path, prompt: str,
     composed = composite(src, raw, msk)
     return _save(composed, _stamp(tag), "inpaint", {
         "workflow": "w3", "prompt": prompt, "image": str(image), "mask": str(mask),
-        "strength": strength, "steps": steps, "seed": seed, "raw": None,
+        "strength": strength, "steps": steps, "cfg": cfg, "seed": seed, "model": model,
+        "raw": None,
         "seconds": seconds, "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
     })
 
@@ -199,11 +202,22 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
              clean_iso: int = 1, export: Optional[str] = None,
              controlnet: str = "openpose", preset: Optional[str] = None,
              model: str = "sd15",
+             candidates: int = 1, gate: bool = True, gate_min_points: int = 8,
+             gate_retries: int = 2, gate_seed_step: int = 1000,
              anim_name: str = "walk", fps: int = 10, tag: str = "w4") -> Dict[str, Any]:
     """逐帧生成 -> 锚点对齐 -> 打包 sprite sheet。固定 seed 是跨帧一致的前提。
 
     preset 为 None 表示不套契约（保持向后兼容）；w4 + LoRA 时建议显式传，
     否则武侠 LoRA 会自己画水墨背景与题字，抠图抠不净。
+
+    `candidates` / `gate`（批量挑帧 + 质量闸门）：
+      每帧默认生成 `candidates` 个候选（种子 seed, seed+gate_seed_step, ...），
+      用 quality.evaluate 打分后取最好的一个；候选里没有一个过闸门（检出关节
+      数 < gate_min_points，或有边被画布切断）时，再补提最多 `gate_retries` 次。
+      闸门的代价是每帧多花几十毫秒（姿态模型跑 CPU），换来的是不再往精灵图里
+      塞没画出手脚、或者脚被裁掉的废帧——这类帧以前只能人眼一张张挑。
+      姿态模型缺失时闸门自动关闭并告警，此时 candidates 仍然生效（只按分数挑，
+      分数里只剩占比/贴边/漂移三项）。
     """
     negative = negative or NEG_DEFAULT
     if preset is not None:
@@ -217,23 +231,29 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
     else:
         ref = None
 
-    frames: List[Image.Image] = []
-    per_frame: List[float] = []
-    torch.cuda.reset_peak_memory_stats()
-    for pose_path in pose_images:
-        pose = Image.open(pose_path).convert("RGB").resize((width, height))
+    extractor = None
+    if gate:
+        extractor = eng.pose_extractor()
+        if extractor is None:
+            print("[warn] 质量闸门不可用（姿态模型或 onnxruntime 缺失），本次只按分数挑帧")
+    candidates = max(1, int(candidates))
+    # 闸门不可用时不留补提额度：没有判据的重提等于烧显卡
+    retries = max(0, int(gate_retries)) if extractor is not None else 0
+    attempts_max = candidates + retries
+
+    def _one_frame(pose: Image.Image, frame_seed: int):
         dt = _timer()
         kwargs: Dict[str, Any] = dict(
             prompt=prompt, negative_prompt=negative, image=pose,
             num_inference_steps=steps, guidance_scale=cfg,
             controlnet_conditioning_scale=cn_scale,
-            generator=torch.Generator("cuda").manual_seed(seed),
+            generator=torch.Generator("cuda").manual_seed(frame_seed),
             width=width, height=height,
         )
         if ref is not None:
             kwargs["ip_adapter_image"] = ref
         out = pipe(**kwargs).images[0]
-        per_frame.append(dt())
+        secs = dt()
         if matte:
             out = matte_mod.despeckle(
                 matte_mod.matte_auto(out.convert("RGBA"), matte_backend, eng.matte_dir),
@@ -244,15 +264,50 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
             out = pp.quantize_palette(out, palette)
         if clean_iso and (pixel > 1 or palette):
             out = pp.clean_isolated(out, passes=clean_iso)
-        frames.append(out.convert("RGBA"))
+        return out.convert("RGBA"), secs
+
+    frames: List[Image.Image] = []
+    per_frame: List[float] = []
+    frame_scores: List[Dict[str, Any]] = []
+    attempts_used = 0
+    torch.cuda.reset_peak_memory_stats()
+    for pose_path in pose_images:
+        pose = Image.open(pose_path).convert("RGB").resize((width, height))
+        prev = frames[-1] if frames else None      # 只在抠图后有意义，未抠图 drift 恒 0
+        best: Optional[tuple[Dict[str, Any], Image.Image]] = None
+        spent = 0.0
+        used = 0
+        for i in range(attempts_max):
+            cand, secs = _one_frame(pose, seed + i * gate_seed_step)
+            spent += secs
+            used += 1
+            ev = quality.evaluate(cand, extractor, prev=prev, min_points=gate_min_points)
+            if best is None or ev["score"] > best[0]["score"]:
+                best = (ev, cand)
+            # 候选没凑齐就继续；凑齐后挑中的那个过了闸门就收工，不过才动用补提额度
+            if used >= candidates and (extractor is None or best[0]["passed"]):
+                break
+        ev, frame = best
+        ev = {**ev, "attempts": used}
+        frame_scores.append(ev)
+        attempts_used += used
+        per_frame.append(round(spent, 2))
+        frames.append(frame)
 
     aligned = pp.align_sequence(frames)
+    passed = sum(1 for s in frame_scores if s["passed"])
     meta = {
         "workflow": "w4", "prompt": prompt, "negative": negative or NEG_DEFAULT,
         "ref_image": str(ref_image) if ref_image else None, "lora": lora,
         "ipa_scale": ipa_scale if ref else None, "cn_scale": cn_scale,
         "steps": steps, "cfg": cfg, "seed": seed, "frames": len(frames), "matte": matte,
         "model": model,
+        "candidates": candidates, "gate": bool(gate and extractor is not None),
+        "gate_min_points": gate_min_points,
+        "gate_retries": retries,
+        "attempts": attempts_used,
+        "gate_passed": passed,
+        "frame_scores": frame_scores,
         "per_frame_seconds": per_frame,
         "seconds_total": round(sum(per_frame), 2),
         "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),

@@ -4,6 +4,7 @@ from __future__ import annotations
 import time
 
 import pytest
+from PIL import Image, ImageDraw
 
 from workflows.engine import Engine
 from workflows import generate as g
@@ -40,10 +41,40 @@ def test_txt2img_model_echoed(eng):
     assert r["meta"]["model"] == "sd15"
 
 
-def test_w3_refuses_sdxl(eng):
-    """W3 局部重绘只有 SD1.5 的 inpaint 权重，选错必须明确报错而不是出废图。"""
-    with pytest.raises(ValueError, match="只支持 SD1.5"):
-        eng.inpaint_pipe("sdxl")
+@pytest.mark.slow
+def test_w3_sdxl_uses_base_weights(eng, assets, root):
+    """W3 也支持 SDXL：直接用 base 权重跑 StableDiffusionXLInpaintPipeline。
+
+    SDXL 没有官方 inpaint 微调版，diffusers 的 XL inpaint 管线能吃 4 通道 UNet
+    （把 mask+被遮图拼进 latent 只在 9 通道 UNet 上发生），所以不需要额外权重。
+    这里验证三件事：能建管线、选区外逐点不变、meta 记对了型号。
+    """
+    import numpy as np
+
+    if "sdxl" not in eng.available_models():
+        pytest.skip("未下载 SDXL 底模")
+
+    src = assets / "_test_w3_sdxl_src.png"
+    mask = assets / "_test_w3_sdxl_mask.png"
+    im = Image.new("RGB", (768, 768), (30, 60, 90))
+    ImageDraw.Draw(im).rectangle([200, 200, 400, 400], fill=(200, 30, 30))
+    im.save(src)
+    m = Image.new("L", (768, 768), 0)
+    ImageDraw.Draw(m).rectangle([350, 350, 550, 550], fill=255)
+    m.save(mask)
+
+    eng.free()                       # 先腾显存，SDXL 各管线加起来容易顶到 24G
+    t0 = time.time()
+    r = g.inpaint(eng, image=src, mask=mask, prompt="green grass block", steps=10,
+                  cfg=6.0, seed=7, model="sdxl", tag="w3_sdxl_test")
+    assert r["meta"]["model"] == "sdxl"
+
+    before = np.asarray(Image.open(src).convert("RGB")).astype(int)
+    after = np.asarray(Image.open(r["file"]).convert("RGB")).astype(int)
+    outside = np.asarray(Image.open(mask).convert("L")) == 0
+    assert np.abs(after - before).max(axis=2)[outside].max() == 0, "选区外被改动了"
+    print(f"  [w3 sdxl] {time.time() - t0:.1f}s peak={r['meta']['peak_vram_gb']}GB")
+    eng.free()
 
 
 def test_w4_sdxl_needs_its_own_controlnet(eng):
