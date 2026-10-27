@@ -1,4 +1,5 @@
 import { useRef } from 'react'
+import { hasCJK } from '../store/prompts'
 import type { GenNode, Preset } from '../types'
 
 export const NODE_W = 300
@@ -14,6 +15,8 @@ type Props = {
   onGenerate: () => void
   onDuplicate: () => void
   onDelete: () => void
+  favorited: boolean
+  onToggleFavorite: () => void
 }
 
 const PRESETS: { v: Preset; label: string }[] = [
@@ -31,6 +34,8 @@ export default function GenNodeCard({
   onGenerate,
   onDuplicate,
   onDelete,
+  favorited,
+  onToggleFavorite,
 }: Props) {
   const dragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null)
   const p = node.params
@@ -132,13 +137,31 @@ export default function GenNodeCard({
         </div>
       ) : (
         <div className="node-body">
-          <textarea
-            className="prompt"
-            rows={3}
-            placeholder="描述你想要的素材，例如：白色猫骑士，红披风，武士刀"
-            value={p.prompt}
-            onChange={(e) => setParam('prompt', e.target.value)}
-          />
+          <div className="prompt-wrap">
+            <textarea
+              className="prompt"
+              rows={3}
+              placeholder="English prompt, e.g. white cat knight, red cape, katana, front view"
+              value={p.prompt}
+              onChange={(e) => setParam('prompt', e.target.value)}
+            />
+            <button
+              className={`star${favorited ? ' on' : ''}`}
+              title={favorited ? '取消收藏' : '收藏这条提示词'}
+              disabled={!p.prompt.trim()}
+              onClick={(e) => {
+                e.stopPropagation()
+                onToggleFavorite()
+              }}
+            >
+              {favorited ? '★' : '☆'}
+            </button>
+          </div>
+          <div className={`lang-hint${hasCJK(p.prompt) ? ' bad' : ''}`}>
+            {hasCJK(p.prompt)
+              ? '⚠ 检测到中文：SD1.5 的 CLIP 只认英文，中文会被拆成乱 token，出图基本靠猜'
+              : 'SD1.5 只支持英文提示词；逗号分隔，主体 + 特征 + 视角'}
+          </div>
 
           <div className="row">
             <label>

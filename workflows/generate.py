@@ -70,12 +70,15 @@ def txt2img(eng: Engine, *, prompt: str, negative: Optional[str] = None,
     img = pipe(prompt=prompt, negative_prompt=negative or NEG_DEFAULT, width=width, height=height,
                num_inference_steps=steps, guidance_scale=cfg, generator=gen).images[0]
     seconds = dt()
+    # 顺序很重要：先抠图（按原始颜色的连通域判断更准），再像素化与量化。
+    # 反过来做会把背景噪点量化成格纹，抠图也会因为色阶被压而失效。
+    if matte:
+        # 保留 alpha：转回 RGB 会把透明区域压成黑色，等于白抠
+        img = matte_mod.matte(img.convert("RGBA"))
     if pixel > 1:
         img = pp.pixelate(img, pixel)
     if palette:
         img = pp.quantize_palette(img, palette)
-    if matte:
-        img = matte_mod.matte(img.convert("RGBA"))
     return _save(img, _stamp(tag), "txt2img", {
         "workflow": "w1", "prompt": prompt, "negative": negative or NEG_DEFAULT,
         "width": width, "height": height, "steps": steps, "cfg": cfg, "seed": seed,
@@ -196,12 +199,12 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
             kwargs["ip_adapter_image"] = ref
         out = pipe(**kwargs).images[0]
         per_frame.append(dt())
+        if matte:
+            out = matte_mod.matte(out.convert("RGBA"))
         if pixel > 1:
             out = pp.pixelate(out, pixel)
         if palette:
             out = pp.quantize_palette(out, palette)
-        if matte:
-            out = matte_mod.matte(out.convert("RGBA"))
         frames.append(out.convert("RGBA"))
 
     aligned = pp.align_sequence(frames)

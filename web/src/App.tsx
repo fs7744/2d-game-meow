@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Canvas from './canvas/Canvas'
 import NodePalette from './components/NodePalette'
+import PromptBook from './components/PromptBook'
+import { hasPrompt, loadPrompts, removePrompt, savePrompts, togglePrompt } from './store/prompts'
 import { fetchJob, health, submitTxt2Img } from './api'
-import type { GenNode, GenParams, Viewport } from './types'
+import type { FavoritePrompt, GenNode, GenParams, Viewport } from './types'
 import type { NodePatch } from './nodes/GenNodeCard'
 
 const STORAGE_KEY = 'meow.canvas.v1'
@@ -73,6 +75,9 @@ export default function App() {
   })
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [device, setDevice] = useState<string>('')
+  const [favs, setFavs] = useState<FavoritePrompt[]>(() => loadPrompts())
+
+  useEffect(() => savePrompts(favs), [favs])
 
   const nodesRef = useRef(nodes)
   nodesRef.current = nodes
@@ -230,6 +235,25 @@ export default function App() {
     })
   }, [])
 
+  // 收藏：以「提示词文本」为键去重，节点上的星标据此点亮
+  const isFavorite = useCallback((text: string) => hasPrompt(favs, text), [favs])
+
+  const toggleFavorite = useCallback((id: string) => {
+    const n = nodesRef.current.find((x) => x.id === id)
+    if (!n) return
+    setFavs((list) => togglePrompt(list, n.params.prompt))
+  }, [])
+
+  const applyFavorite = useCallback((text: string) => {
+    const n = nodesRef.current.find((x) => x.id === selectedId)
+    if (!n) return
+    patchNode(n.id, { params: { ...n.params, prompt: text } })
+  }, [patchNode, selectedId])
+
+  const removeFavorite = useCallback((id: string) => {
+    setFavs((list) => removePrompt(list, id))
+  }, [])
+
   const zoomLabel = useMemo(() => `${Math.round(viewport.z * 100)}%`, [viewport.z])
 
   return (
@@ -254,7 +278,11 @@ export default function App() {
       </header>
 
       <main className="stage">
-        <NodePalette onAdd={(t) => addNode(t)} />
+        <div className="left-col">
+          <NodePalette onAdd={(t) => addNode(t)} />
+          <PromptBook items={favs} canApply={!!selectedId}
+                      onApply={applyFavorite} onRemove={removeFavorite} />
+        </div>
         <Canvas
           nodes={nodes}
           selectedId={selectedId}
@@ -265,6 +293,8 @@ export default function App() {
           onGenerate={generate}
           onDuplicate={duplicateNode}
           onDelete={deleteNode}
+          isFavorite={isFavorite}
+          onToggleFavorite={toggleFavorite}
           onDropType={(t, world) => addNode(t, world)}
         />
         <div className="badge-count">{nodes.length} 个节点</div>

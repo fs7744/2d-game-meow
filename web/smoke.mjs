@@ -190,6 +190,70 @@ function check(name, cond, extra = '') {
   dom.window.close()
 }
 
+
+// 5) 语言提示 + 提示词收藏
+{
+  const { dom, errors } = await boot('?demo=1')
+  const doc = dom.window.document
+  const win = dom.window
+  await new Promise((r) => setTimeout(r, 400))
+
+  const hint = doc.querySelector('.lang-hint')
+  check('默认提示英文约束', (hint?.textContent || '').includes('英文'))
+
+  // 受控 textarea：必须走原生 setter + input 事件
+  const ta = doc.querySelector('textarea.prompt')
+  const setValue = (el, v) => {
+    const setter = Object.getOwnPropertyDescriptor(win.HTMLTextAreaElement.prototype, 'value').set
+    setter.call(el, v)
+    el.dispatchEvent(new win.Event('input', { bubbles: true }))
+  }
+
+  setValue(ta, '背剑侠客')
+  await new Promise((r) => setTimeout(r, 80))
+  check('中文触发警告', !!doc.querySelector('.lang-hint.bad'))
+
+  setValue(ta, 'white cat knight, red cape, front view')
+  await new Promise((r) => setTimeout(r, 80))
+  check('英文不告警', !doc.querySelector('.lang-hint.bad'))
+
+  const star = doc.querySelector('.star')
+  check('星标可用', !!star && !star.disabled)
+  star.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 80))
+  check('收藏后出现在列表', doc.querySelectorAll('.book-item').length === 1)
+  check('星标点亮', !!doc.querySelector('.star.on'))
+  check('列表文本正确',
+    (doc.querySelector('.book-text')?.textContent || '').includes('white cat knight'))
+
+  // 改成别的再点收藏条目，应能回填
+  setValue(ta, 'blue slime')
+  await new Promise((r) => setTimeout(r, 80))
+  doc.querySelector('.node').dispatchEvent(new win.Event('pointerdown', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 60))
+  doc.querySelector('.book-text').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 80))
+  check('点收藏条目回填到节点',
+    doc.querySelector('textarea.prompt').value.includes('white cat knight'),
+    doc.querySelector('textarea.prompt').value)
+
+  // 重复收藏不应出现两条
+  doc.querySelector('.star').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 80))
+  check('重复收藏去重（已收藏则取消）', doc.querySelectorAll('.book-item').length === 0,
+    String(doc.querySelectorAll('.book-item').length))
+
+  // 再收藏一次后删除
+  doc.querySelector('.star').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 80))
+  doc.querySelector('.book-del')?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 80))
+  check('删除收藏', doc.querySelectorAll('.book-item').length === 0)
+
+  check('收藏场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
 const failed = results.filter((r) => !r.ok)
 console.log(`\n${results.length - failed.length}/${results.length} 通过`)
 process.exit(failed.length ? 1 : 0)

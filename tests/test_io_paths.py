@@ -12,10 +12,10 @@ from PIL import Image, ImageDraw
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _frames(assets, n=8):
-    got = sorted(assets.glob("walk*_frames/frame_*.png"))[:n]
-    if len(got) < 4:
-        pytest.skip("缺少帧素材")
+def _frames(frames, n=8):
+    """人形帧素材（由 walk_frames 夹具保证存在）。"""
+    got = list(frames)[:n]
+    assert len(got) >= 4, f"帧素材不足：{len(got)}"
     return [Image.open(f).convert("RGB").resize((256, 256)) for f in got]
 
 
@@ -30,8 +30,8 @@ def _make_avi(path: Path, frames) -> None:
     vw.release()
 
 
-def test_video_frames_extraction(tmp_path, assets):
-    frames = _frames(assets)
+def test_video_frames_extraction(tmp_path, walk_frames):
+    frames = _frames(walk_frames)
     vid = tmp_path / "walk.avi"
     _make_avi(vid, frames)
 
@@ -43,8 +43,8 @@ def test_video_frames_extraction(tmp_path, assets):
     assert idx == 0 and im.size == frames[0].size
 
 
-def test_cli_on_video(tmp_path, assets):
-    frames = _frames(assets)
+def test_cli_on_video(tmp_path, walk_frames):
+    frames = _frames(walk_frames)
     vid = tmp_path / "walk.avi"
     _make_avi(vid, frames)
     out = tmp_path / "poses"
@@ -57,10 +57,10 @@ def test_cli_on_video(tmp_path, assets):
     assert len(list(out.glob("pose_*.png"))) == len(range(0, len(frames), 2))
 
 
-def test_sheet_skips_blank_cells(assets):
+def test_sheet_skips_blank_cells(walk_frames):
     from tools.pose_from_image import frames_from_sheet
 
-    frames = _frames(assets)[:2]
+    frames = _frames(walk_frames)[:2]
     cw, ch = frames[0].size
     sheet = Image.new("RGBA", (cw * 3, ch), (0, 0, 0, 0))
     sheet.paste(frames[0].convert("RGBA"), (0, 0))
@@ -124,9 +124,9 @@ def test_pack_sheet_with_more_cols_than_frames(tmp_path):
     assert (info["cols"], info["rows"]) == (3, 1), "cols 应被夹到帧数"
 
 
-def test_gif_input(tmp_path, assets):
+def test_gif_input(tmp_path, walk_frames):
     """GIF 也走同一个 VideoCapture 分支（cv2 默认后端支持）。"""
-    frames = _frames(assets)
+    frames = _frames(walk_frames)
     gif = tmp_path / "walk.gif"
     frames[0].save(gif, save_all=True, append_images=frames[1:], duration=120, loop=0)
 

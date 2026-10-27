@@ -12,6 +12,8 @@ type Props = {
   onGenerate: (id: string) => void
   onDuplicate: (id: string) => void
   onDelete: (id: string) => void
+  isFavorite: (text: string) => boolean
+  onToggleFavorite: (id: string) => void
   onDropType: (type: string, world: { x: number; y: number }) => void
 }
 
@@ -28,6 +30,8 @@ export default function Canvas({
   onGenerate,
   onDuplicate,
   onDelete,
+  isFavorite,
+  onToggleFavorite,
   onDropType,
 }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null)
@@ -154,6 +158,8 @@ export default function Canvas({
             onGenerate={() => onGenerate(n.id)}
             onDuplicate={() => onDuplicate(n.id)}
             onDelete={() => onDelete(n.id)}
+            favorited={isFavorite(n.params.prompt)}
+            onToggleFavorite={() => onToggleFavorite(n.id)}
           />
         ))}
       </div>

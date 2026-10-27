@@ -19,8 +19,10 @@ SPRITE_SUFFIX = (
 
 # 负向词：按「污染程度」排序，前面被保留的概率最高
 SPRITE_NEG = (
-    "pattern, texture, gradient, background scenery, brick wall, "
-    "multiple characters, text, watermark, "
+    # 最脏的放最前：格纹背景是像素化之后最刺眼的败笔
+    "checkerboard, grid, lattice, tile pattern, pattern, texture, "
+    "text, letters, chinese characters, sign, watermark, "
+    "gradient, background scenery, multiple characters, "
     "photo, 3d render, blurry, anti-aliasing, extra limbs, cropped"
 )
 

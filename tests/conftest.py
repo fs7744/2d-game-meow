@@ -47,3 +47,45 @@ def pose_frames(assets) -> list[Path]:
         gen_pose()
         frames = sorted(assets.glob("_pose_walk_*.png"))
     return frames
+
+
+@pytest.fixture(scope="session")
+def walk_frames(eng, assets) -> list[Path]:
+    """一套人形精灵帧。素材丢了就现场生成（约 5s），避免测试因缺素材而 skip。"""
+    d = assets / "_fixture_walk_frames"
+    have = sorted(d.glob("frame_*.png")) if d.exists() else []
+    if len(have) >= 4:
+        return have
+
+    from workflows import generate as g
+
+    poses = sorted(assets.glob("_pose_walk_*.png"))[:4]
+    if len(poses) < 4:
+        from tools.make_pose import main as gen_pose
+
+        gen_pose()
+        poses = sorted(assets.glob("_pose_walk_*.png"))[:4]
+    r = g.poseswap(eng, pose_images=poses, prompt="white cat knight, red cape, front view",
+                   steps=12, seed=999, width=256, height=256, cols=4, tag="_fixture_walk")
+    return sorted(Path(r["frames_dir"]).glob("frame_*.png"))
+
+
+@pytest.fixture(scope="session")
+def walk_frames(eng, assets) -> list[Path]:
+    """一套人形精灵帧。素材丢了就现场生成（约 5s），避免测试因缺素材而 skip。"""
+    d = assets / "_fixture_walk_frames"
+    have = sorted(d.glob("frame_*.png")) if d.exists() else []
+    if len(have) >= 4:
+        return have
+
+    from workflows import generate as g
+
+    poses = sorted(assets.glob("_pose_walk_*.png"))[:4]
+    if len(poses) < 4:
+        from tools.make_pose import main as gen_pose
+
+        gen_pose()
+        poses = sorted(assets.glob("_pose_walk_*.png"))[:4]
+    r = g.poseswap(eng, pose_images=poses, prompt="white cat knight, red cape, front view",
+                   steps=12, seed=999, width=256, height=256, cols=4, tag="_fixture_walk")
+    return sorted(Path(r["frames_dir"]).glob("frame_*.png"))

@@ -40,3 +40,9 @@ export type GenNode = {
 }
 
 export type Viewport = { x: number; y: number; z: number }
+
+export type FavoritePrompt = {
+  id: string
+  text: string
+  at: number
+}
