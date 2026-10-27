@@ -91,12 +91,41 @@ python tools/pose_from_image.py walk.mp4  --step 3   -o assets/pose
 
 React 18 + Vite + TS，**零 UI 库、零画布库**（与 pixelforge 同思路），构建产物 157KB / gzip 51KB。
 
+**一条命令启动**（自动体检 → 按需构建前端 → 起服务 → 开浏览器）：
+
+```bash
+./start.sh                  # Git Bash / macOS / Linux
+start.bat                   # Windows 双击或命令行
+```
+
+| 参数 | 作用 |
+|---|---|
+| `--port 8010` | 换端口 |
+| `--rebuild` / `--no-build` | 强制重建前端 / 跳过构建 |
+| `--check` | 只体检（Python、依赖、CUDA、权重、前端、端口），不启动 |
+| `--dev` | 只起 API，前端另开 `cd web && npm run dev`（:5173 代理） |
+
+体检项与实际输出：
+
+```
+✓ Python：.venv/Scripts/python.exe（Python 3.13.14）
+✓ 依赖齐全（torch / diffusers / transformers / fastapi / uvicorn）
+✓ CUDA 可用（NVIDIA GeForce RTX 4090）
+✓ 权重就绪（14 个文件）
+✓ 前端产物是最新的
+```
+
+手动方式：
+
 ```bash
 cd web && npm ci && npm run build     # 构建
 cd .. && python app.py                # FastAPI 同时托管 dist 与 API → http://127.0.0.1:8000
 cd web && npm run dev                 # 或开发模式（:5173，代理到 8000）
 npm run smoke                         # 无浏览器渲染冒烟（jsdom，25 项断言）
 ```
+
+> `start.bat` 刻意保持**纯 ASCII**：cmd.exe 按 OEM 代码页解析 .bat，中文注释会切断命令行
+> （实测把 `setlocal` 切成 `ld`）。中文提示只留在 `start.sh`。
 
 **布局**（参考了 InvokeAI 的「队列可见/参数分层」、SD.Next 的「折叠压制参数面」、pixelforge 的视觉与画布机制）：
 
