@@ -14,6 +14,8 @@ from typing import Any, Dict, List, Optional, Sequence
 import torch
 from PIL import Image
 
+from . import anim as anim_mod
+from . import matte as matte_mod
 from . import postprocess as pp
 from . import presets
 from .engine import Engine
@@ -53,7 +55,7 @@ def txt2img(eng: Engine, *, prompt: str, negative: Optional[str] = None,
             width: int = 512, height: int = 768, steps: int = 25, cfg: float = 7.5,
             seed: int = -1, lora: Optional[str] = None, lora_scale: float = 0.8,
             pixel: int = 0, palette: int = 0, preset: str = "sprite",
-            tag: str = "w1") -> Dict[str, Any]:
+            matte: bool = False, tag: str = "w1") -> Dict[str, Any]:
     prompt, negative = presets.build(prompt, negative, preset)
     ntok = presets.rough_tokens(prompt)
     if ntok > 77:
@@ -72,11 +74,13 @@ def txt2img(eng: Engine, *, prompt: str, negative: Optional[str] = None,
         img = pp.pixelate(img, pixel)
     if palette:
         img = pp.quantize_palette(img, palette)
+    if matte:
+        img = matte_mod.matte(img.convert("RGBA"))
     return _save(img, _stamp(tag), "txt2img", {
         "workflow": "w1", "prompt": prompt, "negative": negative or NEG_DEFAULT,
         "width": width, "height": height, "steps": steps, "cfg": cfg, "seed": seed,
         "lora": lora, "lora_scale": lora_scale if lora else None,
-        "pixel_block": pixel, "palette": palette,
+        "pixel_block": pixel, "palette": palette, "matte": matte,
         "seconds": seconds, "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
     })
 
@@ -163,7 +167,9 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
              lora: Optional[str] = None, lora_scale: float = 0.8,
              ipa_scale: float = 0.8, cn_scale: float = 1.0, steps: int = 25,
              cfg: float = 7.5, seed: int = 20261027, width: int = 512, height: int = 768,
-             cols: int = 8, pixel: int = 0, palette: int = 0, tag: str = "w4") -> Dict[str, Any]:
+             cols: int = 8, pixel: int = 0, palette: int = 0,
+             matte: bool = False, export: Optional[str] = None,
+             anim_name: str = "walk", fps: int = 10, tag: str = "w4") -> Dict[str, Any]:
     """逐帧生成 -> 锚点对齐 -> 打包 sprite sheet。固定 seed 是跨帧一致的前提。"""
     pipe = eng.pose_pipe(with_ipadapter=ref_image is not None)
     eng.apply_lora(pipe, lora, lora_scale)
@@ -194,6 +200,8 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
             out = pp.pixelate(out, pixel)
         if palette:
             out = pp.quantize_palette(out, palette)
+        if matte:
+            out = matte_mod.matte(out.convert("RGBA"))
         frames.append(out.convert("RGBA"))
 
     aligned = pp.align_sequence(frames)
@@ -201,7 +209,7 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
         "workflow": "w4", "prompt": prompt, "negative": negative or NEG_DEFAULT,
         "ref_image": str(ref_image) if ref_image else None, "lora": lora,
         "ipa_scale": ipa_scale if ref else None, "cn_scale": cn_scale,
-        "steps": steps, "cfg": cfg, "seed": seed, "frames": len(frames),
+        "steps": steps, "cfg": cfg, "seed": seed, "frames": len(frames), "matte": matte,
         "per_frame_seconds": per_frame,
         "seconds_total": round(sum(per_frame), 2),
         "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
@@ -216,6 +224,9 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
     info["frames_dir"] = str(fdir)
     Path(ASSETS / f"{name}_sheet.png.json").write_text(
         json.dumps(info, ensure_ascii=False, indent=2), "utf-8")
+    if export:
+        info["export"] = anim_mod.export_godot(
+            aligned, export, anim_name=anim_name, fps=fps, loop=True, cols=cols)
     with (ASSETS / "index.jsonl").open("a", encoding="utf-8") as fh:
         fh.write(json.dumps({"sheet": info["sheet"], **meta}, ensure_ascii=False) + "\n")
     return info

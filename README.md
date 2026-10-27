@@ -19,10 +19,11 @@
 | 后处理（像素化 / 16 色量化 / 锚点对齐 / 打包） | 已完成并自测（28px 漂移 → 0） |
 | IP-Adapter 角色身份锁定 | 已接通，效果待调（见「实测」） |
 | FastAPI 服务（单卡串行队列 + 资产索引） | 已完成 |
-| 抠图 / 去白边 | 未开始 |
-| LoRA 训练脚本 | 未开始 |
+| 抠图 / 去白边（纯色连通域 + 迭代去白边） | 已完成，实测通过 |
+| 游戏动效导出（GIF/APNG + Godot 4 + 通用 JSON） | 已完成，实测通过 |
+| LoRA 训练脚本 | 未开始（暂缓） |
 | 姿态提取（YOLOX 检测 + RTMPose 回归 → OpenPose 骨架） | 已完成，实测通过 |
-| W5 视频驱动（MimicMotion） | 未开始 |
+| W5 视频驱动（Wan2.2 TI2V-5B，替代 MimicMotion） | 已完成，实测通过 |
 
 ## 实测数据
 
@@ -86,10 +87,54 @@ python tools/pose_from_image.py walk.mp4  --step 3   -o assets/pose
 检测的价值在**构图不规整**的输入（人物偏在一角、多人、画面留白多）；精灵图本来就占满画面时，
 整图模式又快又够用。
 
+## 抠图 / 动效导出
+
+```python
+r = poseswap(eng, pose_images=poses, prompt="blue robot",
+             pixel=4, palette=16, matte=True,          # 出透明底
+             export="assets/export/robot", anim_name="walk", fps=10)  # 出 Godot 工程包
+```
+
+导出产物（`export_godot`）：图集 PNG、`SpriteFrames.tres`（每帧一个 AtlasTexture）、
+`AnimatedSprite2D.tscn`（`texture_filter = 1` 最近邻、`autoplay` 已开、
+`offset.y = -cell_h/2` 脚底对齐）、引擎无关 JSON、GIF/APNG 预览、zip 包。
+全是确定性文本生成，同输入逐字节可复现。
+
+抠图三个要点：
+
+1. 只抠**与画面边界连通**的同色区域——否则白猫肚子贴着白底会被一起吃掉。
+2. 去白边要**迭代**：混色边通常 1–3px 厚，单次膨胀只剥掉最外一圈（实测残留 184 像素 → 迭代 3 次后 0）。
+3. alpha 一律二值。像素素材要硬边，半透明会引入新的脏边。
+
+## W5 视频驱动（Wan2.2 而非 MimicMotion）
+
+选 Wan2.2 TI2V-5B 而不是 MimicMotion，理由很实际：Wan 已在盘上（pixelforge 的 37GB），
+MimicMotion 要另下 ~16GB（代理 480KB/s ≈ 9 小时）。MimicMotion 的优势是「真人动作驱动」，
+等有明确需求再单独接。
+
+```bash
+python tools/video.py t2v "pixel art cat knight walking, flat background" -o assets/clip
+python tools/video.py i2v assets/cat.png "the same character walking" -o assets/clip
+```
+
+实测（4090 24GB，bf16 + enable_model_cpu_offload）：
+
+| 项 | 数值 |
+|---|---|
+| 加载 | 23–30s |
+| 25 帧 384² / 10 步 | **26.8–30.6s（1.22s/帧）** |
+| 峰值显存 | **10.7GB** |
+
+比预期省：pixelforge 记的 19GB 是 fp8+offload；bf16 + 仅 offload 实测 10.7GB 就够。
+注意视频底座要和 SD1.5 分开跑（先 `eng.free()`），否则两套权重抢显存。
+
+**一个坦诚的限制**：人体姿态模型对**非人形角色**（四足/怪物）几乎无效——实测把生成的
+四足生物视频喂进去，5 帧里只有 3 帧能提够关节。W5 用在人形角色上才顺。
+
 ## 测试
 
 ```bash
-python -m pytest tests -q        # 65 个用例，约 80s
+python -m pytest tests -q        # 88 个用例，约 85s（含 1 个需 RUN_WAN=1 的慢用例）
 ```
 
 | 文件 | 覆盖 | 用例数 |
@@ -103,6 +148,9 @@ python -m pytest tests -q        # 65 个用例，约 80s
 | `tests/test_presets.py` | 契约拼接与优先级、77 token 预算、中文 token 估算、下载器过滤（safety_checker/bin/ckpt/fp16 优先） | 9 |
 | `tests/test_fetch.py` | Range 分块拼接、断点续传、**拒绝非 206 响应**（防 429 错误体污染）、超长残留文件重置 | 5 |
 | `tests/test_stability.py` | 连续 20 次推理显存不涨、`free()` 释放 pipeline 与 ControlNet、跨进程同 seed 一致、PNG 结构、sidecar 一致 | 5 |
+| `tests/test_matte.py` | 背景估计、连通域不误抠内部同色区、去白边生效、alpha 二值、容差方向、裁边、真实生成图抠图 | 9 |
+| `tests/test_anim.py` | GIF/APNG 帧数、索引几何、Godot tres 分区序列、tscn 像素设置（最近邻/autoplay/脚底偏移）、导出确定性 | 9 |
+| `tests/test_video.py` | numpy/PIL 帧兼容、mp4 落地、模型路径校验、Wan 真实生成（`RUN_WAN=1`） | 6 |
 
 已知限制：骨架质量决定成败——实测 8 帧序列里有 2 帧只提取到 8/18 个关节（手臂与身体重叠），
 这两帧生成时会自由发挥，出现朝向漂移。产线上应当在提取后按「可见关节数」筛帧。
@@ -125,6 +173,7 @@ python -m pytest tests -q        # 65 个用例，约 80s
 │   ├── smoke.py            逐阶段测速/测显存
 │   ├── make_pose.py        COCO-18 骨架图生成 / 渲染
 │   ├── pose_from_image.py  从图片 / 视频 / 精灵图批量提骨骼
+│   ├── video.py            文生视频 / 图生视频 CLI
 │   ├── fetch_ranged.py     按 Range 分块下载（抗限流断流）
 │   ├── bench.py            稳态基准
 │   └── check_env.py        环境自检
