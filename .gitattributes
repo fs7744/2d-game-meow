@@ -1,0 +1,13 @@
+* text=auto
+
+# Windows 批处理必须 CRLF，否则 goto/label 解析可能出错
+*.bat text eol=crlf
+# Shell 脚本必须 LF，否则 Git Bash 会报 bad interpreter
+*.sh  text eol=lf
+
+# 二进制
+*.png binary
+*.safetensors binary
+*.onnx binary
+*.pth binary
+*.zip binary
