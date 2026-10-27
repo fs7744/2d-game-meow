@@ -64,6 +64,28 @@ def estimate_bg_color(img: Image.Image, border: int = 2) -> tuple[int, int, int]
     return (r, g, b)
 
 
+def strip_fringe(alpha: np.ndarray, rgb: np.ndarray, bg: Iterable[int],
+                 tol: int = 32, ratio: float = 3.0, passes: int = 3) -> np.ndarray:
+    """剥掉紧贴背景、且颜色明显被背景混过的那一圈（白边 / 蓝边）。
+
+    单独抽出来是因为**两个后端都需要**：色键要，语义分割同样要。
+    实测 u2net 只给 alpha、不做这步，结果角色轮廓外残留一圈背景色的 8px 块
+    （像素化后就是一圈白点/蓝点），看起来像散落噪点 —— 那不是颜色问题，
+    是这圈没剥干净。
+    """
+    bg_arr = np.array(list(bg), dtype=np.int16)
+    dist = np.abs(rgb.astype(np.int16) - bg_arr).max(axis=2)
+    k = np.ones((3, 3), np.uint8)
+    for _ in range(max(1, passes)):
+        cur_bg = alpha == 0
+        touching = cv2.dilate(cur_bg.astype(np.uint8), k).astype(bool)
+        blended = touching & (~cur_bg) & (dist <= tol * ratio)
+        if not blended.any():
+            break
+        alpha[blended] = 0
+    return alpha
+
+
 def matte(img: Image.Image, bg: Iterable[int] | None = None, tol: int = 32,
           fringe: bool = True, fringe_ratio: float = 3.0,
           fringe_passes: int = 3) -> Image.Image:
@@ -88,21 +110,14 @@ def matte(img: Image.Image, bg: Iterable[int] | None = None, tol: int = 32,
     alpha = np.where(bg_mask, 0, 255).astype(np.uint8)
 
     if fringe:
-        # 混色边通常 1~3 px 厚，单次膨胀只能剥掉最外一圈，所以要迭代。
-        k = np.ones((3, 3), np.uint8)
-        for _ in range(max(1, fringe_passes)):
-            cur_bg = alpha == 0
-            touching = cv2.dilate(cur_bg.astype(np.uint8), k).astype(bool)
-            blended = touching & (~cur_bg) & (dist <= tol * fringe_ratio)
-            if not blended.any():
-                break
-            alpha[blended] = 0
+        alpha = strip_fringe(alpha, rgb, bg_arr, tol, fringe_ratio, fringe_passes)
 
     out = np.dstack([rgb.astype(np.uint8), alpha])
     return Image.fromarray(out, "RGBA")
 
 
-def despeckle(rgba: Image.Image, min_ratio: float = 0.05) -> Image.Image:
+def despeckle(rgba: Image.Image, min_ratio: float = 0.05,
+              denoise_iters: int = 0) -> Image.Image:
     """清掉前景里的孤立小块（碎屑、印章、签名）。
 
     只保留面积不小于「最大连通块 × min_ratio」的前景块。实测武侠 LoRA 会在
@@ -110,17 +125,29 @@ def despeckle(rgba: Image.Image, min_ratio: float = 0.05) -> Image.Image:
 
     阈值定 5% 而不是 2%：实测那枚印章占前景约 3%，2% 清不掉。代价是「角色 +
     完全分离且很小的手持物」会被误删 —— 但那种构图本来就该重画。
+
+    denoise_iters > 0 时再叠一层**形态学开运算**（腐蚀→膨胀）：这一步对付的是
+    「贴着主体的散落色点」——它们和主体是同一个连通域，面积过滤拿它们没办法。
+    实测 SDXL 的像素风会在轮廓外留下这种点（看图就是一圈脏边），开运算能把宽度
+    小于 kernel 的突起削掉，主体形状几乎不变。默认 0（不改变既有行为）。
     """
     arr = np.asarray(rgba.convert("RGBA")).copy()
     fg = (arr[..., 3] > 0).astype(np.uint8)
     n, lab, stats, _ = cv2.connectedComponentsWithStats(fg, connectivity=8)
-    if n <= 2:
+    if n <= 2 and denoise_iters <= 0:
         return Image.fromarray(arr, "RGBA")
 
-    areas = stats[1:, cv2.CC_STAT_AREA]
-    thresh = float(areas.max()) * max(0.0, min_ratio)
-    keep = [i + 1 for i, a in enumerate(areas) if a >= thresh]
-    arr[~np.isin(lab, keep), 3] = 0
+    if n > 2:
+        areas = stats[1:, cv2.CC_STAT_AREA]
+        thresh = float(areas.max()) * max(0.0, min_ratio)
+        keep = [i + 1 for i, a in enumerate(areas) if a >= thresh]
+        arr[~np.isin(lab, keep), 3] = 0
+
+    if denoise_iters > 0:
+        fg = (arr[..., 3] > 0).astype(np.uint8)
+        opened = cv2.morphologyEx(
+            fg, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8), iterations=denoise_iters)
+        arr[opened == 0, 3] = 0
     return Image.fromarray(arr, "RGBA")
 
 
@@ -197,14 +224,23 @@ def load_ai_session(model_dir: str | Path, name: str = "isnet-general-use"):
 
 
 def matte_ai(img: Image.Image, model_dir: str | Path, name: str = "isnet-general-use",
-             thresh: int = 128, session: Any = None, feather: int = 0) -> Image.Image:
-    """语义分割抠图，alpha 仍二值化（像素素材要硬边）。"""
+             thresh: int = 128, session: Any = None, feather: int = 0,
+             fringe: bool = True) -> Image.Image:
+    """语义分割抠图，alpha 仍二值化（像素素材要硬边）。
+
+    分割只给「这是不是主体」，不会顺手清掉被背景混过的那一圈边 —— 所以这里
+    也要走一遍 strip_fringe，否则轮廓外残留一圈背景色块。
+    """
     sess = session or load_ai_session(model_dir, name)
     from rembg import remove
 
+    rgb = np.asarray(img.convert("RGB"))
     cut = remove(img.convert("RGB"), session=sess, post_process_mask=True)
     arr = np.asarray(cut.convert("RGBA")).copy()
     arr[..., 3] = np.where(arr[..., 3] >= thresh, 255, 0).astype(np.uint8)
+
+    if fringe:
+        arr[..., 3] = strip_fringe(arr[..., 3], rgb, estimate_bg_color(img))
     out = Image.fromarray(arr, "RGBA")
 
     if feather > 0:                        # 分割边一般已很干净，默认不羽化

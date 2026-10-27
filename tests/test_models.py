@@ -95,3 +95,42 @@ def test_w4_sdxl_end_to_end(eng, pose_frames):
     assert r["frames"] == 2
     assert r["model"] == "sdxl"       # poseswap 把 meta 展开在返回字典里
     eng.free()
+
+
+@pytest.mark.slow
+def test_sdxl_ip_adapter_loads(eng):
+    """SDXL 的 IP-Adapter 与 SD1.5 共享 ViT-H image encoder。
+
+    这里最容易踩的坑：HF 上 sdxl_models/image_encoder 是 ViT-bigG（hidden 1664 /
+    projection 1280），而 ip-adapter_sdxl_vit-h 要的是 ViT-H（1280 / 1024）。
+    拿错会报 mat1 and mat2 shapes cannot be multiplied。
+    """
+    if "sdxl" not in eng.available_models():
+        pytest.skip("未下载 SDXL 底模")
+    models = eng.root / "ipadapter" / "models"
+    if not (models / "ip-adapter_sdxl_vit-h.safetensors").exists():
+        pytest.skip("未下载 SDXL 版 IP-Adapter 权重")
+
+    base, sub, name = eng.ipa_weight("sdxl")
+    assert sub == "models" and name == "ip-adapter_sdxl_vit-h.safetensors"
+    # 与 SD1.5 共用同一个 image_encoder（都是 ViT-H）
+    assert base == str(eng.root / "ipadapter")
+    b2, s2, _ = eng.ipa_weight("sd15")
+    assert (base, sub) == (b2, s2)
+
+
+@pytest.mark.slow
+def test_sdxl_controlnet_kinds(eng):
+    """SDXL 的三条 ControlNet（openpose / canny / tile）按 model 分开取。"""
+    if "sdxl" not in eng.available_models():
+        pytest.skip("未下载 SDXL 底模")
+    cn_root = eng.root / "controlnet"
+    for kind in ("openpose", "canny", "tile"):
+        if not (cn_root / f"sdxl_{kind}" / "config.json").exists():
+            pytest.skip(f"未下载 SDXL 版 {kind}")
+        cn = eng.controlnet(kind, "sdxl")
+        assert cn is not None
+    # SD1.5 与 SDXL 的 ControlNet 必须缓存在不同 key 下
+    assert any(k.endswith(":sdxl") for k in eng._ctrl)
+    assert not any(k == "openpose" for k in eng._ctrl if "sdxl" in k)
+    eng.free()

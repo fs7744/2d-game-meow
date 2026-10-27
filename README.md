@@ -116,7 +116,25 @@ python tools/pose_from_image.py walk.mp4  --step 3   -o assets/pose
 
 这不是调参能救的差距。要这种题材，就换底模。
 
-### 3. 预设契约要选对
+### 3. 像素画的散落杂色（已做清洗，但未根除）
+
+SDXL 的像素风出图，量化到 32 色后角色周围会冒出一粒粒红 / 青 / 橙的点。
+排查时有个反直觉的发现：**它们不是独立小块**——实测 1024² 图上 25 个前景块，
+最小的也有 2368px，压根没有孤立小块。所以面积过滤和形态学开运算都拿它们
+没办法（那两种手段只动 alpha，而这里要动的是**颜色**）。
+
+做了两层处理（`clean_iso` 与 `strip_fringe`，产线默认各 1 次）：
+
+- **`strip_fringe`**：把「紧贴背景、颜色被背景混过」的一圈剥掉。
+  原先只有色键后端走这一步，语义分割后端没走 —— 这才是白点的主要来源，
+  补上之后残留从 30~40 个降到 15~20 个。
+- **`clean_isolated`**：4 邻域判定的孤立点，主体内部的改成邻居色，
+  飘在外面且 5×5 邻域只有自己的直接删。**5×5 那层保护不能省**：像素画的
+  1px 斜向轮廓四邻同样全透明，只看 4 邻域会把整条对角线吃掉（实测踩过）。
+
+残留的十来个点生成模型自身的噪声，继续加码会开始伤细节，就此打住。
+
+### 4. 预设契约要选对
 
 - 像素 LoRA 必须配 `preset=pixel`，配 `sprite` 会出彩色色块怪物（见下节）。
 - 武侠 LoRA 必须配 `preset=wuxia`（压印章与水墨背景），且抠图要用 u2net。
@@ -133,8 +151,8 @@ mkdir -p models/checkpoints/sdxl && ...   # 见 tools/fetch_modelscope.py
 | 原生分辨率 | 512²（768² 是甜点，1024² 会崩） | **1024²** |
 | W1 文生图实测 | 768²/30 步 ≈ 1.8s / 3.4GB | **1024²/30 步 ≈ 4.5s / 10.5GB** |
 | W4 姿态驱动实测 | 512²/25 步 ≈ 1.2s / 3.6GB | **1024²/28 步 ≈ 9.1s / 13.2GB** |
-| ControlNet | OpenPose/Canny/Tile 三套 | **OpenPose 已装**（xinsir 版，2.4GB） |
-| IP-Adapter | ✅ | ❌ 未装权重（`with_ipadapter` 需关掉） |
+| ControlNet | OpenPose/Canny/Tile 三套 | **三套都已装**（xinsir 版，各 2.4GB） |
+| IP-Adapter | ✅ | ✅ 已装（666MB，与 SD1.5 **共享** ViT-H encoder） |
 | W3 局部重绘 | ✅ 有专用 inpaint 权重 | ❌ 明确报错 |
 | LoRA | 3 个精选 | **2 个可用**（见下） |
 
@@ -142,6 +160,12 @@ mkdir -p models/checkpoints/sdxl && ...   # 见 tools/fetch_modelscope.py
 SD1.5 的 LoRA 装在 SDXL 上完全无效且会静默出废图，所以直接不让你选。
 
 W3 在 SDXL 下会**明确报错**而不是悄悄跑错。
+
+> **IP-Adapter 的坑**：HF 上 `sdxl_models/image_encoder` 是 **ViT-bigG**
+> （hidden 1664 / projection 1280），而 `ip-adapter_sdxl_vit-h` 要的是 **ViT-H**
+> （1280 / 1024）——和 SD1.5 完全同一个。用错会报
+> `mat1 and mat2 shapes cannot be multiplied (2x1280 and 1024x8192)`。
+> 所以权重并列放在 `ipadapter/models/`，两个底模共用一份 encoder（省 2.5GB）。
 
 ### SDXL 版 LoRA（实测）
 
@@ -168,6 +192,16 @@ SD1.5 与 SDXL 的 ControlNet **形状不同、不能混用**——代码里按 
 - 四帧**角色完全一致**（红发、红袍、深色腰带、靴子），SD1.5 做不到这个稳定性
 - 姿态**跟随骨架**，全身在画面内
 - 已知瑕疵：剑柄握持偶有偏移、个别帧有细微尺寸漂移
+
+SDXL 三条 ControlNet 与 IP-Adapter 的实测（1024²）：
+
+| 组合 | 耗时 | 峰值显存 |
+|---|---|---|
+| W4 + OpenPose + IP-Adapter（2 帧） | 20s | 14.83GB |
+| W4 + Canny 形状迁移（1 帧） | 12s | 12.99GB |
+| W4 + Tile 高清放大（1 帧） | 32s | **21.94GB**（接近 24GB 上限，别再叠加别的） |
+
+`poseswap` 新增 `controlnet="openpose|canny|tile"` 参数，三个底模无关地通用。
 
 ## LoRA：装什么、怎么用
 
@@ -376,7 +410,10 @@ python tools/video.py i2v assets/cat.png "the same character walking" -o assets/
 ## 测试
 
 ```bash
-python -m pytest tests -q        # 121 个用例，约 160s（含 RUN_WAN=1 与 W4+SDXL 两个慢用例）
+python -m pytest tests -q        # 132 个用例，约 220s（含几个慢用例）
+# 全套超过 2 分钟会被超时杀掉，分批跑：
+#   pytest tests --ignore=tests/test_models.py   # 122 个，约 147s
+#   pytest tests/test_models.py                  # 10 个，约 76s
 ```
 
 | 文件 | 覆盖 | 用例数 |
@@ -395,7 +432,8 @@ python -m pytest tests -q        # 121 个用例，约 160s（含 RUN_WAN=1 与 
 | `tests/test_video.py` | numpy/PIL 帧兼容、mp4 落地、模型路径校验、Wan 真实生成（`RUN_WAN=1`） | 6 |
 | `tests/test_lora.py` | 注册表扫描/元数据/坏 JSON 容错、名称解析、去碎屑、贴边占比判定、武侠契约预算 | 13 |
 | `tests/test_train.py` | 数据集读取与兜底、步数规划、**端到端 6 步真训练**（导出的体积上限、可被 scan/apply_lora 认出）、`/train` 全流程 | 9 |
-| `tests/test_models.py` | `/models` 只列出本机已装的、未知底模报错、**W3 拒绝 SDXL**、SDXL 真实生成、**W4+SDXL 端到端** | 8 |
+| `tests/test_models.py` | `/models` 只列出本机已装的、未知底模报错、**W3 拒绝 SDXL**、SDXL 真实生成、**W4+SDXL 端到端**、SDXL 版 IPA 与三条 ControlNet | 10 |
+| `tests/test_denoise.py` | `strip_fringe` 剥白边/迭代/不误伤主体、`clean_isolated` 内部改色/外挂删除/**斜向轮廓不被吃** | 9 |
 
 已知限制：骨架质量决定成败——实测 8 帧序列里有 2 帧只提取到 8/18 个关节（手臂与身体重叠），
 这两帧生成时会自由发挥，出现朝向漂移。产线上应当在提取后按「可见关节数」筛帧。

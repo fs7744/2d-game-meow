@@ -68,8 +68,8 @@ def txt2img(eng: Engine, *, prompt: str, negative: Optional[str] = None,
             width: int = 768, height: int = 768, steps: int = 30, cfg: float = 7.0,
             seed: int = -1, lora: Optional[str] = None, lora_scale: float = 0.8,
             pixel: int = 0, palette: int = 0, preset: str = "sprite",
-            matte: bool = False, matte_backend: str = "auto",
-            model: str = "sd15", tag: str = "w1") -> Dict[str, Any]:
+            matte: bool = False, matte_backend: str = "auto", denoise: int = 1,
+            clean_iso: int = 1, model: str = "sd15", tag: str = "w1") -> Dict[str, Any]:
     prompt, negative = presets.build(prompt, negative, preset)
     ntok = presets.rough_tokens(prompt)
     if ntok > 77:
@@ -91,18 +91,23 @@ def txt2img(eng: Engine, *, prompt: str, negative: Optional[str] = None,
     if matte:
         # 保留 alpha：转回 RGB 会把透明区域压成黑色，等于白抠
         img = matte_mod.despeckle(
-            matte_mod.matte_auto(img.convert("RGBA"), matte_backend, eng.matte_dir))
+            matte_mod.matte_auto(img.convert("RGBA"), matte_backend, eng.matte_dir),
+            denoise_iters=denoise)
         edge = matte_mod.edge_touch(img)
     if pixel > 1:
         img = pp.pixelate(img, pixel)
     if palette:
         img = pp.quantize_palette(img, palette)
+    if clean_iso and (pixel > 1 or palette):
+        # 量化之后才去孤立点：量化本身就会把相邻色合并，此时再判「孤立」才准
+        img = pp.clean_isolated(img, passes=clean_iso)
     return _save(img, _stamp(tag), "txt2img", {
         "workflow": "w1", "prompt": prompt, "negative": negative or NEG_DEFAULT,
         "width": width, "height": height, "steps": steps, "cfg": cfg, "seed": seed,
         "lora": lora, "lora_scale": lora_scale if lora else None,
         "pixel_block": pixel, "palette": palette, "matte": matte,
-        "matte_backend": matte_backend, "edge_touch": edge, "model": model,
+        "matte_backend": matte_backend, "denoise": denoise, "clean_iso": clean_iso,
+        "edge_touch": edge, "model": model,
         "seconds": seconds, "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
     })
 
@@ -190,9 +195,10 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
              ipa_scale: float = 0.8, cn_scale: float = 1.0, steps: int = 25,
              cfg: float = 7.0, seed: int = 20261027, width: int = 768, height: int = 768,
              cols: int = 8, pixel: int = 0, palette: int = 0,
-             matte: bool = False, matte_backend: str = "auto",
-             export: Optional[str] = None,
-             preset: Optional[str] = None, model: str = "sd15",
+             matte: bool = False, matte_backend: str = "auto", denoise: int = 1,
+             clean_iso: int = 1, export: Optional[str] = None,
+             controlnet: str = "openpose", preset: Optional[str] = None,
+             model: str = "sd15",
              anim_name: str = "walk", fps: int = 10, tag: str = "w4") -> Dict[str, Any]:
     """逐帧生成 -> 锚点对齐 -> 打包 sprite sheet。固定 seed 是跨帧一致的前提。
 
@@ -202,7 +208,8 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
     negative = negative or NEG_DEFAULT
     if preset is not None:
         prompt, negative = presets.build(prompt, negative, preset)
-    pipe = eng.pose_pipe(with_ipadapter=ref_image is not None, model=model)
+    pipe = eng.pose_pipe(controlnet=controlnet, with_ipadapter=ref_image is not None,
+                        model=model)
     eng.apply_lora(pipe, lora, lora_scale)
     if ref_image is not None:
         pipe.set_ip_adapter_scale(ipa_scale)
@@ -229,11 +236,14 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
         per_frame.append(dt())
         if matte:
             out = matte_mod.despeckle(
-                matte_mod.matte_auto(out.convert("RGBA"), matte_backend, eng.matte_dir))
+                matte_mod.matte_auto(out.convert("RGBA"), matte_backend, eng.matte_dir),
+                denoise_iters=denoise)
         if pixel > 1:
             out = pp.pixelate(out, pixel)
         if palette:
             out = pp.quantize_palette(out, palette)
+        if clean_iso and (pixel > 1 or palette):
+            out = pp.clean_isolated(out, passes=clean_iso)
         frames.append(out.convert("RGBA"))
 
     aligned = pp.align_sequence(frames)

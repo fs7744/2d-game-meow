@@ -52,7 +52,14 @@ CN_FILES = {
 }
 
 # SDXL 的 ControlNet 是另一套权重（shape 不同，混用会直接报错）
-CN_SDXL_DIRS = {"openpose": "controlnet/sdxl_openpose"}
+CN_SDXL_DIRS = {
+    "openpose": "controlnet/sdxl_openpose",
+    "canny": "controlnet/sdxl_canny",
+    "tile": "controlnet/sdxl_tile",
+}
+
+# SDXL 的 IP-Adapter 也是另一套（ViT-H image encoder 与 SD1.5 的不通用）
+IPADAPTER_SDXL_WEIGHT = "ipadapter/models/ip-adapter_sdxl_vit-h.safetensors"
 
 
 def _scheduler(config):
@@ -217,20 +224,31 @@ class Engine:
                 raise FileNotFoundError(f"ControlNet {which} 权重缺失（{d} 或 {f}）")
         return self._ctrl[which]
 
-    def ipa_weight(self) -> str:
-        """IP-Adapter 权重文件名：魔搭只给 .safetensors，HF 只给 .bin。"""
-        base = self.path(IPADAPTER) / "models"
-        for name in ("ip-adapter_sd15.safetensors", "ip-adapter_sd15.bin"):
-            if (base / name).exists():
-                return name
-        raise FileNotFoundError(f"IP-Adapter 权重缺失: {base}")
+    def ipa_weight(self, model: str = DEFAULT_MODEL) -> tuple[str, str, str]:
+        """(根目录, 子目录, 权重文件名)。魔搭只给 .safetensors，HF 只给 .bin。
+
+        SDXL 用的是另一套（ViT-H image encoder 与 SD1.5 的不通用），目录也分开。
+        注意 load_ip_adapter 的 subfolder 是**必需**的（不是可选关键字）。
+        """
+        root = str(self.path(IPADAPTER))
+        # 两个底模的 IP-Adapter 权重并列放在 ipadapter/models/，共享同一个 image_encoder。
+        # 这不是偷懒：ip-adapter_sdxl_vit-h 要的就是 ViT-H（hidden 1280 / projection 1024），
+        # 与 SD1.5 完全同一个。HF 上还有一份 sdxl_models/image_encoder 是 ViT-bigG
+        # （hidden 1664 / projection 1280），那是给不带 vit-h 后缀的 ip-adapter_sdxl 用的，
+        # 拿错会报 mat1 and mat2 shapes cannot be multiplied。
+        names = ("ip-adapter_sdxl_vit-h.safetensors", "ip-adapter_sdxl_vit-h.bin") \
+            if model == "sdxl" else ("ip-adapter_sd15.safetensors", "ip-adapter_sd15.bin")
+        for name in names:
+            if (self.path(IPADAPTER) / "models" / name).exists():
+                return root, "models", name
+        raise FileNotFoundError(
+            f"IP-Adapter 权重缺失（{model}）: {root}/models/{names[0]}")
 
     def pose_pipe(self, controlnet: str = "openpose", with_ipadapter: bool = True,
                   model: str = DEFAULT_MODEL):
-        """SD1.5 + ControlNet(+IP-Adapter)。W4 的核心管线。
+        """ControlNet(+IP-Adapter)。W4 的核心管线，两个底模都支持。
 
-        只支持 SD1.5：我们的 ControlNet OpenPose 权重就是 SD1.5 版，SDXL 需要另一套
-        （xinsir/controlnet-openpose-sdxl）。与其悄悄跑错，不如显式拒绝。
+        SD1.5 与 SDXL 的 ControlNet / IP-Adapter 是两套权重，按 model 分别取。
         """
         key = f"pose:{controlnet}:{int(with_ipadapter)}:{model}"
         if key in self._cache:
@@ -239,8 +257,6 @@ class Engine:
         cn = self.controlnet(controlnet, model)
         p = self._check_model(model)
         if model == "sdxl":
-            if with_ipadapter:
-                raise ValueError("SDXL 的 IP-Adapter 权重未装，请用 with_ipadapter=False")
             pipe = StableDiffusionXLControlNetPipeline.from_pretrained(
                 p, controlnet=cn, variant=detect_variant(p), **self._base_kwargs()
             )
@@ -249,11 +265,12 @@ class Engine:
                 p, controlnet=cn, variant=detect_variant(p), **self._base_kwargs()
             )
         pipe.scheduler = _scheduler(pipe.scheduler.config)
-        if with_ipadapter and model == "sd15":
-            pipe.load_ip_adapter(
-                str(self.path(IPADAPTER)), subfolder="models",
-                weight_name=self.ipa_weight(),
-            )
+        if with_ipadapter:
+            # 布局：<root>/<sub>/ip-adapter_*.safetensors 与 <root>/<sub>/image_encoder/
+            # SD1.5 是 ipadapter/models/，SDXL 是 ipadapter/sdxl/
+            ipa_root, ipa_sub, ipa_name = self.ipa_weight(model)
+            pipe.load_ip_adapter(ipa_root, ipa_sub, weight_name=ipa_name,
+                                 image_encoder_folder="image_encoder")
             pipe.set_ip_adapter_scale(0.8)
         self._cache[key] = self._fit(pipe, key)
         log.info("%s 加载 %.1fs", key, time.perf_counter() - t0)

@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 from typing import Iterable, List, Sequence, Tuple
 
+import cv2
 import numpy as np
 from PIL import Image
 
@@ -35,6 +36,68 @@ def quantize_palette(img: Image.Image, colors: int = 16) -> Image.Image:
     out = pal.convert("RGBA")
     out.putalpha(alpha.point(lambda a: 255 if a > 127 else 0))  # 硬边 alpha
     return out
+
+
+def clean_isolated(img: Image.Image, passes: int = 1) -> Image.Image:
+    """去孤立点：把「上下左右四个邻居颜色都跟自己不同」的像素处理掉。
+
+    这是像素画的经典清洗步骤，专治一类特定问题：**角色身上/轮廓外的零星杂色**。
+    实测 SDXL 的像素风出图，量化到 32 色后角色周围会冒出一粒粒红、青、橙的点。
+    它们大多是**主体连通域的一部分**（实测 1024² 图上 25 个前景块，最小的也有
+    2368px，根本没有孤立小块），所以面积过滤和形态学开运算都拿它们没办法 ——
+    那两种手段只动 alpha，而这里要动的是**颜色**。
+
+    分两类处理：
+    - 主体内部的杂色粒：改成上邻颜色（沿扫描线方向连续）
+    - 飘在外面、四邻皆透明、且 5×5 邻域只有它自己的：直接删掉
+
+    5×5 计数这一条不能省：像素画的 1px 斜向轮廓四邻同样全透明，只看 4 邻域会
+    把整条对角线吃掉（实测就是这样，所以加了这层保护）。
+    """
+    if passes <= 0:
+        return img
+    arr = np.asarray(img.convert("RGBA")).copy()
+    h, w = arr.shape[:2]
+    if h < 3 or w < 3:
+        return Image.fromarray(arr, "RGBA")
+
+    k5 = np.ones((5, 5), np.float32)
+    for _ in range(passes):
+        c, a = arr[..., :3], arr[..., 3]
+        m = a[1:-1, 1:-1] > 0
+
+        up_fg, dn_fg = a[:-2, 1:-1] > 0, a[2:, 1:-1] > 0
+        lf_fg, rt_fg = a[1:-1, :-2] > 0, a[1:-1, 2:] > 0
+
+        # 与「同为前景」的邻居同色的数量
+        same = np.zeros((h - 2, w - 2), dtype=np.int8)
+        same[m] += (np.all(c[1:-1, 1:-1][m] == c[:-2, 1:-1][m], axis=-1) & up_fg[m])
+        same[m] += (np.all(c[1:-1, 1:-1][m] == c[2:, 1:-1][m], axis=-1) & dn_fg[m])
+        same[m] += (np.all(c[1:-1, 1:-1][m] == c[1:-1, :-2][m], axis=-1) & lf_fg[m])
+        same[m] += (np.all(c[1:-1, 1:-1][m] == c[1:-1, 2:][m], axis=-1) & rt_fg[m])
+
+        iso = (same == 0) & m
+        if not iso.any():
+            break
+
+        cnt = cv2.filter2D((a > 0).astype(np.float32), -1, k5,
+                           borderType=cv2.BORDER_CONSTANT)
+        outside = iso & ~up_fg & ~dn_fg & ~lf_fg & ~rt_fg & (cnt[1:-1, 1:-1] <= 1.5)
+        rest = iso & ~outside
+
+        # 写回：统一用整图尺寸的 mask，避免链式切片索引的赋值歧义
+        del_mask = np.zeros((h, w), bool)
+        del_mask[1:-1, 1:-1] = outside
+        if del_mask.any():
+            arr[..., 3][del_mask] = 0
+
+        if rest.any():
+            # 上邻优先；上邻是透明就退回左邻
+            arr[1:-1, 1:-1, :3][rest] = arr[:-2, 1:-1, :3][rest]
+            no_up = rest & ~up_fg
+            arr[1:-1, 1:-1, :3][no_up] = arr[1:-1, :-2, :3][no_up]
+
+    return Image.fromarray(arr, "RGBA")
 
 
 def trim_alpha(img: Image.Image, pad: int = 0) -> Image.Image:
