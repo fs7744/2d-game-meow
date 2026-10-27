@@ -36,7 +36,7 @@ def gpu() -> dict:
         out = subprocess.run(
             ["nvidia-smi", "--query-gpu=name,memory.total,memory.used,driver_version",
              "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
         )
         parts = [p.strip() for p in out.stdout.strip().split(",")]
         return {"name": parts[0], "total_mb": int(parts[1]), "used_mb": int(parts[2]),

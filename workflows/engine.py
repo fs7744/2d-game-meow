@@ -222,9 +222,19 @@ class Engine:
     # ---------- 显存管理 ----------
 
     def free(self, keep: tuple[str, ...] = ()) -> None:
+        """释放显存。
+
+        ControlNet 是独立缓存（self._ctrl），容易漏——实测只清 _cache 时
+        仍残留 4.16GB。keep 里出现某条 ControlNet 名（openpose/canny/tile）才保留。
+        """
         for k in list(self._cache):
             if k not in keep:
                 self._cache.pop(k, None)
+        for name in list(self._ctrl):
+            if not any(name in item for item in keep):
+                self._ctrl.pop(name, None)
+        if not keep:
+            self._lora = None
         gc.collect()
         torch.cuda.empty_cache()
 

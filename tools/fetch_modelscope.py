@@ -110,7 +110,8 @@ def download(repo: str, rel: str, dest: Path, size: int) -> None:
     url = MS.format(repo=repo, path=urllib.parse.quote(rel, safe=""))
     print(f"  [dl] {rel}  {size / 2**20:.0f}MB", flush=True)
     cmd = ["curl", "-L", "--retry", "4", "--retry-delay", "3", "-o", str(out), url]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = subprocess.run(cmd, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace")
     got = out.stat().st_size if out.exists() else 0
     if got < size * 0.99:
         print(f"  [warn] {rel} 只有 {got / 2**20:.0f}/{size / 2**20:.0f}MB "

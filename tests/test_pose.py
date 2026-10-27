@@ -92,6 +92,7 @@ def test_cli_grid_mode(tmp_path, root):
     r = subprocess.run(
         [sys.executable, str(root / "tools" / "pose_from_image.py"), str(sheet),
          "--grid", f"{len(ims)}x1", "-o", str(out), "--detector", "none", "--size", "128"],
-        capture_output=True, text=True, timeout=600, cwd=str(root))
+        capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=600, cwd=str(root))
     assert r.returncode == 0, r.stderr[-500:]
     assert len(list(out.glob("pose_*.png"))) == len(ims)

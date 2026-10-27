@@ -40,8 +40,10 @@ def frames_from_video(path: Path, step: int):
     cap.release()
 
 
-def frames_from_sheet(path: Path, cols: int, rows: int):
-    sheet = Image.open(path).convert("RGBA")
+def frames_from_sheet(source, cols: int, rows: int):
+    """source 可以是路径，也可以是已经打开的 Image（便于测试与链式调用）。"""
+    sheet = source if isinstance(source, Image.Image) else Image.open(source)
+    sheet = sheet.convert("RGBA")
     cw, ch = sheet.width // cols, sheet.height // rows
     n = 0
     for r in range(rows):

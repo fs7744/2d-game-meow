@@ -89,7 +89,7 @@ python tools/pose_from_image.py walk.mp4  --step 3   -o assets/pose
 ## 测试
 
 ```bash
-python -m pytest tests -q        # 35 个用例，约 45s
+python -m pytest tests -q        # 65 个用例，约 80s
 ```
 
 | 文件 | 覆盖 | 用例数 |
@@ -99,6 +99,10 @@ python -m pytest tests -q        # 35 个用例，约 45s
 | `tests/test_controlnet.py` | Canny conditioning 生效、Tile 放大结构相关性 > 0.5、像素块均匀性 | 3 |
 | `tests/test_api.py` | 全部端点、队列串行性、路径穿越防护、400/404 | 9 |
 | `tests/test_pose.py` | 检测器切换、18 点完整性、关节在画面内且头高于髋、骨架渲染、双后端一致性、精灵图切片 CLI | 6 |
+| `tests/test_io_paths.py` | 视频抽帧、GIF、精灵图切片（含空格子）、CLI 错误码、非 8 倍数尺寸重绘、cols 夹取、环境自检 JSON、LoRA 空接口 | 11 |
+| `tests/test_presets.py` | 契约拼接与优先级、77 token 预算、中文 token 估算、下载器过滤（safety_checker/bin/ckpt/fp16 优先） | 9 |
+| `tests/test_fetch.py` | Range 分块拼接、断点续传、**拒绝非 206 响应**（防 429 错误体污染）、超长残留文件重置 | 5 |
+| `tests/test_stability.py` | 连续 20 次推理显存不涨、`free()` 释放 pipeline 与 ControlNet、跨进程同 seed 一致、PNG 结构、sidecar 一致 | 5 |
 
 已知限制：骨架质量决定成败——实测 8 帧序列里有 2 帧只提取到 8/18 个关节（手臂与身体重叠），
 这两帧生成时会自由发挥，出现朝向漂移。产线上应当在提取后按「可见关节数」筛帧。
