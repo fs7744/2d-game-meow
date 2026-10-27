@@ -69,5 +69,36 @@
     "preset": "pixel",
     "note": "本地训练产出",
     "base": "sd15"
+  },
+  "pixelart_xl": {
+    "label": "Pixel Art XL（SDXL）",
+    "trigger": "",
+    "scale": 0.8,
+    "preset": "pixel",
+    "base": "sdxl",
+    "size_mb": 163,
+    "source": "civitai:?@130580",
+    "note": "SDXL 最高人气像素风（下载 119741 / 赞 6288）。无触发词，靠 prompt 里的 pixel art 生效。"
+  },
+  "inkwash_xl2": {
+    "label": "水墨风格 ink wash（SDXL）",
+    "trigger": "ink wash painting",
+    "scale": 0.8,
+    "preset": "wuxia",
+    "base": "sdxl",
+    "size_mb": 68,
+    "source": "civitai:?@261828",
+    "note": "实测是 LoKr 格式（key 为 lokr_w1），diffusers 的 load_lora_weights 不支持，加载会报一堆 key 重命名失败。暂不可用。",
+    "hidden": true
+  },
+  "inkart_xl": {
+    "label": "Ink Art XL 线稿（SDXL）",
+    "trigger": "ink art",
+    "scale": 0.8,
+    "preset": "portrait",
+    "base": "sdxl",
+    "size_mb": 102,
+    "source": "civitai:?@284385",
+    "note": "水墨线稿风，触发词 ink art。"
   }
 }

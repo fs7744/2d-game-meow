@@ -26,6 +26,7 @@ from diffusers import (  # noqa: E402
     StableDiffusionImg2ImgPipeline,
     StableDiffusionInpaintPipeline,
     StableDiffusionPipeline,
+    StableDiffusionXLControlNetPipeline,
     StableDiffusionXLImg2ImgPipeline,
     StableDiffusionXLPipeline,
 )
@@ -49,6 +50,9 @@ CN_FILES = {
     "canny": "controlnet/control_v11p_sd15_canny.pth",
     "tile": "controlnet/control_v11f1e_sd15_tile.pth",
 }
+
+# SDXL 的 ControlNet 是另一套权重（shape 不同，混用会直接报错）
+CN_SDXL_DIRS = {"openpose": "controlnet/sdxl_openpose"}
 
 
 def _scheduler(config):
@@ -178,7 +182,19 @@ class Engine:
             log.info("inpaint 加载 %.1fs", time.perf_counter() - t0)
         return self._cache["inpaint"]
 
-    def controlnet(self, which: str = "openpose") -> ControlNetModel:
+    def controlnet(self, which: str = "openpose", model: str = DEFAULT_MODEL) -> ControlNetModel:
+        key = f"{which}:{model}"
+        if key in self._ctrl:
+            return self._ctrl[key]
+        if model == "sdxl":
+            d = self.root / CN_SDXL_DIRS.get(which, "")
+            if not (d / "config.json").exists():
+                raise FileNotFoundError(
+                    f"SDXL 版 ControlNet {which} 权重缺失: {d}（SD1.5 与 SDXL 的 ControlNet 不能混用）")
+            self._ctrl[key] = ControlNetModel.from_pretrained(
+                d, torch_dtype=self.dtype, variant=detect_variant(d), local_files_only=True)
+            log.info("ControlNet %s (sdxl) <- %s", which, d.name)
+            return self._ctrl[key]
         if which not in self._ctrl:
             d = self.root / CN_DIRS[which]
             f = self.root / CN_FILES[which]
@@ -216,20 +232,24 @@ class Engine:
         只支持 SD1.5：我们的 ControlNet OpenPose 权重就是 SD1.5 版，SDXL 需要另一套
         （xinsir/controlnet-openpose-sdxl）。与其悄悄跑错，不如显式拒绝。
         """
-        if model != "sd15":
-            raise ValueError(
-                f"W4 姿态驱动目前只支持 SD1.5（ControlNet OpenPose 是 SD1.5 版），收到 {model}")
-        key = f"pose:{controlnet}:{int(with_ipadapter)}"
+        key = f"pose:{controlnet}:{int(with_ipadapter)}:{model}"
         if key in self._cache:
             return self._cache[key]
         t0 = time.perf_counter()
-        cn = self.controlnet(controlnet)
-        p = self.path(SD15)
-        pipe = StableDiffusionControlNetPipeline.from_pretrained(
-            p, controlnet=cn, variant=detect_variant(p), **self._base_kwargs()
-        )
+        cn = self.controlnet(controlnet, model)
+        p = self._check_model(model)
+        if model == "sdxl":
+            if with_ipadapter:
+                raise ValueError("SDXL 的 IP-Adapter 权重未装，请用 with_ipadapter=False")
+            pipe = StableDiffusionXLControlNetPipeline.from_pretrained(
+                p, controlnet=cn, variant=detect_variant(p), **self._base_kwargs()
+            )
+        else:
+            pipe = StableDiffusionControlNetPipeline.from_pretrained(
+                p, controlnet=cn, variant=detect_variant(p), **self._base_kwargs()
+            )
         pipe.scheduler = _scheduler(pipe.scheduler.config)
-        if with_ipadapter:
+        if with_ipadapter and model == "sd15":
             pipe.load_ip_adapter(
                 str(self.path(IPADAPTER)), subfolder="models",
                 weight_name=self.ipa_weight(),
@@ -253,8 +273,20 @@ class Engine:
             return
         if self._lora is not None:
             pipe.unload_lora_weights()
-        pipe.load_lora_weights(str(lora_path), adapter_name="char")
-        pipe.set_adapters(["char"], adapter_weights=[scale])
+        try:
+            pipe.load_lora_weights(str(lora_path), adapter_name="char")
+            pipe.set_adapters(["char"], adapter_weights=[scale])
+        except Exception as exc:            # noqa: BLE001
+            # 常见原因：这不是标准 LoRA，而是 LoKr / LoHa / LyCORIS 变体
+            # （实测「水墨风格 ink wash」就是 LoKr，key 叫 lokr_w1）——
+            # diffusers 的 load_lora_weights 认不出来，报的是一堆 key 重命名失败，
+            # 用户根本看不懂。这里翻成人话并把权重卸干净，别让脏状态留在管道里。
+            self._lora = None
+            raise ValueError(
+                f"LoRA 加载失败: {Path(lora_path).name} —— {exc}\n"
+                "大概率不是标准 LoRA（LoKr/LoHa/LyCORIS 变体暂不支持），"
+                "请换一个标准 LoRA（权重 key 形如 lora_unet_*_lora_A.weight）。"
+            ) from exc
         self._lora = key
         log.info("LoRA 热切换 -> %s (scale=%.2f)", Path(lora_path).name, scale)
 

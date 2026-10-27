@@ -40,12 +40,25 @@ def test_txt2img_model_echoed(eng):
     assert r["meta"]["model"] == "sd15"
 
 
-def test_w4_and_w3_refuse_sdxl(eng):
-    """W3 局部重绘与 W4 姿态驱动只有 SD1.5 权重，选错必须明确报错而不是出废图。"""
+def test_w3_refuses_sdxl(eng):
+    """W3 局部重绘只有 SD1.5 的 inpaint 权重，选错必须明确报错而不是出废图。"""
     with pytest.raises(ValueError, match="只支持 SD1.5"):
         eng.inpaint_pipe("sdxl")
-    with pytest.raises(ValueError, match="只支持 SD1.5"):
-        eng.pose_pipe(model="sdxl")
+
+
+def test_w4_sdxl_needs_its_own_controlnet(eng):
+    """SD1.5 与 SDXL 的 ControlNet 形状不同，绝不能混用。
+
+    有 SDXL 版 OpenPose 就应当能建管线；没有则必须报「SDXL 版 ControlNet 缺失」，
+    而不是悄悄拿 SD1.5 的权重去跑（那会直接 shape 不匹配崩掉）。
+    """
+    if "sdxl" not in eng.available_models():
+        pytest.skip("未下载 SDXL 底模")
+    try:
+        pipe = eng.pose_pipe(model="sdxl", with_ipadapter=False)
+        assert pipe is not None
+    except FileNotFoundError as exc:
+        assert "SDXL" in str(exc), str(exc)
 
 
 @pytest.mark.slow
@@ -61,4 +74,24 @@ def test_sdxl_generates_when_present(eng, root):
     assert r["meta"]["model"] == "sdxl"
     assert r["meta"]["seconds"] > 0
     print(f"  [sdxl] {time.time() - t0:.1f}s peak={r['meta']['peak_vram_gb']}GB")
+    eng.free()
+
+
+@pytest.mark.slow
+def test_w4_sdxl_end_to_end(eng, pose_frames):
+    """W4 + SDXL：骨架锁全身 + SDXL 画质。出帧即算通过（构图质量靠肉眼看）。"""
+    if "sdxl" not in eng.available_models():
+        pytest.skip("未下载 SDXL 底模")
+    if not (eng.root / "controlnet" / "sdxl_openpose" / "config.json").exists():
+        pytest.skip("未下载 SDXL 版 OpenPose ControlNet")
+
+    from workflows import generate as g
+
+    r = g.poseswap(eng, pose_images=list(pose_frames)[:2],
+                   prompt="pixel art game sprite, wuxia swordsman, red robe, holding sword",
+                   steps=12, seed=999, width=1024, height=1024, cols=2,
+                   pixel=8, palette=32, matte=True, preset="pixel",
+                   model="sdxl", tag="w4_sdxl_test")
+    assert r["frames"] == 2
+    assert r["model"] == "sdxl"       # poseswap 把 meta 展开在返回字典里
     eng.free()

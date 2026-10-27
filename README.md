@@ -131,16 +131,43 @@ mkdir -p models/checkpoints/sdxl && ...   # 见 tools/fetch_modelscope.py
 | 项 | SD1.5 | SDXL 1.0 |
 |---|---|---|
 | 原生分辨率 | 512²（768² 是甜点，1024² 会崩） | **1024²** |
-| 1024² / 20 步实测 | 会重复肢体 | **10.2s / 峰值 10.48GB** |
-| ControlNet / IP-Adapter / LoRA 生态 | **全** | 需另一套权重 |
-| W3 局部重绘 | ✅ 有专用 inpaint 权重 | ❌ 明确拒绝 |
-| W4 姿态驱动 | ✅ | ❌ 明确拒绝（我们的 OpenPose 是 SD1.5 版） |
-| LoRA 通用 | ❌ 互不通用 | ❌ 互不通用 |
+| W1 文生图实测 | 768²/30 步 ≈ 1.8s / 3.4GB | **1024²/30 步 ≈ 4.5s / 10.5GB** |
+| W4 姿态驱动实测 | 512²/25 步 ≈ 1.2s / 3.6GB | **1024²/28 步 ≈ 9.1s / 13.2GB** |
+| ControlNet | OpenPose/Canny/Tile 三套 | **OpenPose 已装**（xinsir 版，2.4GB） |
+| IP-Adapter | ✅ | ❌ 未装权重（`with_ipadapter` 需关掉） |
+| W3 局部重绘 | ✅ 有专用 inpaint 权重 | ❌ 明确报错 |
+| LoRA | 3 个精选 | **2 个可用**（见下） |
 
 **切换方式**：WebUI 左栏「设置 → 底模」。切换后 LoRA 列表会按 `base` 字段自动过滤——
 SD1.5 的 LoRA 装在 SDXL 上完全无效且会静默出废图，所以直接不让你选。
 
-SDXL 下 W3/W4 会**明确报错**而不是悄悄跑错（`ValueError: 只支持 SD1.5`）。
+W3 在 SDXL 下会**明确报错**而不是悄悄跑错。
+
+### SDXL 版 LoRA（实测）
+
+| LoRA | 体量 | 判定 |
+|---|---|---|
+| **Pixel Art XL** | 163MB | ✅ 可用。SDXL 最高人气像素风（dl 119741 / ♥6288），无触发词，靠 prompt 里的 `pixel art` 生效 |
+| **Ink Art XL** | 102MB | ✅ 可用。水墨线稿，触发词 `ink art` |
+| 水墨风格 ink wash | 68MB | ❌ **LoKr 格式**（key 是 `lokr_w1`），diffusers 的 `load_lora_weights` 不支持 |
+
+> LoKr / LoHa / LyCORIS 这类变体加载时会抛一堆「keys have not been correctly renamed」，
+> 用户根本看不懂。引擎已把它翻成人话：「大概率不是标准 LoRA」，并把管道状态卸干净。
+
+### SDXL 版 ControlNet（W4 才能吃 1024）
+
+```
+models/controlnet/sdxl_openpose/     # xinsir/controlnet-openpose-sdxl-1.0，2.4GB
+```
+
+SD1.5 与 SDXL 的 ControlNet **形状不同、不能混用**——代码里按 `model` 分开取，
+拿错会直接 shape 不匹配崩掉，所以是显式报错而不是静默降级。
+
+实测 W4 + SDXL（4 帧走路，1024²）：
+
+- 四帧**角色完全一致**（红发、红袍、深色腰带、靴子），SD1.5 做不到这个稳定性
+- 姿态**跟随骨架**，全身在画面内
+- 已知瑕疵：剑柄握持偶有偏移、个别帧有细微尺寸漂移
 
 ## LoRA：装什么、怎么用
 
@@ -349,7 +376,7 @@ python tools/video.py i2v assets/cat.png "the same character walking" -o assets/
 ## 测试
 
 ```bash
-python -m pytest tests -q        # 119 个用例，约 120s（含 1 个需 RUN_WAN=1 的慢用例）
+python -m pytest tests -q        # 121 个用例，约 160s（含 RUN_WAN=1 与 W4+SDXL 两个慢用例）
 ```
 
 | 文件 | 覆盖 | 用例数 |
@@ -368,7 +395,7 @@ python -m pytest tests -q        # 119 个用例，约 120s（含 1 个需 RUN_W
 | `tests/test_video.py` | numpy/PIL 帧兼容、mp4 落地、模型路径校验、Wan 真实生成（`RUN_WAN=1`） | 6 |
 | `tests/test_lora.py` | 注册表扫描/元数据/坏 JSON 容错、名称解析、去碎屑、贴边占比判定、武侠契约预算 | 13 |
 | `tests/test_train.py` | 数据集读取与兜底、步数规划、**端到端 6 步真训练**（导出的体积上限、可被 scan/apply_lora 认出）、`/train` 全流程 | 9 |
-| `tests/test_models.py` | `/models` 只列出本机已装的、未知底模报错、`W3/W4 拒绝 SDXL`、SDXL 真实生成 | 6 |
+| `tests/test_models.py` | `/models` 只列出本机已装的、未知底模报错、**W3 拒绝 SDXL**、SDXL 真实生成、**W4+SDXL 端到端** | 8 |
 
 已知限制：骨架质量决定成败——实测 8 帧序列里有 2 帧只提取到 8/18 个关节（手臂与身体重叠），
 这两帧生成时会自由发挥，出现朝向漂移。产线上应当在提取后按「可见关节数」筛帧。

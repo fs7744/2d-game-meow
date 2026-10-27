@@ -192,7 +192,7 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
              cols: int = 8, pixel: int = 0, palette: int = 0,
              matte: bool = False, matte_backend: str = "auto",
              export: Optional[str] = None,
-             preset: Optional[str] = None,
+             preset: Optional[str] = None, model: str = "sd15",
              anim_name: str = "walk", fps: int = 10, tag: str = "w4") -> Dict[str, Any]:
     """逐帧生成 -> 锚点对齐 -> 打包 sprite sheet。固定 seed 是跨帧一致的前提。
 
@@ -202,7 +202,7 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
     negative = negative or NEG_DEFAULT
     if preset is not None:
         prompt, negative = presets.build(prompt, negative, preset)
-    pipe = eng.pose_pipe(with_ipadapter=ref_image is not None)
+    pipe = eng.pose_pipe(with_ipadapter=ref_image is not None, model=model)
     eng.apply_lora(pipe, lora, lora_scale)
     if ref_image is not None:
         pipe.set_ip_adapter_scale(ipa_scale)
@@ -242,6 +242,7 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
         "ref_image": str(ref_image) if ref_image else None, "lora": lora,
         "ipa_scale": ipa_scale if ref else None, "cn_scale": cn_scale,
         "steps": steps, "cfg": cfg, "seed": seed, "frames": len(frames), "matte": matte,
+        "model": model,
         "per_frame_seconds": per_frame,
         "seconds_total": round(sum(per_frame), 2),
         "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
