@@ -246,6 +246,11 @@ g.poseswap(eng, pose_images=poses, prompt="...", matte=True,
 代价：闸门每帧多几十毫秒（姿态模型跑 CPU，4090 上单帧约 10ms 量级），比重新出
 一帧便宜两个数量级。`candidates=1, gate_retries=0` 就退化成原来的行为。
 
+实测（2 帧走路，512²/20 步，`candidates=2, gate_retries=2, matte=True`）：
+共 6 次生成、7.15s、峰值 3.33GB，两帧都过闸门（各 18/18 关节、无贴边）。
+第 2 帧前 3 个候选都没过（关节断掉/贴边），第 4 次才拿到合格帧——这正是以前
+会被人眼退掉、但自动管线照单全收的废帧。
+
 ## LoRA：装什么、怎么用
 
 `models/lora/*.safetensors` + 同目录 `loras.json`（标签 / 触发词 / 推荐强度）。
