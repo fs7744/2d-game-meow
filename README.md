@@ -21,6 +21,7 @@
 | FastAPI 服务（单卡串行队列 + 资产索引） | 已完成 |
 | 抠图 / 去白边 | 未开始 |
 | LoRA 训练脚本 | 未开始 |
+| 姿态提取（YOLOX 检测 + RTMPose 回归 → OpenPose 骨架） | 已完成，实测通过 |
 | W5 视频驱动（MimicMotion） | 未开始 |
 
 ## 实测数据
@@ -48,10 +49,47 @@
 2. **产线估算**：一个角色的走/跑/待机/攻击四套动作（各 8 帧）≈ **32 秒**；
    一个 20 角色的关卡 ≈ 11 分钟。瓶颈不在推理，在挑帧与修瑕疵。
 
+## 姿态提取（W4 的入口）
+
+```
+图片 / GIF / 视频 / 精灵图
+        ↓  YOLOX-L（onnx, 640×640，person 类）
+   人体检测框 → 扩成正方形 ×1.25 → 缩到 288×384
+        ↓  RTMPose（dw-ll_ucoco_384.onnx, SimCC 头）
+   17 个 COCO 关键点 → 补 neck → 重排为 OpenPose-18 → 按官方配色渲染
+        ↓
+   ControlNet OpenPose 条件图
+```
+
+```bash
+# 单图 / 精灵图（按网格切）/ 视频（每 3 帧取一帧）
+python tools/pose_from_image.py sprite.png          -o assets/pose
+python tools/pose_from_image.py sheet.png --grid 8x1 -o assets/pose
+python tools/pose_from_image.py walk.mp4  --step 3   -o assets/pose
+```
+
+两个实现细节值得记：
+
+1. **不用 controlnet_aux 的 DwposeDetector**：它依赖 mmpose + mmdet + mmcv（Windows 编译极痛），
+   而且要 .pth 不是 onnx。这里直接用 DWPose 官方导出的两个 onnx 自己串链路。
+2. **检测器可换**：`--detector auto|yolox|torchvision|none`。`auto` 优先 YOLOX，
+   权重不在时退到 torchvision FasterRCNN（权重来自 download.pytorch.org，国内可达），
+   两者都没有则整图回归——实测整图模式对人形精灵也能出 17/18 个关节，只是比例偏差更大。
+
+实测（CPU，512² 输入）：
+
+| 模式 | 单帧耗时 | 可见关节 |
+|---|---|---|
+| 整图回归（无检测） | 26ms | 17/18 |
+| YOLOX 检测 + 裁剪 | 515ms | 17/18 |
+
+检测的价值在**构图不规整**的输入（人物偏在一角、多人、画面留白多）；精灵图本来就占满画面时，
+整图模式又快又够用。
+
 ## 测试
 
 ```bash
-python -m pytest tests -q        # 29 个用例，约 60s
+python -m pytest tests -q        # 35 个用例，约 45s
 ```
 
 | 文件 | 覆盖 | 用例数 |
@@ -60,6 +98,10 @@ python -m pytest tests -q        # 29 个用例，约 60s
 | `tests/test_generate.py` | 同 seed 逐像素一致、不同 seed 相异、色板生效、**重绘选区外不变**、序列帧数、显存回收、缺权重报错 | 8 |
 | `tests/test_controlnet.py` | Canny conditioning 生效、Tile 放大结构相关性 > 0.5、像素块均匀性 | 3 |
 | `tests/test_api.py` | 全部端点、队列串行性、路径穿越防护、400/404 | 9 |
+| `tests/test_pose.py` | 检测器切换、18 点完整性、关节在画面内且头高于髋、骨架渲染、双后端一致性、精灵图切片 CLI | 6 |
+
+已知限制：骨架质量决定成败——实测 8 帧序列里有 2 帧只提取到 8/18 个关节（手臂与身体重叠），
+这两帧生成时会自由发挥，出现朝向漂移。产线上应当在提取后按「可见关节数」筛帧。
 
 测试过程中修掉的两个真 bug：**inpaint 不传 width/height 时 diffusers 默认输出 512×512**（与源图不符，
 贴回时 `images do not match`）；**composite 的羽化是双向扩散**（会把选区外像素一起吃掉），
@@ -77,7 +119,11 @@ python -m pytest tests -q        # 29 个用例，约 60s
 ├── tools/
 │   ├── fetch_weights.py    权重下载（走 hf-mirror）
 │   ├── smoke.py            逐阶段测速/测显存
-│   └── make_pose.py        COCO-18 骨架图生成（无 DWPose 依赖时用）
+│   ├── make_pose.py        COCO-18 骨架图生成 / 渲染
+│   ├── pose_from_image.py  从图片 / 视频 / 精灵图批量提骨骼
+│   ├── fetch_ranged.py     按 Range 分块下载（抗限流断流）
+│   ├── bench.py            稳态基准
+│   └── check_env.py        环境自检
 ├── models/                 权重（checkpoints / controlnet / ipadapter / loras / ...）
 └── assets/                 产物 + sidecar(.json) + index.jsonl
 ```
