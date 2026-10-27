@@ -118,12 +118,18 @@ def inpaint(eng: Engine, *, image: str | Path, mask: str | Path, prompt: str,
         msk = msk.resize(src.size, Image.NEAREST)
     if seed < 0:
         seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
+    # 关键：不显式传 width/height 时，diffusers 会用 unet.sample_size（512）覆盖，
+    # 输出尺寸就和源图不一致了（贴回时会 "images do not match"）。
+    w8, h8 = max(64, src.width // 8 * 8), max(64, src.height // 8 * 8)
     torch.cuda.reset_peak_memory_stats()
     dt = _timer()
     raw = pipe(prompt=prompt, negative_prompt=negative or NEG_DEFAULT, image=src,
                mask_image=msk, strength=strength, num_inference_steps=steps,
-               guidance_scale=cfg, generator=torch.Generator("cuda").manual_seed(seed)).images[0]
+               guidance_scale=cfg, generator=torch.Generator("cuda").manual_seed(seed),
+               width=w8, height=h8).images[0]
     seconds = dt()
+    if raw.size != src.size:
+        raw = raw.resize(src.size, Image.LANCZOS)
     composed = composite(src, raw, msk)
     return _save(composed, _stamp(tag), "inpaint", {
         "workflow": "w3", "prompt": prompt, "image": str(image), "mask": str(mask),
@@ -133,14 +139,18 @@ def inpaint(eng: Engine, *, image: str | Path, mask: str | Path, prompt: str,
 
 
 def composite(src: Image.Image, gen: Image.Image, mask: Image.Image, feather: int = 3) -> Image.Image:
-    """羽化**向内**的蒙版贴回：mask 内取生成结果，mask 外保留原像素。"""
+    """把生成结果按蒙版贴回，**承诺选区外逐点不变**。
+
+    羽化必须「向内」：先做形态学腐蚀（MinFilter）再高斯模糊，模糊的扩散范围才不会
+    越过原始蒙版边界。反过来直接模糊会把选区外的像素一起吃掉。
+    """
     from PIL import ImageFilter
 
     m = mask.convert("L")
     if feather > 0:
-        m = m.filter(ImageFilter.GaussianBlur(feather))
-    # 向内收缩，保证边界处也来自生成结果（避免原图脏边残留）
-    m = m.point(lambda v: 255 if v > 24 else 0)
+        m = m.filter(ImageFilter.MinFilter(2 * feather + 1))   # 向内收缩 feather px
+        m = m.filter(ImageFilter.GaussianBlur(feather))        # 边缘软化，仍不越界
+    m = m.point(lambda v: 255 if v >= 128 else 0)
     out = src.convert("RGBA").copy()
     out.paste(gen.convert("RGBA"), (0, 0), m)
     return out.convert("RGB")
@@ -203,6 +213,7 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
         f.save(fdir / f"frame_{i:04d}.png")
     info = pp.pack_sheet(aligned, ASSETS / f"{name}_sheet.png", cols=cols, sidecar=meta)
     info.update(meta)
+    info["frames_dir"] = str(fdir)
     Path(ASSETS / f"{name}_sheet.png.json").write_text(
         json.dumps(info, ensure_ascii=False, indent=2), "utf-8")
     with (ASSETS / "index.jsonl").open("a", encoding="utf-8") as fh:
