@@ -1,10 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Canvas from './canvas/Canvas'
-import NodePalette from './components/NodePalette'
-import PromptBook from './components/PromptBook'
+import Sidebar from './components/Sidebar'
 import TrainPanel from './components/TrainPanel'
 import { hasPrompt, loadPrompts, removePrompt, savePrompts, togglePrompt } from './store/prompts'
-import { fetchJob, fetchLoras, health, submitTxt2Img } from './api'
+import { fetchJob, fetchLoras, fetchModels, health, submitTxt2Img } from './api'
 import type { FavoritePrompt, GenNode, GenParams, LoraInfo, Viewport } from './types'
 import type { NodePatch } from './nodes/GenNodeCard'
 
@@ -13,14 +12,16 @@ const STORAGE_KEY = 'meow.canvas.v1'
 const DEFAULT_PARAMS: GenParams = {
   prompt: '',
   negative: '',
-  width: 512,
-  height: 512,
-  steps: 25,
-  cfg: 7.5,
+  // 实测：512² 出全身角色必糊；768² 是 SD1.5 的甜点（1024² 会开始重复肢体）。
+  // pixel=6 / palette=32 正好把 768 降到 128 有效像素 —— 标准精灵尺寸。
+  width: 768,
+  height: 768,
+  steps: 30,
+  cfg: 7.0,
   seed: -1,
   preset: 'sprite',
-  pixel: 4,
-  palette: 16,
+  pixel: 6,
+  palette: 32,
   matte: false,
   lora: '',
   loraScale: 0.8,
@@ -86,16 +87,24 @@ export default function App() {
   const [favs, setFavs] = useState<FavoritePrompt[]>(() => loadPrompts())
   const [loras, setLoras] = useState<LoraInfo[]>([])
   const [trainOpen, setTrainOpen] = useState(false)
+  const [models, setModels] = useState<string[]>(['sd15'])
+  const [model, setModel] = useState<string>('sd15')
+  const [matteBackend, setMatteBackend] = useState('auto')
 
   useEffect(() => savePrompts(favs), [favs])
 
   const reloadLoras = useCallback(() => {
-    fetchLoras().then(setLoras).catch(() => setLoras([]))
-  }, [])
+    fetchLoras(model).then(setLoras).catch(() => setLoras([]))
+  }, [model])
+
+  useEffect(() => { reloadLoras() }, [reloadLoras])
 
   useEffect(() => {
-    reloadLoras()
-  }, [reloadLoras])
+    fetchModels().then((m) => {
+      setModels(m)
+      if (m.length && !m.includes(model)) setModel(m[0])
+    })
+  }, [model])
 
   const nodesRef = useRef(nodes)
   nodesRef.current = nodes
@@ -162,7 +171,7 @@ export default function App() {
     if (!node || !node.params.prompt.trim()) return
     patchNode(id, { job: { id: 'pending', status: 'queued', startedAt: Date.now() } })
     try {
-      const { job_id } = await submitTxt2Img(node.params)
+      const { job_id } = await submitTxt2Img(node.params, { model, matteBackend })
       patchNode(id, { job: { id: job_id, status: 'queued', startedAt: Date.now() } })
     } catch (e) {
       patchNode(id, {
@@ -299,11 +308,19 @@ export default function App() {
       </header>
 
       <main className="stage">
-        <div className="left-col">
-          <NodePalette onAdd={(t) => addNode(t)} />
-          <PromptBook items={favs} canApply={!!selectedId}
-                      onApply={applyFavorite} onRemove={removeFavorite} />
-        </div>
+        <Sidebar
+          loras={loras}
+          favs={favs}
+          onAddNode={() => addNode('gen')}
+          canApply={!!selectedId}
+          onApplyFav={applyFavorite}
+          onRemoveFav={removeFavorite}
+          models={models}
+          model={model}
+          onModel={setModel}
+          matteBackend={matteBackend}
+          onMatteBackend={setMatteBackend}
+        />
         <Canvas
           nodes={nodes}
           selectedId={selectedId}

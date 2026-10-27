@@ -196,6 +196,12 @@ def engine_stats() -> Dict[str, Any]:
     return engine.stats()
 
 
+@app.get("/models")
+def models() -> Dict[str, Any]:
+    """可用底模。前端下拉用它；没有对应权重就不显示，避免选了却跑不动。"""
+    return {"current": engine.DEFAULT_MODEL, "available": engine.available_models()}
+
+
 @app.get("/loras")
 def loras() -> Dict[str, Any]:
     """可用 LoRA 清单（含触发词与推荐强度）。前端下拉直接用。"""

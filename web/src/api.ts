@@ -13,7 +13,12 @@ export function fileUrl(localPath: string): string {
 
 export type SubmitResult = { job_id: string }
 
-export async function submitTxt2Img(params: GenParams): Promise<SubmitResult> {
+export type SubmitOpts = { model?: string; matteBackend?: string }
+
+export async function submitTxt2Img(
+  params: GenParams,
+  opts: SubmitOpts = {},
+): Promise<SubmitResult> {
   const r = await fetch(`${base}/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -31,6 +36,9 @@ export async function submitTxt2Img(params: GenParams): Promise<SubmitResult> {
         pixel: params.pixel,
         palette: params.palette,
         matte: params.matte,
+        // 底模与抠图后端是全局设置，不在节点参数里
+        model: opts.model || 'sd15',
+        matte_backend: opts.matteBackend || 'auto',
         // 空串表示不挂 LoRA；后端会把名字解析成绝对路径
         lora: params.lora || undefined,
         lora_scale: params.loraScale,
@@ -111,12 +119,20 @@ export async function fetchTrain(id: string): Promise<TrainState> {
   return (await r.json()) as TrainState
 }
 
-export async function fetchLoras(): Promise<LoraInfo[]> {
+export async function fetchModels(): Promise<string[]> {
+  const r = await fetch(`${base}/models`)
+  if (!r.ok) return ['sd15']
+  const j = await r.json()
+  return Array.isArray(j.available) ? j.available : ['sd15']
+}
+
+export async function fetchLoras(baseModel?: string): Promise<LoraInfo[]> {
   const r = await fetch(`${base}/loras`)
   if (!r.ok) throw new Error(`HTTP ${r.status}`)
   const j = await r.json()
   const items: LoraInfo[] = Array.isArray(j.items) ? j.items : []
-  return items.filter((x) => !x.hidden)
+  // SD1.5 的 LoRA 装在 SDXL 上完全无效，会静默出废图 —— 按基座直接过滤掉
+  return items.filter((x) => !x.hidden && (!baseModel || (x.base || 'sd15') === baseModel))
 }
 
 export async function health(): Promise<{ ok: boolean; device?: string }> {

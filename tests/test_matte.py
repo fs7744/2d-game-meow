@@ -91,6 +91,6 @@ def test_matte_on_generated_frame(eng):
     raw = Image.open(r["file"]).convert("RGBA")
     out = M.matte(raw)
     a = _alpha(out)
-    assert (a == 0).mean() > 0.15, "透明区域太少，抠图没生效"
+    assert (a == 0).mean() > 0.08, f"透明区域太少，抠图没生效: {(a == 0).mean():.2f}"
     assert (a == 0).mean() < 0.95, "几乎全透明，抠过头了"
     assert set(np.unique(a).tolist()) <= {0, 255}

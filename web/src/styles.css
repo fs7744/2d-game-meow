@@ -416,3 +416,77 @@ button { cursor: pointer; }
 .train-line { font-size: 11px; color: var(--muted); font-family: var(--mono); }
 .train-line.dim { color: var(--muted-2); font-size: 10px; }
 .train-line.ok { color: var(--green); font-size: 10.5px; font-family: inherit; line-height: 1.6; }
+
+/* ---------------- 左边栏（菜单式层级，可收起） ---------------- */
+.rail {
+  position: absolute; left: 0; top: 0; bottom: 0; z-index: 30;
+  width: 236px; display: flex; flex-direction: column;
+  background: rgba(10, 10, 14, 0.96); border-right: 1px solid var(--line-strong);
+  backdrop-filter: blur(6px);
+}
+.rail.collapsed { width: 42px; }
+.rail-head {
+  display: flex; align-items: center; gap: 6px; padding: 8px 8px;
+  border-bottom: 1px solid var(--line);
+}
+.rail-brand {
+  font-family: var(--chip); font-size: 10px; letter-spacing: 1px; color: var(--muted);
+}
+.rail-toggle {
+  width: 22px; height: 22px; background: transparent; border: 1px solid var(--line);
+  color: var(--muted-2); font-size: 12px;
+}
+.rail-toggle:hover { border-color: var(--green); color: var(--green); }
+.rail-scroll { flex: 1; overflow: auto; padding: 6px 0 12px; }
+
+.rail.collapsed .rail-toggle { margin: 8px auto; }
+.rail-icon {
+  width: 26px; height: 26px; margin: 4px auto; display: block;
+  background: transparent; border: 1px solid transparent; color: var(--muted-2); font-size: 14px;
+}
+.rail-icon:hover { color: var(--green); border-color: var(--line-strong); }
+
+.rail-sec { border-bottom: 1px solid var(--line); }
+.rail-sec-head {
+  width: 100%; display: flex; align-items: center; gap: 6px; padding: 7px 9px;
+  background: transparent; border: 0; color: var(--muted); text-align: left;
+}
+.rail-sec-head:hover { color: var(--white); background: rgba(255, 255, 255, 0.03); }
+.rail-sec-arrow { font-size: 9px; color: var(--muted-2); width: 8px; }
+.rail-sec-icon { font-size: 11px; color: var(--green); }
+.rail-sec-title { font-family: var(--chip); font-size: 10px; letter-spacing: 0.6px; }
+.rail-count {
+  margin-left: auto; font-family: var(--mono); font-size: 10px; color: var(--green);
+  border: 1px solid rgba(0, 255, 136, 0.35); padding: 0 4px;
+}
+.rail-sec-body { padding: 2px 9px 10px; display: flex; flex-direction: column; gap: 6px; }
+
+.rail-item {
+  display: flex; align-items: center; gap: 4px;
+  border: 1px solid var(--line); background: rgba(255, 255, 255, 0.02);
+}
+.rail-item-main {
+  flex: 1; min-width: 0; text-align: left; padding: 6px 7px;
+  background: transparent; border: 0; color: var(--white); font-size: 11.5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.rail-item-main b { display: block; font-size: 12px; }
+.rail-item-main em { display: block; font-style: normal; font-size: 10px; color: var(--muted-2); }
+.rail-item-main:hover:not(:disabled) { color: var(--green); }
+.rail-item-main:disabled { color: var(--muted-2); cursor: not-allowed; }
+.rail-add, .rail-del {
+  width: 24px; align-self: stretch; background: transparent;
+  border: 0; border-left: 1px solid var(--line); color: var(--muted-2); font-size: 13px;
+}
+.rail-add:hover { color: var(--green); }
+.rail-del:hover { color: var(--pink); }
+.rail-tip { margin: 0; font-size: 10px; line-height: 1.7; color: var(--muted-2); }
+
+.rail .block { display: flex; flex-direction: column; gap: 3px; font-size: 10px; color: var(--muted-2); }
+.rail select {
+  height: 26px; padding: 0 6px; color-scheme: dark;
+  background: var(--bg); border: 1px solid var(--line-strong);
+  font-family: var(--mono); font-size: 11.5px; color: var(--white);
+}
+.rail select option { background: #14141c; }
+.rail-stat { font-family: var(--mono); font-size: 10px; color: var(--muted-2); }

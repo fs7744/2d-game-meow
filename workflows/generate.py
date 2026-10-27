@@ -49,19 +49,32 @@ def _timer():
     return lambda: round(time.perf_counter() - t0, 2)
 
 
+# 质量档位（实测，RTX 4090，fp16，DPM++ 2M Karras）：
+#   草稿  512² /  8 步  —— 0.30s，只用来验证构图
+#   可用  768² / 30 步  —— 1.8s，SD1.5 的甜点：再大就开始重复肢体（1024² 实测出 3~4 个猫头）
+#   精修  768² / 45 步 + cfg 6.5 —— 2.6s，细节更稳，代价是慢
+# 像素化统一用 pixel=6 / palette=32（768 ÷ 6 = 128 有效像素，正好是精灵尺寸）；
+# 512² 配 pixel=4 会把有效像素压到 128 但源信息本来就少，实测明显更糊。
+QUALITY_PRESETS = {
+    "draft": dict(width=512, height=512, steps=8, cfg=7.0, pixel=0, palette=0),
+    "normal": dict(width=768, height=768, steps=30, cfg=7.0, pixel=6, palette=32),
+    "fine": dict(width=768, height=768, steps=45, cfg=6.5, pixel=6, palette=32),
+}
+
+
 # ---------------- W1 文生图 ----------------
 
 def txt2img(eng: Engine, *, prompt: str, negative: Optional[str] = None,
-            width: int = 512, height: int = 768, steps: int = 25, cfg: float = 7.5,
+            width: int = 768, height: int = 768, steps: int = 30, cfg: float = 7.0,
             seed: int = -1, lora: Optional[str] = None, lora_scale: float = 0.8,
             pixel: int = 0, palette: int = 0, preset: str = "sprite",
             matte: bool = False, matte_backend: str = "auto",
-            tag: str = "w1") -> Dict[str, Any]:
+            model: str = "sd15", tag: str = "w1") -> Dict[str, Any]:
     prompt, negative = presets.build(prompt, negative, preset)
     ntok = presets.rough_tokens(prompt)
     if ntok > 77:
         print(f"[warn] 正向提示词约 {ntok} token，超过 SD1.5 的 77 上限，尾部会被截断")
-    pipe = eng.txt2img_pipe()
+    pipe = eng.txt2img_pipe(model)
     eng.apply_lora(pipe, lora, lora_scale)
     if seed < 0:
         seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
@@ -89,7 +102,7 @@ def txt2img(eng: Engine, *, prompt: str, negative: Optional[str] = None,
         "width": width, "height": height, "steps": steps, "cfg": cfg, "seed": seed,
         "lora": lora, "lora_scale": lora_scale if lora else None,
         "pixel_block": pixel, "palette": palette, "matte": matte,
-        "matte_backend": matte_backend, "edge_touch": edge,
+        "matte_backend": matte_backend, "edge_touch": edge, "model": model,
         "seconds": seconds, "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
     })
 
@@ -99,8 +112,8 @@ def txt2img(eng: Engine, *, prompt: str, negative: Optional[str] = None,
 def img2img(eng: Engine, *, init_image: str | Path, prompt: str,
             negative: Optional[str] = None, strength: float = 0.55, steps: int = 25,
             cfg: float = 7.0, seed: int = -1, lora: Optional[str] = None,
-            lora_scale: float = 0.8, tag: str = "w2") -> Dict[str, Any]:
-    pipe = eng.img2img_pipe()
+            lora_scale: float = 0.8, model: str = "sd15", tag: str = "w2") -> Dict[str, Any]:
+    pipe = eng.img2img_pipe(model)
     eng.apply_lora(pipe, lora, lora_scale)
     ref = Image.open(init_image).convert("RGB")
     if seed < 0:
@@ -175,7 +188,7 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
              negative: Optional[str] = None, ref_image: Optional[str | Path] = None,
              lora: Optional[str] = None, lora_scale: float = 0.8,
              ipa_scale: float = 0.8, cn_scale: float = 1.0, steps: int = 25,
-             cfg: float = 7.5, seed: int = 20261027, width: int = 512, height: int = 768,
+             cfg: float = 7.0, seed: int = 20261027, width: int = 768, height: int = 768,
              cols: int = 8, pixel: int = 0, palette: int = 0,
              matte: bool = False, matte_backend: str = "auto",
              export: Optional[str] = None,

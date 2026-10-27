@@ -43,6 +43,9 @@ function makeFetch() {
         }),
       }
     }
+    if (String(url).endsWith('/models')) {
+      return { ok: true, json: async () => ({ current: 'sd15', available: ['sd15', 'sdxl'] }) }
+    }
     if (String(url).endsWith('/loras')) {
       return {
         ok: true,
@@ -50,9 +53,9 @@ function makeFetch() {
           count: 3,
           items: [
             { name: 'wuxia_v2', label: '武侠 Wuxia V2', trigger: 'wuxia',
-              scale: 0.8, preset: 'wuxia', note: '水墨武侠' },
+              scale: 0.8, preset: 'wuxia', note: '水墨武侠', base: 'sd15' },
             { name: 'guofeng', label: '国风插画', trigger: 'guofeng, chinese style',
-              scale: 0.7, preset: null, note: '工笔重彩' },
+              scale: 0.7, preset: null, note: '工笔重彩', base: 'sd15' },
             { name: 'xuer_wuxia', label: '隐藏项', trigger: '', scale: 0.8,
               preset: null, hidden: true },
           ],
@@ -120,7 +123,7 @@ function check(name, cond, extra = '') {
   const doc = dom.window.document
   check('渲染出顶栏品牌', doc.querySelector('.brand .title')?.textContent?.includes('喵叫'))
   check('空状态引导可见', !!doc.querySelector('.canvas-empty .empty-card'))
-  check('节点列表存在', doc.querySelectorAll('.palette-item').length === 1)
+  check('侧栏存在', doc.querySelectorAll('.rail-item').length === 1)
   check('缩放显示 100%', doc.querySelector('.zoom-val')?.textContent === '100%')
   check('无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
@@ -140,7 +143,8 @@ function check(name, cond, extra = '') {
   if (genCall) {
     const body = JSON.parse(genCall.body)
     check('workflow=w1', body.workflow === 'w1', body.workflow)
-    check('参数带 pixel/palette', body.params.pixel === 4 && body.params.palette === 16)
+    check('参数带 pixel/palette', body.params.pixel === 6 && body.params.palette === 32,
+        JSON.stringify({ p: body.params.pixel, c: body.params.palette }))
   }
   check('轮询了任务状态', calls.some((c) => c.url.includes('/jobs/')))
   check('出图后显示预览图', !!doc.querySelector('.preview img, .node-image-only img'))
@@ -173,7 +177,7 @@ function check(name, cond, extra = '') {
   check('复制后 2 个节点', doc.querySelectorAll('.node').length === 2,
         String(doc.querySelectorAll('.node').length))
 
-  const addBtn = doc.querySelector('.palette-item .add')
+  const addBtn = doc.querySelector('.rail-add')
   addBtn?.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
   await new Promise((r) => setTimeout(r, 60))
   check('加号新建后 3 个节点', doc.querySelectorAll('.node').length === 3,
@@ -254,17 +258,20 @@ function check(name, cond, extra = '') {
   check('星标可用', !!star && !star.disabled)
   star.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
   await new Promise((r) => setTimeout(r, 80))
-  check('收藏后出现在列表', doc.querySelectorAll('.book-item').length === 1)
+  const favItems = () =>
+    [...doc.querySelectorAll('.rail-sec')][1].querySelectorAll('.rail-item')
+  check('收藏后出现在列表', favItems().length === 1)
   check('星标点亮', !!doc.querySelector('.star.on'))
   check('列表文本正确',
-    (doc.querySelector('.book-text')?.textContent || '').includes('white cat knight'))
+    (favItems()[0]?.querySelector('.rail-item-main')?.textContent || '')
+      .includes('white cat knight'))
 
   // 改成别的再点收藏条目，应能回填
   setValue(ta, 'blue slime')
   await new Promise((r) => setTimeout(r, 80))
   doc.querySelector('.node').dispatchEvent(new win.Event('pointerdown', { bubbles: true }))
   await new Promise((r) => setTimeout(r, 60))
-  doc.querySelector('.book-text').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  favItems()[0].querySelector('.rail-item-main').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
   await new Promise((r) => setTimeout(r, 80))
   check('点收藏条目回填到节点',
     doc.querySelector('textarea.prompt').value.includes('white cat knight'),
@@ -273,15 +280,14 @@ function check(name, cond, extra = '') {
   // 重复收藏不应出现两条
   doc.querySelector('.star').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
   await new Promise((r) => setTimeout(r, 80))
-  check('重复收藏去重（已收藏则取消）', doc.querySelectorAll('.book-item').length === 0,
-    String(doc.querySelectorAll('.book-item').length))
+  check('重复收藏去重（已收藏则取消）', favItems().length === 0, String(favItems().length))
 
   // 再收藏一次后删除
   doc.querySelector('.star').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
   await new Promise((r) => setTimeout(r, 80))
-  doc.querySelector('.book-del')?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  doc.querySelector('.rail-del')?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
   await new Promise((r) => setTimeout(r, 80))
-  check('删除收藏', doc.querySelectorAll('.book-item').length === 0)
+  check('删除收藏', favItems().length === 0)
 
   check('收藏场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
@@ -479,6 +485,63 @@ function check(name, cond, extra = '') {
   ptr(node, 'pointerup', 400, 400)
 
   check('平移场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+
+// 10) 左边栏：菜单层级 + 收起/展开 + 底模设置
+{
+  const { dom, errors } = await boot('?demo=1')
+  const doc = dom.window.document
+  const win = dom.window
+  await new Promise((r) => setTimeout(r, 500))
+
+  check('侧栏存在', !!doc.querySelector('.rail'))
+  const titles = [...doc.querySelectorAll('.rail-sec-title')].map((x) => x.textContent)
+  check('三个菜单分组：节点/收藏/设置',
+    JSON.stringify(titles) === JSON.stringify(['节点', '提示词收藏', '设置']),
+    JSON.stringify(titles))
+
+  // 分组可折叠
+  const head = doc.querySelector('.rail-sec-head')
+  head.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 80))
+  check('分组可折叠', !doc.querySelector('.rail-sec').classList.contains('open'))
+  head.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 80))
+  check('分组可展开', doc.querySelector('.rail-sec').classList.contains('open'))
+
+  // 整条收起 / 展开
+  doc.querySelector('.rail-toggle').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 100))
+  check('侧栏可收起', !!doc.querySelector('.rail.collapsed'))
+  doc.querySelector('.rail-toggle').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 100))
+  check('侧栏可展开', !doc.querySelector('.rail.collapsed'))
+
+  // 设置里的底模下拉
+  doc.querySelector('details.fold').open = true
+  await new Promise((r) => setTimeout(r, 80))
+  const setSec = [...doc.querySelectorAll('.rail-sec')][2]
+  const msel = setSec.querySelector('select')
+  check('设置里有底模下拉', !!msel)
+  check('底模下拉列出本机已装的', msel && msel.options.length === 2,
+    String(msel?.options.length))
+
+  const setSelect = (el, v) => {
+    const setter = Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value').set
+    setter.call(el, v)
+    el.dispatchEvent(new win.Event('change', { bubbles: true }))
+  }
+  setSelect(msel, 'sdxl')
+  await new Promise((r) => setTimeout(r, 300))
+  // 切到 SDXL 后，SD1.5 的 LoRA 必须被过滤掉（装上去是废图）
+  const nodeLora = [...doc.querySelectorAll('details select')].find(
+    (x) => x.parentElement?.textContent?.startsWith('LoRA'))
+  check('切到 SDXL 后该底模无可用 LoRA',
+    nodeLora && nodeLora.options.length === 1, String(nodeLora?.options.length))
+
+  check('侧栏场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 

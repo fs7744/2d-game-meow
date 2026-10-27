@@ -23,6 +23,7 @@ export type LoraInfo = {
   trigger: string
   scale: number
   preset: Preset | null
+  base?: string          // 适配的底模；缺失按 sd15 处理
   note?: string
   source?: string
   size_mb?: number

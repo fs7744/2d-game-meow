@@ -26,13 +26,20 @@ from diffusers import (  # noqa: E402
     StableDiffusionImg2ImgPipeline,
     StableDiffusionInpaintPipeline,
     StableDiffusionPipeline,
+    StableDiffusionXLImg2ImgPipeline,
+    StableDiffusionXLPipeline,
 )
 
 log = logging.getLogger("engine")
 
 SD15 = "checkpoints/sd15"
+SDXL = "checkpoints/sdxl"
 SD15_INPAINT = "checkpoints/sd15-inpaint"
 IPADAPTER = "ipadapter"
+
+# 可自选的底模。SDXL 画质更好但：慢约 3×、显存约 2×、且 SD1.5 的 LoRA 不能通用。
+BASE_MODELS = {"sd15": SD15, "sdxl": SDXL}
+DEFAULT_MODEL = "sd15"
 
 # ControlNet 两种来源：diffusers 目录（hf 布局）或原始 .pth（魔搭布局，LDM 单文件）
 CN_DIRS = {"openpose": "controlnet/openpose", "canny": "controlnet/canny",
@@ -65,12 +72,29 @@ class Engine:
     def __init__(self, models_root: str | Path, device: str = "cuda") -> None:
         self.root = Path(models_root)
         self.device = device
+        self.DEFAULT_MODEL = DEFAULT_MODEL        # 给 API/前端当默认值用
         self.dtype = torch.float16
         self._cache: Dict[str, Any] = {}
         self._ctrl: Dict[str, ControlNetModel] = {}
         self._lora: Optional[str] = None
         # 语义分割抠图模型目录（isnet-general-use.onnx）。存在即启用 u2net 后端。
         self.matte_dir = self.root / "matte"
+
+    # ---------- 底模 ----------
+
+    def available_models(self) -> list[str]:
+        """本机已经下好的底模。"""
+        return [k for k, rel in BASE_MODELS.items()
+                if (self.root / rel / "model_index.json").exists()]
+
+    def _check_model(self, model: str) -> Path:
+        rel = BASE_MODELS.get(model)
+        if rel is None:
+            raise ValueError(f"未知底模 {model}（可选 {', '.join(BASE_MODELS)}）")
+        p = self.root / rel
+        if not (p / "model_index.json").exists():
+            raise FileNotFoundError(f"权重缺失: {p}（见 README「模型」）")
+        return p
 
     # ---------- 基础工具 ----------
 
@@ -110,34 +134,39 @@ class Engine:
 
     # ---------- pipeline 获取（懒加载 + 缓存）----------
 
-    def txt2img_pipe(self) -> StableDiffusionPipeline:
-        if "txt2img" not in self._cache:
+    def txt2img_pipe(self, model: str = DEFAULT_MODEL):
+        key = f"txt2img:{model}"
+        if key not in self._cache:
             t0 = time.perf_counter()
-            p = self.path(SD15)
-            pipe = StableDiffusionPipeline.from_pretrained(
-                p, variant=detect_variant(p), **self._base_kwargs()
-            )
+            p = self._check_model(model)
+            cls = StableDiffusionXLPipeline if model == "sdxl" else StableDiffusionPipeline
+            pipe = cls.from_pretrained(p, variant=detect_variant(p), **self._base_kwargs())
             pipe.scheduler = _scheduler(pipe.scheduler.config)
-            self._cache["txt2img"] = self._fit(pipe, "txt2img")
-            log.info("txt2img 加载 %.1fs", time.perf_counter() - t0)
-        return self._cache["txt2img"]
+            self._cache[key] = self._fit(pipe, key)
+            log.info("%s 加载 %.1fs", key, time.perf_counter() - t0)
+        return self._cache[key]
 
-    def img2img_pipe(self) -> StableDiffusionImg2ImgPipeline:
-        if "img2img" not in self._cache:
-            # 与 txt2img 共享同一份权重，避免二次占显存
-            if "txt2img" in self._cache:
-                base = self._cache["txt2img"]
-                pipe = StableDiffusionImg2ImgPipeline(**base.components)
+    def img2img_pipe(self, model: str = DEFAULT_MODEL):
+        key = f"img2img:{model}"
+        if key not in self._cache:
+            tkey = f"txt2img:{model}"
+            if tkey in self._cache:            # 共享权重，避免二次占显存
+                cls = StableDiffusionXLImg2ImgPipeline if model == "sdxl" \
+                    else StableDiffusionImg2ImgPipeline
+                pipe = cls(**self._cache[tkey].components)
             else:
-                p = self.path(SD15)
-                pipe = StableDiffusionImg2ImgPipeline.from_pretrained(
-                    p, variant=detect_variant(p), **self._base_kwargs()
-                )
+                p = self._check_model(model)
+                cls = StableDiffusionXLImg2ImgPipeline if model == "sdxl" \
+                    else StableDiffusionImg2ImgPipeline
+                pipe = cls.from_pretrained(p, variant=detect_variant(p), **self._base_kwargs())
                 pipe.scheduler = _scheduler(pipe.scheduler.config)
-            self._cache["img2img"] = self._fit(pipe, "img2img")
-        return self._cache["img2img"]
+            self._cache[key] = self._fit(pipe, key)
+        return self._cache[key]
 
-    def inpaint_pipe(self) -> StableDiffusionInpaintPipeline:
+    def inpaint_pipe(self, model: str = DEFAULT_MODEL):
+        """W3 局部重绘。只有 SD1.5 有专用 inpaint 权重（SDXL 的 inpaint 质量更差）。"""
+        if model != "sd15":
+            raise ValueError(f"W3 局部重绘目前只支持 SD1.5，收到 {model}")
         if "inpaint" not in self._cache:
             t0 = time.perf_counter()
             p = self.path(SD15_INPAINT)
@@ -180,8 +209,16 @@ class Engine:
                 return name
         raise FileNotFoundError(f"IP-Adapter 权重缺失: {base}")
 
-    def pose_pipe(self, controlnet: str = "openpose", with_ipadapter: bool = True):
-        """SD1.5 + ControlNet(+IP-Adapter)。W4 的核心管线。"""
+    def pose_pipe(self, controlnet: str = "openpose", with_ipadapter: bool = True,
+                  model: str = DEFAULT_MODEL):
+        """SD1.5 + ControlNet(+IP-Adapter)。W4 的核心管线。
+
+        只支持 SD1.5：我们的 ControlNet OpenPose 权重就是 SD1.5 版，SDXL 需要另一套
+        （xinsir/controlnet-openpose-sdxl）。与其悄悄跑错，不如显式拒绝。
+        """
+        if model != "sd15":
+            raise ValueError(
+                f"W4 姿态驱动目前只支持 SD1.5（ControlNet OpenPose 是 SD1.5 版），收到 {model}")
         key = f"pose:{controlnet}:{int(with_ipadapter)}"
         if key in self._cache:
             return self._cache[key]
