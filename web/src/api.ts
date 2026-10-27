@@ -1,4 +1,4 @@
-import type { GenParams, JobState } from './types'
+import type { GenParams, JobState, LoraInfo } from './types'
 
 const base = ''                                   // 生产同源；开发由 vite proxy 转发
 
@@ -31,6 +31,9 @@ export async function submitTxt2Img(params: GenParams): Promise<SubmitResult> {
         pixel: params.pixel,
         palette: params.palette,
         matte: params.matte,
+        // 空串表示不挂 LoRA；后端会把名字解析成绝对路径
+        lora: params.lora || undefined,
+        lora_scale: params.loraScale,
       },
     }),
   })
@@ -61,6 +64,59 @@ export async function fetchJob(jobId: string): Promise<JobState> {
     peakVram:
       typeof meta.peak_vram_gb === 'number' ? (meta.peak_vram_gb as number) : undefined,
   }
+}
+
+export type TrainState = {
+  train_id: string
+  status: 'queued' | 'running' | 'done' | 'failed'
+  stage?: string
+  name?: string
+  step?: number
+  total?: number
+  loss?: number
+  elapsed?: number
+  peak_vram_gb?: number
+  trainable_params?: number
+  samples?: number
+  path?: string
+  seconds?: number
+  error?: string
+}
+
+export type TrainReq = {
+  name: string
+  data_dir: string
+  caption?: string
+  trigger?: string
+  label?: string
+  rank?: number
+  steps?: number
+  epochs?: number
+  resolution?: number
+}
+
+export async function startTrain(req: TrainReq): Promise<{ train_id: string }> {
+  const r = await fetch(`${base}/train`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  })
+  if (!r.ok) throw new Error(`提交失败：HTTP ${r.status}`)
+  return r.json()
+}
+
+export async function fetchTrain(id: string): Promise<TrainState> {
+  const r = await fetch(`${base}/train/${id}`)
+  if (!r.ok) throw new Error(`查询失败：HTTP ${r.status}`)
+  return (await r.json()) as TrainState
+}
+
+export async function fetchLoras(): Promise<LoraInfo[]> {
+  const r = await fetch(`${base}/loras`)
+  if (!r.ok) throw new Error(`HTTP ${r.status}`)
+  const j = await r.json()
+  const items: LoraInfo[] = Array.isArray(j.items) ? j.items : []
+  return items.filter((x) => !x.hidden)
 }
 
 export async function health(): Promise<{ ok: boolean; device?: string }> {

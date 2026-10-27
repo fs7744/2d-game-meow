@@ -69,6 +69,8 @@ class Engine:
         self._cache: Dict[str, Any] = {}
         self._ctrl: Dict[str, ControlNetModel] = {}
         self._lora: Optional[str] = None
+        # 语义分割抠图模型目录（isnet-general-use.onnx）。存在即启用 u2net 后端。
+        self.matte_dir = self.root / "matte"
 
     # ---------- 基础工具 ----------
 

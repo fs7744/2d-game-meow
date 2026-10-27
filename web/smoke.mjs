@@ -30,6 +30,35 @@ function makeFetch() {
         }),
       }
     }
+    if (String(url).endsWith('/train') && (init.method || 'GET') === 'POST') {
+      return { ok: true, json: async () => ({ train_id: 't1' }) }
+    }
+    if (String(url).includes('/train/t1')) {
+      return {
+        ok: true,
+        json: async () => ({
+          train_id: 't1', status: 'running', stage: 'train',
+          step: 20, total: 100, loss: 0.0512, elapsed: 8.4,
+          peak_vram_gb: 4.67, trainable_params: 1594368, name: 'my_lora',
+        }),
+      }
+    }
+    if (String(url).endsWith('/loras')) {
+      return {
+        ok: true,
+        json: async () => ({
+          count: 3,
+          items: [
+            { name: 'wuxia_v2', label: '武侠 Wuxia V2', trigger: 'wuxia',
+              scale: 0.8, preset: 'wuxia', note: '水墨武侠' },
+            { name: 'guofeng', label: '国风插画', trigger: 'guofeng, chinese style',
+              scale: 0.7, preset: null, note: '工笔重彩' },
+            { name: 'xuer_wuxia', label: '隐藏项', trigger: '', scale: 0.8,
+              preset: null, hidden: true },
+          ],
+        }),
+      }
+    }
     if (String(url).startsWith('/files/')) {
       return { ok: true, json: async () => ({}) }
     }
@@ -55,7 +84,10 @@ async function boot(search) {
     beforeParse(win) {
       win.fetch = makeFetch()
       win.matchMedia = () => ({ matches: false, addListener() {}, removeListener() {} })
-      win.HTMLElement.prototype.setPointerCapture = () => {}
+      // 记录捕获调用：卡头拖拽会 setPointerCapture，按钮上则不应调用。
+      // 真实浏览器里正是这个捕获把 click 重定向到卡头，导致按钮点不动。
+      win.__captured = []
+      win.HTMLElement.prototype.setPointerCapture = () => win.__captured.push(1)
       win.HTMLElement.prototype.releasePointerCapture = () => {}
       win.ResizeObserver = class {
         observe() {}
@@ -123,13 +155,14 @@ function check(name, cond, extra = '') {
   const doc = dom.window.document
   await new Promise((r) => setTimeout(r, 1400))
 
-  const toggle = [...doc.querySelectorAll('.icon-btn')].find((b) => b.textContent === '▣')
-  check('存在「只看图」按钮', !!toggle)
+  const toggle = doc.querySelector('.icon-btn.view-toggle')
+  check('存在「只看图」按钮', !!toggle && (toggle.textContent || '').includes('▣'))
   toggle?.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
   await new Promise((r) => setTimeout(r, 60))
   check('切换为只展示图', !!doc.querySelector('.node-image-only'))
 
-  const back = [...doc.querySelectorAll('.icon-btn')].find((b) => b.textContent === '▤')
+  // 切回按钮的文本是「▤ 参数」，用 class 定位而非精确匹配符号
+  const back = doc.querySelector('.icon-btn.view-toggle')
   back?.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
   await new Promise((r) => setTimeout(r, 60))
   check('切回参数视图', !!doc.querySelector('.node .prompt'))
@@ -251,6 +284,201 @@ function check(name, cond, extra = '') {
   check('删除收藏', doc.querySelectorAll('.book-item').length === 0)
 
   check('收藏场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+
+// 6) 视图切换的根因回归：卡头上的按钮不能被 pointer capture 吃掉
+{
+  const { dom, errors } = await boot('?demo=gen')
+  const doc = dom.window.document
+  const win = dom.window
+  await new Promise((r) => setTimeout(r, 1400))
+
+  const btn = () => doc.querySelector('.icon-btn.view-toggle')
+  const nodeLeft = () => doc.querySelector('.node').style.left
+
+  // 切到图片模式（这是一次普通 click，不经过 pointerdown）
+  const left0 = nodeLeft()
+  btn().dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 80))
+  check('图片模式：只剩画面', !!doc.querySelector('.node-image-only'))
+
+  // 关键：真实浏览器是 pointerdown → setPointerCapture → pointerup → click，
+  // capture 会把 click 派发到卡头而非按钮。这里模拟该序列并断言按钮仍可点。
+  const capturedBefore = (win.__captured || []).length
+  const b = btn()
+  b.dispatchEvent(new win.PointerEvent('pointerdown', { bubbles: true, button: 0 }))
+  b.dispatchEvent(new win.PointerEvent('pointerup', { bubbles: true, button: 0 }))
+  b.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 80))
+
+  check('按钮上 pointerdown 不触发拖拽捕获',
+    (win.__captured || []).length === capturedBefore,
+    `captured ${capturedBefore} -> ${(win.__captured || []).length}`)
+  check('图片模式可切回参数视图', !!doc.querySelector('.node .prompt'))
+  check('切回后节点未被拖走', nodeLeft() === left0, `${left0} -> ${nodeLeft()}`)
+
+  // 卡头空白处仍应能拖拽
+  const head = doc.querySelector('.node-head')
+  head.dispatchEvent(new win.PointerEvent('pointerdown', { bubbles: true, button: 0 }))
+  check('卡头空白处仍可拖拽', (win.__captured || []).length === capturedBefore + 1)
+
+  check('视图切换场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 7) LoRA：下拉、自动切契约、触发词填入、提交带 lora
+{
+  const { dom, errors } = await boot('?demo=1')
+  const doc = dom.window.document
+  const win = dom.window
+  await new Promise((r) => setTimeout(r, 500))
+
+  doc.querySelector('details.fold').open = true
+  await new Promise((r) => setTimeout(r, 80))
+
+  const sel = [...doc.querySelectorAll('select')].find(
+    (s) => s.parentElement?.textContent?.startsWith('LoRA'))
+  check('存在 LoRA 下拉', !!sel)
+  check('隐藏项被过滤（不挂 + 2 个可见）', sel?.options.length === 3,
+    String(sel?.options.length))
+
+  const setSelect = (el, v) => {
+    const setter = Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value').set
+    setter.call(el, v)
+    el.dispatchEvent(new win.Event('change', { bubbles: true }))
+  }
+  setSelect(sel, 'wuxia_v2')
+  await new Promise((r) => setTimeout(r, 100))
+
+  check('选中后显示触发词', (doc.querySelector('.lora-trigger')?.textContent || '').includes('wuxia'))
+  const presetSel = [...doc.querySelectorAll('select')].find(
+    (s) => s.parentElement?.textContent?.startsWith('风格'))
+  check('自动切到武侠契约', presetSel?.value === 'wuxia', presetSel?.value)
+
+  const before = doc.querySelector('textarea.prompt').value
+  doc.querySelector('.lora-trigger .mini')
+    .dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 80))
+  check('一键填入触发词', doc.querySelector('textarea.prompt').value.startsWith('wuxia'))
+  check('触发词加在提示词之前', doc.querySelector('textarea.prompt').value !== before)
+
+  // 再点一次不应重复添加
+  const once = doc.querySelector('textarea.prompt').value
+  doc.querySelector('.lora-trigger .mini')
+    .dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 80))
+  check('重复填入不重复触发词', doc.querySelector('textarea.prompt').value === once)
+
+  doc.querySelector('.gen-btn').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 200))
+  const sub = calls.filter((c) => c.url.endsWith('/generate')).pop()
+  const body = JSON.parse(sub.body)
+  check('提交带 lora 与强度',
+    body.params.lora === 'wuxia_v2' && body.params.lora_scale === 0.8,
+    JSON.stringify({ l: body.params.lora, s: body.params.lora_scale }))
+  check('提交带 wuxia 契约', body.params.preset === 'wuxia', body.params.preset)
+
+  check('LoRA 场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+
+// 8) LoRA 训练面板：打开、提交、进度渲染
+{
+  const { dom, errors } = await boot('')
+  const doc = dom.window.document
+  const win = dom.window
+  await new Promise((r) => setTimeout(r, 500))
+
+  const openBtn = doc.querySelector('.train-btn')
+  check('顶栏有「训练 LoRA」入口', !!openBtn && (openBtn.textContent || '').includes('训练'))
+  openBtn.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 120))
+  check('训练面板打开', !!doc.querySelector('.train-panel'))
+  check('面板有数据集输入', !!doc.querySelector('.train-panel input'))
+
+  const setInput = (el, v) => {
+    const setter = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value').set
+    setter.call(el, v)
+    el.dispatchEvent(new win.Event('input', { bubbles: true }))
+  }
+  const inputs = [...doc.querySelectorAll('.train-panel input')]
+  setInput(inputs[1], 'mk_knight')          // 输出名
+  setInput(inputs[2], 'mk_knight')          // 触发词
+  await new Promise((r) => setTimeout(r, 80))
+
+  const startBtn = doc.querySelector('.train-panel .gen-btn')
+  check('开始训练按钮可用', !!startBtn && !startBtn.disabled)
+  startBtn.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 260))
+
+  const sub = calls.filter((c) => c.url.endsWith('/train') && c.method === 'POST').pop()
+  const body = JSON.parse(sub.body)
+  check('提交带输出名与触发词',
+    body.name === 'mk_knight' && body.trigger === 'mk_knight',
+    JSON.stringify({ n: body.name, t: body.trigger }))
+
+  // 轮询一次后会渲染进度条
+  await new Promise((r) => setTimeout(r, 1500))
+  check('显示进度条', !!doc.querySelector('.train-bar-fill'))
+  check('显示步数与 loss',
+    (doc.querySelector('.train-line')?.textContent || '').includes('20/100'),
+    doc.querySelector('.train-line')?.textContent)
+  check('显示可训练参数量',
+    (doc.querySelector('.train-status')?.textContent || '').includes('1.59M'))
+
+  doc.querySelector('.train-head .icon-btn').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 100))
+  check('面板可关闭', !doc.querySelector('.train-panel'))
+
+  check('训练面板无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+
+// 9) 画布平移：空白处直接拖（曾经因为 .canvas-grid 是 pointer-events:none 而完全拖不动）
+{
+  const { dom, errors } = await boot('?demo=1')
+  const doc = dom.window.document
+  const win = dom.window
+  await new Promise((r) => setTimeout(r, 500))
+
+  const vp = doc.querySelector('.canvas-viewport')
+  const world = () => doc.querySelector('.canvas-world')
+  const before = world().style.transform
+
+  const ptr = (el, type, x, y) => {
+    const ev = new win.Event(type, { bubbles: true })
+    Object.defineProperties(ev, {
+      clientX: { value: x }, clientY: { value: y },
+      button: { value: 0 }, pointerId: { value: 1 },
+    })
+    el.dispatchEvent(ev)
+  }
+
+  // target 就是 viewport 本身（网格层 pointer-events:none，点空白必然是它）
+  ptr(vp, 'pointerdown', 500, 400)
+  ptr(vp, 'pointermove', 560, 450)
+  await new Promise((r) => setTimeout(r, 80))
+  const after = world().style.transform
+  check('拖空白可平移', before !== after, `${before} -> ${after}`)
+  check('平移量正确 (+60,+50)', /translate\(180px, 140px\)/.test(after), after)
+
+  ptr(vp, 'pointerup', 560, 450)
+  await new Promise((r) => setTimeout(r, 60))
+
+  // 节点上拖不能平移（那是移动节点）
+  const node = doc.querySelector('.node')
+  const before2 = world().style.transform
+  ptr(node, 'pointerdown', 300, 300)
+  ptr(node, 'pointermove', 400, 400)
+  await new Promise((r) => setTimeout(r, 80))
+  check('拖节点不平移画布', world().style.transform === before2, world().style.transform)
+  ptr(node, 'pointerup', 400, 400)
+
+  check('平移场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 

@@ -1,6 +1,6 @@
 import { useRef } from 'react'
 import { hasCJK } from '../store/prompts'
-import type { GenNode, Preset } from '../types'
+import type { GenNode, LoraInfo, Preset } from '../types'
 
 export const NODE_W = 300
 
@@ -17,11 +17,13 @@ type Props = {
   onDelete: () => void
   favorited: boolean
   onToggleFavorite: () => void
+  loras: LoraInfo[]
 }
 
 const PRESETS: { v: Preset; label: string }[] = [
   { v: 'sprite', label: '像素精灵' },
   { v: 'portrait', label: '立绘' },
+  { v: 'wuxia', label: '武侠 / 国风' },
   { v: 'none', label: '不套契约' },
 ]
 
@@ -36,9 +38,11 @@ export default function GenNodeCard({
   onDelete,
   favorited,
   onToggleFavorite,
+  loras,
 }: Props) {
   const dragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null)
   const p = node.params
+  const loraInfo = loras.find((l) => l.name === p.lora)
   const job = node.job
   const busy = job?.status === 'queued' || job?.status === 'running'
   const hasImage = !!job?.url
@@ -46,6 +50,11 @@ export default function GenNodeCard({
 
   const startDrag = (e: React.PointerEvent) => {
     if (e.button !== 0) return
+    // 交互控件上绝不启动拖拽。一旦 setPointerCapture，后续 pointerup 会被重定向到
+    // 卡头，浏览器按「pointerdown 与 pointerup 的最近公共祖先」派发 click ——
+    // click 就落到卡头上而不是按钮上，按钮永远点不动（切回参数视图失效即此因）。
+    const el = e.target as HTMLElement
+    if (el.closest('button, input, textarea, select, summary, a, label')) return
     e.stopPropagation()
     onSelect()
     dragRef.current = { sx: e.clientX, sy: e.clientY, ox: node.x, oy: node.y }
@@ -74,6 +83,31 @@ export default function GenNodeCard({
   const setParam = <K extends keyof typeof p>(k: K, v: (typeof p)[K]) =>
     onPatch({ params: { ...p, [k]: v } })
 
+  /**
+   * 选 LoRA：同时把「推荐强度」和「匹配的提示词契约」一起带过来。
+   * 不这么做的话，挂着武侠 LoRA 却仍在用像素契约，两边打架、两头不到位。
+   */
+  const chooseLora = (name: string) => {
+    const info = loras.find((l) => l.name === name)
+    const next = { ...p, lora: name }
+    if (info) {
+      next.loraScale = info.scale
+      if (info.preset && p.preset === 'sprite') next.preset = info.preset
+    }
+    onPatch({ params: next })
+  }
+
+  /** 触发词缺了等于白装 LoRA，所以给个一键补入，已包含则不重复加。 */
+  const addTrigger = () => {
+    const t = (loraInfo?.trigger || '').trim()
+    if (!t) return
+    const lower = p.prompt.toLowerCase()
+    const missing = t.split(',').map((x) => x.trim()).filter(Boolean)
+      .filter((x) => !lower.includes(x.toLowerCase()))
+    if (!missing.length) return
+    setParam('prompt', `${missing.join(', ')}, ${p.prompt}`.replace(/^, /, ''))
+  }
+
   return (
     <div
       className={`node gen${selected ? ' selected' : ''}${imageMode ? ' image-mode' : ''}`}
@@ -95,14 +129,14 @@ export default function GenNodeCard({
         <span className="spacer" />
         {hasImage && (
           <button
-            className="icon-btn"
+            className={`icon-btn view-toggle${imageMode ? ' on' : ''}`}
             title={imageMode ? '切回参数视图' : '只看图'}
             onClick={(e) => {
               e.stopPropagation()
               onPatch({ view: imageMode ? 'expanded' : 'image' })
             }}
           >
-            {imageMode ? '▤' : '▣'}
+            {imageMode ? '▤ 参数' : '▣'}
           </button>
         )}
         <button
@@ -241,7 +275,45 @@ export default function GenNodeCard({
                   onChange={(e) => setParam('negative', e.target.value)}
                 />
               </label>
+              <label className="block">
+                LoRA
+                <select value={p.lora} onChange={(e) => chooseLora(e.target.value)}>
+                  <option value="">不挂（纯底模）</option>
+                  {loras.map((l) => (
+                    <option key={l.name} value={l.name}>
+                      {l.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {loraInfo && (
+                <div className="lora-box">
+                  <div className="lora-trigger">
+                    <span>
+                      触发词 <b>{loraInfo.trigger || '（无）'}</b>
+                    </span>
+                    {loraInfo.trigger && (
+                      <button className="mini" title="补进提示词开头" onClick={addTrigger}>
+                        + 填入
+                      </button>
+                    )}
+                  </div>
+                  {loraInfo.note && <p className="lora-note">{loraInfo.note}</p>}
+                </div>
+              )}
               <div className="row">
+                <label>
+                  LoRA 强度
+                  <input
+                    type="number"
+                    step={0.05}
+                    min={0}
+                    max={1.5}
+                    value={p.loraScale}
+                    disabled={!p.lora}
+                    onChange={(e) => setParam('loraScale', Number(e.target.value))}
+                  />
+                </label>
                 <label>
                   CFG
                   <input

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { GenNode, Viewport } from '../types'
+import type { GenNode, LoraInfo, Viewport } from '../types'
 import GenNodeCard, { NODE_W, type NodePatch } from '../nodes/GenNodeCard'
 
 type Props = {
@@ -14,6 +14,7 @@ type Props = {
   onDelete: (id: string) => void
   isFavorite: (text: string) => boolean
   onToggleFavorite: (id: string) => void
+  loras: LoraInfo[]
   onDropType: (type: string, world: { x: number; y: number }) => void
 }
 
@@ -32,6 +33,7 @@ export default function Canvas({
   onDelete,
   isFavorite,
   onToggleFavorite,
+  loras,
   onDropType,
 }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null)
@@ -90,10 +92,16 @@ export default function Canvas({
 
   const startPan = (e: React.PointerEvent) => {
     const target = e.target as HTMLElement
-    const onBackground = target.dataset.bg === '1'
+    // 原来靠 data-bg="1" 判断，但 .canvas-grid 是 pointer-events:none，
+    // 点空白时 target 是 viewport 自己（没有 data-bg）→ 画布永远拖不动。
+    // 改成反向排除：只要不落在节点/面板/控件上，就算可拖区域。
+    const onUi = !!target.closest(
+      '.node, button, input, textarea, select, a, label, .palette, .book, .train-panel',
+    )
     const withSpace = spaceRef.current
     const middle = e.button === 1
-    if (!onBackground && !withSpace && !middle) return
+    if (onUi && !withSpace && !middle) return
+    if (e.button !== 0 && !middle) return
     e.preventDefault()
     onSelect(null)
     panRef.current = { sx: e.clientX, sy: e.clientY, vx: viewport.x, vy: viewport.y }
@@ -160,6 +168,7 @@ export default function Canvas({
             onDelete={() => onDelete(n.id)}
             favorited={isFavorite(n.params.prompt)}
             onToggleFavorite={() => onToggleFavorite(n.id)}
+            loras={loras}
           />
         ))}
       </div>
@@ -171,8 +180,7 @@ export default function Canvas({
               从左侧节点列表拖入「图生成」，或点它右边的 <b>+</b> 放到原点。
             </p>
             <p className="dim" data-bg="1">
-              空格 + 拖拽平移 · 滚轮缩放 · 选中后 Delete 删除 · Ctrl/Cmd+D 复制
-            </p>
+              拖空白处平移</p>
           </div>
         </div>
       )}

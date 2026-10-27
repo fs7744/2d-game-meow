@@ -21,7 +21,8 @@
 | FastAPI 服务（单卡串行队列 + 资产索引） | 已完成 |
 | 抠图 / 去白边（纯色连通域 + 迭代去白边） | 已完成，实测通过 |
 | 游戏动效导出（GIF/APNG + Godot 4 + 通用 JSON） | 已完成，实测通过 |
-| LoRA 训练脚本 | 未开始（暂缓） |
+| LoRA 选装（Civitai 精选 + 注册表 + 节点下拉） | 已完成，实测通过 |
+| **LoRA 训练**（自包含训练循环 + CLI + 面板） | 已完成，实测通过 |
 | 姿态提取（YOLOX 检测 + RTMPose 回归 → OpenPose 骨架） | 已完成，实测通过 |
 | W5 视频驱动（Wan2.2 TI2V-5B，替代 MimicMotion） | 已完成，实测通过 |
 
@@ -87,6 +88,86 @@ python tools/pose_from_image.py walk.mp4  --step 3   -o assets/pose
 检测的价值在**构图不规整**的输入（人物偏在一角、多人、画面留白多）；精灵图本来就占满画面时，
 整图模式又快又够用。
 
+## LoRA：装什么、怎么用
+
+`models/lora/*.safetensors` + 同目录 `loras.json`（标签 / 触发词 / 推荐强度）。
+启动后 `GET /loras` 直接列出，节点里「更多设置 → LoRA」可选，选中会自动带出触发词
+和匹配的提示词契约。
+
+### 精选结论（全部实跑验证，不是看描述选的）
+
+| LoRA | 体量 | 来源人气 | 判定 |
+|---|---|---|---|
+| **px_illustrious**（像素游戏素材） | 36MB | dl 55382 / ♥5357 | ✅ **像素风首选** |
+| **wuxia_v2**（武侠） | 96MB | dl 17267 / ♥2793 | ✅ **武侠首选** |
+| paseer_wuxia（武侠线稿） | 144MB | dl 2533 / ♥507 | ⚠️ 纯线稿，当形状底稿用 |
+| px_toolkit（2D 像素工具包） | 36MB | dl 53451 / ♥5140 | ❌ 背景污染 + 多主体，隐藏 |
+| guofeng（工笔重彩） | 72MB | dl 18595 / ♥2416 | ❌ 手部崩坏，隐藏 |
+| xuer_wuxia | 144MB | dl 8871 / ♥1005 | ❌ 出的是真人摄影风，隐藏 |
+
+> 人气高 ≠ 适合产线。上面三个 ❌ 的下载量都不低，实测才知道不行。
+> 隐藏项保留文件（`"hidden": true`），前端不显示，便于复现判断。
+
+### 两条必须记住的用法
+
+**1. 像素 LoRA 要配 `preset=pixel`，绝不能配 `sprite`**
+
+`sprite` 契约里写着 `16-bit pixel art`，而像素 LoRA 已经把风格学进去了，重复要求
+会让画面在「插画」和「像素」之间打架——实测套 sprite 契约出的是彩色色块怪物。
+正确组合：
+
+```python
+txt2img(prompt="pixelart, knight in armor holding sword", preset="pixel",
+        lora="px_illustrious", lora_scale=0.75,
+        width=512, height=576, pixel=4, palette=24, matte=True)
+```
+
+**2. 武侠 LoRA 会给画面盖印章、画水墨背景**
+
+必须靠 `preset=wuxia` 的负向词压（`seal / signature / ink splatter / paper texture`），
+而且这类图必须用 **u2net 语义分割**抠图——纯色键控会把白袍和脸一起抠掉（实测第一帧
+脸直接消失）。另外 `wuxia_v2` 的产出**偏半身**（训练集如此），要全身走 W4 姿态驱动，
+让骨架锁结构、LoRA 只给风格。
+
+## LoRA 训练
+
+自包含训练循环（`workflows/train.py`），不依赖 diffusers 的 examples 脚本，
+产出直接是 `Engine.apply_lora` 能加载的格式，训完立刻出现在下拉里。
+
+```bash
+# 数据集：图片 + 同名 .txt（每张一句 caption）；没有 .txt 时用 --caption 兜底
+dataset/my_knight/
+  knight_01.png
+  knight_01.txt   ->  "mk_knight, a knight in plate armor, pixel art, white background"
+  ...
+
+python tools/train_lora.py --data dataset/my_knight --name mk_knight \
+    --caption "mk_knight, pixel art game sprite, white background" --steps 400
+```
+
+WebUI 顶栏「训练 LoRA」同一个功能，有进度条、loss、显存与可训练参数量。
+
+**实测（RTX 4090 24GB，fp32 UNet + gradient checkpointing，512 分辨率 batch 1）**
+
+| 项 | 数值 |
+|---|---|
+| 可训练参数 | rank8 → 1.59M；rank16 → 3.19M |
+| 耗时 | 约 **0.34s/步**（60 步 25s / 420 步 143s） |
+| 峰值显存 | **4.67GB** |
+| 产出体积 | rank8 → 6.2MB；rank16 → 13MB |
+
+**三个坑（都写进代码注释了）**
+
+1. `save_lora_weights` 的第一个参数是**目录**不是文件，且文件名写死
+   `pytorch_lora_weights.safetensors`。直接传文件路径会得到一个同名目录，产物「消失」。
+2. 直接传 `unet_lora_layers=unet` 会把**整个 fp32 UNet（3.3GB）**存进去且格式不对。
+   必须 `get_peft_model_state_dict(unet)` + `convert_state_dict_to_diffusers()` 只取 LoRA 层。
+3. 触发词必须写进 `loras.json`，否则训完也没人知道该写什么词唤出它（等于白训）。
+
+**关于样本量**：实测 6 张图 + 420 步只能学到「像素风的大致色块分布」，出图仍会跑形。
+角色 LoRA 建议 15~30 张同一角色不同姿势，风格 LoRA 20~40 张，配合
+`plan_steps()` 自动按样本数算步数（下限 100、上限 2000）。
+
 ## WebUI（画布 · 文生图）
 
 React 18 + Vite + TS，**零 UI 库、零画布库**（与 pixelforge 同思路），构建产物 157KB / gzip 51KB。
@@ -151,6 +232,8 @@ npm run smoke                         # 无浏览器渲染冒烟（jsdom，25 �
 | 复制/删除 | 卡头按钮 + `Ctrl/Cmd+D` 复制、`Delete` 删除 | 输入框内不拦截按键 |
 | 画布 | 自研 viewport(overflow hidden) + world(translate/scale) + 视差点阵网格 | 不上 react-flow：它会把节点模型绑死在库里；InvokeAI 的 README 已现身说法 dockview 之痛 |
 | 持久化 | localStorage 防抖 400ms 保存 nodes + viewport | 刷新不丢布局 |
+| 画布平移 | **拖空白处**（或空格 / 中键）；滚轮以光标为锚点缩放 | 节点多了全靠它 |
+| 训练入口 | 顶栏「训练 LoRA」浮层面板，有进度条/loss/显存 | 不用切命令行 |
 | **提示词语言** | 节点内固定提示「SD1.5 只支持英文」；输入含中日韩字符时实时转红警告 | 实测中文被拆成字节级乱 token（'背剑侠客' → `è ĥ Į å ī`），模型只会瞎猜甚至把乱码当文字画出来 |
 | **提示词收藏** | 提示词框右上角 ☆ 收藏，左栏「提示词收藏」列出，点条目填入选中节点 | 常用提示词不必反复输入；按文本去重、可删除、localStorage 持久化 |
 
@@ -166,6 +249,16 @@ r = poseswap(eng, pose_images=poses, prompt="blue robot",
 `AnimatedSprite2D.tscn`（`texture_filter = 1` 最近邻、`autoplay` 已开、
 `offset.y = -cell_h/2` 脚底对齐）、引擎无关 JSON、GIF/APNG 预览、zip 包。
 全是确定性文本生成，同输入逐字节可复现。
+
+抠图两个后端（`matte_backend="auto"` 默认有分割模型就走第二个）：
+
+| 后端 | 耗时 | 适用 | 实测短板 |
+|---|---|---|---|
+| `color`（连通域色键） | **0.02s/帧** | 平坦纯色背景的精灵 | 白袍/浅色角色贴白底会被误抠（实测把脸抠没） |
+| `u2net`（isnet-general-use, 170MB） | 1.6s/帧 | 复杂背景、水墨装饰、浅色主体 | 慢 80 倍 |
+
+同一张武侠图对比：`color` 把背后的圆形水墨装饰整个留下、底部黑块也在；
+`u2net` 只留人，脸、剑、衣摆全在。**武侠 / 立绘类一律走 u2net。**
 
 抠图三个要点：
 
@@ -201,7 +294,7 @@ python tools/video.py i2v assets/cat.png "the same character walking" -o assets/
 ## 测试
 
 ```bash
-python -m pytest tests -q        # 88 个用例，约 85s（含 1 个需 RUN_WAN=1 的慢用例）
+python -m pytest tests -q        # 112 个用例，约 105s（含 1 个需 RUN_WAN=1 的慢用例）
 ```
 
 | 文件 | 覆盖 | 用例数 |
@@ -218,6 +311,8 @@ python -m pytest tests -q        # 88 个用例，约 85s（含 1 个需 RUN_WAN
 | `tests/test_matte.py` | 背景估计、连通域不误抠内部同色区、去白边生效、alpha 二值、容差方向、裁边、真实生成图抠图 | 9 |
 | `tests/test_anim.py` | GIF/APNG 帧数、索引几何、Godot tres 分区序列、tscn 像素设置（最近邻/autoplay/脚底偏移）、导出确定性 | 9 |
 | `tests/test_video.py` | numpy/PIL 帧兼容、mp4 落地、模型路径校验、Wan 真实生成（`RUN_WAN=1`） | 6 |
+| `tests/test_lora.py` | 注册表扫描/元数据/坏 JSON 容错、名称解析、去碎屑、贴边占比判定、武侠契约预算 | 13 |
+| `tests/test_train.py` | 数据集读取与兜底、步数规划、**端到端 6 步真训练**（导出的体积上限、可被 scan/apply_lora 认出）、`/train` 全流程 | 9 |
 
 已知限制：骨架质量决定成败——实测 8 帧序列里有 2 帧只提取到 8/18 个关节（手臂与身体重叠），
 这两帧生成时会自由发挥，出现朝向漂移。产线上应当在提取后按「可见关节数」筛帧。
@@ -298,6 +393,19 @@ curl -X POST http://127.0.0.1:8000/generate -H "Content-Type: application/json" 
 ```
 
 ## 设计约束（都是踩过的坑）
+
+### 前端（这两条是用户实测报上来的）
+
+1. **卡头按钮上不能启动拖拽**。`setPointerCapture` 会把后续 pointerup 重定向到卡头，
+   浏览器按「pointerdown 与 pointerup 的最近公共祖先」派发 click —— 于是 click 落到卡头，
+   「切回参数视图」永远点不动。修法：`e.target.closest('button, input, textarea, ...')`
+   命中就直接 return，不抓手。
+2. **画布平移不能靠 `data-bg` 判断**。`.canvas-grid` 是 `pointer-events:none`，点空白时
+   事件目标是 `.canvas-viewport` 自己（没有 `data-bg`），判据永远不成立 → 画布完全拖不动。
+   改成反向排除：不在节点/面板/控件上就算可拖。
+3. **`.block` / `.fold-body select` 的样式漏了**，深色底上 LoRA 下拉几乎看不见。
+   现在 `.fold-body` 里的 select 与 number 统一有边框、`color-scheme: dark`、深色 option。
+
 
 1. **像素感由后处理保证，不靠提示词**。模型只会画出「看起来像像素」的糊图；
    必须走「提示词契约 → 网格吸附 → 共享调色板」三道关。

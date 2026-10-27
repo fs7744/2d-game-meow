@@ -1,4 +1,14 @@
-"""抠图 / 去白边：纯色背景 → 硬边 alpha，并清掉混色边。
+"""抠图 / 去白边：两种后端。
+
+**color（默认）**：纯色背景 → 连通域色键 → 硬边 alpha。零权重、毫秒级、完全确定。
+**u2net**：语义分割（isnet-general-use.onnx，170MB）。给彩色/复杂背景用。
+
+什么时候必须上 u2net：实测武侠 LoRA 出的白袍角色，浅色衣襟与白底同色且贴边，
+色键会把衣服甚至脸一起抠掉（"去白边"把贴边的白色当混色边剥走）。这类图只能
+靠语义分割——它知道那是人，不知道那是不是白色。
+
+原始说明：
+纯色背景 → 硬边 alpha，并清掉混色边。
 
 为什么不用大模型（u2net / BiRefNet）：
 生成的精灵背景本来就是**平坦纯色**（提示词契约里写死了 plain flat background），
@@ -14,7 +24,9 @@
 """
 from __future__ import annotations
 
-from typing import Iterable
+import os
+from pathlib import Path
+from typing import Any, Iterable, Optional
 
 import cv2
 import numpy as np
@@ -22,13 +34,34 @@ from PIL import Image
 
 
 def estimate_bg_color(img: Image.Image, border: int = 2) -> tuple[int, int, int]:
-    """取四边各 border 像素的众数作为背景色。"""
+    """背景色估计：**四角 patch 的众数**优先，退化时才用四条边的众数。
+
+    为什么不用整条边：实测武侠类 LoRA 会在画面上边缘写字、左右边缘画黑条，
+    四边取样会把「题字的黑」当成背景色，于是整张图抠反（背景留下、人物被抠掉）。
+    角落是整幅图里最不容易被主体和题字占据的地方。
+    """
     arr = np.asarray(img.convert("RGB"))
+    h, w = arr.shape[:2]
+    p = max(4, min(h, w) // 12)                       # 角落 patch 边长
+
+    corners = np.concatenate([
+        arr[:p, :p].reshape(-1, 3), arr[:p, -p:].reshape(-1, 3),
+        arr[-p:, :p].reshape(-1, 3), arr[-p:, -p:].reshape(-1, 3),
+    ], axis=0)
+
+    def mode(px: np.ndarray) -> tuple[int, int, int, int]:
+        colors, counts = np.unique(px.reshape(-1, 3), axis=0, return_counts=True)
+        i = int(counts.argmax())
+        return (*[int(v) for v in colors[i]], int(counts[i]))
+
+    cr, cg, cb, ccount = mode(corners)
+    if ccount >= 0.35 * len(corners):                 # 四角足够一致才采信
+        return (cr, cg, cb)
+
     strips = [arr[:border].reshape(-1, 3), arr[-border:].reshape(-1, 3),
               arr[:, :border].reshape(-1, 3), arr[:, -border:].reshape(-1, 3)]
-    px = np.concatenate(strips, axis=0)
-    colors, counts = np.unique(px.reshape(-1, 3), axis=0, return_counts=True)
-    return tuple(int(v) for v in colors[counts.argmax()])
+    r, g, b, _ = mode(np.concatenate(strips, axis=0))
+    return (r, g, b)
 
 
 def matte(img: Image.Image, bg: Iterable[int] | None = None, tol: int = 32,
@@ -69,6 +102,58 @@ def matte(img: Image.Image, bg: Iterable[int] | None = None, tol: int = 32,
     return Image.fromarray(out, "RGBA")
 
 
+def despeckle(rgba: Image.Image, min_ratio: float = 0.05) -> Image.Image:
+    """清掉前景里的孤立小块（碎屑、印章、签名）。
+
+    只保留面积不小于「最大连通块 × min_ratio」的前景块。实测武侠 LoRA 会在
+    人物右侧画出红色印章与几粒色屑，抠图后仍留在 alpha 里，打包进图集就是脏点。
+
+    阈值定 5% 而不是 2%：实测那枚印章占前景约 3%，2% 清不掉。代价是「角色 +
+    完全分离且很小的手持物」会被误删 —— 但那种构图本来就该重画。
+    """
+    arr = np.asarray(rgba.convert("RGBA")).copy()
+    fg = (arr[..., 3] > 0).astype(np.uint8)
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(fg, connectivity=8)
+    if n <= 2:
+        return Image.fromarray(arr, "RGBA")
+
+    areas = stats[1:, cv2.CC_STAT_AREA]
+    thresh = float(areas.max()) * max(0.0, min_ratio)
+    keep = [i + 1 for i, a in enumerate(areas) if a >= thresh]
+    arr[~np.isin(lab, keep), 3] = 0
+    return Image.fromarray(arr, "RGBA")
+
+
+def edge_stats(rgba: Image.Image) -> dict:
+    """各边「前景贴边宽度」占整边的比例。
+
+    为什么要占比而不是布尔：全身立绘本来就贴近画幅，边缘碰上一两像素是正常构图，
+    只有贴边宽度明显（这里用 2%）才说明该部位真的被切断。
+    """
+    a = np.asarray(rgba.convert("RGBA").getchannel("A"))
+    fg = a > 0
+    h, w = fg.shape
+    if h == 0 or w == 0:
+        return {"top": 0.0, "bottom": 0.0, "left": 0.0, "right": 0.0}
+    return {
+        "top": round(float(fg[0].sum()) / w, 4),
+        "bottom": round(float(fg[-1].sum()) / w, 4),
+        "left": round(float(fg[:, 0].sum()) / h, 4),
+        "right": round(float(fg[:, -1].sum()) / h, 4),
+    }
+
+
+def edge_touch(rgba: Image.Image, thresh: float = 0.02) -> list[str]:
+    """被切断的边（贴边宽度 > thresh）。
+
+    SD1.5 生成全身立绘时裁脚是常态，而提示词层面压不住（加 "feet visible" 只会
+    让人物缩小、细节变糊，实测）。与其反复调 prompt，不如把「裁了」变成可观测
+    信号：产物 meta 里带上 edge_touch，产线按它筛图或加宽重跑。
+    """
+    st = edge_stats(rgba)
+    return [k for k, v in st.items() if v > thresh]
+
+
 def has_fringe(rgba: Image.Image, bg=(255, 255, 255), ratio: float = 1.6) -> int:
     """诊断：统计仍像混色边的像素数（越大说明白边越明显）。"""
     arr = np.asarray(rgba.convert("RGBA")).astype(np.int16)
@@ -91,3 +176,65 @@ def trim(rgba: Image.Image, pad: int = 0) -> Image.Image:
     l, t = max(0, l - pad), max(0, t - pad)
     r, b = min(rgba.width, r + pad), min(rgba.height, b + pad)
     return rgba.crop((l, t, r, b))
+
+
+# ---------------- 语义分割后端（u2net / isnet） ----------------
+
+_AI_SESSIONS: dict[str, Any] = {}
+
+
+def load_ai_session(model_dir: str | Path, name: str = "isnet-general-use"):
+    """加载（并缓存）分割模型。rembg 通过 U2NET_HOME 找本地权重，不走网络。"""
+    key = f"{model_dir}:{name}"
+    if key in _AI_SESSIONS:
+        return _AI_SESSIONS[key]
+
+    os.environ.setdefault("U2NET_HOME", str(Path(model_dir).resolve()))
+    from rembg import new_session          # 延迟导入：不用 u2net 时不该付这个代价
+
+    _AI_SESSIONS[key] = new_session(name)
+    return _AI_SESSIONS[key]
+
+
+def matte_ai(img: Image.Image, model_dir: str | Path, name: str = "isnet-general-use",
+             thresh: int = 128, session: Any = None, feather: int = 0) -> Image.Image:
+    """语义分割抠图，alpha 仍二值化（像素素材要硬边）。"""
+    sess = session or load_ai_session(model_dir, name)
+    from rembg import remove
+
+    cut = remove(img.convert("RGB"), session=sess, post_process_mask=True)
+    arr = np.asarray(cut.convert("RGBA")).copy()
+    arr[..., 3] = np.where(arr[..., 3] >= thresh, 255, 0).astype(np.uint8)
+    out = Image.fromarray(arr, "RGBA")
+
+    if feather > 0:                        # 分割边一般已很干净，默认不羽化
+        m = np.asarray(out.getchannel("A")).astype(np.float32) / 255.0
+        m = cv2.GaussianBlur(m, (0, 0), feather)
+        arr = np.asarray(out).copy()
+        arr[..., 3] = (m * 255).astype(np.uint8)
+        out = Image.fromarray(arr, "RGBA")
+    return out
+
+
+AI_MODEL = "isnet-general-use.onnx"
+
+
+def ai_available(model_dir: Optional[str | Path]) -> bool:
+    return bool(model_dir) and (Path(str(model_dir)) / AI_MODEL).exists()
+
+
+def matte_auto(img: Image.Image, backend: str = "auto",
+               model_dir: Optional[str | Path] = None, **kw: Any) -> Image.Image:
+    """统一入口。
+
+    backend:
+      auto  — 有分割模型就用 u2net，否则 color（推荐）
+      color — 强制纯色键控（快，但白袍角色会误伤）
+      u2net — 强制语义分割
+    未知值退回 color：不该因为拼错就整单失败。
+    """
+    use_ai = backend in ("u2net", "ai", "isnet") or (
+        backend == "auto" and ai_available(model_dir))
+    if use_ai and ai_available(model_dir):
+        return matte_ai(img, model_dir, **kw)
+    return matte(img, **kw)

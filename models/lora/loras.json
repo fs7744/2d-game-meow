@@ -1,0 +1,66 @@
+{
+  "wuxia_v2": {
+    "label": "武侠 Wuxia V2（推荐）",
+    "trigger": "wuxia",
+    "scale": 0.8,
+    "preset": "wuxia",
+    "size_mb": 96.4,
+    "source": "civitai:76637@90181",
+    "note": "水墨/国画风武侠立绘，全身动感姿态。Civitai 武侠类最高人气（下载 17267 / 赞 2793）。配 preset=wuxia；产出偏半身，要全身走 W4 姿态驱动。"
+  },
+  "px_illustrious": {
+    "label": "像素游戏素材 Pixel Art（推荐）",
+    "trigger": "pixelart",
+    "scale": 0.75,
+    "preset": "pixel",
+    "size_mb": 36.1,
+    "source": "civitai:?@121559",
+    "note": "实测最佳像素风：512×576 + pixel=4 + palette=24 + 抠图，出红蓝骑士级别干净精灵。务必用 preset=pixel（不要再写 pixel art）。Civitai 下载 55382 / 赞 5357。"
+  },
+  "px_toolkit": {
+    "label": "2D Pixel Toolkit（不推荐）",
+    "trigger": "pixel art",
+    "scale": 0.9,
+    "preset": "pixel",
+    "hidden": true,
+    "size_mb": 36.1,
+    "source": "civitai:?@265506",
+    "note": "实测背景污染严重（杂色块 + 黑框），256 与 512 都出多主体。按质量优先不列入 UI。"
+  },
+  "paseer_wuxia": {
+    "label": "武侠插画·线稿 PAseer",
+    "trigger": "Wuxia",
+    "scale": 0.8,
+    "preset": "wuxia",
+    "size_mb": 144.1,
+    "source": "civitai:75172@79921",
+    "note": "纯线稿（无上色），线条干净。适合当形状底稿再配 Canny 上色，不能直接当成品精灵。"
+  },
+  "guofeng": {
+    "label": "国风插画（工笔重彩）",
+    "trigger": "guofeng, chinese style",
+    "scale": 0.7,
+    "preset": "none",
+    "hidden": true,
+    "size_mb": 72.1,
+    "source": "civitai:?@93169",
+    "note": "工笔重彩国风，实测手部易崩、构图偏散，适合概念图而非精灵。"
+  },
+  "xuer_wuxia": {
+    "label": "绪儿-武侠（真人摄影风）",
+    "trigger": "xuer martial arts",
+    "scale": 0.8,
+    "preset": "none",
+    "hidden": true,
+    "size_mb": 144.1,
+    "source": "civitai:128198@299499",
+    "note": "实测输出真人摄影风（韩式武术服），不是中国武侠。保留文件以便复现判断。"
+  },
+  "api_tiny": {
+    "label": "api_tiny",
+    "trigger": "api_tiny",
+    "scale": 1.0,
+    "preset": "pixel",
+    "note": "本地训练产出"
+  }
+}

@@ -1,4 +1,4 @@
-export type Preset = 'sprite' | 'portrait' | 'none'
+export type Preset = 'sprite' | 'portrait' | 'wuxia' | 'none'
 
 export type GenParams = {
   prompt: string
@@ -12,6 +12,21 @@ export type GenParams = {
   pixel: number
   palette: number
   matte: boolean
+  lora: string            // LoRA 名（后端解析成路径）；空串表示不挂
+  loraScale: number
+}
+
+/** 后端 /loras 返回的条目 */
+export type LoraInfo = {
+  name: string
+  label: string
+  trigger: string
+  scale: number
+  preset: Preset | null
+  note?: string
+  source?: string
+  size_mb?: number
+  hidden?: boolean
 }
 
 export type JobStatus = 'queued' | 'running' | 'done' | 'failed'

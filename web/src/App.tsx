@@ -2,9 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Canvas from './canvas/Canvas'
 import NodePalette from './components/NodePalette'
 import PromptBook from './components/PromptBook'
+import TrainPanel from './components/TrainPanel'
 import { hasPrompt, loadPrompts, removePrompt, savePrompts, togglePrompt } from './store/prompts'
-import { fetchJob, health, submitTxt2Img } from './api'
-import type { FavoritePrompt, GenNode, GenParams, Viewport } from './types'
+import { fetchJob, fetchLoras, health, submitTxt2Img } from './api'
+import type { FavoritePrompt, GenNode, GenParams, LoraInfo, Viewport } from './types'
 import type { NodePatch } from './nodes/GenNodeCard'
 
 const STORAGE_KEY = 'meow.canvas.v1'
@@ -21,6 +22,8 @@ const DEFAULT_PARAMS: GenParams = {
   pixel: 4,
   palette: 16,
   matte: false,
+  lora: '',
+  loraScale: 0.8,
 }
 
 let seq = 0
@@ -39,6 +42,11 @@ function makeNode(x: number, y: number, params?: Partial<GenParams>): GenNode {
 
 type Saved = { nodes: GenNode[]; viewport: Viewport }
 
+/** 老存档没有 lora/loraScale，读回来补默认值，否则下拉会显示空、强度变 NaN。 */
+function migrate(n: GenNode): GenNode {
+  return { ...n, params: { ...DEFAULT_PARAMS, ...n.params } }
+}
+
 // 仅供截图/联调：?demo=1 铺一个示例节点，?demo=gen 同时触发一次生成
 const DEMO = new URLSearchParams(location.search).get('demo')
 
@@ -54,7 +62,7 @@ export default function App() {
       const raw = localStorage.getItem(STORAGE_KEY)
       if (raw) {
         const s = JSON.parse(raw) as Saved
-        if (Array.isArray(s.nodes)) return s.nodes
+        if (Array.isArray(s.nodes)) return s.nodes.map(migrate)
       }
     } catch {
       /* 旧数据损坏就忽略 */
@@ -76,8 +84,18 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [device, setDevice] = useState<string>('')
   const [favs, setFavs] = useState<FavoritePrompt[]>(() => loadPrompts())
+  const [loras, setLoras] = useState<LoraInfo[]>([])
+  const [trainOpen, setTrainOpen] = useState(false)
 
   useEffect(() => savePrompts(favs), [favs])
+
+  const reloadLoras = useCallback(() => {
+    fetchLoras().then(setLoras).catch(() => setLoras([]))
+  }, [])
+
+  useEffect(() => {
+    reloadLoras()
+  }, [reloadLoras])
 
   const nodesRef = useRef(nodes)
   nodesRef.current = nodes
@@ -265,6 +283,9 @@ export default function App() {
           <span className="sub">画布 · 文生图</span>
         </div>
         <div className="spacer" />
+        <button className="train-btn" onClick={() => setTrainOpen(true)} title="训练自己的 LoRA">
+          训练 LoRA
+        </button>
         <span className={`gpu ${device && !device.includes('未连接') ? 'ok' : 'bad'}`} title={device}>
           {device || '连接中…'}
         </span>
@@ -295,10 +316,15 @@ export default function App() {
           onDelete={deleteNode}
           isFavorite={isFavorite}
           onToggleFavorite={toggleFavorite}
+          loras={loras}
           onDropType={(t, world) => addNode(t, world)}
         />
         <div className="badge-count">{nodes.length} 个节点</div>
       </main>
+
+      {trainOpen && (
+        <TrainPanel onClose={() => setTrainOpen(false)} onTrained={reloadLoras} />
+      )}
     </div>
   )
 }

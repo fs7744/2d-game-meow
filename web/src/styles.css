@@ -200,6 +200,9 @@ button { cursor: pointer; }
 }
 .icon-btn:hover { border-color: var(--line-strong); color: var(--white); }
 .icon-btn.danger:hover { border-color: var(--pink); color: var(--pink); }
+/* 视图切换在图片模式下变成「▤ 参数」，撑开宽度以便一眼看到 */
+.icon-btn.view-toggle { width: auto; min-width: 22px; padding: 0 5px; font-size: 11px; }
+.icon-btn.view-toggle.on { color: var(--green); border-color: rgba(0, 255, 136, 0.4); }
 
 .node-body { display: flex; flex-direction: column; gap: 8px; padding: 10px; }
 
@@ -237,6 +240,22 @@ button { cursor: pointer; }
 .fold-body textarea {
   background: var(--bg); border: 1px solid var(--line); padding: 6px;
   font-size: 12px; resize: vertical; color: var(--white);
+}
+/* select / number 之前漏了样式，导致 LoRA 下拉与强度框在深色底上几乎看不见 */
+.fold-body select, .fold-body input[type="number"] {
+  width: 100%; height: 26px; padding: 0 6px;
+  background: var(--bg); border: 1px solid var(--line-strong);
+  font-family: var(--mono); font-size: 12px; color: var(--white);
+  color-scheme: dark;                 /* 让浏览器把下拉面板也画成深色 */
+}
+.fold-body select:focus, .fold-body input[type="number"]:focus {
+  outline: none; border-color: var(--green);
+}
+.fold-body input[type="number"]:disabled {
+  opacity: 0.45; cursor: not-allowed;
+}
+.fold-body select option {
+  background: #14141c; color: var(--white);
 }
 .check { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
 
@@ -320,3 +339,80 @@ button { cursor: pointer; }
   color: #ffb3c4; border-left-color: var(--pink);
   background: rgba(255, 51, 102, 0.08); padding: 5px 6px;
 }
+
+/* ---------------- LoRA 选择 ---------------- */
+.lora-box {
+  border: 1px solid var(--line); border-left: 2px solid var(--purple, #5b57eb);
+  padding: 6px 7px; display: flex; flex-direction: column; gap: 5px;
+  background: rgba(91, 87, 235, 0.06);
+}
+.lora-trigger {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 10.5px; color: var(--muted);
+}
+.lora-trigger b { color: var(--yellow); font-family: var(--mono); }
+.lora-trigger .mini { margin-left: auto; }
+.lora-note {
+  margin: 0; font-size: 10px; line-height: 1.6; color: var(--muted-2);
+}
+
+/* ---------------- LoRA 训练面板 ---------------- */
+.train-btn {
+  height: 24px; padding: 0 9px;
+  background: transparent; border: 1px solid var(--line-strong);
+  color: var(--purple, #5b57eb); font-family: var(--chip);
+  font-size: 10px; letter-spacing: 0.6px;
+}
+.train-btn:hover { border-color: var(--purple, #5b57eb); background: rgba(91, 87, 235, 0.12); }
+
+.train-mask {
+  position: fixed; inset: 0; z-index: 60;
+  background: rgba(0, 0, 0, 0.62);
+  display: flex; align-items: center; justify-content: center;
+}
+.train-panel {
+  width: 520px; max-height: 86vh; overflow: auto;
+  background: var(--bg-2); border: 1px solid var(--line-strong);
+  box-shadow: var(--shadow-hard);
+  color: var(--white);
+}
+.train-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px; border-bottom: 1px solid var(--line);
+  background: linear-gradient(180deg, rgba(91, 87, 235, 0.16), transparent);
+}
+.train-head .node-kind { color: var(--purple, #5b57eb); }
+.train-body { display: flex; flex-direction: column; gap: 9px; padding: 12px; }
+.train-tip {
+  margin: 0; font-size: 10px; line-height: 1.7; color: var(--muted-2);
+  border-left: 2px solid var(--line-strong); padding-left: 7px;
+}
+.train-tip code { color: var(--yellow); font-family: var(--mono); }
+
+.train-panel .block {
+  display: flex; flex-direction: column; gap: 3px;
+  font-size: 10px; color: var(--muted-2);
+}
+.train-panel .block input,
+.train-panel .row input {
+  width: 100%; height: 26px; padding: 0 6px;
+  background: var(--bg); border: 1px solid var(--line-strong);
+  font-family: var(--mono); font-size: 12px; color: var(--white);
+}
+.train-panel .block input:focus,
+.train-panel .row input:focus { outline: none; border-color: var(--purple, #5b57eb); }
+.train-panel .row { display: flex; gap: 8px; }
+
+.train-status {
+  display: flex; flex-direction: column; gap: 5px;
+  border: 1px solid var(--line); padding: 8px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.train-bar { height: 6px; background: var(--bg); border: 1px solid var(--line); }
+.train-bar-fill {
+  height: 100%; background: linear-gradient(90deg, var(--purple, #5b57eb), var(--green));
+  transition: width 0.3s ease;
+}
+.train-line { font-size: 11px; color: var(--muted); font-family: var(--mono); }
+.train-line.dim { color: var(--muted-2); font-size: 10px; }
+.train-line.ok { color: var(--green); font-size: 10.5px; font-family: inherit; line-height: 1.6; }

@@ -6,7 +6,13 @@ __pycache__/
 *.egg-info/
 
 # ---- 模型权重（数十 GB，绝不入库；用 tools/fetch_modelscope.py 拉）----
-models/
+# 只有 LoRA 清单（触发词/推荐强度）要入库：它是元数据不是权重，
+# 而且丢了前端就不知道该写什么词唤醒 LoRA。注意 Git 无法在被忽略的目录里
+# 用 ! 反选，所以必须先放开 models/* 再放开 lora 子目录。
+models/*
+!models/lora/
+models/lora/*
+!models/lora/loras.json
 
 # ---- 生成物 / 测试产物（可随时重建，不入库）----
 assets/
@@ -30,3 +36,6 @@ huggingface/
 .idea/
 Thumbs.db
 desktop.ini
+
+# ---- 训练数据集 ----
+dataset/

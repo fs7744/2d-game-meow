@@ -13,6 +13,12 @@ controlnet_aux
 opencv-python
 pillow
 numpy
+onnxruntime
+
+# LoRA：peft 是 diffusers 加载与训练 LoRA 的后端（缺了报 "PEFT backend is required"）
+peft>=0.13
+# 语义分割抠图（u2net / isnet）。权重放 models/matte/，见 README「抠图」
+rembg>=2.0
 
 fastapi
 uvicorn[standard]

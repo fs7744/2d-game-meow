@@ -89,3 +89,25 @@ def walk_frames(eng, assets) -> list[Path]:
     r = g.poseswap(eng, pose_images=poses, prompt="white cat knight, red cape, front view",
                    steps=12, seed=999, width=256, height=256, cols=4, tag="_fixture_walk")
     return sorted(Path(r["frames_dir"]).glob("frame_*.png"))
+
+
+@pytest.fixture(scope="session")
+def client():
+    """FastAPI TestClient。训练测试也要用，所以放在 conftest 共用。"""
+    from fastapi.testclient import TestClient
+
+    import app as app_module
+
+    with TestClient(app_module.app) as c:
+        yield c
+
+
+@pytest.fixture(scope="session")
+def client():
+    """FastAPI TestClient。训练测试也要用，所以放在 conftest 共用。"""
+    from fastapi.testclient import TestClient
+
+    import app as app_module
+
+    with TestClient(app_module.app) as c:
+        yield c
