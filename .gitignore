@@ -1,0 +1,27 @@
+# ---- 虚拟环境 ----
+.venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# ---- 模型权重（数十 GB，绝不入库；用 tools/fetch_modelscope.py 拉）----
+models/
+
+# ---- 生成物 / 测试产物（可随时重建，不入库）----
+assets/
+*.log
+*.jsonl
+
+# ---- 本地临时与缓存 ----
+.workbuddy/
+.cache/
+huggingface/
+*.incomplete
+*.tmp
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

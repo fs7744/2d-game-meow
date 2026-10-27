@@ -1,0 +1,128 @@
+# 2D Game Asset Pipeline（SD1.5 本地版）
+
+单卡 RTX 4090 上的本地 2D 游戏资产生成工作台。**全栈 SD1.5**：文生图、图生图、局部重绘、
+姿态驱动→精灵帧、精灵图打包。代码化推理（diffusers，不依赖 ComfyUI）+ FastAPI 服务。
+
+设计基线来自资料库文档 `RTX4090_2D_Game_Pipeline` v1.1；本仓库把其中的 SDXL 部分收敛为 SD1.5，
+原因与实测结论见文末「版本选型」。
+
+---
+
+## 现状
+
+| 模块 | 状态 |
+|---|---|
+| 引擎层（懒加载 / 显存守卫 / LoRA 热切换） | 已完成，实测通过 |
+| W1 文生图 / W2 图生图 | 已完成，实测通过 |
+| W3 局部重绘 | 已完成，实测通过 |
+| W4 姿态驱动 → 逐帧对齐 → 精灵图打包 | 已完成，实测通过（8 帧走路序列） |
+| 后处理（像素化 / 16 色量化 / 锚点对齐 / 打包） | 已完成并自测（28px 漂移 → 0） |
+| IP-Adapter 角色身份锁定 | 已接通，效果待调（见「实测」） |
+| FastAPI 服务（单卡串行队列 + 资产索引） | 已完成 |
+| 抠图 / 去白边 | 未开始 |
+| LoRA 训练脚本 | 未开始 |
+| W5 视频驱动（MimicMotion） | 未开始 |
+
+## 实测数据（RTX 4090 24GB，512 档，fp16，DPM++ 2M Karras）
+
+| 阶段 | 配置 | 耗时 | 峰值显存 |
+|---|---|---|---|
+| 模型加载 | SD1.5 3.44GB(fp32) → fp16 | **1.7s** | — |
+| W1 文生图 | 512×768 / 25 步 | **1.52s** | 2.91GB |
+| W2 图生图 | 512×768 / 25 步 / strength 0.55 | **0.60s** | 2.91GB |
+| W3 局部重绘 | 512×768 / 25 步 / strength 0.9 | **1.05s** | 2.61GB |
+| W4 姿态驱动 | 512×512 / 25 步 / ControlNet OpenPose | **1.82s** | 3.64GB |
+| W4 八帧走路序列 | 同上 + IP-Adapter 0.85 | **9.51s（1.2s/帧）** | 4.54GB |
+| W4 八帧（无 IPA） | 同上，无 IP-Adapter | **8.38s（1.0s/帧）** | 3.33GB |
+
+结论：**24GB 只用掉不到 1/5**。一整套 8 帧动作约 8–10 秒，一个角色的 4 个动作（走/跑/待机/攻击）≈ 40 秒。
+
+## 目录
+
+```
+2d-game-meow/
+├── app.py                  FastAPI 服务入口
+├── workflows/
+│   ├── engine.py           pipeline 懒加载、显存守卫、LoRA 热切换
+│   ├── generate.py         w1/w2/w3/w4 四个工作流
+│   └── postprocess.py      像素化、调色板量化、锚点对齐、精灵图打包
+├── tools/
+│   ├── fetch_weights.py    权重下载（走 hf-mirror）
+│   ├── smoke.py            逐阶段测速/测显存
+│   └── make_pose.py        COCO-18 骨架图生成（无 DWPose 依赖时用）
+├── models/                 权重（checkpoints / controlnet / ipadapter / loras / ...）
+└── assets/                 产物 + sidecar(.json) + index.jsonl
+```
+
+## 环境（本机实测）
+
+| 项 | 值 |
+|---|---|
+| GPU | RTX 4090 24GB（驱动 621.01 / CUDA UMD 13.5） |
+| CPU / RAM | i9-13900KF 24C32T / **31.8GB** |
+| OS | Windows 11 26300 |
+| Python | 3.13.14，torch 2.6.0+cu124（`cuda.is_available()=True`） |
+| 注意力 | torch SDPA（Windows + py3.13 无 xformers 轮子） |
+| 模型源 | `HF_ENDPOINT=https://hf-mirror.com`（huggingface.co 直连不可达） |
+
+安装：
+
+```bash
+python -m venv .venv
+.venv/Scripts/python -m pip install torch==2.6.0+cu124 torchvision==0.21.0+cu124 \
+    --index-url https://download.pytorch.org/whl/cu124
+.venv/Scripts/python -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
+## 快速开始
+
+```bash
+# 1) 拉权重（魔搭，约 12.6GB：底座 4.0 + inpainting 2.2 + IP-Adapter 2.4 + ControlNet 4.0）
+python tools/fetch_modelscope.py            # 全部
+python tools/fetch_modelscope.py sd15       # 只拉某一段
+python tools/fetch_modelscope.py --list     # 先看清单
+
+# 2) 环境自检 + 分阶段实测（写 assets/_bench.json）
+python tools/check_env.py
+python tools/make_pose.py          # 生成 COCO-18 骨架帧（无 DWPose 时用）
+python tools/smoke.py w1
+python tools/smoke.py w3
+python tools/smoke.py w4 --pose-file assets/_pose_walk_00.png --no-ipa
+
+# 3) 起服务
+python app.py            # http://127.0.0.1:8000/docs
+```
+
+提交任务：
+
+```bash
+curl -X POST http://127.0.0.1:8000/generate -H "Content-Type: application/json" -d '{
+  "workflow": "w1",
+  "params": {"prompt": "pixel art cat knight, red cape, katana, front view",
+             "width": 512, "height": 768, "steps": 25, "pixel": 4, "palette": 16}
+}'
+```
+
+## 设计约束（都是踩过的坑）
+
+1. **像素感由后处理保证，不靠提示词**。模型只会画出「看起来像像素」的糊图；
+   必须走「提示词契约 → 网格吸附 → 共享调色板」三道关。
+2. **逐帧生成必须做锚点回拉**。模型每帧会自己重新构图，角色在画面里上下漂移；
+   按首帧脚底锚点做**整体整数平移**拉回，只平移不缩放（缩放会抹掉下蹲/抬腿的真实大小变化）。
+3. **跨帧一致性靠固定 seed + 固定 LoRA + 固定文本**，不是靠提示词描述得详细。
+4. **局部重绘只改选区**：羽化蒙版**向内**收缩后贴回，选区外像素逐点不变。
+5. **单卡串行**：一个 worker 线程 + FIFO 队列，不做并发，避免两套 pipeline 抢显存。
+
+## 版本选型：为什么全栈 SD1.5
+
+| 能力 | SD1.5 | SDXL |
+|---|---|---|
+| 文生图 / 图生图 | 可行 | 画质与 prompt 遵循更好 |
+| 局部重绘 | **更优**（专用 inpaint 权重，专为 512 训练） | inpaint 专模弱于自身基座 |
+| 姿态 → 精灵帧 | **更优**（lllyasviel OpenPose v1.1，业界默认件） | 社区二次训练，边缘姿态更飘 |
+| 视频驱动 | **唯一选项**（MimicMotion 底座即 SD1.5） | 无 |
+| 权重体积 / 单步耗时 | 2GB / 基准 | 7GB / 慢 3–4 倍 |
+| 授权 | CreativeML OpenRAIL-M | Community License（年营收 >$1M 需付费） |
+
+关键判断：**游戏精灵的交付分辨率是 512–768，不是 1024**。SDXL 出 1024 再缩到 128 只会把细节噪声一起缩进去。
+SD1.5 在 512 上「一次到位 + 16 色量化」更贴产线，且被视频模型绑死（MimicMotion 无 SDXL 版）。

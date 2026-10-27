@@ -1,0 +1,19 @@
+# torch 需从 PyTorch 官方索引安装（PyPI 上的 Windows 轮子是 CPU-only）：
+#   pip install torch==2.6.0+cu124 torchvision==0.21.0+cu124 \
+#       --index-url https://download.pytorch.org/whl/cu124
+torch==2.6.0+cu124
+torchvision==0.21.0+cu124
+
+diffusers==0.41.0
+transformers>=5.0
+accelerate>=1.0
+safetensors
+huggingface_hub
+controlnet_aux
+opencv-python
+pillow
+numpy
+
+fastapi
+uvicorn[standard]
+python-multipart
