@@ -112,8 +112,28 @@ def needs_chunk(pipe: Any, *texts: str) -> bool:
     return any(count_tokens(pipe, t) > limit - 2 for t in texts if t)
 
 
+def split_chunks(pipe: Any, text: str, max_chunks: int = 2) -> list:
+    """把文本切成 75 token 的段列表。空文本返回 `[[]]`（一段空）。"""
+    limit = pipe.tokenizer.model_max_length           # 77
+    step = limit - 2                                  # 留 BOS/EOS
+    ids = pipe.tokenizer(text, add_special_tokens=False).input_ids
+    if not ids:
+        return [[]]
+    return [ids[i:i + step] for i in range(0, len(ids), step)][:max_chunks]
+
+
+def _encode_chunk(pipe: Any, ids, clip_skip: int) -> torch.Tensor:
+    """编码**一段**，补到 77 个位置（BOS + 内容 + EOS + pad）。"""
+    limit = pipe.tokenizer.model_max_length
+    bos, eos = pipe.tokenizer.bos_token_id, pipe.tokenizer.eos_token_id
+    pad = pipe.tokenizer.pad_token_id
+    full = [bos] + list(ids) + [eos]
+    full = full[:limit] + [pad] * max(0, limit - len(full))
+    return _forward(pipe, torch.tensor([full], dtype=torch.long), clip_skip)
+
+
 def encode_long(pipe: Any, text: str, clip_skip: int = 1,
-                max_chunks: int = 2) -> torch.Tensor:
+                max_chunks: int = 2, chunks: int | None = None) -> torch.Tensor:
     """长文本分段编码后拼起来，返回 (1, 77×n, 768)。
 
     **为什么需要**：SD1.5 的 CLIP 位置编码只有 77 个位置，超出部分被
@@ -123,30 +143,43 @@ def encode_long(pipe: Any, text: str, clip_skip: int = 1,
     UNet 的交叉注意力对序列长度不敏感，所以把文本按 75 token 切段、各自编码后
     在序列维拼接（A1111 的 "CLIP 77→154" 就是这个做法），模型照样能读到
     第 78~154 个 token。代价是交叉注意力 seq_len 翻倍，512² 下约 +3~5% 耗时。
+
+    **`chunks` 指定段数**（正负对齐用）：文本本身不够长时补**空段**，而不是
+    少返回几段。曾经的实现各算各的段数，于是「正向短 + 负向长」得到
+    (1,77,768) 与 (1,154,768)，diffusers 在 CFG 相减时直接抛
+    `prompt_embeds != negative_prompt_embeds`。
     """
-    limit = pipe.tokenizer.model_max_length           # 77
-    step = limit - 2                                  # 留 BOS/EOS
-    ids = pipe.tokenizer(text, add_special_tokens=False).input_ids
-    if not ids:
-        return encode(pipe, text, clip_skip)
-    chunks = [ids[i:i + step] for i in range(0, len(ids), step)][:max_chunks]
-
-    bos, eos = pipe.tokenizer.bos_token_id, pipe.tokenizer.eos_token_id
-    pad = pipe.tokenizer.pad_token_id
-    embs = []
-    for ch in chunks:
-        full = [bos] + list(ch) + [eos]
-        full = full[:limit] + [pad] * max(0, limit - len(full))
-        embs.append(_forward(pipe, torch.tensor([full], dtype=torch.long), clip_skip))
-    return torch.cat(embs, dim=1) if len(embs) > 1 else embs[0]
+    parts = split_chunks(pipe, text, max_chunks)
+    n = max(1, chunks or len(parts))
+    embs = [_encode_chunk(pipe, parts[i] if i < len(parts) else [], clip_skip)
+            for i in range(n)]
+    return torch.cat(embs, dim=1) if n > 1 else embs[0]
 
 
-def embeds(pipe: Any, prompt: str, negative: str, clip_skip: int = 1):
+def embeds(pipe: Any, prompt: str, negative: str, clip_skip: int = 1,
+           max_chunks: int = 2):
     """(正向 embeds, 负向 embeds)。clip_skip=1 时调用方可直接忽略本模块。
 
-    任一侧超长就**两侧都走分段编码**：正负 embeds 的序列长度必须一致，
-    否则 CFG 相减时形状不匹配。
+    **两侧段数必须一致**：diffusers 的 CFG 是 `pos - neg`，形状必须相同。
+    只让超长的一侧分段、另一侧保持 77，会直接抛
+    `prompt_embeds torch.Size([1,77,768]) != negative_prompt_embeds
+    torch.Size([1,154,768])`——所以这里统一取两侧段数的最大值，短板补空段。
     """
-    chunk = needs_chunk(pipe, prompt, negative)
-    fn = encode_long if chunk else encode
-    return fn(pipe, prompt, clip_skip), fn(pipe, negative, clip_skip)
+    n_pos = len(split_chunks(pipe, prompt, max_chunks))
+    n_neg = len(split_chunks(pipe, negative, max_chunks))
+    n = max(n_pos, n_neg)
+
+    # 超过 max_chunks 段能装下的量仍然会被丢——但要说出来。
+    # 静默截断是这条链路的老毛病（CLIP 本身就是这样），不该再重复一次。
+    limit = pipe.tokenizer.model_max_length
+    room = max_chunks * (limit - 2)
+    for label, text in (("正向", prompt), ("负向", negative)):
+        ntok = count_tokens(pipe, text)
+        if ntok > room:
+            print(f"[warn] {label}提示词 {ntok} token，超过 {max_chunks} 段能容纳的 "
+                  f"{room}，末尾会被丢弃（分段编码上限）")
+
+    if n <= 1:
+        return encode(pipe, prompt, clip_skip), encode(pipe, negative, clip_skip)
+    return (encode_long(pipe, prompt, clip_skip, max_chunks, chunks=n),
+            encode_long(pipe, negative, clip_skip, max_chunks, chunks=n))

@@ -133,3 +133,36 @@ def test_postprocess_exposes_pre_pixel_image(eng):
     n_out = len(out.convert("RGB").getcolors(maxcolors=1 << 20) or [])
     assert n_pre > 50, n_pre
     assert n_out <= 8, n_out
+
+
+def test_text_embeds_align_when_only_negative_is_long(eng):
+    """正向短、负向长时两侧 embeds 必须等长。
+
+    上线后实测到的崩法：正向 3 token（77）、负向 289 token（154），
+    diffusers 在 CFG 相减时抛
+    `prompt_embeds torch.Size([1,77,768]) != negative_prompt_embeds
+    torch.Size([1,154,768])`。
+
+    原因是两侧各算各的段数：短的那侧只出 1 段。修法是取两侧段数最大值、
+    短的一侧补空段。
+    """
+    from workflows import clip as c
+
+    pipe = eng.txt2img_pipe("sd15")
+    long_neg = ", ".join(f"ugly term{i}" for i in range(60))
+    short_pos = "blue slime monster"
+    assert c.count_tokens(pipe, short_pos) < 20
+    assert c.count_tokens(pipe, long_neg) > 150
+
+    kw, _ = g._text_kwargs(pipe, short_pos, long_neg, 1, "sd15")
+    assert "prompt_embeds" in kw
+    pos, neg = kw["prompt_embeds"], kw["negative_prompt_embeds"]
+    assert pos.shape == neg.shape, f"{tuple(pos.shape)} vs {tuple(neg.shape)}"
+    assert pos.shape[1] == 154, "负向超长时应该分段到 154"
+
+
+def test_text_embeds_both_short_stays_string_path(eng):
+    """两侧都短时仍走字符串路径——历史输出必须逐像素不变。"""
+    pipe = eng.txt2img_pipe("sd15")
+    kw, cs = g._text_kwargs(pipe, "blue slime", "blurry", 1, "sd15")
+    assert kw == {"prompt": "blue slime", "negative_prompt": "blurry"} and cs == 1

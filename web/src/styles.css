@@ -175,6 +175,30 @@ button { cursor: pointer; }
   user-select: none;
 }
 .node.gen { border-color: rgba(0, 255, 136, 0.5); }
+
+/* 节点内的原生控件：全局那条 `color: inherit` 让控件文字继承了白色，但这些控件
+   从没设过背景——Windows 上默认是浅灰/白底，浅字压在浅底上基本看不清。
+   这里统一成深底亮字，并声明 color-scheme 让下拉面板也画成深色
+   （否则点开 select 弹出一整块白底，比看不清更刺眼）。 */
+.node select,
+.node input[type='number'],
+.node input[type='text'] {
+  background: var(--bg-1);
+  border: 1px solid var(--line-strong);
+  color: var(--white);
+  color-scheme: dark;
+  border-radius: 3px;
+}
+.node select:focus,
+.node input[type='number']:focus,
+.node input[type='text']:focus {
+  outline: none;
+  border-color: var(--green);
+}
+.node select option { background: #14141c; color: var(--white); }
+.node input[type='checkbox'],
+.node input[type='radio'] { accent-color: var(--green); }
+.node input:disabled, .node select:disabled { opacity: 0.45; cursor: not-allowed; }
 .node.selected { box-shadow: var(--shadow-hard), 0 0 0 2px rgba(0, 255, 136, 0.55); }
 
 /* 右边缘拖宽手柄：平时几乎看不见，hover 才显形——不抢视觉，但要拖得到 */
@@ -562,12 +586,9 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
 .src-thumb span { font-size: 9px; color: var(--muted-2); }
 .src-side { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .src-side select { height: 24px; padding: 0 4px; font-size: 11px; }
-/* 目录/通配手填框：与 select 同高，等宽字体便于核对路径 */
-.dir-input {
-  height: 24px; padding: 0 5px; font-size: 10.5px; font-family: var(--mono);
-  color: var(--fg); background: var(--bg-2); border: 1px solid var(--line);
-  border-radius: 3px; min-width: 0;
-}
+/* 目录/通配手填框：只补等宽字体与高度，底色/边框走下面「节点内控件」的统一规则
+   （原来自带 background 且用了未定义的 --fg，等于两套规则打架） */
+.dir-input { height: 24px; padding: 0 5px; font-size: 10.5px; font-family: var(--mono); }
 .dir-input::placeholder { color: var(--muted-2); }
 .strength { display: flex; align-items: center; gap: 5px; font-size: 10px; color: var(--muted); }
 /* 局部重绘的几何预览：棋盘格底表示透明，红=选区 橙=外扩 黄=羽化 */
