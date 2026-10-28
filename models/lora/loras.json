@@ -119,7 +119,7 @@
     "preset": "pixel",
     "hidden": true,
     "base": "flux",
-    "note": "键名是 lora_unet_blocks_*_adaln_modulation_cross_attn_*（DiT 结构），训练元数据标 base_model_version=anima——**不是 SD1.5/SDXL 的 UNet LoRA**，挂上去必报 size mismatch（640 vs 1280 那类）。训练集 210 张、rank 32，风格上确实是八方旅人那种像素。要用得换 SD 版权重。",
+    "note": "键名是 lora_unet_blocks_*_adaln_modulation_cross_attn_*（DiT 结构），训练元数据标 base_model_version=anima。实测挂到 SDXL 抛 NoMatchingPeftModuleError（Target modules q.proj/v.proj/mlp.1 not found）——不是 SD1.5/SDXL 的 UNet LoRA。训练集 210 张、rank 32，风格确实是八方旅人。",
     "source": "auto"
   },
   "pixel-art-xl": {
@@ -139,7 +139,18 @@
     "preset": null,
     "hidden": true,
     "base": "wan",
-    "note": "Wan2.2 视频模型的 LoRA（t2v，键名 diffusion_model.blocks.*.cross_attn）。SD1.5/SDXL 出图用不了；W5 视频链路（workflows/video.py）目前也还没接 LoRA 加载，先留作备用。",
+    "note": "Wan2.2 视频模型的 LoRA（t2v，键名 diffusion_model.blocks.*.cross_attn）。实测挂到 SDXL 上：load_lora_weights 不报错，但 unet 里 LoRA 参数增量为 0——纯静默空挂，出图毫无变化。现在 apply_lora 会检测并直接报错。出图用不了；W5 视频链路（workflows/video.py）也还没接 LoRA 加载。",
+    "source": "auto"
+  },
+  "pixel_f2": {
+    "label": "像素风 Pixel F2（SD1.5）",
+    "trigger": "",
+    "scale": 0.8,
+    "preset": "pixel",
+    "matte": true,
+    "base": "sd15",
+    "rank": 128,
+    "note": "144MB / rank 128 的 SD1.5 像素 LoRA——比 px_illustrious（36MB / rank 32）大 4 倍，容量更高，细节可能更足。训练元数据里最高频 tag 是 'pixel'，但**触发词留空**：像素 LoRA 加触发词在本项目实测会让多主体率上升（px_illustrious 是 3/3 全变多主体），这条结论先沿用，未对这个权重单独验证。尚未 A/B，先按 preset=pixel + 0.8 强度试；要定论就跑 python tools/ab_base.py --models sd15 --lora pixel_f2。",
     "source": "auto"
   }
 }

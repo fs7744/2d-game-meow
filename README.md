@@ -380,12 +380,40 @@ python -m workflows.lora --dry-run    # 只看结果不写
 > 这三个都是"文件名像但架不对"的典型。没有自动识别的话，它们的表现是
 > 选中后报一串 `size mismatch`，看起来像文件损坏。
 
+### 比报错更难查的：静默空挂
+
+把 `wan_t2v_h_unipixel-e6`（Wan 视频 LoRA）挂到 SDXL 上实测：
+
+```
+load_lora_weights()  →  不报错
+unet 里 LoRA 参数     0 → 0        ← 一个都没注入
+界面                  →  显示"已挂 LoRA"
+出图                  →  和没挂完全一样
+```
+
+diffusers 对认不出的键只打三条 warning（"No LoRA keys associated to
+UNet2DConditionModel found"），异常不抛。用户看到"加载成功"会以为是强度不够，
+把 0.8 一路调到 1.0——全是白费。
+
+所以 `apply_lora` 现在会在加载后数一遍 LoRA 参数增量，为 0 就**卸载并报错**：
+
+```
+这个 LoRA 没起作用: wan_t2v_h_unipixel-e6.safetensors
+文件能读、但**没有一个权重键能对上当前底模**（diffusers 只给了 warning，不报错）。
+常见于把视频模型（Wan）或 DiT（Flux/anima）的 LoRA 挂到 SD1.5/SDXL 上。
+```
+
+同一次实测里还有第二种失败形态：`octopath_traverl` 挂 SDXL 抛
+`NoMatchingPeftModuleError: Target modules {'q.proj','v.proj',...} not found`。
+以前这会被归因为"LoKr 变体不支持"，现在识别为**模块结构对不上**（架构不对）。
+
 ### 精选结论（全部实跑验证，不是看描述选的）
 
 | LoRA | 体量 | 来源人气 | 判定 |
 |---|---|---|---|
 | **px_illustrious**（像素游戏素材） | 36MB | dl 55382 / ♥5357 | ✅ **像素风首选** |
 | **wuxia_v2**（武侠） | 96MB | dl 17267 / ♥2793 | ✅ **武侠首选** |
+| **pixel_f2**（像素风 SD1.5） | 144MB / rank 128 | — | ⏳ 待 A/B：容量是 px_illustrious 的 4 倍 |
 | paseer_wuxia（武侠线稿） | 144MB | dl 2533 / ♥507 | ⚠️ 纯线稿，当形状底稿用 |
 | px_toolkit（2D 像素工具包） | 36MB | dl 53451 / ♥5140 | ❌ 背景污染 + 多主体，隐藏 |
 | guofeng（工笔重彩） | 72MB | dl 18595 / ♥2416 | ❌ 手部崩坏，隐藏 |

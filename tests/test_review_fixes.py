@@ -15,20 +15,34 @@ from workflows.engine import BASE_MODELS, Engine, LORA_ATTR
 
 
 class _FakePipe:
-    """够 apply_lora 用的最小管线：只记 unet 与已加载的权重。"""
+    """够 apply_lora 用的最小管线：只记 unet 与已加载的权重。
+
+    **load_lora_weights 必须真的"注入"一个参数**：apply_lora 现在会在加载后
+    数一遍 LoRA 参数，增量为 0 就判定"静默空挂"（实测 Wan 视频 LoRA 挂 SDXL
+    就是加载成功但一个键都没匹配）。假管线如果只记个路径，会被这道检查拦下。
+    """
 
     class _U:
-        pass
+        def __init__(self) -> None:
+            self._p: dict = {}
+
+        def named_parameters(self):
+            return iter(list(self._p.items()))
 
     def __init__(self) -> None:
         self.unet = _FakePipe._U()
+        self.text_encoder = None
+        self.text_encoder_2 = None
+        self.transformer = None
         self.loaded: list[str] = []
 
     def load_lora_weights(self, path, adapter_name=None):      # noqa: D401
         self.loaded.append(str(path))
+        self.unet._p[f"blk{len(self.loaded)}.lora_A.weight"] = object()
 
     def unload_lora_weights(self):
         self.loaded.clear()
+        self.unet._p.clear()
 
     def set_adapters(self, names, adapter_weights=None):
         pass

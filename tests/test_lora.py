@@ -265,3 +265,98 @@ def test_autoscan_detects_duplicate_weights(tmp_path):
     assert cfg["b_copy"]["hidden"] is True
     assert any(d["kept"] is False for d in r["duplicates"])
     assert any(x["kept"] == "a_original" for x in r["same_content"])
+
+
+# ---------------- 静默空挂检测（apply_lora 的真实行为） ----------------
+
+def _make_engine(root):
+    """建一个只用来测 apply_lora 的引擎：不加载权重，只用它的 adapter 状态池。"""
+    from workflows.engine import Engine
+
+    return Engine(root)
+
+
+class _Mod:
+    """最小的模块替身：只需要 named_parameters / setattr。"""
+
+    def __init__(self) -> None:
+        self._params: dict = {}
+
+    def named_parameters(self):
+        return iter(list(self._params.items()))
+
+    def add_lora(self, n: int = 1) -> None:
+        for i in range(n):
+            self._params[f"blk{i}.lora_A.weight"] = object()
+
+
+class _FakePipe:
+    """按 mode 模拟 diffusers 的三种行为，覆盖实测到的三条分支。"""
+
+    def __init__(self, mode: str) -> None:
+        self.mode = mode
+        self.unet = _Mod()
+        self.text_encoder = None
+        self.text_encoder_2 = None
+        self.transformer = None
+
+    def load_lora_weights(self, path, adapter_name=None):
+        if self.mode == "inject":            # 正常的 SD LoRA
+            self.unet.add_lora(3)
+        elif self.mode == "silent":          # Wan/视频 LoRA：只 warning，不报错
+            pass
+        elif self.mode == "nomatch":         # DiT：PEFT 找不到目标模块
+            raise RuntimeError(
+                "Target modules {'q.proj', 'v.proj', 'mlp.1'} not found in the base model")
+
+    def unload_lora_weights(self):
+        pass
+
+    def set_adapters(self, names, adapter_weights=None):
+        pass
+
+    def get_active_adapters(self):
+        return []
+
+
+def test_apply_lora_rejects_silent_noop(tmp_path):
+    """加载"成功"但一个键都没匹配上时必须报错。
+
+    实测 Wan 的视频 LoRA 挂 SDXL 就是这样：diffusers 只打三条 warning，
+    unet 里 LoRA 参数增量是 0。界面显示已挂、出图毫无变化，用户会以为是
+    强度不够，一路把 0.8 调到 1.0——全是白费。
+    """
+    lora = tmp_path / "wan.safetensors"
+    lora.write_bytes(b"\0" * 16)
+    eng = _make_engine(tmp_path)
+    pipe = _FakePipe("silent")
+
+    with pytest.raises(ValueError) as exc:
+        eng.apply_lora(pipe, lora, 0.8)
+    msg = str(exc.value)
+    assert "没起作用" in msg
+    assert "warning" in msg, "要说清这是「只给了 warning 不报错」的那种情况"
+    assert eng._pool["lora"] is None, "失败后不能留脏状态"
+
+
+def test_apply_lora_reports_module_mismatch(tmp_path):
+    """PEFT 的 NoMatchingPeftModuleError 是"架构不对"，不是"LoKr 变体"。"""
+    lora = tmp_path / "octo.safetensors"
+    lora.write_bytes(b"\0" * 16)
+    eng = _make_engine(tmp_path)
+
+    with pytest.raises(ValueError) as exc:
+        eng.apply_lora(_FakePipe("nomatch"), lora, 0.8)
+    msg = str(exc.value)
+    assert "结构对不上" in msg
+    assert "LoKr" not in msg, "别把架构问题说成变体不支持"
+
+
+def test_apply_lora_accepts_real_injection(tmp_path):
+    lora = tmp_path / "ok.safetensors"
+    lora.write_bytes(b"\0" * 16)
+    eng = _make_engine(tmp_path)
+    pipe = _FakePipe("inject")
+
+    eng.apply_lora(pipe, lora, 0.8)
+    assert eng._pool["lora"] and eng._pool["lora"].startswith("ok.safetensors")

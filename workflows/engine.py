@@ -74,6 +74,23 @@ CN_SDXL_DIRS = {
 IPADAPTER_SDXL_WEIGHT = "ipadapter/models/ip-adapter_sdxl_vit-h.safetensors"
 
 
+def _count_lora_params(modules) -> int:
+    """数一数这些模块里有多少个 LoRA 参数（名字带 lora 的）。
+
+    用来判断 `load_lora_weights` 到底是"真注入了"还是"读完发现没有能对上的键"。
+    遍历 named_parameters 是毫秒级，相对加载本身可以忽略。
+    """
+    total = 0
+    for m in modules:
+        if m is None:
+            continue
+        try:
+            total += sum(1 for name, _ in m.named_parameters() if "lora" in name.lower())
+        except Exception:                     # noqa: BLE001  非 nn.Module 就跳过
+            continue
+    return total
+
+
 def _scheduler(config):
     return DPMSolverMultistepScheduler.from_config(
         config, use_karras_sigmas=True, algorithm_type="dpmsolver++"
@@ -707,15 +724,14 @@ class Engine:
         if cur is not None:
             _unload()
             setattr(target, LORA_ATTR, None)
+        # 加载前后各数一次 LoRA 参数，用来发现"加载成功但一个键都没匹配"的
+        # 静默空挂（见下面的检查）。
+        holders = [getattr(pipe, n, None) for n in
+                   ("unet", "text_encoder", "text_encoder_2", "transformer")]
+        before = _count_lora_params(holders)
         try:
             pipe.load_lora_weights(str(lora_path), adapter_name="char")
-            # 蒸馏 LoRA 是另一个 adapter，set_adapters 只列 "char" 会把它关掉
-            names, weights = ["char"], [scale]
-            if "distill" in self._active_adapters(pipe):
-                names.append("distill")
-                weights.append(1.0)
-            pipe.set_adapters(names, adapter_weights=weights)
-        except Exception as exc:            # noqa: BLE001
+        except Exception as exc:          # noqa: BLE001
             # 常见原因：这不是标准 LoRA，而是 LoKr / LoHa / LyCORIS 变体
             # （实测「水墨风格 ink wash」就是 LoKr，key 叫 lokr_w1）——
             # diffusers 的 load_lora_weights 认不出来，报的是一堆 key 重命名失败，
@@ -726,6 +742,17 @@ class Engine:
             # **先分辨"拿错基座"和"权重格式不支持"**：两者的处置完全不同。
             # SD1.5 的 LoRA 装进 SDXL 会报 size mismatch（640 vs 1280），
             # 旧实现一律归因为 LoKr/LoHa，用户会去换 LoRA——但换多少个都没用。
+            # PEFT 找不到目标模块时抛的是 NoMatchingPeftModuleError
+            # （实测 DiT 结构的 octopath 挂 SDXL：Target modules {'q.proj','v.proj',...}
+            # not found in the base model）——这是架构不对，不是 LoKr 变体。
+            if ("NoMatchingPeftModule" in msg or "not found in the base model" in msg) \
+                    and "size mismatch" not in msg:
+                raise ValueError(
+                    f"LoRA 与当前底模的模块结构对不上: {Path(lora_path).name}\n"
+                    "它引用的层（如 q.proj / adaln_modulation）在这套 UNet 里不存在，"
+                    "说明不是 SD1.5/SDXL 的 LoRA（可能是 Flux/anima 这类 DiT 架构）。\n"
+                    "用 python -m workflows.lora 看它的实际架构。"
+                ) from exc
             if "size mismatch" in msg or "shape" in msg:
                 raise ValueError(
                     f"LoRA 与当前底模不匹配: {Path(lora_path).name}\n"
@@ -737,6 +764,29 @@ class Engine:
                 "大概率不是标准 LoRA（LoKr/LoHa/LyCORIS 变体暂不支持），"
                 "请换一个标准 LoRA（权重 key 形如 lora_unet_*_lora_A.weight）。"
             ) from exc
+
+        # **静默空挂检查**：diffusers 对认不出的键只是 warning，不抛异常。
+        # 实测 Wan 的视频 LoRA（键名 diffusion_model.*）挂到 SDXL 会"加载成功"，
+        # unet 里 LoRA 参数增量是 **0** —— 界面显示已挂、出图完全没变化，
+        # 用户会怀疑是不是强度太低，然后一直往上调 0.8 → 1.0，全都是白费。
+        if _count_lora_params(holders) <= before:
+            _unload()
+            setattr(target, LORA_ATTR, None)
+            self._pool["lora"] = None
+            raise ValueError(
+                f"这个 LoRA 没起作用: {Path(lora_path).name}\n"
+                "文件能读、但**没有一个权重键能对上当前底模**（diffusers 只给了 "
+                "warning，不报错）。常见于把视频模型（Wan）或 DiT（Flux/anima）的 "
+                "LoRA 挂到 SD1.5/SDXL 上，或反过来。\n"
+                "用 python -m workflows.lora 看一眼它的实际架构。"
+            )
+
+        # 蒸馏 LoRA 是另一个 adapter，set_adapters 只列 "char" 会把它关掉
+        names, weights = ["char"], [scale]
+        if "distill" in self._active_adapters(pipe):
+            names.append("distill")
+            weights.append(1.0)
+        pipe.set_adapters(names, adapter_weights=weights)
         setattr(target, LORA_ATTR, key)
         self._pool["lora"] = key
         log.info("LoRA 热切换 -> %s (scale=%.2f)", Path(lora_path).name, scale)
