@@ -199,6 +199,86 @@ def test_matte_bg_with_background_image(eng, assets):
     assert im.getpixel((1, 1))[:3] == (20, 160, 60)
 
 
+def _rp_pair(assets):
+    """造一对「源图 + 蒙版」：白底上一个红方块，蒙版盖住方块中央。"""
+    src = assets / "_rp_src.png"
+    im = Image.new("RGB", (256, 256), (250, 250, 250))
+    ImageDraw.Draw(im).rectangle([78, 78, 178, 178], fill=(200, 40, 40))
+    im.save(src)
+    mk = assets / "_rp_mask.png"
+    m = Image.new("L", (256, 256), 0)
+    ImageDraw.Draw(m).rectangle([98, 98, 158, 158], fill=255)
+    m.save(mk)
+    return src, mk
+
+
+def test_ai_repaint_keeps_outside_pixels(eng, assets):
+    """局部 AI 重绘的立命之本：选区外的像素一个都不变。"""
+    src, mk = _rp_pair(assets)
+    r = g.ai_repaint(eng, image=src, mask=mk, prompt="blue gem",
+                     steps=6, seed=11, preset="none", tag="rp_out")
+    m = r["meta"]
+    assert m["workflow"] == "w5"
+    assert m["coverage"] > 0
+    assert m["box"][2] > m["box"][0] and m["box"][3] > m["box"][1]
+
+    a = np.asarray(Image.open(src).convert("RGBA")).astype(int)
+    b = np.asarray(Image.open(r["file"]).convert("RGBA")).astype(int)
+    outside = np.asarray(Image.open(mk)) <= 127
+    # 源图与产物同尺寸，否则比较无意义
+    assert a.shape == b.shape
+    assert (a[outside] == b[outside]).all(), "选区外有像素变了"
+
+
+def test_ai_repaint_records_prompt_and_warnings(eng, assets):
+    """程序加的约束条款必须记进 meta（界面上要能看见、可改）。"""
+    src, mk = _rp_pair(assets)
+    r = g.ai_repaint(eng, image=src, mask=mk, prompt="blue gem",
+                     steps=6, seed=12, preset="none", feather=0,
+                     tag="rp_meta")
+    m = r["meta"]
+    assert m["prompt_body"] == "blue gem"
+    # 约束条款必须是英文：SD1.5 的 CLIP 只认英文，中文会被拆成乱 token，
+    # 而且整句必然在 77 token 处被截断（实测后半段直接被砍掉）
+    assert "masked" in m["constraint"]
+    assert not any("\u4e00" <= ch <= "\u9fff" for ch in m["constraint"])
+    assert m["prompt"].startswith("blue gem")
+    assert m["negative"]
+    assert isinstance(m["warnings"], list)
+
+
+def test_ai_repaint_rejects_mismatched_mask(eng, assets):
+    """蒙版尺寸和源图对不上（换了图没重涂）必须报错，而不是硬缩蒙版。"""
+    src, mk = _rp_pair(assets)
+    small = assets / "_rp_small.png"
+    Image.new("L", (64, 64), 255).save(small)
+    import pytest
+
+    with pytest.raises(ValueError, match="不一致"):
+        g.ai_repaint(eng, image=src, mask=small, prompt="x", steps=4,
+                     preset="none", tag="rp_bad")
+
+
+def test_ai_repaint_rejects_empty_prompt(eng, assets):
+    src, mk = _rp_pair(assets)
+    import pytest
+
+    with pytest.raises(ValueError, match="提示词"):
+        g.ai_repaint(eng, image=src, mask=mk, prompt="  ", steps=4,
+                     preset="none", tag="rp_nop")
+
+
+def test_ai_repaint_empty_mask_errors(eng, assets):
+    src, _ = _rp_pair(assets)
+    empty = assets / "_rp_empty.png"
+    Image.new("L", (256, 256), 0).save(empty)
+    import pytest
+
+    with pytest.raises(ValueError, match="蒙版"):
+        g.ai_repaint(eng, image=src, mask=empty, prompt="x", steps=4,
+                     preset="none", tag="rp_empty")
+
+
 def test_clip_skip_changes_result_and_is_recorded(eng):
     """clip_skip=2 必须真的改变画面，并把生效值记进 meta（否则没法复现）。"""
     kw = dict(prompt="blue slime monster", width=256, height=256, steps=8, seed=4321,

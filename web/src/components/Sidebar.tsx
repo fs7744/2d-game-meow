@@ -11,7 +11,7 @@ type Props = {
   onCreateProject: () => void
   onRenameProject: (id: string, name: string) => void
   onDeleteProject: (id: string) => void
-  onAddNode: (kind?: 'gen' | 'img2img' | 'image' | 'bg' | 'inpaint') => void
+  onAddNode: (kind?: 'gen' | 'img2img' | 'image' | 'bg' | 'inpaint' | 'airepaint') => void
   canApply: boolean
   onApplyFav: (text: string) => void
   onRemoveFav: (id: string) => void
@@ -188,6 +188,21 @@ export default function Sidebar({
               <em>拿已有图改内容 / 改画风</em>
             </span>
             <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('img2img')}>+</button>
+          </div>
+          <div
+            className="rail-item"
+            draggable
+            onDragStart={(e) => {
+              e.dataTransfer.setData('application/x-node-type', 'airepaint')
+              e.dataTransfer.effectAllowed = 'copy'
+            }}
+            title="局部 AI 重绘：裁剪选区交给通用模型重画，能挂 LoRA、选区外逐点不变"
+          >
+            <span className="rail-item-main">
+              <b>局部AI重绘</b>
+              <em>裁剪重画 · 支持 LoRA</em>
+            </span>
+            <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('airepaint')}>+</button>
           </div>
           <div
             className="rail-item"

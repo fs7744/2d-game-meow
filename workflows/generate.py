@@ -20,6 +20,7 @@ from . import anim as anim_mod
 from . import clip as clip_mod
 from . import matte as matte_mod
 from . import postprocess as pp
+from . import repaint as rp
 from . import presets
 from . import quality
 from .engine import Engine
@@ -392,6 +393,157 @@ def _parse_color(c: str | Sequence[int]) -> tuple[int, int, int]:
         return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16))
     except ValueError:
         return (255, 255, 255)
+
+
+# ---------------- W5 局部 AI 重绘 ----------------
+
+# 约束条款：局部重绘的立命之本——没有它，模型倾向于把整张图重画一遍，
+# 结果就是选区外也跟着变。每条都是踩坑换来的，但**必须在界面上可见可改**：
+# 提示词不允许有用户看不见的部分。
+#
+# **必须写英文**：SD1.5 / SDXL 的 CLIP 只认英文。中文会被拆成乱 token，
+# 而且整句约束有 100+ token，必然在 77 的上限处被截断——实测约束条款的后半段
+# （"边界处不要出现接缝…"）直接被砍掉，等于约束根本没生效。
+#
+# **而且必须够短**：77 是「用户提示词 + 契约后缀 + 约束」三者共享的上限。
+# 契约后缀（pixel 契约 26 token）已经吃掉三分之一，用户提示词通常也有 8~15，
+# 约束只剩 30 token 左右。这句 23 token，留了余量。约束的措辞经过取舍：
+# 保留三件最要紧的——只改选区、风格要延续、不要接缝；
+# 砍掉的是那些「模型本来也不会做的」（加物体、改构图——在 img2img 里
+# 选区外本来就不动，约束是给纯文生图用的）。
+AI_REPAINT_CONSTRAINT = (
+    "local inpaint, repaint only the masked area, keep the rest identical, "
+    "match style and lighting, no seams"
+)
+
+# 负面词只放「重绘最容易出的四种错」，不放画风词（画风由原图自己决定）
+AI_REPAINT_NEGATIVE = (
+    "seam, edge highlight, color banding, visible seam, blurry, ghosting, "
+    "duplicate limbs, extra characters, text, watermark, signature"
+)
+
+
+def ai_repaint(eng: Engine, *, image: str | Path, mask: str | Path, prompt: str,
+               negative: Optional[str] = None, strength: float = 0.9,
+               steps: int = 25, cfg: float = 7.0, seed: int = -1,
+               model: str = "sd15", lora: Optional[str] = None,
+               lora_scale: float = 0.8, clip_skip: int = 1,
+               preset: Optional[str] = None,
+               context: float = 0.35, expand: int = 8, feather: int = 4,
+               match_color: bool = True, match_strength: float = 0.45,
+               palette_snap: bool = False, palette_colors: int = 32,
+               scope: str = "", tag: str = "w5") -> Dict[str, Any]:
+    """局部 AI 重绘：裁剪「选区+上下文」→ 交给通用模型重画 → 贴回原图。
+
+    **strength 的实测含义**（像素素材，768² crop，25 步）：
+      0.80 → 选区几乎没变（模型保留原样，重画等于没做）
+      0.90 → 改动开始明显
+      0.95 → 改动最明显，但硬边会留矩形拼接痕（要配合羽化）
+      1.00 → 整块重画，风格漂移最大
+    所以默认 0.90：够改得动，又不至于把选区整块重画。
+
+    **和 W3（专用 inpaint 权重）的区别**：W3 走 SD1.5 的 inpaint 微调权重，
+    只有 512 分辨率、也不能挂 LoRA；本工作流把选区裁出来放大，交给**任意底模**
+    （含像素 LoRA、SDXL）重画，再贴回去。所以：
+      - 能用 LoRA（像素素材必须用像素 LoRA 才像像素画）
+      - 小区域也能拿到足够的像素（放大到 512 再画）
+      - 选区外的像素**逐点不变**（羽化只向内 + 二值蒙版相乘）
+
+    代价是接缝需要收：羽化过渡 + 只在边界带做色彩校正 + 可选色板吸附。
+    """
+    if preset is not None:
+        prompt, negative = presets.build(prompt, negative, preset)
+    src = Image.open(image).convert("RGBA")
+    msk = rp.load_mask(mask)
+    if msk.size != src.size:
+        # 尺寸不一致一定是换了源图但没重涂蒙版。缩放蒙版在语义上是错的
+        # （涂的地方和要改的地方对不上），所以明确报错而不是硬缩。
+        raise ValueError(
+            f"蒙版尺寸 {msk.size[0]}×{msk.size[1]} 与源图 "
+            f"{src.width}×{src.height} 不一致：换图后要重新涂抹")
+
+    # 提示词：用户正文 + 程序加的约束条款（都记进 meta，界面上可看）
+    body = (prompt or "").strip()
+    if not body:
+        raise ValueError("提示词是空的：先写一句要重绘成什么")
+    full_prompt = f"{body}, {AI_REPAINT_CONSTRAINT}"
+    neg = (negative or "").strip() or AI_REPAINT_NEGATIVE
+
+    # 1) 裁出「选区 + 上下文」
+    crop, crop_mask, box = rp.crop_region(src, msk, expand=expand, context=context)
+    target = rp.fit_size(crop.size)
+
+    # 2) 交给通用模型重画。用图生图而不是文生图：上下文已经在裁剪图里了，
+    #    模型要做的只是「在既有内容上改」，不是凭空重画。
+    pipe = eng.img2img_pipe(model)
+    eng.apply_lora(pipe, lora, lora_scale)
+    # **必须转 RGB**：RGBA 进 VaeImageProcessor 会变成 4 通道，UNet 首层按 4 通道
+    # 卷积 → 激活尺寸爆炸（实测 512² 直接 OOM，报 Tried to allocate 36.00 GiB）。
+    # alpha 的信息在贴回阶段用（composite 会混合 alpha），送模型不需要它。
+    #
+    # 但不能直接 convert("RGB")：那样透明区会变黑，模型会把背景也当内容重画。
+    # 用 flatten_rgb 把透明区填白（精灵素材大多是透明底）。
+    payload = rp.flatten_rgb(crop)
+    if payload.size != target:
+        payload = payload.resize(target, Image.LANCZOS)
+    if seed < 0:
+        seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
+    kw: Dict[str, Any] = dict(prompt=full_prompt, negative_prompt=neg)
+    emb = _skip_embeds(pipe, full_prompt, neg, clip_skip, model)
+    if emb is not None:
+        kw = dict(prompt_embeds=emb[0], negative_prompt_embeds=emb[1])
+    torch.cuda.reset_peak_memory_stats()
+    dt = _timer()
+    gen = pipe(image=payload, strength=strength, num_inference_steps=steps,
+               guidance_scale=cfg,
+               generator=torch.Generator("cuda").manual_seed(seed), **kw).images[0]
+    seconds = dt()
+    if gen.size != crop.size:
+        gen = gen.resize(crop.size, Image.LANCZOS)
+
+    # 3) 贴回：羽化只向内 -> 选区外逐点不变
+    merged = rp.composite(crop, gen, crop_mask, feather_px=feather,
+                           match_color=match_color,
+                           match_strength=match_strength)
+
+    # 4) 色板吸附（像素素材专用）：把重绘区里「接近源色」的杂色吸回源图色板。
+    #    差得远的新颜色保留 —— 否则「要把这块改成红色」会被吸成灰。
+    palette_snapped = 0.0
+    if palette_snap:
+        merged, pal, palette_snapped = rp.snap_palette(
+            merged, src, crop_mask, colors=palette_colors)
+
+    out = src.copy()
+    out.paste(merged, box)
+
+    warnings: List[str] = []
+    min_side = min(box[2] - box[0], box[3] - box[1])
+    if feather > max(2, min_side // 4):
+        warnings.append(
+            f"羽化 {feather}px 相对选区偏大：改动会溢出选区边缘一圈，"
+            "想要干净边界就调小")
+    if palette_snap and palette_snapped < 0.02:
+        warnings.append("色板对齐几乎没有生效：新颜色离源图色板都太远")
+
+    return _save(out, _stamp(tag), "ai_repaint", {
+        "workflow": "w5", "scope": scope or "default",
+        "prompt": full_prompt, "prompt_body": body,
+        "constraint": AI_REPAINT_CONSTRAINT,
+        "negative": neg,
+        "image": str(image), "mask": str(mask),
+        "strength": strength, "steps": steps, "cfg": cfg, "seed": seed,
+        "model": model, "lora": lora,
+        "lora_scale": lora_scale if lora else None,
+        "clip_skip": clip_skip if emb is not None else 1,
+        "box": list(box), "crop_size": list(crop.size), "target_size": list(target),
+        "coverage": rp.mask_coverage(msk),
+        "context": context, "expand": expand, "feather": feather,
+        "match_color": bool(match_color), "match_strength": match_strength,
+        "palette_snap": bool(palette_snap), "palette_snapped": palette_snapped,
+        "warnings": warnings,
+        "seconds": seconds,
+        "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
+    }, scope=scope)
 
 
 # ---------------- W4 姿态驱动 -> 精灵帧 ----------------

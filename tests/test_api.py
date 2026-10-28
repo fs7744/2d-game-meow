@@ -318,6 +318,45 @@ def test_generate_wbg_roundtrip(client, tmp_path):
     assert Path(job["result"]["file"]).exists()
 
 
+def test_generate_w5_roundtrip(client, tmp_path):
+    """局部 AI 重绘（w5）走同一条队列。"""
+    from PIL import Image, ImageDraw
+
+    src = tmp_path / "w5_src.png"
+    im = Image.new("RGB", (256, 256), (250, 250, 250))
+    ImageDraw.Draw(im).rectangle([78, 78, 178, 178], fill=(200, 40, 40))
+    im.save(src)
+    mk = tmp_path / "w5_mask.png"
+    m = Image.new("L", (256, 256), 0)
+    ImageDraw.Draw(m).rectangle([98, 98, 158, 158], fill=255)
+    m.save(mk)
+
+    r = client.post("/generate", json={"workflow": "w5", "params": {
+        "image": str(src), "mask": str(mk), "prompt": "blue gem",
+        "steps": 6, "seed": 5, "preset": "none", "tag": "apiw5"}})
+    assert r.status_code == 200, r.text
+    job_id = r.json()["job_id"]
+
+    job = None
+    for _ in range(120):
+        job = client.get(f"/jobs/{job_id}").json()
+        if job["status"] in ("done", "failed"):
+            break
+        time.sleep(0.5)
+    assert job["status"] == "done", job.get("error")
+    meta = job["result"]["meta"]
+    assert meta["workflow"] == "w5"
+    assert meta["prompt_body"] == "blue gem"
+    assert meta["coverage"] > 0
+    assert Path(job["result"]["file"]).exists()
+
+
+def test_generate_rejects_unknown_workflow(client):
+    r = client.post("/generate", json={"workflow": "w9", "params": {"prompt": "x"}})
+    assert r.status_code == 400
+    assert "w5" in r.json()["detail"], r.json()["detail"]
+
+
 def test_assets_lists_generated(client):
     r = client.get("/assets?limit=5")
     assert r.status_code == 200

@@ -18,6 +18,7 @@
 | W4 姿态驱动 → 逐帧对齐 → 精灵图打包 | 已完成，实测通过（8 帧走路序列） |
 | **W4 批量候选 + 质量闸门**（关节数不足自动补提、按分数挑帧） | 已完成，实测通过 |
 | **画布「图生图」节点**（w2：选源图 / 重绘幅度 / 链式重绘 / raw 源图） | 已完成，实测通过 |
+| **画布「局部AI重绘」节点**（w5：笔刷选区 / 裁剪重画 / 支持 LoRA / 选区外逐点不变） | 已完成，实测通过 |
 | 后处理（像素化 / 16 色量化 / 锚点对齐 / 打包） | 已完成并自测（28px 漂移 → 0） |
 | IP-Adapter 角色身份锁定 | 已接通，效果待调（见「实测」） |
 | FastAPI 服务（单卡串行队列 + 资产索引） | 已完成 |
@@ -430,7 +431,7 @@ start.bat                   # Windows 双击或命令行
 cd web && npm ci && npm run build     # 构建
 cd .. && python app.py                # FastAPI 同时托管 dist 与 API → http://127.0.0.1:8000
 cd web && npm run dev                 # 或开发模式（:5173，代理到 8000）
-npm run smoke                         # 无浏览器渲染冒烟（jsdom，175 项断言）
+npm run smoke                         # 无浏览器渲染冒烟（jsdom，185 项断言）
 ```
 
 > `start.bat` 刻意保持**纯 ASCII**：cmd.exe 按 OEM 代码页解析 .bat，中文注释会切断命令行
@@ -577,6 +578,77 @@ curl -X POST http://127.0.0.1:8000/generate -H "Content-Type: application/json" 
 后端对应 `POST /generate` 的 `workflow: "w3"`（`image` + `mask` 两个路径），
 蒙版另有一个 `POST /mask` 端点负责存 PNG。
 
+### 局部 AI 重绘节点（w5）
+
+和上面的「局部重绘（w3）」并列的另一种做法：**裁剪「选区 + 上下文」→ 交给通用模型
+重画 → 贴回原图**。左栏「节点」组里是「局部AI重绘」（绿色标题）。
+
+**和 w3 的区别**（选哪个看场景）：
+
+| | w3 局部重绘 | **w5 局部 AI 重绘** |
+|---|---|---|
+| 模型 | SD1.5 **专用 inpaint 权重** | **任意底模**（含 SDXL、像素 LoRA） |
+| 分辨率 | 512 封顶 | 选区放大到 512~1024 再画 |
+| 能挂 LoRA | ❌ | ✅ |
+| 原理 | 管线原生 mask | 裁剪 → 图生图 → 贴回 |
+
+所以：**像素素材改局部**必须用 w5（w3 的 inpaint 权重画不出像素风），
+**大幅改写整块内容**用 w3 更省事。
+
+**操作**：源图（连线或拖图）+ 笔刷蒙版（与 w3 共用同一个编辑器）+ 提示词 + 重绘幅度。
+
+「更多设置」里的四项：
+
+| 参数 | 默认 | 作用 |
+|---|---|---|
+| 上下文 | 0.35 | 选区外带多少上下文（按选区尺寸的比例）。越大模型看到的参照越多，也越容易改到选区外 |
+| 外扩 | 8 px | 蒙版先外扩一圈，给模型「往哪长」的余地 |
+| 羽化 | 4 px | 贴回时的边缘过渡。0 = 硬边（像素素材常用） |
+| 接缝色彩校正 | 开 | 只在**边界带**做色彩校正。关掉的话模型新颜色可能和周围对不上 |
+| 色板吸附 | 关 | 把重绘区里「接近源色」的杂色吸回源图色板（像素素材建议开） |
+
+**「选区外的像素一个都不变」是逐像素可验证的硬承诺**（有测试钉着）：贴回的羽化
+只向内——羽化权重 = 模糊(蒙版) × 二值蒙版，区域外的权重恒为 0。
+
+**重绘幅度（strength）的实测含义**（像素素材，25 步，512² 源图）：
+
+| strength | 效果 |
+|---|---|
+| 0.80 | **选区几乎没变**——模型保留原样，等于没重画 |
+| 0.90 | 改动开始明显（默认值） |
+| 0.95 | 改动最明显，但硬边会留矩形拼接痕 |
+| 1.00 | 整块重画，风格漂移最大 |
+
+所以默认给 **0.90**。另外实测：硬边（羽化 0）在重绘幅度大时会看到明显的矩形拼接
+痕，**羽化 8px + 边界色彩校正**能把接缝收掉（`docs/img/ai_repaint_ab.jpg` 的
+hard / soft 两组对照）。
+
+![局部 AI 重绘对照](docs/img/ai_repaint_ab.jpg)
+
+上面这组对照还暴露了一个坑：**透明底素材送模型时必须把透明区填白**，不能直接
+`convert("RGB")`——那样透明区会变黑，模型会把背景也当成内容重画，出来的选区
+周围带一圈脏边。
+
+两个踩过的坑（都写进注释了）：
+
+- **送模型前必须转 RGB**。RGBA 图进 VAE 会变成 4 通道，UNet 首层按 4 通道卷积，
+  激活尺寸直接爆炸——实测 512² 报 `Tried to allocate 36.00 GiB` 当场 OOM。
+- **约束条款必须写英文**。SD1.5/SDXL 的 CLIP 只认英文，中文会被拆成乱 token；
+  而且整句约束有 100+ token，必然在 77 的上限处被截断（实测后半段被整段砍掉，
+  等于约束根本没生效）。
+
+后端对应 `POST /generate` 的 `workflow: "w5"`：
+
+```bash
+curl -X POST http://127.0.0.1:8000/generate -H "Content-Type: application/json" -d '{
+  "workflow": "w5",
+  "params": {"image": "D:/.../assets/projects/p1/src.png",
+             "mask": "D:/.../assets/projects/p1/masks/mask_x.png",
+             "prompt": "give the knight a golden helmet",
+             "context": 0.35, "expand": 8, "feather": 4, "palette_snap": true}
+}'
+```
+
 ### 全屏预览与下载
 
 图在卡片里只是缩略图，看不清像素细节。三种方式进全屏（灯箱）：
@@ -722,22 +794,23 @@ python tools/video.py i2v assets/cat.png "the same character walking" -o assets/
 ## 测试
 
 ```bash
-python -m pytest tests -q        # 185 个用例，约 180s（含 SDXL 慢用例）
+python -m pytest tests -q        # 208 个用例，约 180s（含 SDXL 慢用例）
 # 全套超过 2 分钟会被超时杀掉，分批跑：
-#   pytest tests --ignore=tests/test_models.py   # 174 个，约 105s
+#   pytest tests --ignore=tests/test_models.py   # 197 个，约 105s
 #   pytest tests/test_models.py                  # 11 个，约 60s
 ```
 
 | 文件 | 覆盖 | 用例数 |
 |---|---|---|
 | `tests/test_postprocess.py` | 锚点、逐帧对齐、打包几何、色板上限、alpha 二值化、裁边、**像素块单色性**、**前景块计数** | 11 |
-| `tests/test_generate.py` | **抠图三种模式（透明/纯色/换背景图）**、同 seed 逐像素一致、不同 seed 相异、色板生效、**重绘选区外不变**、序列帧数、**闸门重提与批量挑帧**、**clip_skip 生效与 meta 记录**、主体数上报、**图生图后处理与 raw 留存**、**项目隔离（产物分目录 + 跨项目引用被拒）**、显存回收、缺权重报错 | 18 |
+| `tests/test_generate.py` | **局部 AI 重绘（选区外逐点不变 / 约束条款是英文 / 蒙版尺寸不匹配报错）**、**抠图三种模式（透明/纯色/换背景图）**、同 seed 逐像素一致、不同 seed 相异、色板生效、**重绘选区外不变**、序列帧数、**闸门重提与批量挑帧**、**clip_skip 生效与 meta 记录**、主体数上报、**图生图后处理与 raw 留存**、**项目隔离（产物分目录 + 跨项目引用被拒）**、显存回收、缺权重报错 | 18 |
 | `tests/test_controlnet.py` | Canny conditioning 生效、Tile 放大结构相关性 > 0.5、像素块均匀性 | 3 |
-| `tests/test_api.py` | **wbg 队列往返**、**蒙版端点（同名覆盖/拒绝非 PNG）**、全部端点、队列串行性、**w2 队列往返（含 raw 留存）**、**上传端点（坏文件/空文件/文件名清洗/进项目目录）**、**真删（连带 sidecar/raw、索引清理、路径穿越防护、索引不可删）**、**资产按项目过滤**、**下载的 Content-Disposition**、400/404 | 22 |
+| `tests/test_api.py` | **w5 队列往返**、**未知 workflow 报错**、**wbg 队列往返**、**蒙版端点（同名覆盖/拒绝非 PNG）**、全部端点、队列串行性、**w2 队列往返（含 raw 留存）**、**上传端点（坏文件/空文件/文件名清洗/进项目目录）**、**真删（连带 sidecar/raw、索引清理、路径穿越防护、索引不可删）**、**资产按项目过滤**、**下载的 Content-Disposition**、400/404 | 22 |
 | `tests/test_pose.py` | 检测器切换、18 点完整性、关节在画面内且头高于髋、骨架渲染、双后端一致性、引擎内的姿态提取器单例、精灵图切片 CLI | 7 |
 | `tests/test_quality.py` | 前景占比/质心/漂移、**贴边检测**（含未抠图时整体失效）、无模型时「无法判定」、关节数影响排序与闸门 | 11 |
 | `tests/test_io_paths.py` | 视频抽帧、GIF、精灵图切片（含空格子）、CLI 错误码、非 8 倍数尺寸重绘、cols 夹取、环境自检 JSON、LoRA 空接口 | 11 |
 | `tests/test_presets.py` | 契约拼接与优先级、77 token 预算、**长提示词不丢后缀**、**无逗号文本不截成空串**、中文 token 估算、下载器过滤 | 12 |
+| `tests/test_repaint.py` | **选区外逐点不变**、硬边完全替换、**色彩校正不把中心拉回原色**、**色板吸附保留远色**、蒙版运算、尺寸对齐、**RGBA 进 VAE 会炸**、**透明底填白** | 16 |
 | `tests/test_clip.py` | **clip_skip=1 与管道默认逐元素一致**、cs2 换向量、越界值夹取、无 text_encoder 时报错 | 4 |
 | `tests/test_fetch.py` | Range 分块拼接、断点续传、**拒绝非 206 响应**（防 429 错误体污染）、超长残留文件重置 | 5 |
 | `tests/test_stability.py` | 连续 20 次推理显存不涨、`free()` 释放 pipeline 与 ControlNet、跨进程同 seed 一致、PNG 结构、sidecar 一致 | 5 |
@@ -766,6 +839,7 @@ W4 侧对应的兜底是上面那套**质量闸门**（生成后再检一遍，�
 │   ├── engine.py           pipeline 懒加载、显存守卫、LoRA 热切换
 │   ├── generate.py         w1/w2/w3/w4 四个工作流
 │   ├── quality.py          帧质量评分（关节数 / 占比 / 贴边 / 漂移）——挑帧与闸门
+│   ├── repaint.py          局部 AI 重绘的图像运算（裁剪 / 羽化 / 接缝校正 / 色板吸附）
 │   ├── clip.py             自实现 clip skip（上游参数在 transformers 5.x 下会崩）
 │   └── postprocess.py      像素化、调色板量化、锚点对齐、精灵图打包
 ├── tools/
@@ -776,6 +850,7 @@ W4 侧对应的兜底是上面那套**质量闸门**（生成后再检一遍，�
 │   ├── video.py            文生视频 / 图生视频 CLI
 │   ├── fetch_ranged.py     按 Range 分块下载（抗限流断流）
 │   ├── bench.py            稳态基准
+│   ├── ab_repaint.py       局部 AI 重绘 A/B（重绘幅度 / 羽化 / 色板吸附，同源单变量）
 │   ├── ab_quality.py       画质 A/B（采样档 / 后处理档 / 背景干净度，同 seed 单变量）
 │   ├── ab_matte.py         抠图后端 A/B（色键 vs u2net：占比/白边/连通块/IoU）
 │   └── check_env.py        环境自检

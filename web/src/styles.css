@@ -282,6 +282,25 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
 .mask-thumb img { width: 100%; height: 100%; object-fit: contain; image-rendering: pixelated; }
 .mask-thumb span { font-size: 9px; color: var(--muted-2); }
 .node-kind.inpaint { color: var(--pink); }
+.node-kind.airepaint { color: var(--green); }
+
+/* 节点里的「更多设置」折叠区 */
+.adv {
+  border: 1px solid var(--line); padding: 4px 6px; background: rgba(255, 255, 255, 0.02);
+}
+.adv > summary {
+  cursor: pointer; font-size: 10.5px; color: var(--muted); list-style: none;
+  user-select: none;
+}
+.adv > summary::marker { content: ''; }
+.adv > summary::before { content: '▸ '; color: var(--muted-2); }
+.adv[open] > summary::before { content: '▾ '; }
+.adv .strength { margin-top: 4px; }
+.adv .strength input[type='number'] { width: 58px; height: 22px; }
+.check {
+  display: flex; align-items: center; gap: 5px;
+  font-size: 10.5px; color: var(--muted); margin-top: 4px;
+}
 
 /* 全屏预览（灯箱） */
 .lightbox {

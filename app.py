@@ -4,7 +4,7 @@
 端点：
   GET  /health            服务与显存状态
   GET  /engine            加载中的 pipeline
-  POST /generate          提交任务 -> {"job_id": ...}（w1/w2/w3/w4/wbg）
+  POST /generate          提交任务 -> {"job_id": ...}（w1/w2/w3/w4/wbg/w5）
   GET  /jobs/{job_id}     查询任务
   GET  /jobs              最近任务
   GET  /assets            资产清单（读 assets/index.jsonl）
@@ -111,7 +111,8 @@ def _run(job_id: str, workflow: str, params: Dict[str, Any]) -> None:
     job.update(status="running", started=time.time())
     try:
         fn = {"w1": gen.txt2img, "w2": gen.img2img, "w3": gen.inpaint,
-              "w4": gen.poseswap, "wbg": gen.matte_bg}[workflow]
+              "w4": gen.poseswap, "wbg": gen.matte_bg,
+              "w5": gen.ai_repaint}[workflow]
         job["result"] = fn(engine, **_resolve_lora(params))
         job["status"] = "done"
     except Exception as exc:  # noqa: BLE001
@@ -233,8 +234,8 @@ def loras() -> Dict[str, Any]:
 
 @app.post("/generate")
 def submit(job: Job) -> Dict[str, Any]:
-    if job.workflow not in ("w1", "w2", "w3", "w4", "wbg"):
-        raise HTTPException(400, "workflow 必须是 w1/w2/w3/w4/wbg")
+    if job.workflow not in ("w1", "w2", "w3", "w4", "wbg", "w5"):
+        raise HTTPException(400, "workflow 必须是 w1/w2/w3/w4/wbg/w5")
     job_id = uuid.uuid4().hex[:12]
     _jobs[job_id] = {"job_id": job_id, "workflow": job.workflow, "params": job.params,
                      "status": "queued", "created": time.time()}

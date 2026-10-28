@@ -116,7 +116,7 @@ function common(params: GenParams, opts: SubmitOpts) {
   }
 }
 
-async function post(workflow: 'w1' | 'w2' | 'w3' | 'wbg', params: Record<string, unknown>) {
+async function post(workflow: 'w1' | 'w2' | 'w3' | 'w5' | 'wbg', params: Record<string, unknown>) {
   const r = await fetch(`${base}/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -166,6 +166,39 @@ export function submitInpaint(
     lora_scale: params.loraScale,
     model: opts.model || 'sd15',
     scope: opts.scope || undefined,
+  })
+}
+
+/**
+ * 局部 AI 重绘（w5）。裁剪「选区+上下文」→ 通用模型重画 → 贴回。
+ * 与 w3 的区别：w5 能挂 LoRA、能用 SDXL（w3 的专用 inpaint 权重只有 512 且不能挂 LoRA）。
+ */
+export function submitAiRepaint(
+  params: GenParams,
+  opts: SubmitOpts,
+  initImage: string,
+  mask: string,
+) {
+  return post('w5', {
+    image: initImage,
+    mask,
+    prompt: params.prompt,
+    negative: params.negative || undefined,
+    strength: params.strength,
+    steps: params.steps,
+    cfg: params.cfg,
+    seed: params.seed,
+    preset: params.preset,
+    clip_skip: params.clipSkip,
+    lora: params.lora || undefined,
+    lora_scale: params.loraScale,
+    model: opts.model || 'sd15',
+    scope: opts.scope || undefined,
+    context: params.rpContext,
+    expand: params.rpExpand,
+    feather: params.rpFeather,
+    match_color: params.rpMatchColor,
+    palette_snap: params.rpPaletteSnap,
   })
 }
 

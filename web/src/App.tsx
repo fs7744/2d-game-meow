@@ -7,8 +7,8 @@ import {
   loadStore, makeProject, metaOf, saveStore, type Project, type ProjectMeta,
 } from './store/projects'
 import {
-  deleteAssets, fetchJob, fetchLoras, fetchModels, health, submitImg2Img, submitInpaint,
-  submitMatte, submitTxt2Img, uploadImage,
+  deleteAssets, fetchJob, fetchLoras, fetchModels, health, submitAiRepaint, submitImg2Img,
+  submitInpaint, submitMatte, submitTxt2Img, uploadImage,
 } from './api'
 import ConfirmDialog from './components/ConfirmDialog'
 import Lightbox from './components/Lightbox'
@@ -42,6 +42,12 @@ const DEFAULT_PARAMS: GenParams = {
   maskPath: '',
   maskUrl: '',
   maskCoverage: 0,
+  // 局部 AI 重绘（w5）：默认值照 pixelforge 的实测结论
+  rpContext: 0.35,      // 选区外带 35% 上下文
+  rpExpand: 8,          // 蒙版外扩 8px
+  rpFeather: 4,         // 贴回羽化 4px
+  rpMatchColor: true,   // 接缝带色彩校正
+  rpPaletteSnap: false, // 色板吸附：像素素材才需要
   lora: '',
   loraScale: 0.8,
 }
@@ -242,6 +248,14 @@ export default function App() {
 
   const addNode = useCallback((type: string, world?: { x: number; y: number }) => {
     const at = world ?? { x: 0, y: 0 }
+    if (type === 'airepaint') {
+      // 局部 AI 重绘的默认幅度比图生图高：实测 0.8 时模型几乎保留原样，
+      // 等于没重画（0.9 才开始明显改动）
+      const node = makeNode(at.x, at.y, 'airepaint', { strength: 0.9 })
+      setSelectedId(node.id)
+      setNodes((list) => [...list, node])
+      return
+    }
     if (type === 'image') {
       // 图片节点的内容来自本机文件：走文件选择器，选完直接落成节点
       pickFiles.current?.click()
@@ -251,7 +265,8 @@ export default function App() {
       type === 'img2img' ? 'img2img'
         : type === 'bg' ? 'bg'
           : type === 'inpaint' ? 'inpaint'
-            : 'gen'
+            : type === 'airepaint' ? 'airepaint'
+              : 'gen'
     setNodes((list) => {
       // 原点放多个时阶梯错开，避免完全重叠
       const sameSpot = list.filter((n) => n.x === at.x && n.y === at.y).length
@@ -287,7 +302,7 @@ export default function App() {
         try {
           const up = await uploadImage(f, currentId)
           if (target && (target.kind === 'img2img' || target.kind === 'bg'
-            || target.kind === 'inpaint')) {
+            || target.kind === 'inpaint' || target.kind === 'airepaint')) {
             patchNode(target.id, { source: { path: up.path } })
             continue
           }
@@ -311,7 +326,7 @@ export default function App() {
   const onConnect = useCallback((from: string, to: string) => {
     const target = nodesRef.current.find((n) => n.id === to)
     // 能接源的节点：图生图（要底图）、抠图与局部重绘（要源图）；文生图没有「底」这回事
-    if (!target || !['img2img', 'bg', 'inpaint'].includes(target.kind)) return
+    if (!target || !['img2img', 'bg', 'inpaint', 'airepaint'].includes(target.kind)) return
     if (target.id === from) return
     patchNode(to, { source: { nodeId: from } })
   }, [patchNode])
@@ -393,9 +408,11 @@ export default function App() {
     if (!node) return
     // 抠图节点不需要提示词（纯图像处理）；文生图/图生图需要
     const needPrompt = node.kind === 'gen' || node.kind === 'img2img' || node.kind === 'inpaint'
+      || node.kind === 'airepaint'
     if (needPrompt && !node.params.prompt.trim()) return
     let init: string | undefined
-    if (node.kind === 'img2img' || node.kind === 'bg' || node.kind === 'inpaint') {
+    if (node.kind === 'img2img' || node.kind === 'bg' || node.kind === 'inpaint'
+      || node.kind === 'airepaint') {
       init = sourcePathOf(node)
       if (!init) {
         // 没有源图就没法提交，直接在节点上报错，别让用户等一个必然失败的任务
@@ -409,7 +426,11 @@ export default function App() {
     patchNode(id, { job: { id: 'pending', status: 'queued', startedAt: Date.now() } })
     try {
       let jobId: string
-      if (node.kind === 'inpaint') {
+      if (node.kind === 'airepaint') {
+        const r = await submitAiRepaint(
+          node.params, { model, matteBackend, scope: currentId }, init!, node.params.maskPath)
+        jobId = r.job_id
+      } else if (node.kind === 'inpaint') {
         const r = await submitInpaint(
           node.params, { model, matteBackend, scope: currentId }, init!, node.params.maskPath)
         jobId = r.job_id

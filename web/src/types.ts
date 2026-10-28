@@ -1,7 +1,7 @@
 export type Preset = 'sprite' | 'portrait' | 'wuxia' | 'pixel' | 'none'
 
-/** 节点类型：图生成（w1）/ 图生图（w2）/ 图片（拖进来的本地图）/ 抠图换背景（wbg）/ 局部重绘（w3） */
-export type NodeKind = 'gen' | 'img2img' | 'image' | 'bg' | 'inpaint'
+/** 节点类型：图生成（w1）/ 图生图（w2）/ 图片 / 抠图换背景（wbg）/ 局部重绘（w3）/ 局部 AI 重绘（w5） */
+export type NodeKind = 'gen' | 'img2img' | 'image' | 'bg' | 'inpaint' | 'airepaint'
 
 /** 抠图节点的背景方式 */
 export type BgMode = 'alpha' | 'color' | 'image'
@@ -37,6 +37,11 @@ export type GenParams = {
   maskPath: string        // 局部重绘节点：蒙版文件路径（后端要读它）
   maskUrl: string         // 局部重绘节点：蒙版缩略图（给用户看涂了哪）
   maskCoverage: number    // 局部重绘节点：蒙版覆盖了多少比例
+  rpContext: number       // AI 重绘：选区外扩多少上下文（0~1，按选区尺寸的比例）
+  rpExpand: number        // AI 重绘：蒙版先外扩几 px（给模型留「往哪长」的余地）
+  rpFeather: number       // AI 重绘：贴回羽化 px（0 = 硬边）
+  rpMatchColor: boolean   // AI 重绘：接缝带做色彩校正
+  rpPaletteSnap: boolean  // AI 重绘：把重绘区里接近源色的杂色吸回源图色板
   lora: string            // LoRA 名（后端解析成路径）；空串表示不挂
   loraScale: number
 }

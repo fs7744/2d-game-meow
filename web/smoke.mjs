@@ -152,8 +152,8 @@ function check(name, cond, extra = '') {
   const doc = dom.window.document
   check('渲染出顶栏品牌', doc.querySelector('.brand .title')?.textContent?.includes('喵叫'))
   check('空状态引导可见', !!doc.querySelector('.canvas-empty .empty-card'))
-  check('侧栏存在（节点 5 项：图生成 / 图生图 / 局部重绘 / 抠图 / 图片）',
-    section(doc, '节点')?.querySelectorAll('.rail-item').length === 5,
+  check('侧栏存在（节点 6 项：图生成 / 图生图 / 局部重绘 / 局部AI重绘 / 抠图 / 图片）',
+    section(doc, '节点')?.querySelectorAll('.rail-item').length === 6,
     String(section(doc, '节点')?.querySelectorAll('.rail-item').length))
   check('有「项目」分组（独立画布）', !!section(doc, '项目'))
   check('缩放显示 100%', doc.querySelector('.zoom-val')?.textContent === '100%')
@@ -1084,6 +1084,69 @@ function check(name, cond, extra = '') {
   check('可以关掉笔刷', !doc.querySelector('.mask-editor'))
 
   check('局部重绘场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 21) 局部 AI 重绘节点：裁剪重画 + 提交体
+{
+  const { dom, errors } = await boot('')
+  const doc = dom.window.document
+  const win = dom.window
+
+  const nodeItems = [...section(doc, '节点').querySelectorAll('.rail-item')]
+  const arItem = nodeItems.find((it) => (it.querySelector('b')?.textContent || '') === '局部AI重绘')
+  check('侧栏有「局部AI重绘」节点类型', !!arItem)
+  arItem?.querySelector('.rail-add').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 150))
+
+  const node = doc.querySelector('.node')
+  check('新建出局部AI重绘节点',
+    (node?.querySelector('.node-kind')?.textContent || '') === '局部AI重绘',
+    node?.querySelector('.node-kind')?.textContent)
+  check('有蒙版区', !!node?.querySelector('.mask-box'))
+  check('有源图区', !!node?.querySelector('.src-box'))
+  check('没源图/蒙版/提示词时不能提交', node?.querySelector('.gen-btn')?.disabled === true)
+  check('有更多设置（上下文/外扩/羽化/校正/吸附）',
+    !!node?.querySelector('.adv') &&
+    node.querySelectorAll('.adv .check').length === 2,
+    String(node?.querySelectorAll('.adv .check').length))
+
+  // 接一个图片节点当源
+  const viewport = doc.querySelector('.canvas-viewport')
+  const file = new win.File([new Uint8Array([1])], 'pic.png', { type: 'image/png' })
+  const ev = new win.Event('drop', { bubbles: true })
+  Object.defineProperties(ev, {
+    clientX: { value: 300 }, clientY: { value: 200 },
+    dataTransfer: { value: { types: ['Files'], files: [file], getData: () => '' } },
+  })
+  viewport.dispatchEvent(ev)
+  await new Promise((r) => setTimeout(r, 400))
+  const imgNode = [...doc.querySelectorAll('.node')].find(
+    (n) => (n.querySelector('.node-kind')?.textContent || '') === '图片')
+  const arNode = [...doc.querySelectorAll('.node')].find(
+    (n) => (n.querySelector('.node-kind')?.textContent || '') === '局部AI重绘')
+  imgNode?.querySelector('.conn.out')
+    .dispatchEvent(new win.PointerEvent('pointerdown', { bubbles: true, button: 0 }))
+  await new Promise((r) => setTimeout(r, 60))
+  arNode.dispatchEvent(new win.PointerEvent('pointerover', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 60))
+  win.dispatchEvent(new win.PointerEvent('pointerup', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 150))
+  check('连线后局部AI重绘节点接上了源',
+    !!arNode.querySelector('.src-box select')?.value)
+
+  // 打开笔刷（jsdom 没 canvas 2d，只验证能开能关）
+  arNode.querySelector('.mask-box .mini')
+    .dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 150))
+  check('能打开蒙版笔刷', !!doc.querySelector('.mask-editor'))
+  const cancel = [...doc.querySelectorAll('.mask-bar .mini')].find(
+    (b) => (b.textContent || '').includes('取消'))
+  cancel?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 120))
+  check('能关掉笔刷', !doc.querySelector('.mask-editor'))
+
+  check('局部AI重绘场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 
