@@ -570,6 +570,21 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
 }
 .dir-input::placeholder { color: var(--muted-2); }
 .strength { display: flex; align-items: center; gap: 5px; font-size: 10px; color: var(--muted); }
+/* 局部重绘的几何预览：棋盘格底表示透明，红=选区 橙=外扩 黄=羽化 */
+.mask-preview { margin: 6px 0 2px; }
+.mask-preview canvas {
+  display: block; width: 100%; height: auto;
+  border: 1px solid var(--line); border-radius: 3px;
+  background-color: #141418;
+  background-image:
+    linear-gradient(45deg, #1c1c22 25%, transparent 25%, transparent 75%, #1c1c22 75%),
+    linear-gradient(45deg, #1c1c22 25%, transparent 25%, transparent 75%, #1c1c22 75%);
+  background-size: 12px 12px;
+  background-position: 0 0, 6px 6px;
+}
+.mp-note { margin-top: 3px; font-size: 9px; line-height: 1.45; color: var(--muted-2); }
+.mp-dim { opacity: 0.62; }
+
 /* 带说明的参数：虚下划线 + help 光标。
    光加 title 不够——用户不知道"这里能 hover"，也就不会去看说明。 */
 .node label[title] { cursor: help; }

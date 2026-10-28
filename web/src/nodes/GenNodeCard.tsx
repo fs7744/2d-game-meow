@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react'
 import { hasCJK } from '../store/prompts'
 import MaskEditor from '../components/MaskEditor'
+import MaskPreview from '../components/MaskPreview'
 import type { PoseDir } from '../api'
 import type { GenNode, LoraInfo, Preset } from '../types'
 
@@ -1293,25 +1294,29 @@ export default function GenNodeCard({
             </label>
             <label className="strength" title={hint('外扩')}>
               <span>外扩</span>
+              {/* 拖滑块比点数字框快得多，而且下面的预览会跟着变——
+                  改这两个参数不用再点一次生成才知道效果 */}
               <input
-                type="number"
+                type="range"
                 min={0}
-                max={64}
+                max={32}
+                step={1}
                 value={p.rpExpand}
-                onChange={(e) => setParam('rpExpand', Number(e.target.value) || 0)}
+                onChange={(e) => setParam('rpExpand', Number(e.target.value))}
               />
-              <b>px</b>
+              <b>{p.rpExpand}px</b>
             </label>
             <label className="strength" title={hint('羽化')}>
               <span>羽化</span>
               <input
-                type="number"
+                type="range"
                 min={0}
-                max={24}
+                max={16}
+                step={1}
                 value={p.rpFeather}
-                onChange={(e) => setParam('rpFeather', Number(e.target.value) || 0)}
+                onChange={(e) => setParam('rpFeather', Number(e.target.value))}
               />
-              <b>px</b>
+              <b>{p.rpFeather}px</b>
             </label>
             <label className="check" title={hint('色彩校正')}>
               <input
@@ -1330,6 +1335,13 @@ export default function GenNodeCard({
               色板吸附（像素素材用）
             </label>
           </details>
+          {/* 几何预览：外扩/羽化是像素级参数，改完不用再点一次生成 */}
+          <MaskPreview
+            srcUrl={sourceNode?.job?.url || sourceNode?.image?.url}
+            maskUrl={p.maskUrl || undefined}
+            expand={p.rpExpand}
+            feather={p.rpFeather}
+          />
           {hasImage && (
             <div
               className="preview"
