@@ -125,7 +125,9 @@ def _postprocess(img: Image.Image, eng: Engine, *, matte: bool, matte_backend: s
         # 拿产物评分会把好帧判成废帧，白白触发补提。
         info["pre_pixel"] = img.copy() if (pixel > 1 or palette) else img
     if pixel > 1:
-        img = pp.pixelate(img, pixel, grid_align=True)
+        # 中位数取色：BOX 平均会把背景色按比例混进边缘块，轮廓外挂一圈灰边
+        #（看着像抗锯齿）。实测并排对比，中位数的边缘更硬、色块更纯。
+        img = pp.pixelate(img, pixel, grid_align=True, sample='median')
     if palette:
         img = pp.quantize_palette(img, palette)
     if clean_iso and (pixel > 1 or palette):

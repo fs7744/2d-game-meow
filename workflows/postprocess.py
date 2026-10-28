@@ -72,8 +72,35 @@ def _pixelate_grid(img: Image.Image, block: int) -> Image.Image | None:
     return up
 
 
+def _block_median(img: Image.Image, block: int) -> Image.Image:
+    """按块取**中位数**而不是平均值。
+
+    为什么比平均好：BOX 平均会把背景色按比例混进边缘块，轮廓外面挂一圈灰边
+    （看着像抗锯齿）。实测同一张图并排对比，中位数取色的边缘更硬、色块更纯，
+    更接近手工像素画（对比图 assets/_sample_cmp.png）。
+
+    alpha 不能取中位数——那会给出半透明块。用「块内多数像素是否不透明」判，
+    保证轮廓是硬的（像素素材要的就是硬边）。
+    """
+    import numpy as np
+
+    rgba = np.asarray(img.convert("RGBA"))
+    h, w = rgba.shape[:2]
+    hh, ww = (h // block) * block, (w // block) * block
+    grid = rgba[:hh, :ww].reshape(hh // block, block, ww // block, block, 4)
+    rgb = np.median(grid[..., :3].astype(np.float32), axis=(1, 3)).astype(np.uint8)
+    solid = (grid[..., 3] > 127).mean(axis=(1, 3)) >= 0.5
+    out = np.dstack([rgb, (solid * 255).astype(np.uint8)])
+    out = np.repeat(np.repeat(out, block, axis=0), block, axis=1)
+    if out.shape[0] != h or out.shape[1] != w:      # 右下不足一块的边
+        pad = np.zeros((h, w, 4), np.uint8)
+        pad[: out.shape[0], : out.shape[1]] = out
+        out = pad
+    return Image.fromarray(out, "RGBA")
+
+
 def pixelate(img: Image.Image, block: int, resample=Image.BOX,
-             grid_align: bool = False) -> Image.Image:
+             grid_align: bool = False, sample: str = "box") -> Image.Image:
     """按 block 像素栅格吸附：先降采样再最近邻放大回原尺寸。
 
     降采样用 BOX（面积平均）而不是 LANCZOS：LANCZOS 有负瓣，会在色块交界处
@@ -91,6 +118,11 @@ def pixelate(img: Image.Image, block: int, resample=Image.BOX,
         aligned = _pixelate_grid(img, block)
         if aligned is not None:
             return aligned
+    if sample == "median":
+        try:
+            return _block_median(img, block)
+        except Exception:                  # noqa: BLE001  异常就退回 BOX，别让出图失败
+            pass
     w, h = img.size
     small = img.resize((max(1, w // block), max(1, h // block)), resample)
     return small.resize((w, h), Image.NEAREST)
