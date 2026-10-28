@@ -84,7 +84,7 @@ function makeFetch() {
   }
 }
 
-async function boot(search) {
+async function boot(search, seed) {
   const html = readFileSync(resolve(dist, 'index.html'), 'utf8')
   const vc = new VirtualConsole()
   const errors = []
@@ -115,6 +115,13 @@ async function boot(search) {
     },
   })
 
+  // 老存档迁移测试用：先塞一份老格式的 localStorage
+  if (seed) {
+    for (const [k, v] of Object.entries(seed)) {
+      dom.window.localStorage.setItem(k, v)
+    }
+  }
+
   // 手动注入 bundle（jsdom 的 resources:usable 在本地文件下不可靠）
   const bundle = readFileSync(resolve(dist, 'index.html'), 'utf8')
     .match(/src="([^"]+\.js)"/)[1]
@@ -124,6 +131,13 @@ async function boot(search) {
   dom.window.document.body.appendChild(script)
   await new Promise((r) => setTimeout(r, 600))
   return { dom, errors }
+}
+
+/** 按分组标题找侧栏分组（分组会增减，别用下标写死） */
+function section(doc, title) {
+  return [...doc.querySelectorAll('.rail-sec')].find(
+    (sec) => (sec.querySelector('.rail-sec-title')?.textContent || '') === title,
+  )
 }
 
 const results = []
@@ -139,8 +153,9 @@ function check(name, cond, extra = '') {
   check('渲染出顶栏品牌', doc.querySelector('.brand .title')?.textContent?.includes('喵叫'))
   check('空状态引导可见', !!doc.querySelector('.canvas-empty .empty-card'))
   check('侧栏存在（节点 3 项：图生成 / 图生图 / 图片）',
-    doc.querySelectorAll('.rail-item').length === 3,
-    String(doc.querySelectorAll('.rail-item').length))
+    section(doc, '节点')?.querySelectorAll('.rail-item').length === 3,
+    String(section(doc, '节点')?.querySelectorAll('.rail-item').length))
+  check('有「项目」分组（独立画布）', !!section(doc, '项目'))
   check('缩放显示 100%', doc.querySelector('.zoom-val')?.textContent === '100%')
   check('无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
@@ -289,8 +304,7 @@ function check(name, cond, extra = '') {
   check('星标可用', !!star && !star.disabled)
   star.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
   await new Promise((r) => setTimeout(r, 80))
-  const favItems = () =>
-    [...doc.querySelectorAll('.rail-sec')][1].querySelectorAll('.rail-item')
+  const favItems = () => section(doc, '提示词收藏').querySelectorAll('.rail-item')
   check('收藏后出现在列表', favItems().length === 1)
   check('星标点亮', !!doc.querySelector('.star.on'))
   check('列表文本正确',
@@ -316,7 +330,8 @@ function check(name, cond, extra = '') {
   // 再收藏一次后删除
   doc.querySelector('.star').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
   await new Promise((r) => setTimeout(r, 80))
-  doc.querySelector('.rail-del')?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  section(doc, '提示词收藏').querySelector('.rail-del')
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
   await new Promise((r) => setTimeout(r, 80))
   check('删除收藏', favItems().length === 0)
 
@@ -529,8 +544,8 @@ function check(name, cond, extra = '') {
 
   check('侧栏存在', !!doc.querySelector('.rail'))
   const titles = [...doc.querySelectorAll('.rail-sec-title')].map((x) => x.textContent)
-  check('三个菜单分组：节点/收藏/设置',
-    JSON.stringify(titles) === JSON.stringify(['节点', '提示词收藏', '设置']),
+  check('四个菜单分组：项目/节点/收藏/设置',
+    JSON.stringify(titles) === JSON.stringify(['项目', '节点', '提示词收藏', '设置']),
     JSON.stringify(titles))
 
   // 分组可折叠
@@ -553,7 +568,7 @@ function check(name, cond, extra = '') {
   // 设置里的底模下拉
   doc.querySelector('details.fold').open = true
   await new Promise((r) => setTimeout(r, 80))
-  const setSec = [...doc.querySelectorAll('.rail-sec')][2]
+  const setSec = section(doc, '设置')
   const msel = setSec.querySelector('select')
   check('设置里有底模下拉', !!msel)
   check('底模下拉列出本机已装的', msel && msel.options.length === 2,
@@ -790,6 +805,101 @@ function check(name, cond, extra = '') {
         String(doc.querySelectorAll('.node').length))
 
   check('真删场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 16) 项目：每个项目是独立画布，互不干涉
+{
+  const { dom, errors } = await boot('?demo=1')
+  const doc = dom.window.document
+  const win = dom.window
+  await new Promise((r) => setTimeout(r, 500))
+
+  const projSec = () => section(doc, '项目')
+  const projRows = () => [...(projSec()?.querySelectorAll('.project-item') || [])]
+  const nodes = () => doc.querySelectorAll('.node').length
+
+  check('项目分组初始有 1 个项目', projRows().length === 1, String(projRows().length))
+  check('当前项目有标记', !!projSec().querySelector('.project-item.current'))
+  check('demo 节点在画布上', nodes() === 1, String(nodes()))
+
+  // 新建项目 -> 空白画布
+  projSec().querySelector('.rail-new').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 200))
+  check('新建后项目数变 2', projRows().length === 2, String(projRows().length))
+  check('新项目是空画布', nodes() === 0, String(nodes()))
+  check('顶栏显示当前项目名',
+    (doc.querySelector('.brand .sub')?.textContent || '').includes('项目'),
+    doc.querySelector('.brand .sub')?.textContent)
+
+  // 在新项目里加一个节点
+  section(doc, '节点').querySelector('.rail-add')
+    .dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 150))
+  check('新项目里能加节点', nodes() === 1, String(nodes()))
+
+  // 切回第一个项目 -> 原来的节点回来，新项目的节点不在这
+  projRows()[0].querySelector('.rail-item-main')
+    .dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 200))
+  check('切回旧项目后画布内容换回来了', nodes() === 1, String(nodes()))
+  const promptA = doc.querySelector('textarea.prompt')?.value || ''
+  check('切回的是旧项目的节点', promptA.includes('猫骑士'), promptA)
+
+  // 再切到新项目 -> 它的节点还在（没被旧项目覆盖）
+  projRows()[1].querySelector('.rail-item-main')
+    .dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 200))
+  check('切回新项目仍是它自己的节点', nodes() === 1, String(nodes()))
+  const promptB = doc.querySelector('textarea.prompt')?.value || ''
+  check('两个项目的节点内容互不相同', promptB !== promptA, `${promptA} | ${promptB}`)
+
+  // 删项目（先只从列表移除）
+  projRows()[1].querySelector('.rail-del')
+    .dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 150))
+  check('删项目弹确认框', !!doc.querySelector('.modal-mask'))
+  const onlyRemove = [...doc.querySelectorAll('.modal-actions button')]
+    .find((b) => (b.textContent || '').includes('仅从列表移除'))
+  onlyRemove?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 200))
+  check('项目数回到 1', projRows().length === 1, String(projRows().length))
+
+  check('项目场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 17) 老存档迁移：meow.canvas.v1 的一份 nodes+viewport 要变成第一个项目
+{
+  const legacy = {
+    nodes: [{
+      id: 'legacy1', kind: 'gen', x: 40, y: 60, view: 'expanded',
+      params: {
+        prompt: 'legacy knight', negative: '', width: 768, height: 768, steps: 30,
+        cfg: 7, seed: 1, preset: 'sprite', pixel: 6, palette: 32, matte: false,
+        clipSkip: 1, strength: 0.55, lora: '', loraScale: 0.8,
+      },
+    }],
+    viewport: { x: 33, y: 44, z: 1.5 },
+  }
+  const { dom, errors } = await boot('', { 'meow.canvas.v1': JSON.stringify(legacy) })
+  const doc = dom.window.document
+  await new Promise((r) => setTimeout(r, 500))
+
+  const projSec = () => section(doc, '项目')
+  const rows = () => [...(projSec()?.querySelectorAll('.project-item') || [])]
+  check('老存档被迁移成 1 个项目', rows().length === 1, String(rows().length))
+  check('迁移后的项目名是「我的项目」',
+    (rows()[0]?.querySelector('b')?.textContent || '') === '我的项目',
+    rows()[0]?.querySelector('b')?.textContent)
+  check('老节点被带过来了',
+    (doc.querySelector('textarea.prompt')?.value || '') === 'legacy knight',
+    doc.querySelector('textarea.prompt')?.value)
+  check('老视口被带过来了（缩放 1.5）',
+    (doc.querySelector('.zoom-val')?.textContent || '') === '150%',
+    doc.querySelector('.zoom-val')?.textContent)
+
+  check('迁移场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 

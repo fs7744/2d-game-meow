@@ -1,9 +1,16 @@
 import { useState, type ReactNode } from 'react'
 import type { FavoritePrompt, LoraInfo } from '../types'
+import type { ProjectMeta } from '../store/projects'
 
 type Props = {
   loras: LoraInfo[]
   favs: FavoritePrompt[]
+  projects: ProjectMeta[]
+  currentProject: string
+  onSwitchProject: (id: string) => void
+  onCreateProject: () => void
+  onRenameProject: (id: string, name: string) => void
+  onDeleteProject: (id: string) => void
   onAddNode: (kind?: 'gen' | 'img2img' | 'image') => void
   canApply: boolean
   onApplyFav: (text: string) => void
@@ -44,6 +51,50 @@ function Section(
   )
 }
 
+/** 项目行：名字可双击改成输入框。 */
+function ProjectRow({
+  p, current, onSwitch, onRename, onDelete,
+}: {
+  p: ProjectMeta
+  current: boolean
+  onSwitch: () => void
+  onRename: (name: string) => void
+  onDelete: () => void
+}) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(p.name)
+  return (
+    <div className={`rail-item project-item${current ? ' current' : ''}`}>
+      {editing ? (
+        <input
+          className="project-rename"
+          value={draft}
+          autoFocus
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={() => { setEditing(false); onRename(draft) }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') { setEditing(false); onRename(draft) }
+            if (e.key === 'Escape') { setEditing(false); setDraft(p.name) }
+          }}
+        />
+      ) : (
+        <button
+          className="rail-item-main"
+          onClick={onSwitch}
+          onDoubleClick={() => { setDraft(p.name); setEditing(true) }}
+          title={`切换到「${p.name}」（双击改名）`}
+        >
+          <b>{p.name}</b>
+          <em>{p.count} 个节点{current ? ' · 当前' : ''}</em>
+        </button>
+      )}
+      {!editing && (
+        <button className="rail-del" title="删除项目" onClick={onDelete}>✕</button>
+      )}
+    </div>
+  )
+}
+
 /**
  * 左边栏：菜单式层级，可整条收起。
  *
@@ -53,6 +104,7 @@ function Section(
 export default function Sidebar({
   loras, favs, onAddNode, canApply, onApplyFav, onRemoveFav,
   models, model, onModel, matteBackend, onMatteBackend,
+  projects, currentProject, onSwitchProject, onCreateProject, onRenameProject, onDeleteProject,
 }: Props) {
   const [collapsed, setCollapsed] = useState(false)
 
@@ -89,6 +141,23 @@ export default function Sidebar({
       </div>
 
       <div className="rail-scroll">
+        <Section icon="▤" title="项目" count={projects.length}>
+          {projects.map((p) => (
+            <ProjectRow
+              key={p.id}
+              p={p}
+              current={p.id === currentProject}
+              onSwitch={() => onSwitchProject(p.id)}
+              onRename={(name) => onRenameProject(p.id, name)}
+              onDelete={() => onDeleteProject(p.id)}
+            />
+          ))}
+          <button className="rail-new" onClick={onCreateProject} title="新建一个空画布">
+            + 新建项目
+          </button>
+          <p className="rail-tip">每个项目是一套独立的画布，互不干涉。</p>
+        </Section>
+
         <Section icon="▣" title="节点">
           <div
             className="rail-item"

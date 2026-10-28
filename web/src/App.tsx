@@ -4,6 +4,9 @@ import Sidebar from './components/Sidebar'
 import TrainPanel from './components/TrainPanel'
 import { hasPrompt, loadPrompts, removePrompt, savePrompts, togglePrompt } from './store/prompts'
 import {
+  loadStore, makeProject, metaOf, saveStore, type Project, type ProjectMeta,
+} from './store/projects'
+import {
   deleteAssets, fetchJob, fetchLoras, fetchModels, health, submitImg2Img, submitTxt2Img,
   uploadImage,
 } from './api'
@@ -12,8 +15,6 @@ import type {
   FavoritePrompt, GenNode, GenParams, LoraInfo, NodeImage, NodeKind, NodeSource, Viewport,
 } from './types'
 import type { NodePatch } from './nodes/GenNodeCard'
-
-const STORAGE_KEY = 'meow.canvas.v1'
 
 const DEFAULT_PARAMS: GenParams = {
   prompt: '',
@@ -59,8 +60,6 @@ function makeNode(
   }
 }
 
-type Saved = { nodes: GenNode[]; viewport: Viewport }
-
 /** 老存档没有 lora/loraScale/strength，读回来补默认值，否则下拉会显示空、强度变 NaN。 */
 function migrate(n: GenNode): GenNode {
   return { ...n, kind: n.kind ?? 'gen', params: { ...DEFAULT_PARAMS, ...n.params } }
@@ -70,6 +69,14 @@ function migrate(n: GenNode): GenNode {
 const DEMO = new URLSearchParams(location.search).get('demo')
 
 export default function App() {
+  // 项目：每个项目是一套独立的节点 + 视口。store 里存全部项目的完整数据，
+  // 内存里只留当前项目的（切项目就是把另一套换上）。
+  const storeRef = useRef<{ current: string; projects: Project[] }>(loadStore())
+  const [currentId, setCurrentId] = useState<string>(storeRef.current.current)
+  const [projectMeta, setProjectMeta] = useState<ProjectMeta[]>(
+    () => storeRef.current.projects.map(metaOf),
+  )
+  const initial = storeRef.current.projects.find((p) => p.id === storeRef.current.current)
   const [nodes, setNodes] = useState<GenNode[]>(() => {
     if (DEMO) {
       return [{
@@ -77,29 +84,11 @@ export default function App() {
         params: { ...DEFAULT_PARAMS, prompt: '白色猫骑士，红披风，武士刀，正面全身' },
       }]
     }
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY)
-      if (raw) {
-        const s = JSON.parse(raw) as Saved
-        if (Array.isArray(s.nodes)) return s.nodes.map(migrate)
-      }
-    } catch {
-      /* 旧数据损坏就忽略 */
-    }
-    return []
+    return (initial?.nodes ?? []).map(migrate)
   })
-  const [viewport, setViewport] = useState<Viewport>(() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY)
-      if (raw) {
-        const s = JSON.parse(raw) as Saved
-        if (s.viewport && typeof s.viewport.z === 'number') return s.viewport
-      }
-    } catch {
-      /* 忽略 */
-    }
-    return { x: 120, y: 90, z: 1 }
-  })
+  const [viewport, setViewport] = useState<Viewport>(
+    () => initial?.viewport ?? { x: 120, y: 90, z: 1 },
+  )
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [device, setDevice] = useState<string>('')
   const [favs, setFavs] = useState<FavoritePrompt[]>(() => loadPrompts())
@@ -110,6 +99,7 @@ export default function App() {
   const [matteBackend, setMatteBackend] = useState('auto')
   const [uploadMsg, setUploadMsg] = useState('')
   const [pendingDelete, setPendingDelete] = useState<GenNode | null>(null)
+  const [pendingProjectDelete, setPendingProjectDelete] = useState<string | null>(null)
   const pickFiles = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => savePrompts(favs), [favs])
@@ -129,18 +119,26 @@ export default function App() {
 
   const nodesRef = useRef(nodes)
   nodesRef.current = nodes
+  const viewportRef = useRef(viewport)
+  viewportRef.current = viewport
+  const currentIdRef = useRef(currentId)
+  currentIdRef.current = currentId
 
-  // 自动保存（防抖 400ms）
+  // 自动保存（防抖 400ms）：只写回**当前项目**，别的项目原封不动
   useEffect(() => {
     const t = setTimeout(() => {
-      try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify({ nodes, viewport }))
-      } catch {
-        /* 存储满了就放弃 */
-      }
+      const st = storeRef.current
+      const projects = st.projects.map((p) =>
+        p.id === currentId
+          ? { ...p, nodes, viewport, updated: new Date().toISOString() }
+          : p,
+      )
+      storeRef.current = { current: currentId, projects }
+      saveStore(currentId, projects)
+      setProjectMeta(projects.map(metaOf))
     }, 400)
     return () => clearTimeout(t)
-  }, [nodes, viewport])
+  }, [nodes, viewport, currentId])
 
   useEffect(() => {
     health()
@@ -148,6 +146,89 @@ export default function App() {
       .catch(() => setDevice('后端未连接'))
   }, [])
 
+
+  /** 把当前内存里的节点/视口写回 store（切项目、新建项目、删项目前都要先做） */
+  const flushCurrent = useCallback(() => {
+    const st = storeRef.current
+    const projects = st.projects.map((p) =>
+      p.id === currentIdRef.current
+        ? { ...p, nodes: nodesRef.current, viewport: viewportRef.current,
+            updated: new Date().toISOString() }
+        : p,
+    )
+    storeRef.current = { ...st, projects }
+    return projects
+  }, [])
+
+  /** 切换项目：把另一套节点/视口整个换上，互不干涉。 */
+  const switchProject = useCallback((id: string) => {
+    if (id === currentIdRef.current) return
+    const projects = flushCurrent()
+    const target = projects.find((p) => p.id === id)
+    if (!target) return
+    storeRef.current = { current: id, projects }
+    saveStore(id, projects)
+    setProjectMeta(projects.map(metaOf))
+    setCurrentId(id)
+    setNodes(target.nodes)
+    setViewport(target.viewport)
+    setSelectedId(null)
+  }, [flushCurrent])
+
+  const createProject = useCallback((name?: string) => {
+    const projects = flushCurrent()
+    const p = makeProject(name?.trim() || `项目 ${projects.length + 1}`)
+    const next = [...projects, p]
+    storeRef.current = { current: p.id, projects: next }
+    saveStore(p.id, next)
+    setProjectMeta(next.map(metaOf))
+    setCurrentId(p.id)
+    setNodes([])
+    setViewport({ x: 120, y: 90, z: 1 })
+    setSelectedId(null)
+  }, [flushCurrent])
+
+  const renameProject = useCallback((id: string, name: string) => {
+    const projects = flushCurrent().map((p) =>
+      p.id === id ? { ...p, name: name.trim() || p.name } : p,
+    )
+    storeRef.current = { ...storeRef.current, projects }
+    saveStore(storeRef.current.current, projects)
+    setProjectMeta(projects.map(metaOf))
+  }, [flushCurrent])
+
+  /** 删项目：hard=true 时连这个项目的产物文件一起删（不可恢复）。 */
+  const deleteProject = useCallback(async (id: string, hard: boolean) => {
+    const projects = flushCurrent()
+    const target = projects.find((p) => p.id === id)
+    if (!target) return
+    if (hard) {
+      const paths = target.nodes
+        .flatMap((n) => [n.job?.path, n.job?.raw, n.image?.path])
+        .filter((x): x is string => !!x)
+      if (paths.length > 0) {
+        try {
+          await deleteAssets(paths)
+        } catch (e) {
+          setUploadMsg(`删除失败：${e instanceof Error ? e.message : '未知错误'}`)
+          window.setTimeout(() => setUploadMsg(''), 5000)
+        }
+      }
+    }
+    let next = projects.filter((p) => p.id !== id)
+    if (next.length === 0) next = [makeProject('我的项目')]   // 至少留一个空项目
+    const wasCurrent = currentIdRef.current === id
+    const current = wasCurrent ? next[0].id : currentIdRef.current
+    storeRef.current = { current, projects: next }
+    saveStore(current, next)
+    setProjectMeta(next.map(metaOf))
+    if (wasCurrent) {
+      setCurrentId(next[0].id)
+      setNodes(next[0].nodes)
+      setViewport(next[0].viewport)
+      setSelectedId(null)
+    }
+  }, [flushCurrent])
 
   const patchNode = useCallback((id: string, patch: NodePatch) => {
     setNodes((list) => list.map((n) => (n.id === id ? { ...n, ...patch } : n)))
@@ -432,7 +513,9 @@ export default function App() {
         <div className="brand">
           <span className="logo">喵</span>
           <span className="title">喵叫工作台</span>
-          <span className="sub">画布 · 文生图 / 图生图</span>
+          <span className="sub">
+            {projectMeta.find((p) => p.id === currentId)?.name ?? '画布'} · 文生图 / 图生图
+          </span>
         </div>
         <div className="spacer" />
         <button className="train-btn" onClick={() => setTrainOpen(true)} title="训练自己的 LoRA">
@@ -454,6 +537,12 @@ export default function App() {
         <Sidebar
           loras={loras}
           favs={favs}
+          projects={projectMeta}
+          currentProject={currentId}
+          onSwitchProject={switchProject}
+          onCreateProject={() => createProject()}
+          onRenameProject={renameProject}
+          onDeleteProject={(id) => setPendingProjectDelete(id)}
           onAddNode={(kind) => addNode(kind ?? 'gen')}
           canApply={!!selectedId}
           onApplyFav={applyFavorite}
@@ -502,6 +591,21 @@ export default function App() {
       />
 
       {uploadMsg && <div className="toast">{uploadMsg}</div>}
+
+      {pendingProjectDelete && (() => {
+        const proj = projectMeta.find((p) => p.id === pendingProjectDelete)
+        return (
+          <ConfirmDialog
+            title="删除这个项目？"
+            summary={`项目「${proj?.name ?? '未命名'}」，${proj?.count ?? 0} 个节点`}
+            removeLabel="仅从列表移除"
+            note="「真删」会把这个项目里所有节点的产物文件（PNG / sidecar / raw）一起删掉，不可恢复。"
+            onCancel={() => setPendingProjectDelete(null)}
+            onRemove={() => { void deleteProject(pendingProjectDelete, false); setPendingProjectDelete(null) }}
+            onDelete={() => { void deleteProject(pendingProjectDelete, true); setPendingProjectDelete(null) }}
+          />
+        )
+      })()}
 
       {pendingDelete && (() => {
         const { files, refs } = deleteInfo(pendingDelete)

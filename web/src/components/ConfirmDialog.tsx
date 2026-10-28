@@ -18,13 +18,18 @@ type Props = {
   note?: string
   /** 阻止真删的原因 */
   blockReason?: string
+  /** 两个动作按钮的文案（删节点 / 删项目说法不一样） */
+  removeLabel?: string
+  deleteLabel?: string
   onCancel: () => void
   onRemove: () => void
   onDelete: () => void
 }
 
 export default function ConfirmDialog({
-  title, summary, files, note, blockReason, onCancel, onRemove, onDelete,
+  title, summary, files, note, blockReason,
+  removeLabel = '仅移除节点', deleteLabel = '真删（含文件）',
+  onCancel, onRemove, onDelete,
 }: Props) {
   return (
     <div className="modal-mask" onClick={onCancel}>
@@ -49,7 +54,7 @@ export default function ConfirmDialog({
             取消
           </button>
           <button className="mini wide" onClick={onRemove} title="只从画布移除，磁盘文件保留">
-            仅移除节点
+            {removeLabel}
           </button>
           <button
             className="mini wide danger"
@@ -57,7 +62,7 @@ export default function ConfirmDialog({
             disabled={!!blockReason}
             title={blockReason || '删除磁盘上的文件（不可恢复）'}
           >
-            真删（含文件）
+            {deleteLabel}
           </button>
         </div>
       </div>
