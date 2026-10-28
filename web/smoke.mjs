@@ -74,6 +74,7 @@ function makeFetch() {
         json: async () => ({
           current: 'sd15',
           available: ['sd15', 'sdxl'],
+          refiner: true,
           // 与后端 Engine.RECOMMEND 一致：SDXL 推荐 768/24，不是 1024
           recommend: {
             sd15: { width: 768, height: 768, steps: 30, cfg: 7.0, pixel: 6, palette: 32,
@@ -1867,6 +1868,102 @@ function check(name, cond, extra = '') {
     doc.querySelector('.node .warn')?.textContent)
 
   check('像素块告警场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 31) 像素化是显式开关（由用户控制要不要）
+{
+  const { dom, errors } = await boot('?demo=1')
+  const doc = dom.window.document
+  const win = dom.window
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms))
+  await wait(500)
+  doc.querySelector('details.fold').open = true
+  await wait(120)
+
+  const lab = (name) => [...doc.querySelectorAll('label')]
+    .find((l) => (l.textContent || '').trim().startsWith(name))
+  // React 的 checkbox 走 click（ChangeEventPlugin 对 checkbox/radio 监听 click），
+  // 派发 change 不会触发 onChange——这是测试写法问题，不是功能问题。
+  const clickCheck = (el) =>
+    el.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+
+  const pxToggle = lab('像素化')?.querySelector('input')
+  check('有「像素化」开关', !!pxToggle)
+  check('默认是开的（推荐值 6）', pxToggle?.checked === true, String(pxToggle?.checked))
+  check('像素块输入框可用', lab('像素块')?.querySelector('input')?.disabled === false)
+
+  // 关掉 → 像素块置 0 并禁用
+  clickCheck(pxToggle)
+  await wait(120)
+  check('关掉后像素块变 0', lab('像素块')?.querySelector('input')?.value === '0',
+    lab('像素块')?.querySelector('input')?.value)
+  check('关掉后像素块输入框禁用',
+    lab('像素块')?.querySelector('input')?.disabled === true)
+  check('关掉后不再显示有效像素', (lab('像素块')?.textContent || '').includes('关'),
+    lab('像素块')?.textContent)
+  check('关掉后不再告警', !doc.querySelector('.node .warn'), doc.querySelector('.warn')?.textContent)
+
+  // 再打开 → 恢复默认 6
+  clickCheck(lab('像素化').querySelector('input'))
+  await wait(120)
+  check('再打开恢复成 6（128px 有效像素）',
+    lab('像素块')?.querySelector('input')?.value === '6',
+    lab('像素块')?.querySelector('input')?.value)
+
+  check('像素化开关场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 32) Refiner 开关由用户控制（只在 SDXL + 本机有权重时可用）
+{
+  const { dom, errors } = await boot('?demo=1')
+  const doc = dom.window.document
+  const win = dom.window
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms))
+  await wait(500)
+  doc.querySelector('details.fold').open = true
+  await wait(120)
+
+  const lab = (name) => [...doc.querySelectorAll('label')]
+    .find((l) => (l.textContent || '').trim().startsWith(name))
+  const clickCheck = (el) =>
+    el.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+
+  const rf = lab('应用 Refiner')?.querySelector('input')
+  check('有 Refiner 开关', !!rf)
+  check('默认关闭', rf?.checked === false, String(rf?.checked))
+  check('SD1.5 下禁用（refiner 只支持 SDXL）', rf?.disabled === true, String(rf?.disabled))
+  check('并说明为什么禁用',
+    (doc.querySelector('.node-body')?.textContent || '').includes('只支持 SDXL'))
+
+  // 切到 SDXL 才可用
+  const modelSel = [...doc.querySelectorAll('select')]
+    .find((s2) => (s2.closest('label')?.textContent || '').includes('底模'))
+  const setSel = (el, v) => {
+    const setter = Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value').set
+    setter.call(el, v)
+    el.dispatchEvent(new win.Event('change', { bubbles: true }))
+  }
+  setSel(modelSel, 'sdxl')
+  await wait(250)
+  check('切到 SDXL 后开关可用',
+    lab('应用 Refiner')?.querySelector('input')?.disabled === false)
+
+  clickCheck(lab('应用 Refiner').querySelector('input'))
+  await wait(120)
+  check('勾上后出现精修参数', !!lab('精修强度') && !!lab('精修步数'),
+    (doc.querySelector('.node-body')?.textContent || '').slice(-60))
+
+  doc.querySelector('.gen-btn').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await wait(250)
+  const body = JSON.parse(calls.filter((c) => c.url.endsWith('/generate')).pop().body)
+  check('提交带 refiner 开关与参数',
+    body.params.refiner === true && body.params.refiner_cfg === 6
+      && body.params.refiner_steps === 20 && body.params.refiner_end === 0.8,
+    JSON.stringify({ r: body.params.refiner, c: body.params.refiner_cfg }))
+
+  check('Refiner 场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 

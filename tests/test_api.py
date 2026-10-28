@@ -695,3 +695,10 @@ def test_pose_dirs_lists_directories_with_frames(client):
         assert it["count"] >= 2, "少于 2 张图的目录不该出现在候选里"
         assert isinstance(it["path"], str) and it["path"]
         assert isinstance(it["sample"], list) and it["sample"]
+
+
+def test_models_endpoint_reports_refiner_availability(client):
+    """前端要靠这个字段决定 Refiner 开关能不能点。"""
+    body = client.get("/models").json()
+    assert "refiner" in body
+    assert isinstance(body["refiner"], bool)

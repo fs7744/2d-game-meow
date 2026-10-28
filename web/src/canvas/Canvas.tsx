@@ -10,6 +10,8 @@ type Props = {
   maxCandidates?: number
   /** W4 可用的骨架帧目录 */
   poseDirs?: PoseDir[]
+  /** 本机是否装了 SDXL refiner 权重 */
+  hasRefiner?: boolean
   selectedId: string | null
   viewport: Viewport
   setViewport: (v: Viewport | ((prev: Viewport) => Viewport)) => void
@@ -37,6 +39,7 @@ export default function Canvas({
   model,
   maxCandidates,
   poseDirs,
+  hasRefiner,
   selectedId,
   viewport,
   setViewport,
@@ -306,6 +309,7 @@ export default function Canvas({
             model={model}
             maxCandidates={maxCandidates}
             poseDirs={poseDirs}
+            hasRefiner={hasRefiner}
             onSpawnImg2Img={() => onSpawnImg2Img(n.id)}
             sourceNode={nodes.find((x) => x.id === n.source?.nodeId)}
             sourceOptions={sourceOptions}

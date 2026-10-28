@@ -262,6 +262,8 @@ def txt2img(eng: Engine, *, prompt: str, negative: Optional[str] = None,
             clean_iso: int = 1, model: str = "sd15", clip_skip: int = 1,
             hires: float = 0.0, hires_strength: float = 0.35,
             hires_steps: int = 12, distill: str = "",
+            refiner: bool = False, refiner_cfg: float = 6.0,
+            refiner_steps: int = 20, refiner_end: float = 0.8,
             scope: str = "", tag: str = "w1") -> Dict[str, Any]:
     prompt, negative = presets.build(prompt, negative, preset,
                                     max_tokens=presets.CHUNK_BUDGET)
@@ -286,10 +288,39 @@ def txt2img(eng: Engine, *, prompt: str, negative: Optional[str] = None,
     kw, clip_used = _text_kwargs(pipe, prompt, neg, clip_skip, model)
     torch.cuda.reset_peak_memory_stats()
     dt = _timer()
-    img = _infer(eng, pipe, dict(width=width, height=height,
-                                 num_inference_steps=steps,
-                                 guidance_scale=cfg, generator=gen, **kw),
-                 label="w1").images[0]
+    # **SDXL Refiner**：底模出 latent → refiner 接着精修最后一段去噪。
+    # 它不是"换个更大的模型"，而是把收尾的去噪交给专攻细节的权重，
+    # 所以对发丝/布料纹理的提升远大于对构图的提升。
+    use_refiner = bool(refiner) and model == "sdxl" and eng.has_refiner()
+    if refiner and model != "sdxl":
+        print(f"[warn] Refiner 只支持 SDXL（当前 {model}），已忽略")
+    if refiner and model == "sdxl" and not eng.has_refiner():
+        print("[warn] 没找到 SDXL refiner 权重（models/checkpoints/sdxl-refiner），已忽略")
+
+    call_kw: Dict[str, Any] = dict(width=width, height=height,
+                                   num_inference_steps=steps,
+                                   guidance_scale=cfg, generator=gen, **kw)
+    # 注意：不能传 output_type="image"——新版 diffusers 已废弃它，会把输出换成
+    # numpy 数组（img.size 变成整数，调用方按 PIL 用就炸）。
+    out = _infer(eng, pipe, call_kw, label="w1")
+    img = out.images[0]
+    if use_refiner:
+        # refiner 是 img2img 管线：**只接受图片**（传 latent 会被当成 PIL 图
+        # 走一遍预处理，出来是糊掉的鬼影）。所以底模先解码成图再喂进去。
+        rp = eng.refiner_pipe()
+        # refiner 的 embeds 要自己组装（见 Engine.refiner_embeds 的说明）：
+        # 直接传 prompt 会用底模那套 2816 维拼接，喂不进 refiner 的 UNet。
+        pos_e, neg_e, pos_pool, neg_pool = eng.refiner_embeds(prompt, neg)
+        img = _infer(eng, rp, dict(prompt_embeds=pos_e,
+                                   negative_prompt_embeds=neg_e,
+                                   pooled_prompt_embeds=pos_pool,
+                                   negative_pooled_prompt_embeds=neg_pool,
+                                   image=img,
+                                   denoising_start=refiner_end,
+                                   num_inference_steps=refiner_steps,
+                                   guidance_scale=refiner_cfg,
+                                   generator=gen),
+                     label="refiner").images[0]
     seconds = dt()
     width, height = img.size          # OOM 降档后以实际尺寸为准，别在 meta 里撒谎
     if hires and hires > 1.0:
@@ -318,6 +349,9 @@ def txt2img(eng: Engine, *, prompt: str, negative: Optional[str] = None,
         "hires_strength": hires_strength if hires > 1.0 else None,
         "hires_steps": hires_steps if hires > 1.0 else None,
         "distill": distill or None,
+        "refiner": bool(use_refiner), "refiner_cfg": refiner_cfg if use_refiner else None,
+        "refiner_steps": refiner_steps if use_refiner else None,
+        "refiner_end": refiner_end if use_refiner else None,
         "seconds": seconds, "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
     }, raw=raw, scope=scope)
 

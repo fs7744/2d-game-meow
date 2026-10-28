@@ -110,6 +110,11 @@ function common(params: GenParams, opts: SubmitOpts) {
     matte_backend: opts.matteBackend || 'auto',
     // 空串表示不挂 LoRA；后端会把名字解析成绝对路径
     ...loraPayload(params),
+    // SDXL Refiner：只有 SDXL 有意义，后端会校验
+    refiner: params.refiner || undefined,
+    refiner_cfg: params.refinerCfg,
+    refiner_steps: params.refinerSteps,
+    refiner_end: params.refinerEnd,
     // 项目作用域：产物写进 assets/projects/<scope>/，项目之间互不可见
     scope: opts.scope || undefined,
   }
@@ -476,17 +481,20 @@ export async function fetchTrain(id: string): Promise<TrainState> {
 export type ModelList = {
   available: string[]
   recommend: Record<string, ModelRecommend>
+  /** 本机是否装了 SDXL refiner 权重 */
+  refiner: boolean
 }
 
 export async function fetchModels(): Promise<ModelList> {
   const r = await fetch(`${base}/models`)
   // 后端不可达时退回 SD1.5 单档：宁可少显示，也不要让下拉是空的
-  if (!r.ok) return { available: ['sd15'], recommend: {} }
+  if (!r.ok) return { available: ['sd15'], recommend: {}, refiner: false }
   const j = await r.json()
   const available: string[] = Array.isArray(j.available) ? j.available : ['sd15']
   const recommend: Record<string, ModelRecommend> =
     j.recommend && typeof j.recommend === 'object' ? j.recommend : {}
-  return { available, recommend }
+  const refiner = j.refiner === true
+  return { available, recommend, refiner }
 }
 
 /**

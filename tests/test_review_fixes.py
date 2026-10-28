@@ -346,3 +346,33 @@ def test_recommend_carries_max_candidates(eng):
     for m in eng.available_models():
         rec = eng.recommend(m)
         assert 1 <= rec["max_candidates"] <= 6, rec
+
+
+# ---------------- SDXL Refiner ----------------
+
+def test_refiner_dir_is_not_registered_as_a_base(tmp_path):
+    """refiner 的管线类是 Img2Img，**不能**出现在底模下拉里。
+
+    它不是文生图底模：选它跑文生图会得到完全不同的结果，而且用户根本不知道
+    自己选错了（它长得就像一个"SDXL 变体"）。
+    """
+    d = tmp_path / "checkpoints" / "sdxl-refiner"
+    (d / "unet").mkdir(parents=True)
+    (d / "model_index.json").write_text(
+        json.dumps({"_class_name": "StableDiffusionXLImg2ImgPipeline"}), "utf-8")
+    (d / "unet" / "config.json").write_text(json.dumps({"in_channels": 4}), "utf-8")
+
+    from workflows.engine import Engine
+
+    e = Engine(tmp_path)
+    assert "sdxl-refiner" not in e.available_models()
+    # 但它确实能被识别成 refiner
+    assert e.has_refiner() is True
+    assert e.refiner_path() is not None
+
+
+def test_has_refiner_false_without_weights(eng):
+    """没下载 refiner 权重时要说"没有"，前端据此禁用开关。"""
+    if eng.has_refiner():
+        return                      # 本机装了权重，跳过这条
+    assert eng.refiner_path() is None

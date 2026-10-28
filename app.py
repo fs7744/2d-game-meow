@@ -278,7 +278,9 @@ def models() -> Dict[str, Any]:
     """
     have = engine.available_models()
     return {"current": engine.DEFAULT_MODEL, "available": have,
-            "recommend": {m: engine.recommend(m) for m in have}}
+            "recommend": {m: engine.recommend(m) for m in have},
+            # 本机有没有 SDXL refiner 权重：没有就别让用户勾那个开关
+            "refiner": engine.has_refiner()}
 
 
 @app.get("/loras")

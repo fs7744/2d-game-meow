@@ -135,6 +135,34 @@ const PARAM_HINTS: Record<string, { what: string; effect: string; rec: string }>
     effect: '决定最终像素密度；0=自动检测输入图的网格',
     rec: '0（自动）。已知原图是 128px 像素画时直接填 128',
   },
+  精修: {
+    what: 'SDXL Refiner：底模出图后再走一遍精修（接在最后一段去噪上）',
+    effect: '它是个**照片化**精修器：喂插画会把画面往写实拉（实测把动漫剑客'
+      + '变成"墙上挂的一幅画"），喂写实图才会提升发丝/布料/金属的细节',
+    rec: '**写实图**才值得开；像素/动漫素材别开——后处理本来就会抹平细节，'
+      + 'refiner 只会把风格带偏',
+  },
+  精修步数: {
+    what: 'refiner 自己的去噪步数',
+    effect: '越多越干净也越慢；refiner 只处理最后一段，步数需求比底模低',
+    rec: '20~30',
+  },
+  精修强度: {
+    what: 'refiner 的 CFG（提示词服从度）',
+    effect: '高=更贴合提示词但可能过饱和；低=更自然',
+    rec: '5~7，与底模 CFG 接近',
+  },
+  精修起点: {
+    what: 'refiner 从去噪过程的哪一段接手',
+    effect: '0.8 = 底模走完 80% 后交给 refiner。起点太早会削弱底模的构图',
+    rec: '0.8（官方默认）；想更明显地"换风格"可以调到 0.7',
+  },
+  像素化: {
+    what: '要不要把出图变成像素画（把画面按色块栅格化）',
+    effect: '关掉就是普通插画/立绘；打开才做像素化。像素化会**丢掉大量细节**——'
+      + '同一句提示词，1024² 生成再砍成 128 有效像素，比 768² 生成再砍成 128 明显更精细',
+    rec: '要游戏素材就开（128px 有效像素是标准精灵尺寸）；要立绘/宣传图就关',
+  },
   像素块: {
     what: '像素化时每个色块的边长（0 = 不像素化）',
     effect: '块越大，有效像素越少、越"像素"；块太小会保留 AI 图的软边和噪点，'
@@ -240,6 +268,8 @@ type Props = {
   maxCandidates?: number
   /** 可当 W4 输入的骨架帧目录（后端扫出来的） */
   poseDirs?: PoseDir[]
+  /** 本机是否装了 SDXL refiner 权重（没有就别让人勾） */
+  hasRefiner?: boolean
   onSpawnImg2Img: () => void
   /** 图生图的上游节点（从 source.nodeId 解析而来） */
   sourceNode?: GenNode
@@ -284,6 +314,7 @@ export default function GenNodeCard({
   model,
   maxCandidates,
   poseDirs,
+  hasRefiner,
   onSpawnImg2Img,
   sourceNode,
   sourceOptions,
@@ -1928,6 +1959,74 @@ export default function GenNodeCard({
                     onChange={(e) => setParam('cfg', Number(e.target.value) || 7.5)}
                   />
                 </label>
+                <label className="check" title={hint('精修')}>
+                  <input
+                    type="checkbox"
+                    checked={p.refiner}
+                    disabled={model !== 'sdxl' || !hasRefiner}
+                    onChange={(e) => setParam('refiner', e.target.checked)}
+                  />
+                  应用 Refiner 精修
+                </label>
+                {p.refiner && (
+                  <div className="lora-stack">
+                    <label className="strength" title={hint('精修强度')}>
+                      <span>精修强度</span>
+                      <input
+                        type="range"
+                        min={1}
+                        max={12}
+                        step={0.5}
+                        value={p.refinerCfg}
+                        onChange={(e) => setParam('refinerCfg', Number(e.target.value))}
+                      />
+                      <b>{p.refinerCfg}</b>
+                    </label>
+                    <label className="strength" title={hint('精修步数')}>
+                      <span>精修步数</span>
+                      <input
+                        type="number"
+                        min={5}
+                        max={60}
+                        value={p.refinerSteps}
+                        onChange={(e) => setParam('refinerSteps',
+                          Math.min(60, Math.max(5, Number(e.target.value) || 20)))}
+                      />
+                      <b>步</b>
+                    </label>
+                    <label className="strength" title={hint('精修起点')}>
+                      <span>精修起点</span>
+                      <input
+                        type="range"
+                        min={0.4}
+                        max={0.95}
+                        step={0.05}
+                        value={p.refinerEnd}
+                        onChange={(e) => setParam('refinerEnd', Number(e.target.value))}
+                      />
+                      <b>{p.refinerEnd.toFixed(2)}</b>
+                    </label>
+                  </div>
+                )}
+                {model !== 'sdxl' && (
+                  <p className="src-note">Refiner 只支持 SDXL；SD1.5 底模下不可用。</p>
+                )}
+                {model === 'sdxl' && !hasRefiner && (
+                  <p className="src-note">
+                    本机没有 refiner 权重（models/checkpoints/sdxl-refiner），勾了也不会生效。
+                  </p>
+                )}
+                <label className="check" title={hint('像素化')}>
+                  <input
+                    type="checkbox"
+                    checked={p.pixel > 1}
+                    // 开关直接控制「要不要像素化」：以前只能靠"像素块填 0"来关，
+                    // 太隐蔽——正是有人把 64 当成成品尺寸填进去的原因。
+                    onChange={(e) => setParam('pixel',
+                      e.target.checked ? (p.pixel > 1 ? p.pixel : 6) : 0)}
+                  />
+                  像素化
+                </label>
                 <label title={hint('像素块')}>
                   像素块
                   <input
@@ -1935,12 +2034,13 @@ export default function GenNodeCard({
                     min={0}
                     max={16}
                     value={p.pixel}
+                    disabled={p.pixel <= 1}
                     // max 挡不住手输，所以 onChange 也要夹一下：曾经手输 64，
                     // 512/64 = 8px 有效像素，出图细节全被抹平
                     onChange={(e) => setParam('pixel',
                       Math.min(16, Math.max(0, Number(e.target.value) || 0)))}
                   />
-                  <b>{effPx}px</b>
+                  <b>{p.pixel > 1 ? `${effPx}px` : '关'}</b>
                 </label>
                 <label title={hint('色数')}>
                   色数

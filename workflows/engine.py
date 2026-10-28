@@ -231,7 +231,12 @@ class Engine:
             idx = json.loads((path / "model_index.json").read_text("utf-8"))
         except (OSError, json.JSONDecodeError):
             return False
-        if "Inpaint" in str(idx.get("_class_name") or ""):
+        cls = str(idx.get("_class_name") or "")
+        if "Inpaint" in cls:
+            return False
+        # **Refiner 也要排除**：SDXL refiner 的管线类是 Img2Img（它吃底模的
+        # latent 再精修），不是文生图底模。留在下拉里会让用户选中后跑出废图。
+        if "Img2Img" in cls:
             return False
         try:
             unet = json.loads((path / "unet" / "config.json").read_text("utf-8"))
@@ -827,6 +832,99 @@ class Engine:
         self._pool["lora"] = key
         log.info("LoRA 热切换 -> %s",
                  ", ".join(f"{Path(p_).name}@{sc}" for p_, sc in items))
+
+    # ---------- SDXL Refiner（精修器） ----------
+
+    REFINE_DIR = "checkpoints/sdxl-refiner"
+
+    def refiner_path(self) -> Optional[Path]:
+        """SDXL refiner 权重目录；没下载就返回 None。"""
+        p = self.root / self.REFINE_DIR
+        return p if (p / "model_index.json").is_file() else None
+
+    def has_refiner(self) -> bool:
+        return self.refiner_path() is not None
+
+    def refiner_pipe(self):
+        """加载 SDXL refiner（img2img 管线）。没有权重就返回 None。
+
+        refiner 的作用：吃底模输出的 latent，再走一遍去噪补细节。它不是
+        "换个更大的模型"，而是把最后 20% 的去噪交给一个专攻细节的权重，
+        所以对发丝/布料纹理的提升比对构图的提升大得多。
+        """
+        key = "refiner:sdxl"
+        if key in self._cache:
+            return self._get(key)
+        p = self.refiner_path()
+        if p is None:
+            return None
+        from diffusers import StableDiffusionXLImg2ImgPipeline
+
+        t0 = time.perf_counter()
+        # refiner 仓库里通常**只有 text_encoder_2**（OpenCLIP），ViT-L 的
+        # text_encoder 要复用底模的——本来就是同一个 CLIP-L，直接共享权重，
+        # 省 1.3GB 磁盘也省一份显存。
+        extra: Dict[str, Any] = {}
+        if not (p / "text_encoder" / "config.json").is_file():
+            base = self.txt2img_pipe("sdxl")
+            extra = dict(text_encoder=base.text_encoder, tokenizer=base.tokenizer)
+        pipe = StableDiffusionXLImg2ImgPipeline.from_pretrained(
+            str(p), variant=detect_variant(p),
+            **extra, **self._base_kwargs())      # torch_dtype 在 _base_kwargs 里
+        self._cache[key] = self._fit(pipe, key, vae_slicing=True)
+        log.info("%s 加载 %.1fs", key, time.perf_counter() - t0)
+        return self._get(key)
+
+    def refiner_embeds(self, prompt: str, negative: str, clip_skip: int = 1):
+        """给 refiner 准备文本 embeds（SDXL refiner 的输入跟底模不一样）。
+
+        **为什么不能直接 `refiner(prompt=...)`**：refiner 的 UNet
+        `cross_attention_dim=1280` 且**没有 encoder_hid_proj**，cross-attention
+        只吃 **768 维的 CLIP-L 隐层**；而 added_cond 的 text_embeds 要 **1280 维**
+        = CLIP-L pooled(768) + OpenCLIP pooled 的前 512 维。
+        底模那套"两个编码器拼成 2816"的做法喂进去会直接报
+        `mat1 and mat2 shapes cannot be multiplied (154x2048 and 1280x768)`。
+
+        返回 (正 embeds, 负 embeds, 正 pooled, 负 pooled)。
+        """
+        base = self.txt2img_pipe("sdxl")
+        tok, enc = base.tokenizer, base.text_encoder
+        tok2, enc2 = base.tokenizer_2, base.text_encoder_2
+        dev = enc.device
+
+        def _ids(t, tk):
+            out = tk(t, padding="max_length", max_length=tk.model_max_length,
+                     truncation=True, return_tensors="pt")
+            return out.input_ids.to(dev)
+
+        def _clip_l(text):
+            ids = _ids(text, tok)
+            out = enc(ids, output_hidden_states=True)
+            # SDXL 官方取 hidden_states[-2]（最后一层是过 LN 的 pooled 之前的）
+            emb = out.hidden_states[-2]
+            pooled = out.pooler_output
+            return emb, pooled
+
+        def _openclip(text):
+            """OpenCLIP：隐层（前 512 维要进 cross-attn）+ pooled（也要前 512 维）。"""
+            ids = _ids(text, tok2)
+            out = enc2(ids, output_hidden_states=True)
+            hidden = out.hidden_states[-2][:, :, :512]      # (1, 77, 512)
+            pooled = out.text_embeds                        # (1, 1280) 完整，不截
+            return hidden, pooled
+
+        def _pack(text):
+            emb, _pool = _clip_l(text)
+            oh, op = _openclip(text)
+            # cross-attn 要 1280 = CLIP-L(768) + OpenCLIP 前 512
+            # pooled 直接用 OpenCLIP 的 1280 维（**不要**再拼 CLIP-L 的 768：
+            # 拼出来是 1280 但语义不对，实测 refiner 会把输入图当成"要画的画"，
+            # 输出成一张"画中画"）
+            return torch.cat([emb, oh], dim=-1), op
+
+        pos, pos_pool = _pack(prompt)
+        neg, neg_pool = _pack(negative)
+        return pos, neg, pos_pool, neg_pool
 
     # ---------- 显存管理 ----------
 

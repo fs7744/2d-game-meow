@@ -123,6 +123,12 @@ export type GenParams = {
    * 常见组合：风格 LoRA（像素）+ 角色 LoRA。
    */
   extraLoras?: { name: string; scale: number }[]
+  /** SDXL Refiner：底模出 latent 后再走一遍精修，对发丝/布料纹理提升最大 */
+  refiner: boolean
+  refinerCfg: number
+  refinerSteps: number
+  /** 精修从去噪过程的哪一段接手（0.8 = 最后 20%） */
+  refinerEnd: number
 }
 
 /** 后端 /loras 返回的条目 */
