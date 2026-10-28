@@ -477,6 +477,19 @@ export async function fetchModels(): Promise<ModelList> {
   return { available, recommend }
 }
 
+/**
+ * 扫描 models/lora 并把缺的配置补进 loras.json。
+ *
+ * 读的是 safetensors 头部、不加载权重，所以十几毫秒就回来了。
+ * 后端**只补不覆盖**：手写的 label/scale/note 不会被自动值顶掉。
+ */
+export async function scanLoras(): Promise<{ message: string; count: number }> {
+  const r = await fetch(`${base}/loras/scan`, { method: 'POST' })
+  if (!r.ok) throw new Error(`扫描失败：HTTP ${r.status}`)
+  const j = await r.json()
+  return { message: String(j.message || ''), count: Number(j.count) || 0 }
+}
+
 export async function fetchLoras(baseModel?: string): Promise<LoraInfo[]> {
   const r = await fetch(`${base}/loras`)
   if (!r.ok) throw new Error(`HTTP ${r.status}`)

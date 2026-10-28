@@ -264,6 +264,20 @@ def loras() -> Dict[str, Any]:
     return {"count": len(items), "items": items}
 
 
+@app.post("/loras/scan")
+def loras_scan() -> Dict[str, Any]:
+    """扫描 `models/lora/*.safetensors`，把缺的配置补进 `loras.json`。
+
+    读的是 safetensors 头部（不加载权重），13 个文件约 100ms。
+    **只补不覆盖**：已有条目里手写的 label/scale/note/hidden 一律不动——
+    自动扫描的价值是"别让新放进去的权重变成哑巴"，不是替你重新配一遍。
+    """
+    result = lora_reg.autoscan(ROOT / "models", write=True)
+    items = lora_reg.scan(ROOT / "models")
+    return {**result, "message": lora_reg.format_scan(result),
+            "count": len(items), "items": items}
+
+
 #: 能当 W4 输入的图片扩展名。与 generate.POSE_EXTS 保持一致。
 _POSE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 

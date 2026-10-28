@@ -8,7 +8,8 @@ import {
 } from './store/projects'
 import {
   deleteAssets, fetchJob, fetchLoras, fetchModels, health, submitAiRepaint, submitImg2Img,
-  fetchPoseDirs, submitInpaint, submitMatte, submitPixelify, submitPoseClone, submitPoseSeq,
+  fetchPoseDirs, scanLoras, submitInpaint, submitMatte, submitPixelify, submitPoseClone,
+  submitPoseSeq,
   submitSpriteSwap, submitTxt2Img, uploadImage,
 } from './api'
 import ConfirmDialog from './components/ConfirmDialog'
@@ -161,6 +162,7 @@ export default function App() {
   const [model, setModel] = useState<string>('sd15')
   // W4 的输入是"一组骨架帧"，后端扫 assets 给出可选目录，前端只做下拉
   const [poseDirs, setPoseDirs] = useState<PoseDir[]>([])
+  const [scanning, setScanning] = useState(false)
   const [matteBackend, setMatteBackend] = useState('auto')
   const [uploadMsg, setUploadMsg] = useState('')
   const [notice, setNotice] = useState('')          // 底模切换之类的一次性提示
@@ -176,6 +178,27 @@ export default function App() {
   }, [model])
 
   useEffect(() => { reloadLoras() }, [reloadLoras])
+
+  /**
+   * 扫描 models/lora 补配置。
+   *
+   * 为什么值得做成按钮：新放的 LoRA 没有配置就是哑巴——没有触发词、没有 base，
+   * 选上去可能报 size mismatch，而用户不知道那是架构不对。
+   * 扫描会读 safetensors 头部把 base / rank / 触发词识别出来，并把不可用的
+   * （视频 LoRA、Flux LoRA、重复文件）标成隐藏而不是留在下拉里当陷阱。
+   */
+  const onScanLoras = useCallback(async () => {
+    setScanning(true)
+    try {
+      const r = await scanLoras()
+      reloadLoras()
+      setNotice(r.message.split('\n')[0] + `（共 ${r.count} 个）`)
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : String(e))
+    } finally {
+      setScanning(false)
+    }
+  }, [reloadLoras])
 
   // 骨架目录一次拉完即可（后端 20ms 扫完 assets 两层）；失败就空列表，
   // 节点里仍然可以手填路径，功能不因这个接口挂掉而消失。
@@ -785,6 +808,8 @@ export default function App() {
           onModel={switchModel}
           matteBackend={matteBackend}
           onMatteBackend={setMatteBackend}
+          onScanLoras={onScanLoras}
+          scanning={scanning}
         />
         <Canvas
           nodes={nodes}

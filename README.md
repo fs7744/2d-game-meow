@@ -333,6 +333,53 @@ alpha **都是二值**（中间 alpha 占比 0，边缘硬度假设不成立）�
 启动后 `GET /loras` 直接列出，节点里「更多设置 → LoRA」可选，选中会自动带出触发词
 和匹配的提示词契约。
 
+### 放进去就能用：自动扫描
+
+```bash
+python -m workflows.lora              # 扫描并补全 loras.json
+python -m workflows.lora --dry-run    # 只看结果不写
+```
+
+侧栏「LoRA N 个」旁边也有「扫描」按钮（`POST /loras/scan`，13 个约 0.1s）。
+**读的是 safetensors 头部，不加载权重。**
+
+它解决的是这个问题：新放的权重没有配置就是哑巴——没有 `base`，选中就报
+`size mismatch for ... 640 vs 1280`，而用户会以为是文件坏了，去换一个同样错的 LoRA。
+
+架构判据（按可靠性排序）：
+
+| 判据 | 说明 |
+|---|---|
+| 上下文维度 | SD1.5 的 CLIP context 是 **768**，SDXL 是 **2048**。这是硬指纹 |
+| 键名 | 含 `adaln_modulation` / `double_blocks` → DiT（Flux/anima）；顶层 `diffusion_model.` + `cross_attn` → 视频模型（Wan） |
+| 训练元数据 | 只在前两者都读不出时用（LoKr/LoHa 没有标准张量）。**metadata 会说谎**：实测 octopath 标着 `stable-diffusion-v1/lora`，tensor 却是 DiT |
+
+三条克制规则：
+
+1. **只补不覆盖**。手写的 `label / scale / note / hidden` 一律不动。
+2. **默认不填触发词**（要填得加 `--fill-trigger`）。空 `trigger` 有两种含义——
+   "不知道"和"知道但故意不用"（实测像素 LoRA 加触发词后 3/3 多主体）。
+   自动填会把后者覆盖掉，等于把一条实测结论抹了。
+3. **不可用架构标隐藏而不是留着**。视频/DiT 的 LoRA 出现在下拉里，等你选中再报错，
+   是更差的体验。
+
+顺带会报两类"配置卫生"问题：同一份权重存了多个文件名（内容指纹相同）、
+配置里有条目但文件已经删了。
+
+### 2026-10-28 新加的三个：两个用不了，一个重复
+
+放进去的三个权重文件名都像像素 LoRA，实际只有一个是 SD 的，而且和已有的重复：
+
+| 文件 | 扫描判定 | 结论 |
+|---|---|---|
+| `pixel-art-xl` | `sdxl` | ⚠️ 与已有 `pixelart_xl` **是同一份权重**（大小 + tensor 形状指纹一致），已隐藏。删掉即可 |
+| `octopath_traverl` | `flux`（anima） | ❌ 键名 `lora_unet_blocks_*_adaln_modulation_*` 是 DiT 结构，**不是 SD 的 UNet LoRA**。训练集 210 张、rank 32，风格确实是八方旅人，但要用于出图必须换 SD 版权重 |
+| `wan_t2v_h_unipixel-e6` | `wan` | ❌ Wan2.2 视频 LoRA。出图用不了；W5 视频链路（`workflows/video.py`）目前也还没接 LoRA 加载 |
+| `mk_sp_pixel` | `sd15` | ✅ 可用。12MB 小体积（diffusers 格式、无元数据、无触发词），当轻量风格调整；像素主力仍用 `px_illustrious`，尚未 A/B |
+
+> 这三个都是"文件名像但架不对"的典型。没有自动识别的话，它们的表现是
+> 选中后报一串 `size mismatch`，看起来像文件损坏。
+
 ### 精选结论（全部实跑验证，不是看描述选的）
 
 | LoRA | 体量 | 来源人气 | 判定 |

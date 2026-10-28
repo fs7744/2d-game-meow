@@ -139,3 +139,129 @@ def test_wuxia_preset_keeps_budget():
 def test_unknown_preset_still_raises():
     with pytest.raises(ValueError):
         P.build("x", None, "nope")
+
+
+# ---------------- 架构自动识别（读 header，不加载权重） ----------------
+
+def _fake_st(root, name: str, tensors: dict, metadata: dict | None = None):
+    """造一个**只有合法 header** 的 safetensors：probe 只读头部，不碰权重。"""
+    import struct
+
+    d = root / "lora"
+    d.mkdir(parents=True, exist_ok=True)
+    head = {k: {"dtype": "F16", "shape": list(v), "data_offsets": [0, 0]}
+            for k, v in tensors.items()}
+    if metadata:
+        head["__metadata__"] = metadata
+    blob = json.dumps(head).encode()
+    p = d / f"{name}.safetensors"
+    p.write_bytes(struct.pack("<Q", len(blob)) + blob)
+    return p
+
+
+def test_probe_distinguishes_architectures(tmp_path):
+    """靠上下文维度（768/2048）和键名（adaLN/cross_attn）分架构。
+
+    这是最要紧的一条：架构拿错的报错是 size mismatch，用户会以为文件坏了，
+    然后换一个同样错的 LoRA。
+    """
+    p = _fake_st(tmp_path, "sd15_lora",
+                 {"lora_unet_down_blocks_0_attn.to_k.lora_down.weight": (32, 768)})
+    assert L.probe(p)["base"] == "sd15"
+
+    p = _fake_st(tmp_path, "xl_lora",
+                 {"lora_unet_input_blocks_4_1_proj_in.lora_down.weight": (32, 2048)})
+    assert L.probe(p)["base"] == "sdxl"
+
+    # DiT（Flux/anima）：键里有 adaLN，上下文维度也不是 768/2048
+    p = _fake_st(tmp_path, "flux_lora",
+                 {"lora_unet_blocks_0_adaln_modulation_cross_attn_1.lora_down.weight": (32, 3072)})
+    info = L.probe(p)
+    assert info["base"] == "flux" and not info["supported"]
+
+    # 视频模型（Wan）：顶层就是 diffusion_model.
+    p = _fake_st(tmp_path, "wan_lora",
+                 {"diffusion_model.blocks.0.cross_attn.k.lora_A.weight": (32, 5120)})
+    info = L.probe(p)
+    assert info["base"] == "wan" and not info["supported"]
+
+
+def test_probe_recognises_diffusers_naming(tmp_path):
+    """diffusers 格式是 `unet.*.lora.down.weight`，不是 kohya 的 `lora_down`。
+
+    实测 mk_sp_pixel 就是这种：只认 kohya 命名会让它识别失败。
+    """
+    p = _fake_st(tmp_path, "diffusers_style",
+                 {"unet.down_blocks.0.attentions.0.to_k.lora.down.weight": (16, 768)})
+    assert L.probe(p)["base"] == "sd15"
+
+
+def test_probe_falls_back_to_metadata_for_lokr(tmp_path):
+    """LoKr/LoHa 变体没有 lora_down 张量，只能读训练元数据。"""
+    p = _fake_st(
+        tmp_path, "xl_lokr",
+        {"lora_unet_input_blocks_1_0.lokr_w1": (64, 64)},
+        {"ss_base_model_version": "sdxl_base_v1-0",
+         "modelspec.architecture": "stable-diffusion-xl-v1-base/lora"})
+    assert L.probe(p)["base"] == "sdxl"
+
+
+def test_autoscan_adds_missing_and_is_idempotent(tmp_path):
+    _fake_st(tmp_path, "good_sd15",
+              {"lora_unet_down_blocks_0_attn.to_k.lora_down.weight": (32, 768)})
+    r1 = L.autoscan(tmp_path)
+    assert r1["added"] == ["good_sd15"]
+    cfg = json.loads((tmp_path / "lora" / "loras.json").read_text("utf-8"))
+    assert cfg["good_sd15"]["base"] == "sd15"
+
+    # 再跑一次：不该重复"新增"，也不该改任何东西
+    r2 = L.autoscan(tmp_path)
+    assert r2["added"] == [] and r2["filled"] == []
+    assert json.loads((tmp_path / "lora" / "loras.json").read_text("utf-8")) == cfg
+
+
+def test_autoscan_hides_unsupported_architectures(tmp_path):
+    _fake_st(tmp_path, "wan_lora",
+             {"diffusion_model.blocks.0.cross_attn.k.lora_A.weight": (32, 5120)})
+    r = L.autoscan(tmp_path)
+    assert "wan_lora" in r["hidden"]
+    cfg = json.loads((tmp_path / "lora" / "loras.json").read_text("utf-8"))
+    assert cfg["wan_lora"]["hidden"] is True
+    assert "视频" in cfg["wan_lora"]["note"]
+
+
+def test_autoscan_never_overwrites_handwritten_fields(tmp_path):
+    """手写的 trigger / scale / note 一律不动，尤其是**故意留空的 trigger**。
+
+    实测像素 LoRA 加触发词后 3/3 多主体，所以配置里那条 trigger 是故意留空的。
+    自动扫描把 metadata 的高频 tag 填进去，等于把一条实测结论抹了。
+    """
+    _fake_st(tmp_path, "px",
+             {"lora_unet_down_blocks_0_attn.to_k.lora_down.weight": (32, 768)},
+             {"ss_tag_frequency": json.dumps({"1": {"pixelart": 50, "game": 20}})})
+    (tmp_path / "lora" / "loras.json").write_text(json.dumps({
+        "px": {"label": "手写标签", "trigger": "", "scale": 0.75, "note": "故意不加触发词"},
+    }), "utf-8")
+
+    L.autoscan(tmp_path)
+    cfg = json.loads((tmp_path / "lora" / "loras.json").read_text("utf-8"))["px"]
+    assert cfg["trigger"] == "", "空 trigger 是刻意留的，不能被自动填"
+    assert cfg["label"] == "手写标签" and cfg["scale"] == 0.75
+    assert cfg["base"] == "sd15", "base 是空缺，应该补上"
+
+
+def test_autoscan_detects_duplicate_weights(tmp_path):
+    """同一份权重存两个文件名：后加的标 hidden，**已有的不动**。"""
+    tensors = {"lora_unet_down_blocks_0_attn.to_k.lora_down.weight": (32, 768)}
+    _fake_st(tmp_path, "a_original", tensors)
+    _fake_st(tmp_path, "b_copy", tensors)
+    (tmp_path / "lora" / "loras.json").write_text(json.dumps({
+        "a_original": {"label": "正本", "scale": 0.8, "note": "手工配置"},
+    }), "utf-8")
+
+    r = L.autoscan(tmp_path)
+    cfg = json.loads((tmp_path / "lora" / "loras.json").read_text("utf-8"))
+    assert cfg["a_original"].get("hidden") is None, "已有的正本不能被标隐藏"
+    assert cfg["b_copy"]["hidden"] is True
+    assert any(d["kept"] is False for d in r["duplicates"])
+    assert any(x["kept"] == "a_original" for x in r["same_content"])

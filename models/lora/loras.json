@@ -101,5 +101,45 @@
     "size_mb": 102,
     "source": "civitai:?@284385",
     "note": "水墨线稿风，触发词 ink art。"
+  },
+  "mk_sp_pixel": {
+    "label": "MK 像素精灵（小体积）",
+    "trigger": "",
+    "scale": 0.8,
+    "preset": "pixel",
+    "matte": true,
+    "base": "sd15",
+    "note": "12.2MB 的小体积 SD1.5 像素 LoRA（diffusers 格式 unet.*.lora.down/up，无训练元数据所以没有触发词）。体积小=容量低，适合当轻量风格调整；像素主力仍建议 px_illustrious。尚未 A/B，先按 0.8 强度试。",
+    "source": "auto"
+  },
+  "octopath_traverl": {
+    "label": "八方旅人像素风（架构不兼容）",
+    "trigger": "",
+    "scale": 0.8,
+    "preset": "pixel",
+    "hidden": true,
+    "base": "flux",
+    "note": "键名是 lora_unet_blocks_*_adaln_modulation_cross_attn_*（DiT 结构），训练元数据标 base_model_version=anima——**不是 SD1.5/SDXL 的 UNet LoRA**，挂上去必报 size mismatch（640 vs 1280 那类）。训练集 210 张、rank 32，风格上确实是八方旅人那种像素。要用得换 SD 版权重。",
+    "source": "auto"
+  },
+  "pixel-art-xl": {
+    "label": "Pixel Art XL（与 pixelart_xl 重复）",
+    "trigger": "",
+    "scale": 0.8,
+    "preset": "pixel",
+    "hidden": true,
+    "base": "sdxl",
+    "note": "与 pixelart_xl 是同一份权重：文件大小 162.6MB、tensor 形状指纹完全一致，只是文件名不同（下载了两次）。保留 pixelart_xl 那份（它带完整配置与实测结论），这个可以直接删掉。",
+    "source": "duplicate"
+  },
+  "wan_t2v_h_unipixel-e6": {
+    "label": "Wan2.2 视频 LoRA · unipixel（非 SD）",
+    "trigger": "",
+    "scale": 0.8,
+    "preset": null,
+    "hidden": true,
+    "base": "wan",
+    "note": "Wan2.2 视频模型的 LoRA（t2v，键名 diffusion_model.blocks.*.cross_attn）。SD1.5/SDXL 出图用不了；W5 视频链路（workflows/video.py）目前也还没接 LoRA 加载，先留作备用。",
+    "source": "auto"
   }
 }

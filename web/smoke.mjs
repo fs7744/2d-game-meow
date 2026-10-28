@@ -84,6 +84,22 @@ function makeFetch() {
         }),
       }
     }
+    if (String(url).endsWith('/loras/scan')) {
+      return {
+        ok: true,
+        json: async () => ({
+          message: '扫描 13 个权重\n不可用（已隐藏）：octopath_traverl, wan_t2v_h_unipixel-e6',
+          count: 7,
+          added: ['octopath_traverl', 'pixel-art-xl'],
+          filled: [],
+          hidden: ['octopath_traverl', 'wan_t2v_h_unipixel-e6'],
+          duplicates: [],
+          stale: [],
+          total: 13,
+          written: true,
+        }),
+      }
+    }
     if (String(url).endsWith('/loras')) {
       return {
         ok: true,
@@ -1717,6 +1733,32 @@ function check(name, cond, extra = '') {
   check('参数区大部分控件都有 tooltip（>=10 个）', withTip.length >= 10, String(withTip.length))
 
   check('拖宽与 tooltip 场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 28) LoRA 扫描：放完权重点一下，把缺的配置补进 loras.json
+{
+  const { dom, errors } = await boot('')
+  const doc = dom.window.document
+  const win = dom.window
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms))
+
+  const btn = doc.querySelector('.rail-scan')
+  check('侧栏有「扫描」按钮', !!btn)
+  check('扫描按钮有说明（只补不覆盖）',
+    (btn?.getAttribute('title') || '').includes('只补不覆盖'), btn?.getAttribute('title'))
+
+  btn.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await wait(300)
+
+  const call = calls.filter((c) => c.url.endsWith('/loras/scan')).pop()
+  check('点击后调用 POST /loras/scan', !!call && call.method === 'POST',
+    JSON.stringify(call && { u: call.url, m: call.method }))
+  check('扫描后提示新增/隐藏结果',
+    (doc.querySelector('.toast')?.textContent || '').includes('扫描 13 个权重'),
+    doc.querySelector('.toast')?.textContent)
+
+  check('LoRA 扫描场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 

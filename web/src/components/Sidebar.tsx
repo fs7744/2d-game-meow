@@ -24,6 +24,9 @@ type Props = {
   onModel: (m: string) => void
   matteBackend: string
   onMatteBackend: (v: string) => void
+  /** 扫描 models/lora 补配置（读 safetensors 头部，不加载权重） */
+  onScanLoras?: () => void
+  scanning?: boolean
 }
 
 const MODEL_LABEL: Record<string, string> = {
@@ -108,6 +111,7 @@ function ProjectRow({
 export default function Sidebar({
   loras, favs, onAddNode, canApply, onApplyFav, onRemoveFav,
   models, recommend, model, onModel, matteBackend, onMatteBackend,
+  onScanLoras, scanning,
   projects, currentProject, onSwitchProject, onCreateProject, onRenameProject, onDeleteProject,
 }: Props) {
   const [collapsed, setCollapsed] = useState(false)
@@ -384,6 +388,16 @@ export default function Sidebar({
 
           <div className="rail-stat">
             LoRA {loras.length} 个
+            {onScanLoras && (
+              <button
+                className="rail-scan"
+                disabled={scanning}
+                onClick={onScanLoras}
+                title="扫描 models/lora 下的权重，把缺的配置补进 loras.json（只补不覆盖手写内容）"
+              >
+                {scanning ? '扫描中…' : '扫描'}
+              </button>
+            )}
           </div>
         </Section>
       </div>
