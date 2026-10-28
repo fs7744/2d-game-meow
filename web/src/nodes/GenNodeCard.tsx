@@ -135,6 +135,13 @@ const PARAM_HINTS: Record<string, { what: string; effect: string; rec: string }>
     effect: '决定最终像素密度；0=自动检测输入图的网格',
     rec: '0（自动）。已知原图是 128px 像素画时直接填 128',
   },
+  像素块: {
+    what: '像素化时每个色块的边长（0 = 不像素化）',
+    effect: '块越大，有效像素越少、越"像素"；块太小会保留 AI 图的软边和噪点，'
+      + '看着像插画而不是像素画',
+    rec: '768² 用 6（正好降到 128 有效像素，标准精灵尺寸）；512² 用 4；'
+      + '要 64px 的素材就用 12',
+  },
   色数: {
     what: '量化的调色板色数（0=不量化）',
     effect: '越少越像素；太少丢层次，太多脏',
@@ -200,7 +207,10 @@ const PARAM_HINTS: Record<string, { what: string; effect: string; rec: string }>
 /** 拼成原生 title：换行分三段，扫一眼就知道"是什么/影响什么/填多少" */
 function hint(k: string): string {
   const h = PARAM_HINTS[k]
-  if (!h) return ''
+  // **查不到就返回显眼文案，不要返回空串**：空串的失败模式是静默的——
+  // 界面上只是没有说明，不报错，没人会发现漏了。实测「像素块」就是这样
+  // 漏了一整轮（表里 37 个键、代码引用 38 个）。
+  if (!h) return `未定义说明：${k}（在 PARAM_HINTS 里补）`
   return `${h.what}\n影响：${h.effect}\n推荐：${h.rec}`
 }
 

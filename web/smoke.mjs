@@ -1728,6 +1728,16 @@ function check(name, cond, extra = '') {
   check('推荐值写的是具体数字（不是"视情况"）',
     /\d/.test(stepsTip.split('推荐：')[1] || ''), stepsTip)
 
+  // 「像素块」曾经漏过一条：hint 查不到键时返回空串，界面上只是没说明、不报错。
+  // 现在既补了说明，也让 hint 返回显眼文案 + 加了静态检查。
+  const pxTip = lab('像素块')?.getAttribute('title') || ''
+  check('像素块有 tooltip', pxTip.includes('有效像素'), pxTip)
+  const allTips = [...nd().querySelectorAll('label[title]')]
+    .map((l) => l.getAttribute('title') || '')
+  check('没有「未定义说明」的占位',
+    !allTips.some((t) => t.includes('未定义说明')),
+    allTips.find((t) => t.includes('未定义说明')) || '')
+
   // 参数区整体覆盖率：至少 10 个 label 带说明
   const withTip = [...nd().querySelectorAll('label[title]')]
   check('参数区大部分控件都有 tooltip（>=10 个）', withTip.length >= 10, String(withTip.length))
