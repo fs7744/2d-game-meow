@@ -1172,6 +1172,7 @@ W4 侧对应的兜底是上面那套**质量闸门**（生成后再检一遍，�
 │   ├── ab_pixelfy.py       像素转换 A/B（网格检测 / 目标尺寸 / 色数，同源单变量）
 │   ├── ab_quality.py       画质 A/B（采样档 / 后处理档 / 背景干净度，同 seed 单变量）
 │   ├── ab_matte.py         抠图后端 A/B（色键 vs u2net：占比/白边/连通块/IoU）
+│   ├── ab_base.py          基座 A/B（多权重 × 多 prompt × 多 seed：多主体/贴边/背景脏/块单色/关节）
 │   └── check_env.py        环境自检
 ├── models/                 权重（checkpoints / controlnet / ipadapter / loras / ...）
 └── assets/                 产物 + sidecar(.json) + index.jsonl
@@ -1285,3 +1286,91 @@ curl -X DELETE http://127.0.0.1:8000/assets -H "Content-Type: application/json" 
 
 关键判断：**游戏精灵的交付分辨率是 512–768，不是 1024**。SDXL 出 1024 再缩到 128 只会把细节噪声一起缩进去。
 SD1.5 在 512 上「一次到位 + 16 色量化」更贴产线，且被视频模型绑死（MimicMotion 无 SDXL 版）。
+
+---
+
+## 评审修复（2026-10-28）
+
+完整评审见 `docs/REVIEW-2026-10-28.md`。这一轮修的是「不报错、只是静默变差」的那一类问题，
+以及把省下来的显存换回吞吐。**每条都有回归测试**（`tests/test_review_fixes.py` /
+`test_review_p1.py` / `test_review_p2.py`）。
+
+### 修掉的确定性缺陷
+
+| 问题 | 后果 | 现在 |
+|---|---|---|
+| `ensure_headroom` 判据写成「已用量 < 2GB」 | 每次 wss/wpc 都把**整个缓存清空**（cache 形同虚设），ControlNet 还不跟着释放 | 改为按**空闲显存**判、LRU 驱逐、`keep` 保护正在用的管线、孤儿 ControlNet 一起回收 |
+| LoRA 状态记在 Engine（池级） | 「W1 用了像素 LoRA，接着跑 W4」→ 第二条管线**静默没加载** | 状态挂在 UNet 上；共享 UNet 时天然一致，不重复加载 |
+| WPC / WSS 硬编码 `model="sd15"` | 切 SDXL 无效且无提示 | 参数透传；AnimateDiff + SDXL 显式报错 |
+| WSS 默认路径把 preset 拼两遍 | 白吃 15~20 token 预算 | 只 build 一次 |
+| 底模写死在代码里 | 换社区微调要改两个文件 | `models/checkpoints/<任意名>/` 自动登记，架构按 `_class_name` 判定 |
+
+### 质量
+
+| 改动 | 依据 |
+|---|---|
+| 提示词预算改用**真实 BPE 计数**（`presets.count`），并在超 77 时**分段编码**（`clip.encode_long`，77×2） | 实测 `WUXIA_NEG` 真实 **35 token**，而旧的 `rough_tokens` 估成 **113** → `fit()` 一直按高估值提前砍词。注释里"写到 113 尾部全被丢弃"的结论是错的，真问题是**没超也照砍** |
+| 质量闸门改用**像素化之前**的图评分（`_postprocess` 暴露 `pre_pixel`） | 128 有效像素、32 色的产物上姿态模型本来就检不出几个点，好帧会被判废并触发无谓补提 |
+| 主链路像素化接**网格对齐**（`pixelate(grid_align=True)`） | 只对"已经是像素画"的输入生效（≤512 色才检测；命中要求格数与请求值 ±30%）。**连续调 AI 图没有可检测网格，0.5ms 内回退 BOX**——原先"主链路也走网格对齐"的预期不成立，实测 768² 的 W1 产物与 6px 噪声图都检测不出 |
+| 少步蒸馏（`distill="lcm"`）+ 高清修复（`hires=1.5`） | 蒸馏把 30 步压到 8 步，省下的预算换候选数；hires 是「512 出结构 → 放大补细节」，避开 SD1.5 ControlNet 的 512 训练分辨率问题。**两者都必须 A/B**：蒸馏会削弱 LoRA 风格保真 |
+| 抠图优先用 BiRefNet（放了权重就自动切）、`alpha_mode="soft"` | 细长结构（剑/飘带）与半透明边；像素素材仍默认 binary |
+
+### 显存 / 吞吐（实测 RTX 4090）
+
+| 项 | 前 | 后 |
+|---|---|---|
+| txt2img + pose 同时驻留 | 7.36GB（两份 UNet） | **3.91GB**（共享 UNet） |
+| 候选批量推理（512²，8 步） | 串行 2 张 1.23s | 一次 batch **0.70s（1.75×）**；n=4 为 1.40× |
+| 连续工作流 | 每次清空缓存后重载 | 缓存真正生效；AnimateDiff 前主动清场（`drop_others`） |
+
+批量推理**不是逐像素一致**（不同 batch 走不同 conv 内核，差 1~4/255），但同配置重跑完全一致，
+跨进程同 seed 可复现的测试仍然通过。
+
+### 服务层
+
+- `/assets` 改走 SQLite 增量索引（`workflows/assetdb.py`）：只解析 jsonl 新增的字节，查询取一页；
+  索引库不可用时自动退回全量解析。
+- `_jobs` / `_trains` 加 LRU 上限（200 / 50，跳过运行中的任务）。
+- 训练与生成共用一把 GPU 锁——「不进生成队列」不等于「可以并发占卡」。
+
+### 明确未做（以及为什么）
+
+- **差分扩散 inpaint**（Fooocus 那条路）：要改每一步去噪的潜变量混合，收益（无接缝）必须靠
+  人眼 A/B 判定，纯代码交付无法验证，留作 w5 的第二引擎单独做。
+- **多图 IP-Adapter**：diffusers 要求"每张参考图一个 adapter"（实测报
+  `must have same length as the number of IP Adapters`），要挂两份权重并与共享 UNet 的
+  卸载/重挂机制协调，风险高于收益。
+
+---
+
+## 换基座：怎么跑、怎么判
+
+画质的主因是**基座权重**，不是架构。原始 runwayml v1.5 在"骑士 + 武士刀 + 铠甲 + 红斗篷"
+这类复合概念上会直接画成半身特写（跑一次 `tools/ab_base.py` 就能在
+`assets/_ab_base_same/sheet_knight.png` 看到对照，产物不入库）。
+换同架构的社区微调，显存与速度都不变，只换权重。
+
+```bash
+# 1) 放权重：带 model_index.json 的 diffusers 目录即可自动出现在下拉里
+#    models/checkpoints/<任意名字>/...
+# 2) 冒烟（2 张图，确认能跑）
+python tools/ab_base.py --prompts knight,slime --seeds 1 --limit 1 --size 512
+# 3) 正式对照：口径必须一致，否则尺寸会混进结论
+python tools/ab_base.py --models sd15,mychar --size 768 --steps 20 --seeds 3
+# 4) 只看已有产物、重建报告（改版式不用重跑）
+python tools/ab_base.py --rebuild --out assets/_ab_base
+```
+
+输出 `report.md`（汇总表）、`summary.csv`（明细）、`sheet_<prompt>.png`（人眼打分用）。
+
+**判读三个硬门槛**（其余都是参考）：
+
+| 指标 | 门槛 | 说明 |
+|---|---|---|
+| 多主体率 | 必须 0% | >0 说明画面里挤了多个主体/道具，精灵管线持续出废片 |
+| 贴边率 | 越低越好 | 脚/头被画布切断，对齐必然跳；>30% 基本不可用 |
+| 背景脏率 | 参考 | 两个基座通常都很高——这是"必须抠图"的原因，不是选基座的依据 |
+
+**一个反直觉的实测**：统一 768²、20 步时，SDXL 只比 SD1.5 慢 **1.33 倍**（1.77s vs 1.33s），
+而不是"慢 3~4 倍"——那个数字是 512 vs 1024 的**尺寸差**，不是权重差。所以"SDXL 太慢"
+不能作为排除它的唯一理由，显存才是（SDXL + Tile ControlNet 实测 21.94GB）。
