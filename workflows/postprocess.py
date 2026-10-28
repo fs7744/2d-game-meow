@@ -19,16 +19,78 @@ from PIL import Image
 
 # ---------------- 像素化 / 调色板 ----------------
 
-def pixelate(img: Image.Image, block: int, resample=Image.BOX) -> Image.Image:
+def _pixelate_grid(img: Image.Image, block: int) -> Image.Image | None:
+    """按**检测到的网格**采样像素化；检测不可信时返回 None（由调用方回退 BOX）。
+
+    为什么值得多这一步：AI 出的"像素风"网格几乎不会是整数倍（实测 6.3px 这种），
+    直接 BOX 降采样会把格子边界切在色块中间，混出脏色。这里先检测网格、每格取
+    中位色、再最近邻放大回原尺寸——每格必然单色，这正是"像素画"与"低分辨率图"
+    的区别。`perfect_pixel` 那套已经在 wpx 节点上验证过（每格单色率 100%）。
+
+    **只在检测值与请求值接近时采用**（±30%）：差太远说明这张图本来不是那个
+    像素密度，硬套会把细节抹平，不如老实回退。
+
+    **前提要说清楚**：网格对齐只对"已经是像素画"的输入有意义（wpx 节点那条路）。
+    主链路的输入是连续调的 AI 图，**根本没有可检测的网格**——实测 768² 的 W1
+    产物、以及"6px 块的随机噪声图"都检测不出，直接回退。所以这里先用色数做
+    便宜的前置判断：连续调图有成千上万色，立刻返回，不付检测的时间。
+    """
+    if block < 2:
+        return None
+    # 便宜的前置判断：像素画色数很少（本项目产物量化到 8~32 色），
+    # 超过 512 色几乎不可能是网格化像素画，直接跳过昂贵检测。
+    if img.convert("RGB").getcolors(maxcolors=512) is None:
+        return None
+    try:
+        from . import pixelfy as pxf
+    except Exception:                       # noqa: BLE001  依赖缺失就回退
+        return None
+    try:
+        r = pxf.refine_one(img.convert("RGB"), grid_snap=True, palette=None)
+    except Exception:                       # noqa: BLE001
+        return None
+    meta = r.get("meta") or {}
+    if meta.get("gridFailed"):
+        return None
+    gw, gh = (meta.get("grid") or [0, 0])[:2]
+    # `detect_grid_scale` 返回的是**格数**（横/纵各多少格），不是每格多少像素。
+    # 768² + block=6 → 期望 128 格；用它和 block 直接比是拿错单位（踩过）。
+    want_w, want_h = max(1, img.width // block), max(1, img.height // block)
+    lo_w, hi_w = want_w * 0.7, want_w * 1.3
+    lo_h, hi_h = want_h * 0.7, want_h * 1.3
+    if not (lo_w <= gw <= hi_w and lo_h <= gh <= hi_h):
+        return None
+    small = r["image"].convert("RGB")
+    if small.width < 1 or small.height < 1:
+        return None
+    up = small.resize(img.size, Image.NEAREST)
+    if img.mode == "RGBA":
+        # alpha 沿用 BOX（先降后升），与老路径保持一致：不在这里改 alpha 语义
+        a = img.getchannel("A").resize(small.size, Image.BOX).resize(img.size, Image.NEAREST)
+        up = up.convert("RGBA")
+        up.putalpha(a)
+    return up
+
+
+def pixelate(img: Image.Image, block: int, resample=Image.BOX,
+             grid_align: bool = False) -> Image.Image:
     """按 block 像素栅格吸附：先降采样再最近邻放大回原尺寸。
 
     降采样用 BOX（面积平均）而不是 LANCZOS：LANCZOS 有负瓣，会在色块交界处
     振铃出「过冲色」（深色线旁边冒一圈更亮的边），像素化之后再量化，这些过冲色
     会变成额外的脏色阶。BOX 是纯平均，不造假色。实测同一张图的唯一色数下降、
     锐度上升（见 tools/ab_quality.py）。
+
+    `grid_align=True` 时先试**网格对齐采样**（见 _pixelate_grid）：
+    主链路以前只有 BOX，而项目自己更好的实现锁在 wpx 节点里，等于"好工具没接到
+    产线上"。检测不可信会自动回退，所以打开它不改变稳定性。
     """
     if block <= 1:
         return img
+    if grid_align:
+        aligned = _pixelate_grid(img, block)
+        if aligned is not None:
+            return aligned
     w, h = img.size
     small = img.resize((max(1, w // block), max(1, h // block)), resample)
     return small.resize((w, h), Image.NEAREST)

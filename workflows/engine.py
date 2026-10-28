@@ -9,11 +9,13 @@
 from __future__ import annotations
 
 import gc
+import json
 import logging
 import os
 import time
+from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
@@ -40,8 +42,17 @@ SD15_INPAINT = "checkpoints/sd15-inpaint"
 IPADAPTER = "ipadapter"
 
 # 可自选的底模。SDXL 画质更好但：慢约 3×、显存约 2×、且 SD1.5 的 LoRA 不能通用。
+# **"sd15" / "sdxl" 只是两个约定的名字**，不是能力上限：放到
+# models/checkpoints/<任意名字>/ 且带 model_index.json 的 UNet 管线会在
+# Engine 初始化时自动登记进来（架构按 model_index 的 _class_name 判定），
+# 所以"换一个社区 SD1.5 微调"不需要改代码，只要换目录。
 BASE_MODELS = {"sd15": SD15, "sdxl": SDXL}
 DEFAULT_MODEL = "sd15"
+
+# LoRA 应用状态挂在 UNet 上的属性名。**必须挂在 unet 而不是 Engine**：
+# pose 管线复用同一份 UNet 后，两条管线共享的是同一个 unet 对象，
+# 状态跟着权重走才不会出现「A 管线加载过、B 管线以为自己也加载了」。
+LORA_ATTR = "_meow_lora_key"
 
 # ControlNet 两种来源：diffusers 目录（hf 布局）或原始 .pth（魔搭布局，LDM 单文件）
 CN_DIRS = {"openpose": "controlnet/openpose", "canny": "controlnet/canny",
@@ -96,17 +107,94 @@ class Engine:
         self.device = device
         self.DEFAULT_MODEL = DEFAULT_MODEL        # 给 API/前端当默认值用
         self.dtype = torch.float16
+        self._discover_bases()
         # 共享权重池（按 root 归一化后作为键）
         key = str(self.root.resolve())
         pool = _POOLS.get(key)
         if pool is None:
-            pool = {"cache": {}, "ctrl": {}, "lora": None, "pose": None}
+            # OrderedDict 让 ensure_headroom 能按「最久没用」的顺序驱逐
+            pool = {"cache": OrderedDict(), "ctrl": {}, "lora": None, "pose": None}
             _POOLS[key] = pool
         self._pool = pool
-        self._cache: Dict[str, Any] = pool["cache"]
+        self._cache: "OrderedDict[str, Any]" = pool["cache"]
         self._ctrl: Dict[str, ControlNetModel] = pool["ctrl"]
         # 语义分割抠图模型目录（isnet-general-use.onnx）。存在即启用 u2net 后端。
         self.matte_dir = self.root / "matte"
+
+    # ---------- 底模发现与架构判定 ----------
+
+    def _discover_bases(self) -> None:
+        """把 models/checkpoints/*/ 里所有**能做文生图**的底模登记进 BASE_MODELS。
+
+        为什么要自动发现：**画质的主因是基座权重，不是架构**。原始 SD1.5 在
+        "角色 + 武器 + 铠甲"这类复合概念上本来就弱，换一个社区微调（同架构、
+        同显存、同步数）往往就能解决。但把基座写死在代码里，每次换模型都要改
+        两个文件——于是没人愿意换。这里让"多放一个目录"就等于"多一个可选底模"。
+
+        **必须排除 inpaint 专用权重**：`sd15-inpaint` 的 UNet 是 9 通道
+        （多出来的 4 通道喂加噪原图与蒙版），拿它跑文生图会在采样时报
+        `size of tensor a (9) must match b (4)`。这类目录要能被认出并跳过，
+        否则它会出现在前端下拉里，用户一选就崩。
+        """
+        ck = self.root / "checkpoints"
+        if not ck.is_dir():
+            return
+        for d in sorted(ck.iterdir()):
+            if not (d / "model_index.json").is_file():
+                continue
+            name = d.name
+            if name in BASE_MODELS:
+                continue
+            if not self._txt2img_ok(d):
+                log.info("跳过 %s：不是文生图权重（inpaint/专用管线）", name)
+                continue
+            BASE_MODELS[name] = f"checkpoints/{name}"
+            log.info("发现底模 %s（架构 %s）：%s", name, self._arch_of(d), d.name)
+
+    def _txt2img_ok(self, path: Path) -> bool:
+        """底模能不能跑文生图：看管线类名与 UNet 输入通道。
+
+        过一道就够了：inpaint 类名不同、UNet 是 9 通道；SDXL base 是 4 通道。
+        """
+        try:
+            idx = json.loads((path / "model_index.json").read_text("utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return False
+        if "Inpaint" in str(idx.get("_class_name") or ""):
+            return False
+        try:
+            unet = json.loads((path / "unet" / "config.json").read_text("utf-8"))
+            return int(unet.get("in_channels", 4)) == 4
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            return True                   # 读不到就按可用处理，别误伤正常权重
+
+    def _arch_of(self, path: Path) -> str:
+        """按 model_index.json 的 _class_name 判定架构（sd15 / sdxl）。
+
+        不能靠目录名：用户可能把 SDXL 微调放进 `checkpoints/my_style/`。
+        """
+        cache = getattr(self, "_arch_cache", None)
+        if cache is None:
+            cache = self._arch_cache = {}
+        key = str(path)
+        if key in cache:
+            return cache[key]
+        try:
+            idx = json.loads((path / "model_index.json").read_text("utf-8"))
+            cls = str(idx.get("_class_name") or "")
+        except (OSError, json.JSONDecodeError):
+            cls = ""
+        arch = "sdxl" if ("XL" in cls or "xl" in cls) else "sd15"
+        cache[key] = arch
+        return arch
+
+    def arch(self, model: str = DEFAULT_MODEL) -> str:
+        """'sd15' | 'sdxl'。所有"要不要走 XL 管线"的判断都该用它，而不是比字符串。"""
+        return self._arch_of(self._check_model(model))
+
+    def is_xl(self, model: str = DEFAULT_MODEL) -> bool:
+        return self.arch(model) == "sdxl"
+
 
     # LoRA 与姿态提取器也走共享池——否则两个实例状态会不一致
     @property
@@ -166,47 +254,119 @@ class Engine:
             local_files_only=True,
         )
 
-    def _fit(self, pipe, name: str):
-        """显存守卫：装不下就逐级降级，而不是 OOM 崩掉整个服务。"""
+    def _fit(self, pipe, name: str, *, vae_slicing: Optional[bool] = None):
+        """显存守卫：装不下就逐级降级，而不是 OOM 崩掉整个服务。
+
+        降级顺序与模块文档一致：**先省（VAE/attention 切片）→ 再挪（cpu offload）**。
+        老实现只做了最后一步，等于"一上来就搬到 CPU 来回倒腾"，实测反而更慢更占。
+
+        `vae_slicing`：SDXL 1024² 的 VAE 解码峰值约 1.5~2GB、AnimateDiff 整段解码
+        实测占 4GB（见 vramopt.py），这些场景必须切；SD1.5 单图 512~768² 切片
+        只有 0.05s 开销、省不到 100MB，默认不开。
+        """
         pipe.set_progress_bar_config(disable=True)
+        if vae_slicing is None:
+            vae_slicing = False
+
+        def _slice_vae():
+            nonlocal vae_slicing
+            if vae_slicing:
+                return
+            try:
+                pipe.vae.enable_slicing()
+                vae_slicing = True
+            except Exception:                     # noqa: BLE001
+                pass
+
+        if vae_slicing:
+            _slice_vae()
         try:
-            pipe = pipe.to(self.device)
+            return pipe.to(self.device)
         except torch.OutOfMemoryError:
-            log.warning("%s 直接上卡失败，降级 model_cpu_offload", name)
-            torch.cuda.empty_cache()
-            pipe.enable_model_cpu_offload()
+            log.warning("%s 直接上卡失败，降级 attention/vae 切片后重试", name)
+        torch.cuda.empty_cache()
+        try:
+            pipe.enable_attention_slicing()
+            _slice_vae()
+            return pipe.to(self.device)
+        except torch.OutOfMemoryError:
+            log.warning("%s 切片后仍装不下，降级 model_cpu_offload", name)
+        torch.cuda.empty_cache()
+        pipe.enable_model_cpu_offload()
         return pipe
 
+
     # ---------- pipeline 获取（懒加载 + 缓存）----------
+
+    def _touch(self, key: str) -> None:
+        """把刚用过的管线移到 LRU 队尾（OrderedDict 的插入顺序即"最近使用"）。"""
+        try:
+            self._cache.move_to_end(key)
+        except KeyError:                          # pragma: no cover
+            pass
+
+    def _release_ipa_if_needed(self, pipe) -> None:
+        """共享 UNet 上不能同时存在 IP-Adapter 投影层与"没有参考图"的调用。
+
+        `load_ip_adapter` 是往 **UNet** 里插 `encoder_hid_proj` 的。pose 管线复用
+        txt2img 的 UNet 之后，这个补丁会跟着 UNet 一起被文生图看到——而文生图没有
+        `ip_adapter_image`，UNet 就会抛
+        `argument of type 'NoneType' is not iterable`。
+
+        所以切回"没有参考图"的管线前，先把 IP-Adapter 摘掉；下次进 pose 管线时
+        再挂回去。摘/挂是几百毫秒级，换回来的是**少一份 1.7GB UNet**。
+        """
+        unet = getattr(pipe, "unet", None)
+        if unet is None or getattr(unet, "encoder_hid_proj", None) is None:
+            return
+        owner = self._pool.get("ipa_owner")
+        if owner is None:
+            return
+        try:
+            owner.unload_ip_adapter()
+            log.info("暂时卸载 IP-Adapter（共享 UNet 要跑无参考图的管线）")
+        except Exception as exc:              # noqa: BLE001
+            log.warning("卸载 IP-Adapter 失败，退回独占 UNet：%s", exc)
+        self._pool["ipa_owner"] = None
+
+    def _get(self, key: str):
+        pipe = self._cache.get(key)
+        if pipe is not None:
+            self._touch(key)
+        return pipe
 
     def txt2img_pipe(self, model: str = DEFAULT_MODEL):
         key = f"txt2img:{model}"
         if key not in self._cache:
             t0 = time.perf_counter()
             p = self._check_model(model)
-            cls = StableDiffusionXLPipeline if model == "sdxl" else StableDiffusionPipeline
+            xl = self.is_xl(model)
+            cls = StableDiffusionXLPipeline if xl else StableDiffusionPipeline
             pipe = cls.from_pretrained(p, variant=detect_variant(p), **self._base_kwargs())
             pipe.scheduler = _scheduler(pipe.scheduler.config)
-            self._cache[key] = self._fit(pipe, key)
+            self._cache[key] = self._fit(pipe, key, vae_slicing=xl)
             log.info("%s 加载 %.1fs", key, time.perf_counter() - t0)
-        return self._cache[key]
+        pipe = self._get(key)
+        self._release_ipa_if_needed(pipe)
+        return pipe
 
     def img2img_pipe(self, model: str = DEFAULT_MODEL):
         key = f"img2img:{model}"
         if key not in self._cache:
             tkey = f"txt2img:{model}"
+            xl = self.is_xl(model)
+            cls = StableDiffusionXLImg2ImgPipeline if xl else StableDiffusionImg2ImgPipeline
             if tkey in self._cache:            # 共享权重，避免二次占显存
-                cls = StableDiffusionXLImg2ImgPipeline if model == "sdxl" \
-                    else StableDiffusionImg2ImgPipeline
                 pipe = cls(**self._cache[tkey].components)
             else:
                 p = self._check_model(model)
-                cls = StableDiffusionXLImg2ImgPipeline if model == "sdxl" \
-                    else StableDiffusionImg2ImgPipeline
                 pipe = cls.from_pretrained(p, variant=detect_variant(p), **self._base_kwargs())
                 pipe.scheduler = _scheduler(pipe.scheduler.config)
-            self._cache[key] = self._fit(pipe, key)
-        return self._cache[key]
+            self._cache[key] = self._fit(pipe, key, vae_slicing=xl)
+        pipe = self._get(key)
+        self._release_ipa_if_needed(pipe)
+        return pipe
+
 
     def inpaint_pipe(self, model: str = DEFAULT_MODEL):
         """W3 局部重绘。
@@ -219,11 +379,12 @@ class Engine:
         """
         key = f"inpaint:{model}"
         if key in self._cache:
-            return self._cache[key]
+            return self._get(key)
 
         t0 = time.perf_counter()
         base = self._base_kwargs()
-        if model == "sdxl":
+        xl = self.is_xl(model)
+        if xl:
             p = self._check_model(model)
             # SDXL 管线没有 safety_checker 这个参数，传了只会落一条 warning
             base.pop("safety_checker", None)
@@ -237,15 +398,15 @@ class Engine:
                 p, variant=detect_variant(p), **base
             )
         pipe.scheduler = _scheduler(pipe.scheduler.config)
-        self._cache[key] = self._fit(pipe, key)
+        self._cache[key] = self._fit(pipe, key, vae_slicing=xl)
         log.info("%s 加载 %.1fs", key, time.perf_counter() - t0)
-        return self._cache[key]
+        return self._get(key)
 
     def controlnet(self, which: str = "openpose", model: str = DEFAULT_MODEL) -> ControlNetModel:
         key = f"{which}:{model}"
         if key in self._ctrl:
             return self._ctrl[key]
-        if model == "sdxl":
+        if self.is_xl(model):
             d = self.root / CN_SDXL_DIRS.get(which, "")
             if not (d / "config.json").exists():
                 raise FileNotFoundError(
@@ -289,7 +450,7 @@ class Engine:
         # （hidden 1664 / projection 1280），那是给不带 vit-h 后缀的 ip-adapter_sdxl 用的，
         # 拿错会报 mat1 and mat2 shapes cannot be multiplied。
         names = ("ip-adapter_sdxl_vit-h.safetensors", "ip-adapter_sdxl_vit-h.bin") \
-            if model == "sdxl" else ("ip-adapter_sd15.safetensors", "ip-adapter_sd15.bin")
+            if self.is_xl(model) else ("ip-adapter_sd15.safetensors", "ip-adapter_sd15.bin")
         for name in names:
             if (self.path(IPADAPTER) / "models" / name).exists():
                 return root, "models", name
@@ -303,30 +464,54 @@ class Engine:
         SD1.5 与 SDXL 的 ControlNet / IP-Adapter 是两套权重，按 model 分别取。
         """
         key = f"pose:{controlnet}:{int(with_ipadapter)}:{model}"
-        if key in self._cache:
-            return self._cache[key]
+        cached = self._get(key)
+        if cached is not None:
+            # 缓存命中也可能需要补挂：中间的文生图调用会把共享 UNet 上的
+            # IP-Adapter 摘掉（见 _release_ipa_if_needed）。
+            if with_ipadapter:
+                if getattr(cached.unet, "encoder_hid_proj", None) is None:
+                    self._attach_ipa(cached, model)
+                else:
+                    self._pool["ipa_owner"] = cached
+            return cached
         t0 = time.perf_counter()
         cn = self.controlnet(controlnet, model)
-        p = self._check_model(model)
-        if model == "sdxl":
-            pipe = StableDiffusionXLControlNetPipeline.from_pretrained(
-                p, controlnet=cn, variant=detect_variant(p), **self._base_kwargs()
-            )
+        xl = self.is_xl(model)
+        cls = StableDiffusionXLControlNetPipeline if xl else StableDiffusionControlNetPipeline
+        # **共享底座的 UNet/VAE/TextEncoder**：老实现走 from_pretrained，等于把
+        # 同一份 1.7GB UNet 在显存里又存了一份（README 实测 7.36GB 的来源）。
+        # txt2img 管线已经在缓存里就直接复用它的组件，省 2~3GB 且 LoRA 只需加载一次。
+        base = self._get(f"txt2img:{model}")
+        if base is not None:
+            pipe = cls(controlnet=cn, **dict(base.components))
+            pipe.scheduler = _scheduler(pipe.scheduler.config)
+            log.info("%s 复用已加载的底座权重", key)
         else:
-            pipe = StableDiffusionControlNetPipeline.from_pretrained(
+            p = self._check_model(model)
+            pipe = cls.from_pretrained(
                 p, controlnet=cn, variant=detect_variant(p), **self._base_kwargs()
             )
-        pipe.scheduler = _scheduler(pipe.scheduler.config)
+            pipe.scheduler = _scheduler(pipe.scheduler.config)
         if with_ipadapter:
-            # 布局：<root>/<sub>/ip-adapter_*.safetensors 与 <root>/<sub>/image_encoder/
-            # SD1.5 是 ipadapter/models/，SDXL 是 ipadapter/sdxl/
-            ipa_root, ipa_sub, ipa_name = self.ipa_weight(model)
-            pipe.load_ip_adapter(ipa_root, ipa_sub, weight_name=ipa_name,
-                                 image_encoder_folder="image_encoder")
-            pipe.set_ip_adapter_scale(0.8)
-        self._cache[key] = self._fit(pipe, key)
+            self._attach_ipa(pipe, model)
+        self._cache[key] = self._fit(pipe, key, vae_slicing=xl)
         log.info("%s 加载 %.1fs", key, time.perf_counter() - t0)
-        return self._cache[key]
+        return self._get(key)
+
+    def _attach_ipa(self, pipe, model: str) -> None:
+        """把 IP-Adapter 挂到管线（共享 UNet 上重复挂会形状不匹配，先摘再挂）。"""
+        owner = self._pool.get("ipa_owner")
+        if owner is not None and owner is not pipe:
+            try:
+                owner.unload_ip_adapter()
+            except Exception:                  # noqa: BLE001
+                pass
+            self._pool["ipa_owner"] = None
+        ipa_root, ipa_sub, ipa_name = self.ipa_weight(model)
+        pipe.load_ip_adapter(ipa_root, ipa_sub, weight_name=ipa_name,
+                             image_encoder_folder="image_encoder")
+        pipe.set_ip_adapter_scale(0.8)
+        self._pool["ipa_owner"] = pipe
 
     # ---------- AnimateDiff（时序一致性）----------
 
@@ -372,10 +557,16 @@ class Engine:
         """
         key = f"animatediff:{controlnet}:{int(with_ipadapter)}:{model}"
         if key in self._cache:
-            return self._cache[key]
+            return self._get(key)
         t0 = time.perf_counter()
         from diffusers import (AnimateDiffControlNetPipeline, MotionAdapter)
 
+        # motion module 与 SD1.5 的 UNet 结构绑定，SDXL 上装不进去。
+        # 这里必须显式报错：静默回退到 SD1.5 会让"切了底模却没效果"再次发生。
+        if self.is_xl(model):
+            raise ValueError(
+                f"AnimateDiff 只支持 SD1.5 架构，{model} 是 SDXL。\n"
+                "改用逐帧引擎（engine_mode='frame'），它支持两个底模。")
         adapter_dir = self.root / self.ANIMATEDIFF_DIR
         if not self.animatediff_available():
             raise FileNotFoundError(
@@ -432,71 +623,186 @@ class Engine:
             self._pose = False
         return self._pose or None
 
+    # ---------- 少步蒸馏（LCM / Hyper-SD）----------
+
+    DISTILL_DIR = "lora_distill"
+    DISTILL_FILES = {
+        "lcm": "lcm-lora-sdv1-5.safetensors",
+        "hyper": "hyper-sd15-8steps-lora.safetensors",
+    }
+    # 蒸馏模型都是「低步数 + 低 CFG」训练的，步数给多了反而变差
+    DISTILL_DEFAULTS = {"lcm": {"steps": 8, "cfg": 1.5},
+                        "hyper": {"steps": 8, "cfg": 1.0}}
+
+    def distill_available(self) -> list[str]:
+        d = self.root / self.DISTILL_DIR
+        return [k for k, f in self.DISTILL_FILES.items() if (d / f).exists()]
+
+    def apply_distill(self, pipe, name: str = "lcm") -> str:
+        """加载少步蒸馏 LoRA 并把调度器换成 LCM，返回用到的名字。
+
+        为什么要它（评审 Q3）：30 步 × 2 候选的预算，换成 8 步 × 6 候选更划算——
+        画质靠**挑**而不是靠步数，而"挑"正是本项目最擅长的环节。
+
+        **风险要说清**：蒸馏 LoRA 会削弱风格保真（公开评测里 Hyper-SD 的 FID
+        明显高于教师模型），而本项目重度依赖像素 LoRA。所以这里是**可选**能力，
+        必须在自己的素材上 A/B（判据用每格单色率 + framescore 身份相似度），
+        不能默认打开。
+        """
+        name = (name or "").lower()
+        if name not in self.DISTILL_FILES:
+            raise ValueError(f"未知蒸馏方案 {name}（可选 {', '.join(self.DISTILL_FILES)}）")
+        f = self.root / self.DISTILL_DIR / self.DISTILL_FILES[name]
+        if not f.exists():
+            raise FileNotFoundError(
+                f"蒸馏 LoRA 缺失: {f}\n"
+                f"放到 {self.DISTILL_DIR}/ 下即可启用（LCM-LoRA 约 130MB），"
+                "或把 distill 留空用原始步数。")
+        pipe.load_lora_weights(str(f), adapter_name="distill")
+        from diffusers import LCMScheduler
+
+        pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config)
+        self._pool["distill"] = name
+        log.info("少步蒸馏已启用: %s（建议 %s）", name,
+                 self.DISTILL_DEFAULTS[name])
+        return name
+
+    def _active_adapters(self, pipe) -> list[str]:
+        try:
+            return list(pipe.get_active_adapters() or [])
+        except Exception:                     # noqa: BLE001
+            return []
+
     # ---------- LoRA 热切换 ----------
 
     def apply_lora(self, pipe, lora_path: str | Path | None, scale: float = 0.8) -> None:
-        """角色 LoRA 热加载：同名不重复卸载重载。"""
-        if lora_path is None:
-            if self._lora is not None:
+        """角色 LoRA 热加载：同名不重复卸载重载。
+
+        **状态记在 UNet 上，不是记在 Engine 上**。记在 Engine 上的话，
+        "W1 加载了像素 LoRA，接着跑 W4"会命中同一个 key 直接 return，
+        而 W4 的管线根本没加载过——静默丢风格，且没有任何报错。
+        记在 unet 上还顺带解决了共享权重（pose 管线复用 txt2img 的 UNet）的问题：
+        两条管线看的是同一份权重，状态天然一致。
+        """
+        unet = getattr(pipe, "unet", None)
+        target = unet if unet is not None else pipe
+        cur = getattr(target, LORA_ATTR, None)
+
+        def _unload() -> None:
+            try:
                 pipe.unload_lora_weights()
-                self._lora = None
+            except Exception:                 # noqa: BLE001  没装过就别让它炸
+                pass
+
+        if lora_path is None:
+            if cur is not None:
+                _unload()
+                setattr(target, LORA_ATTR, None)
+            self._pool["lora"] = None
             return
         key = f"{Path(lora_path).name}:{scale}"
-        if key == self._lora:
+        if key == cur:
+            self._pool["lora"] = key            # stats() 用，只作展示
             return
-        if self._lora is not None:
-            pipe.unload_lora_weights()
+        if cur is not None:
+            _unload()
+            setattr(target, LORA_ATTR, None)
         try:
             pipe.load_lora_weights(str(lora_path), adapter_name="char")
-            pipe.set_adapters(["char"], adapter_weights=[scale])
+            # 蒸馏 LoRA 是另一个 adapter，set_adapters 只列 "char" 会把它关掉
+            names, weights = ["char"], [scale]
+            if "distill" in self._active_adapters(pipe):
+                names.append("distill")
+                weights.append(1.0)
+            pipe.set_adapters(names, adapter_weights=weights)
         except Exception as exc:            # noqa: BLE001
             # 常见原因：这不是标准 LoRA，而是 LoKr / LoHa / LyCORIS 变体
             # （实测「水墨风格 ink wash」就是 LoKr，key 叫 lokr_w1）——
             # diffusers 的 load_lora_weights 认不出来，报的是一堆 key 重命名失败，
             # 用户根本看不懂。这里翻成人话并把权重卸干净，别让脏状态留在管道里。
-            self._lora = None
+            setattr(target, LORA_ATTR, None)
+            self._pool["lora"] = None
             raise ValueError(
                 f"LoRA 加载失败: {Path(lora_path).name} —— {exc}\n"
                 "大概率不是标准 LoRA（LoKr/LoHa/LyCORIS 变体暂不支持），"
                 "请换一个标准 LoRA（权重 key 形如 lora_unet_*_lora_A.weight）。"
             ) from exc
-        self._lora = key
+        setattr(target, LORA_ATTR, key)
+        self._pool["lora"] = key
         log.info("LoRA 热切换 -> %s (scale=%.2f)", Path(lora_path).name, scale)
 
     # ---------- 显存管理 ----------
 
-    def ensure_headroom(self, need_gb: float = 2.0) -> None:
-        """显存不够时自动驱逐已缓存的管线。
+    def _free_gb(self) -> float:
+        if not torch.cuda.is_available():
+            return 0.0
+        _, total = torch.cuda.mem_get_info()
+        # **用 reserved 反推占用**：mem_get_info 的 free 不含 PyTorch 缓存着的块，
+        # 那些块下次申请会被直接复用，所以「物理空闲」小于「可用」。
+        # 这里按 reserved 算"已经占掉多少"，剩下的才是真能给新管线用的。
+        return max(0.0, (total - torch.cuda.memory_reserved()) / 2**30)
 
-        **为什么需要**：引擎把管线缓存起来复用，但**从不自动释放**。
-        AnimateDiff 管线约 4.45GB、逐帧 ControlNet 管线约 3.2GB——
-        两者同时驻留就是 7.6GB，加上生成本身的激活就容易撞顶。
-        实测连续跑多个工作流时峰值能到 14.9GB（单独跑只有 5.78GB）。
+    def _ctrl_gc(self) -> None:
+        """丢掉没有被任何缓存管线引用的 ControlNet。
 
-        策略：从最久没用的开始丢，直到腾出足够空间。丢的是**缓存**，
-        下次用到会重新加载（几百毫秒到几秒），比 OOM 划算。
+        ControlNet 存在独立字典里，**不随管线一起释放**——老实现只清 _cache，
+        实测残留 4.16GB。这里按"还有没有管线名字里带它"来判断。
+        """
+        # IP-Adapter 的归属管线同理：它若已被驱逐，pool 里的引用会把它吊在显存里
+        owner = self._pool.get("ipa_owner")
+        if owner is not None and not any(owner is p for p in self._cache.values()):
+            self._pool["ipa_owner"] = None
+        names = set(self._ctrl)
+        if not names:
+            return
+        live = " ".join(self._cache.keys())
+        for name in list(names):
+            kind = name.split(":")[0]
+            if kind not in live:
+                self._ctrl.pop(name, None)
+
+    def drop_others(self, keep: Sequence[str] = ()) -> None:
+        """丢掉所有不匹配 `keep` 前缀的缓存管线。
+
+        与 `ensure_headroom` 的分工：那个是"不够了才腾"，这个是"这条工作流
+        明确要吃一大块显存，先清场"。AnimateDiff 32 帧要 14GB，留一条闲置的
+        2.6GB 文生图管线在旁边没有任何好处。
+        """
+        for key in list(self._cache):
+            if not any(k in key for k in keep):
+                self._cache.pop(key, None)
+        self._ctrl_gc()
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    def ensure_headroom(self, need_gb: float = 2.0,
+                        keep: Sequence[str] = ()) -> None:
+        """显存不够时按 LRU 驱逐缓存管线，**直到腾出 need_gb 的空闲**。
+
+        `need_gb` 的语义是"**还需要多少空闲显存**"，不是"已用量上限"。
+        老实现比较的是 `memory_reserved() < need_gb`，任何管线加载后都恒不成立，
+        于是每次调用都把整个缓存清空——cache 形同虚设，每次 wss/wpc 都要
+        重新加载 UNet（数秒），而这笔成本没有出现在计时里，所以一直没被发现。
+
+        `keep`：子串匹配的管线前缀，绝不驱逐。调用方应把"马上要用的那条"传进来，
+        否则会把自己刚加载好的管线扔掉再重载。
         """
         if not torch.cuda.is_available():
             return
-        # **用 PyTorch 的 reserved 而不是 mem_get_info 的物理空闲**：
-        # mem_get_info 看的是显存分配器的物理占用，它不包含 PyTorch
-        # 缓存着的块（cached-but-unallocated）。那些块在下次申请时会被
-        # 直接复用，所以「物理空闲」不等于「可用」。
-        # reserved 才是真正占着不还的量。
-        def _used_gb() -> float:
-            return torch.cuda.memory_reserved() / 2**30
-
-        if _used_gb() < need_gb:
+        if self._free_gb() >= need_gb:
             return
-        # 按插入顺序丢（dict 保序），保留最近用的
+        # OrderedDict 的迭代顺序就是「最久没用 → 最近用」
         for key in list(self._cache.keys()):
-            if _used_gb() < need_gb:
+            if self._free_gb() >= need_gb:
                 break
+            if any(k in key for k in keep):
+                continue
             self._cache.pop(key, None)
+            self._ctrl_gc()
             gc.collect()
             torch.cuda.empty_cache()
-            log.info("显存紧张（reserved %.1fGB），已释放管线 %s",
-                     _used_gb(), key)
+            log.info("显存紧张（空闲 %.1fGB < %.1fGB），已释放管线 %s",
+                     self._free_gb(), need_gb, key)
 
     def free(self, keep: tuple[str, ...] = ()) -> None:
         """释放显存。

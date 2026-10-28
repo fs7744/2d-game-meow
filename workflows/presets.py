@@ -42,8 +42,11 @@ WUXIA_SUFFIX = (
     "full body head to toe, centered, plain white background, "
     "chinese ink painting, clean lineart"
 )
-# 顺序即优先级：CLIP 只有 77 token，实测这串写到 113 token 尾部全被静默丢弃。
-# 所以只留最关键的 13 段，宁少不滥。
+# 顺序即优先级：越靠前被保留的概率越高。
+# **注意**：这里曾经写着"实测这串写到 113 token 尾部全被丢弃"——那是 `rough_tokens`
+# 的估算值。用真实 CLIPTokenizer 数出来是 **35 token**，根本没超 77。真正被搞坏的
+# 不是"超长被丢"，而是"按高估值提前截断"：估算器把 35 当成 113，于是 `fit()` 在
+# 77 的预算里只留下了前面几条。现在 `fit()` 用真实 BPE 计数（见 presets.count）。
 WUXIA_NEG = (
     # 1 裁切（最致命：头脚出画面就不能当立绘）
     "cropped, cut off head, cut off feet, "
@@ -74,10 +77,23 @@ PRESETS = {
 
 
 def rough_tokens(text: str) -> int:
-    """粗估 token 数：英文按 1.35 token/词，中文按 1 字 1.6 token。"""
+    """粗估 token 数：英文按 1.35 token/词，中文按 1 字 1.6 token。
+
+    **只作为兜底**。它对逗号分隔的英文串高估约 3 倍（实测 WUXIA_NEG 估算 113、
+    真实 35），据此截断会把本来塞得下的词白白砍掉。有 tokenizer 时一律走
+    `count`（真实 BPE 计数），估算法只在没下权重/没装 transformers 时用。
+    """
     words = len(text.split())
     cjk = sum(1 for ch in text if ord(ch) > 0x2E80)
     return int(words * 1.35 + cjk * 1.6)
+
+
+def count(text: str) -> int:
+    """真实 token 数；拿不到 tokenizer 时退回启发式（宁可粗也不能崩）。"""
+    from . import clip as clip_mod
+
+    n = clip_mod.count_text(text)
+    return n if n > 0 else rough_tokens(text)
 
 
 def _cut_words(text: str, budget: int) -> str:
@@ -85,7 +101,7 @@ def _cut_words(text: str, budget: int) -> str:
     keep: list[str] = []
     used = 0
     for w in text.split():
-        cost = rough_tokens(w) + 1
+        cost = count(w) + 1
         if used + cost > budget:
             break
         keep.append(w)
@@ -97,21 +113,21 @@ def fit(text: str, budget: int = 77) -> str:
     """按逗号段截断到 token 预算内。
 
     为什么不靠模型自己截：SD1.5 超出 77 token 是**静默丢弃**，不会报错。负向词
-    往往写很长（实测武侠契约写到 113），末尾那几条等于没写。这里显式按段累加，
-    保证「排在前面的重要词」一定进得去，并把被砍掉的部分暴露出来。
+    往往写很长，末尾那几条等于没写。这里显式按段累加，保证「排在前面的重要词」
+    一定进得去，并把被砍掉的部分暴露出来。
 
     两个边界情况必须处理，否则「截断」会比不截断更糟：
     - 只有一段却没有逗号（用户直接粘了一长串）→ 按词截，不能返回空串；
     - 第一段就超预算 → 同上，至少要留下开头那几个词。
     """
-    if rough_tokens(text) <= budget:
+    if count(text) <= budget:
         return text
     out: list[str] = []
     total = 0
     for part in (x.strip() for x in text.split(",")):
         if not part:
             continue
-        cost = rough_tokens(part) + 1                      # 逗号
+        cost = count(part) + 1                              # 逗号
         if total + cost > budget:
             if not out:                                    # 一句都没进去：退化成按词截
                 tail = _cut_words(part, budget)
@@ -123,20 +139,30 @@ def fit(text: str, budget: int = 77) -> str:
     return ", ".join(out)
 
 
+# 分段编码能塞下的总预算（77 × 2）。见 workflows/clip.py 的 encode_long：
+# 超过 77 token 的部分不再被丢弃，而是切成第二段参与交叉注意力。
+CHUNK_BUDGET = 154
+
+
 def build(prompt: str, negative: str | None, preset: str = "sprite",
-          budget: int = 77) -> tuple[str, str]:
-    """用户描述 + 契约后缀，两侧都在 77 token 预算内。
+          budget: int = 77, max_tokens: int = 0) -> tuple[str, str]:
+    """用户描述 + 契约后缀，两侧都在 token 预算内。
 
     **预算先留给后缀**：后缀（扁平背景 / 硬描边 / 全身）才是产线契约，用户主体
     描述写超了应该截主体，而不是把契约末尾丢掉——老实现是直接 `prompt + suffix`
     交给 CLIP，超长时被静默丢弃的恰好是后缀，画出来背景就脏了。
+
+    `max_tokens`：调大预算，配合 `clip.embeds` 的分段编码使用（见 CHUNK_BUDGET）。
+    默认 0 表示维持 77 的硬上限，老行为逐字不变。
     """
     if preset not in PRESETS:
         raise ValueError(f"未知 preset: {preset}（可选 {', '.join(PRESETS)}）")
+    if max_tokens and max_tokens > budget:
+        budget = int(max_tokens)
     suffix, neg = PRESETS[preset]
     user = (prompt or "").strip().strip(",")
     if suffix:
-        room = max(8, budget - rough_tokens(suffix) - 1)
+        room = max(8, budget - count(suffix) - 1)
         user = fit(user, room)
         pos = f"{user}, {suffix}" if user else suffix
     else:

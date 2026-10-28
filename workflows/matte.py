@@ -225,8 +225,12 @@ def load_ai_session(model_dir: str | Path, name: str = "isnet-general-use"):
 
 def matte_ai(img: Image.Image, model_dir: str | Path, name: str = "isnet-general-use",
              thresh: int = 128, session: Any = None, feather: int = 0,
-             fringe: bool = True) -> Image.Image:
-    """语义分割抠图，alpha 仍二值化（像素素材要硬边）。
+             fringe: bool = True, alpha_mode: str = "binary") -> Image.Image:
+    """语义分割抠图，alpha 默认二值化（像素素材要硬边）。
+
+    `alpha_mode="soft"`：保留分割模型给出的半透明边。**高清插画资产要用这个**——
+    发丝、纱、光效压成 0/255 之后会变成一圈硬齿。像素素材相反：半透明边在
+    放大时就是脏边，所以默认仍是 binary（行为不变）。
 
     分割只给「这是不是主体」，不会顺手清掉被背景混过的那一圈边 —— 所以这里
     也要走一遍 strip_fringe，否则轮廓外残留一圈背景色块。
@@ -237,7 +241,8 @@ def matte_ai(img: Image.Image, model_dir: str | Path, name: str = "isnet-general
     rgb = np.asarray(img.convert("RGB"))
     cut = remove(img.convert("RGB"), session=sess, post_process_mask=True)
     arr = np.asarray(cut.convert("RGBA")).copy()
-    arr[..., 3] = np.where(arr[..., 3] >= thresh, 255, 0).astype(np.uint8)
+    if alpha_mode != "soft":
+        arr[..., 3] = np.where(arr[..., 3] >= thresh, 255, 0).astype(np.uint8)
 
     if fringe:
         arr[..., 3] = strip_fringe(arr[..., 3], rgb, estimate_bg_color(img))
@@ -253,10 +258,32 @@ def matte_ai(img: Image.Image, model_dir: str | Path, name: str = "isnet-general
 
 
 AI_MODEL = "isnet-general-use.onnx"
+# rembg 的模型名。**按文件存在性自动选**：放了 birefnet 就用它，
+# 没有就还是 isnet（不改变现有机器的行为）。
+# BiRefNet 是 2024 的 SOTA 分割模型，细长结构（剑、法杖、飘带）与半透明边缘
+# 明显强于 2022 的 isnet——而"剑被吃掉半截"正是精灵素材最常见的废图原因。
+AI_MODELS = (
+    ("birefnet-general.onnx", "birefnet-general"),
+    ("isnet-general-use.onnx", "isnet-general-use"),
+)
+
+# 高清插画资产不该把 alpha 压成二值：发丝、纱、光效都需要半透明。
+# 像素素材相反——半透明边在放大的时候会变成脏边。所以由调用方给 alpha_mode。
+ALPHA_MODES = ("auto", "binary", "soft")
+
+
+def pick_model(model_dir: Optional[str | Path]) -> tuple[str, str] | None:
+    """本机可用的分割权重（文件名, rembg 模型名），优先级从上到下。"""
+    if not model_dir:
+        return None
+    for fname, name in AI_MODELS:
+        if (Path(str(model_dir)) / fname).exists():
+            return fname, name
+    return None
 
 
 def ai_available(model_dir: Optional[str | Path]) -> bool:
-    return bool(model_dir) and (Path(str(model_dir)) / AI_MODEL).exists()
+    return pick_model(model_dir) is not None
 
 
 def fg_ratio(rgba: Image.Image) -> float:
@@ -291,22 +318,43 @@ def matte_auto(img: Image.Image, backend: str = "auto",
     静默的，比报错难查得多。占比不合理时换成色键再比一次，取占比更合理的那个。
     """
     info = info if info is not None else {}
-    want_ai = backend in ("u2net", "ai", "isnet")
+    # 两种后端的参数集不同（alpha_mode 只有分割后端认），混着传会 TypeError。
+    # 这里按后端分流，避免以后加参数时又踩一次。
+    ai_kw = {k: v for k, v in kw.items()
+             if k in ("thresh", "feather", "fringe", "alpha_mode", "session")}
+    color_kw = {k: v for k, v in kw.items()
+                if k in ("bg", "tol", "fringe", "fringe_ratio", "fringe_passes")}
+    want_ai = backend in ("u2net", "ai", "isnet", "birefnet")
     if backend == "auto":
         if not ai_available(model_dir):
             info.update(backend="color", fallback=False)
-            return matte(img, **kw)
-        cut = matte_ai(img, model_dir, **kw)
+            return matte(img, **color_kw)
+        name = _model_name(model_dir)
+        cut = matte_ai(img, model_dir, name=name, **ai_kw)
         if _sane(cut):
-            info.update(backend="u2net", fallback=False)
+            info.update(backend=_short(name), fallback=False)
             return cut
-        alt = matte(img, **kw)
+        alt = matte(img, **color_kw)
         pick_alt = _sane(alt) or fg_ratio(alt) > fg_ratio(cut)
-        info.update(backend="color" if pick_alt else "u2net", fallback=True)
+        info.update(backend="color" if pick_alt else _short(name), fallback=True)
         return alt if pick_alt else cut
 
     if want_ai and ai_available(model_dir):
-        info.update(backend="u2net", fallback=False)
-        return matte_ai(img, model_dir, **kw)
+        name = _model_name(model_dir)
+        if backend == "birefnet" and not name.startswith("birefnet"):
+            # 显式要 birefnet 但只有 isnet：降级要留痕，不能静默
+            info["downgraded"] = f"birefnet 权重缺失，退回 {name}"
+        info.update(backend=_short(name), fallback=False)
+        return matte_ai(img, model_dir, name=name, **ai_kw)
     info.update(backend="color", fallback=False)
-    return matte(img, **kw)
+    return matte(img, **color_kw)
+
+
+def _model_name(model_dir: Optional[str | Path]) -> str:
+    pick = pick_model(model_dir)
+    return pick[1] if pick else "isnet-general-use"
+
+
+def _short(name: str) -> str:
+    """meta 里的后端名保持向后兼容：isnet 仍记作 u2net（老产物/前端都在用）。"""
+    return "birefnet" if name.startswith("birefnet") else "u2net"

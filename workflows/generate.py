@@ -17,6 +17,7 @@ import torch
 from PIL import Image
 
 from . import anim as anim_mod
+from . import assetdb
 from . import clip as clip_mod
 from . import matte as matte_mod
 from . import pixelfy as pxf
@@ -86,8 +87,7 @@ def _save(img: Image.Image, name: str, tags: str, meta: dict,
         raw.save(raw_path)
         side["raw"] = str(raw_path)
     Path(str(out) + ".json").write_text(json.dumps(side, ensure_ascii=False, indent=2), "utf-8")
-    with (ASSETS / "index.jsonl").open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(side, ensure_ascii=False) + "\n")
+    assetdb.append_line(ASSETS / "index.jsonl", side)
     # url 是相对 assets 的路径：产物现在在 projects/<id>/ 子目录里，只取 basename 会 404
     rel = out.relative_to(ASSETS).as_posix()
     return {"file": str(out), "url": f"/files/{rel}", "sidecar": str(out) + ".json",
@@ -119,8 +119,13 @@ def _postprocess(img: Image.Image, eng: Engine, *, matte: bool, matte_backend: s
         edge = matte_mod.edge_touch(img)
         # 多主体是 SD1.5 画小怪物的通病（史莱姆尤甚），负向词压不住，只能量出来
         subjects = pp.foreground_blobs(img)
+    if info is not None:
+        # 像素化**之前**的图（已抠图）。质量闸门要用它数关节：
+        # 128 有效像素、32 色的像素画上，姿态模型本来就检不出几个点，
+        # 拿产物评分会把好帧判成废帧，白白触发补提。
+        info["pre_pixel"] = img.copy() if (pixel > 1 or palette) else img
     if pixel > 1:
-        img = pp.pixelate(img, pixel)
+        img = pp.pixelate(img, pixel, grid_align=True)
     if palette:
         img = pp.quantize_palette(img, palette)
     if clean_iso and (pixel > 1 or palette):
@@ -129,18 +134,93 @@ def _postprocess(img: Image.Image, eng: Engine, *, matte: bool, matte_backend: s
     return img, edge, subjects
 
 
-def _skip_embeds(pipe, prompt: str, negative: str, clip_skip: int, model: str):
-    """clip_skip>1 时返回 (正向 embeds, 负向 embeds)，否则 None。
+def _infer(eng: Engine, pipe, kw: Dict[str, Any], *, shrink: bool = True,
+           label: str = "") -> Any:
+    """带 OOM 恢复的推理调用：清缓存 → 降分辨率 → 重试（最多两次）。
 
-    只有 SD1.5 走这条路：SDXL 的两个文本编码器 + pooled embeds 要一起改，
-    收益远小于 SD1.5（而且 SDXL 模型页基本不写 clip skip）。
+    **为什么需要**：老实现里 OOM 只可能发生在 `pipe.to()`（`_fit` 里有降级），
+    真正生成时撞顶就直接 `job.status = failed`。对"一次跑 20 个角色"的批量产线，
+    这意味着跑到一半全废。这里把"降档继续跑"补上——`vramopt.plan_generation`
+    本来就有降分辨率的逻辑，只是没接到这条路上。
+
+    降档顺序：先清掉**其它**缓存管线（当前这条由局部变量持有，不会被回收），
+    再按 3/4 缩边长（对齐到 8 的倍数）。缩过两次还不行就如实抛出。
     """
-    if not clip_skip or clip_skip <= 1:
-        return None
-    if model != "sd15":
-        print(f"[warn] clip_skip={clip_skip} 只对 SD1.5 生效，{model} 已忽略")
-        return None
-    return clip_mod.embeds(pipe, prompt, negative, clip_skip)
+    for attempt in range(3):
+        try:
+            return pipe(**kw)
+        except torch.OutOfMemoryError:
+            if attempt >= 2:
+                raise
+            torch.cuda.empty_cache()
+            eng.drop_others(())            # 清空缓存；正在用的这条仍被引用，不受影响
+            w, h = kw.get("width"), kw.get("height")
+            if not shrink or not w or not h:
+                print(f"[warn] {label} OOM：已清空缓存后重试（不降分辨率）")
+                continue
+            nw = max(256, int(w * 0.75) // 8 * 8)
+            nh = max(256, int(h * 0.75) // 8 * 8)
+            if (nw, nh) == (w, h):
+                raise
+            print(f"[warn] {label} OOM：分辨率 {w}×{h} → {nw}×{nh} 后重试")
+            kw = {**kw, "width": nw, "height": nh}
+    return None                            # pragma: no cover  （循环内必 return/raise）
+
+
+def _hires_fix(eng: Engine, img: Image.Image, *, scale: float, strength: float,
+               steps: int, cfg: float, kw: Dict[str, Any], model: str,
+               seed: int, lora: Optional[str], lora_scale: float,
+               resample=Image.LANCZOS) -> Image.Image:
+    """高清修复：把生成结果放大后**低幅度重画**一遍。
+
+    **为什么需要**（评审 Q6）：SD1.5 的 ControlNet（openpose/canny v1.1）是 512²
+    训练的，直接在 768² 上推理等于跨分辨率使用控制网，控制力下降、肢体容易糊。
+    业界标准做法是**两段式**：512² 出结构（控制网在训练分辨率上最准）→ img2img
+    低 strength 放大到 768/1024 补细节。显存峰值也比单段 768² 更低。
+
+    `strength` 建议 0.3~0.4：再高会把结构重画掉，再低只是插值放大。
+    """
+    w = max(64, int(round(img.width * scale)) // 8 * 8)
+    h = max(64, int(round(img.height * scale)) // 8 * 8)
+    up = img.resize((w, h), resample)
+    pipe = eng.img2img_pipe(model)
+    eng.apply_lora(pipe, lora, lora_scale)      # 共享 UNet 时不会重复加载
+    torch.cuda.reset_peak_memory_stats()
+    out = _infer(eng, pipe, dict(
+        image=up, strength=strength, num_inference_steps=steps,
+        guidance_scale=cfg, generator=torch.Generator("cuda").manual_seed(seed),
+        **kw), shrink=False, label="hires").images[0]
+    return out
+
+
+def _text_kwargs(pipe, prompt: str, negative: str, clip_skip: int, model: str):
+    """返回 (传给 pipe 的文本参数, 实际生效的 clip_skip)。
+
+    三条路径，顺序不能换：
+
+    1. **短文本 + clip_skip<=1** → 原样传字符串。这条必须与历史行为逐像素一致
+       （同一个 seed 的结果有测试钉着），所以不做任何"顺手优化"。
+    2. **clip_skip>1** → 自算 embeds（transformers 5.x 下管道参数会崩，见 clip.py）。
+    3. **超过 77 token** → 分段编码。CLIP 超长是**静默丢弃**，本项目的武侠契约
+       自己就写到 113 token，等于尾部几条质量兜底词从来没生效。分段后不再丢。
+
+    SDXL 不走 embeds：它有两个文本编码器 + pooled embeds，动一处要动一片，
+    收益远小于 SD1.5，保持字符串路径。
+    """
+    if "XL" in type(pipe).__name__:
+        if clip_skip and clip_skip > 1:
+            print(f"[warn] clip_skip={clip_skip} 只对 SD1.5 生效，{model} 已忽略")
+        return dict(prompt=prompt, negative_prompt=negative), 1
+    if not clip_mod.available(pipe):
+        return dict(prompt=prompt, negative_prompt=negative), 1
+    if clip_skip and clip_skip > 1:
+        pos_emb, neg_emb = clip_mod.embeds(pipe, prompt, negative, clip_skip)
+        return (dict(prompt_embeds=pos_emb, negative_prompt_embeds=neg_emb),
+                int(clip_skip))
+    if clip_mod.needs_chunk(pipe, prompt, negative):
+        pos_emb, neg_emb = clip_mod.embeds(pipe, prompt, negative, 1)
+        return (dict(prompt_embeds=pos_emb, negative_prompt_embeds=neg_emb), 1)
+    return dict(prompt=prompt, negative_prompt=negative), 1
 
 
 # 质量档位（实测，RTX 4090，fp16，DPM++ 2M Karras）：
@@ -164,26 +244,44 @@ def txt2img(eng: Engine, *, prompt: str, negative: Optional[str] = None,
             pixel: int = 0, palette: int = 0, preset: str = "sprite",
             matte: bool = False, matte_backend: str = "auto", denoise: int = 1,
             clean_iso: int = 1, model: str = "sd15", clip_skip: int = 1,
+            hires: float = 0.0, hires_strength: float = 0.35,
+            hires_steps: int = 12, distill: str = "",
             scope: str = "", tag: str = "w1") -> Dict[str, Any]:
-    prompt, negative = presets.build(prompt, negative, preset)
-    ntok = presets.rough_tokens(prompt)
-    if ntok > 77:
-        print(f"[warn] 正向提示词约 {ntok} token，超过 SD1.5 的 77 上限，尾部会被截断")
+    prompt, negative = presets.build(prompt, negative, preset,
+                                    max_tokens=presets.CHUNK_BUDGET)
+    # 只有真的超过分段上限（77×2）才会丢词，这时才值得告警
+    ntok = presets.count(prompt)
+    if ntok > presets.CHUNK_BUDGET:
+        print(f"[warn] 正向提示词 {ntok} token，超过分段上限 "
+              f"{presets.CHUNK_BUDGET}，尾部会被截断")
     pipe = eng.txt2img_pipe(model)
+    if distill:
+        eng.apply_distill(pipe, distill)
+        d = eng.DISTILL_DEFAULTS.get(distill, {})
+        if steps == 30:                   # 用默认步数说明用户没指定 → 换成蒸馏档位
+            steps = d.get("steps", steps)
+        if abs(cfg - 7.0) < 1e-6:
+            cfg = d.get("cfg", cfg)
     eng.apply_lora(pipe, lora, lora_scale)
     if seed < 0:
         seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
     neg = negative or NEG_DEFAULT
     gen = torch.Generator("cuda").manual_seed(seed)
-    kw: Dict[str, Any] = dict(prompt=prompt, negative_prompt=neg)
-    emb = _skip_embeds(pipe, prompt, neg, clip_skip, model)
-    if emb is not None:
-        kw = dict(prompt_embeds=emb[0], negative_prompt_embeds=emb[1])
+    kw, clip_used = _text_kwargs(pipe, prompt, neg, clip_skip, model)
     torch.cuda.reset_peak_memory_stats()
     dt = _timer()
-    img = pipe(width=width, height=height, num_inference_steps=steps,
-               guidance_scale=cfg, generator=gen, **kw).images[0]
+    img = _infer(eng, pipe, dict(width=width, height=height,
+                                 num_inference_steps=steps,
+                                 guidance_scale=cfg, generator=gen, **kw),
+                 label="w1").images[0]
     seconds = dt()
+    width, height = img.size          # OOM 降档后以实际尺寸为准，别在 meta 里撒谎
+    if hires and hires > 1.0:
+        # 两段式：先在底座分辨率出结构，再低幅度放大补细节（见 _hires_fix）
+        img = _hires_fix(eng, img, scale=hires, strength=hires_strength,
+                         steps=hires_steps, cfg=cfg, kw=kw, model=model,
+                         seed=seed, lora=lora, lora_scale=lora_scale)
+        width, height = img.size
     # 后处理之前的原图另存一份：图生图要拿它当源图（见 _save 的说明）
     raw = img.copy() if (matte or pixel > 1 or palette) else None
     matte_info: Dict[str, Any] = {}
@@ -198,8 +296,12 @@ def txt2img(eng: Engine, *, prompt: str, negative: Optional[str] = None,
         "matte_backend": matte_backend, "denoise": denoise, "clean_iso": clean_iso,
         "matte_used": matte_info.get("backend"), "matte_fallback": matte_info.get("fallback"),
         "edge_touch": edge, "model": model,
-        "clip_skip": clip_skip if emb is not None else 1,
+        "clip_skip": clip_used,
         "subjects": subjects,
+        "hires": hires if hires > 1.0 else None,
+        "hires_strength": hires_strength if hires > 1.0 else None,
+        "hires_steps": hires_steps if hires > 1.0 else None,
+        "distill": distill or None,
         "seconds": seconds, "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
     }, raw=raw, scope=scope)
 
@@ -222,7 +324,8 @@ def img2img(eng: Engine, *, init_image: str | Path, prompt: str,
       原图（txt2img 会额外存 `<name>_raw.png`），拿成品精灵回炉会把色块糊掉。
     """
     if preset is not None:
-        prompt, negative = presets.build(prompt, negative, preset)
+        prompt, negative = presets.build(prompt, negative, preset,
+                                    max_tokens=presets.CHUNK_BUDGET)
     # 项目隔离：源图必须在本项目目录里。别的项目的产物（assets/projects/<别的>/…）
     # 一律拒绝——项目之间互不可见。历史公共区（assets 根目录下的老文件）仍然可用。
     if scope:
@@ -238,15 +341,13 @@ def img2img(eng: Engine, *, init_image: str | Path, prompt: str,
     if seed < 0:
         seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
     neg = negative or NEG_DEFAULT
-    kw: Dict[str, Any] = dict(prompt=prompt, negative_prompt=neg)
-    emb = _skip_embeds(pipe, prompt, neg, clip_skip, model)
-    if emb is not None:
-        kw = dict(prompt_embeds=emb[0], negative_prompt_embeds=emb[1])
+    kw, clip_used = _text_kwargs(pipe, prompt, neg, clip_skip, model)
     torch.cuda.reset_peak_memory_stats()
     dt = _timer()
-    img = pipe(image=ref, strength=strength, num_inference_steps=steps,
-               guidance_scale=cfg, generator=torch.Generator("cuda").manual_seed(seed),
-               **kw).images[0]
+    img = _infer(eng, pipe, dict(
+        image=ref, strength=strength, num_inference_steps=steps,
+        guidance_scale=cfg, generator=torch.Generator("cuda").manual_seed(seed),
+        **kw), shrink=False, label="w2").images[0]
     seconds = dt()
     raw = img.copy() if (matte or pixel > 1 or palette) else None
     matte_info: Dict[str, Any] = {}
@@ -262,7 +363,7 @@ def img2img(eng: Engine, *, init_image: str | Path, prompt: str,
         "matte_backend": matte_backend, "matte_used": matte_info.get("backend"),
         "matte_fallback": matte_info.get("fallback"),
         "edge_touch": edge, "subjects": subjects, "model": model,
-        "clip_skip": clip_skip if emb is not None else 1,
+        "clip_skip": clip_used,
         "seconds": seconds, "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
     }, raw=raw, scope=scope)
 
@@ -286,10 +387,11 @@ def inpaint(eng: Engine, *, image: str | Path, mask: str | Path, prompt: str,
     w8, h8 = max(64, src.width // 8 * 8), max(64, src.height // 8 * 8)
     torch.cuda.reset_peak_memory_stats()
     dt = _timer()
-    raw = pipe(prompt=prompt, negative_prompt=negative or NEG_DEFAULT, image=src,
-               mask_image=msk, strength=strength, num_inference_steps=steps,
-               guidance_scale=cfg, generator=torch.Generator("cuda").manual_seed(seed),
-               width=w8, height=h8).images[0]
+    raw = _infer(eng, pipe, dict(
+        prompt=prompt, negative_prompt=negative or NEG_DEFAULT, image=src,
+        mask_image=msk, strength=strength, num_inference_steps=steps,
+        guidance_scale=cfg, generator=torch.Generator("cuda").manual_seed(seed),
+        width=w8, height=h8), label="w3").images[0]
     seconds = dt()
     if raw.size != src.size:
         raw = raw.resize(src.size, Image.LANCZOS)
@@ -326,6 +428,7 @@ def matte_bg(eng: Engine, *, init_image: str | Path,
              background: str | Path | None = None,
              bg_color: str | Sequence[int] | None = None,
              matte_backend: str = "auto", denoise: int = 1,
+             alpha_mode: str = "binary", feather: int = 0,
              scope: str = "", tag: str = "wbg") -> Dict[str, Any]:
     """抠图去背景 / 换背景。**不需要模型**，纯图像处理，所以不占显存、瞬间出。
 
@@ -336,11 +439,16 @@ def matte_bg(eng: Engine, *, init_image: str | Path,
 
     指定了背景时，会**额外**存一份 `<name>_cut.png`（透明底前景），
     方便回头再换别的背景。
+
+    `alpha_mode`：像素素材用默认的 `binary`（硬边）；**高清插画资产改成 `soft`**，
+    否则发丝/纱/光效会被压成一圈硬齿。`feather` 只对 soft 有意义。
     """
     src = Image.open(init_image).convert("RGBA")
     # 抠图：与其它工作流共用同一套（含 u2net 抠空自动回退的保护）
     cut = matte_mod.despeckle(
-        matte_mod.matte_auto(src, matte_backend, eng.matte_dir), denoise_iters=denoise)
+        matte_mod.matte_auto(src, matte_backend, eng.matte_dir,
+                             alpha_mode=alpha_mode, feather=feather),
+        denoise_iters=denoise)
     fg = float((np.asarray(cut)[..., 3] > 127).mean())
 
     out = cut
@@ -457,7 +565,8 @@ def ai_repaint(eng: Engine, *, image: str | Path, mask: str | Path, prompt: str,
     代价是接缝需要收：羽化过渡 + 只在边界带做色彩校正 + 可选色板吸附。
     """
     if preset is not None:
-        prompt, negative = presets.build(prompt, negative, preset)
+        prompt, negative = presets.build(prompt, negative, preset,
+                                    max_tokens=presets.CHUNK_BUDGET)
     src = Image.open(image).convert("RGBA")
     msk = rp.load_mask(mask)
     if msk.size != src.size:
@@ -493,15 +602,14 @@ def ai_repaint(eng: Engine, *, image: str | Path, mask: str | Path, prompt: str,
         payload = payload.resize(target, Image.LANCZOS)
     if seed < 0:
         seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
-    kw: Dict[str, Any] = dict(prompt=full_prompt, negative_prompt=neg)
-    emb = _skip_embeds(pipe, full_prompt, neg, clip_skip, model)
-    if emb is not None:
-        kw = dict(prompt_embeds=emb[0], negative_prompt_embeds=emb[1])
+    kw, clip_used = _text_kwargs(pipe, full_prompt, neg, clip_skip, model)
     torch.cuda.reset_peak_memory_stats()
     dt = _timer()
-    gen = pipe(image=payload, strength=strength, num_inference_steps=steps,
-               guidance_scale=cfg,
-               generator=torch.Generator("cuda").manual_seed(seed), **kw).images[0]
+    gen = _infer(eng, pipe, dict(
+        image=payload, strength=strength, num_inference_steps=steps,
+        guidance_scale=cfg,
+        generator=torch.Generator("cuda").manual_seed(seed), **kw),
+        shrink=False, label="w5").images[0]
     seconds = dt()
     if gen.size != crop.size:
         gen = gen.resize(crop.size, Image.LANCZOS)
@@ -539,7 +647,7 @@ def ai_repaint(eng: Engine, *, image: str | Path, mask: str | Path, prompt: str,
         "strength": strength, "steps": steps, "cfg": cfg, "seed": seed,
         "model": model, "lora": lora,
         "lora_scale": lora_scale if lora else None,
-        "clip_skip": clip_skip if emb is not None else 1,
+        "clip_skip": clip_used,
         "box": list(box), "crop_size": list(crop.size), "target_size": list(target),
         "coverage": rp.mask_coverage(msk),
         "context": context, "expand": expand, "feather": feather,
@@ -615,6 +723,7 @@ def pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | Path,
                 ref_mode: str = "auto",
                 lora: Optional[str] = None, lora_scale: float = 0.8,
                 clip_skip: int = 1, preset: Optional[str] = None,
+                model: str = "sd15",
                 pixel: int = 0, palette: int = 0, matte: bool = False,
                 matte_backend: str = "auto", denoise: int = 1, clean_iso: int = 1,
                 scope: str = "", tag: str = "wpc") -> Dict[str, Any]:
@@ -642,7 +751,8 @@ def pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | Path,
     多了 IP-Adapter 这一路，是单帧的身份迁移。多帧批量请用 WSS（sprite_swap）。
     """
     if preset is not None:
-        prompt, negative = presets.build(prompt, negative, preset)
+        prompt, negative = presets.build(prompt, negative, preset,
+                                    max_tokens=presets.CHUNK_BUDGET)
 
     ref = Image.open(pose_image).convert("RGB")
     # 1) 动作参考图 → 条件图（骨架或轮廓）
@@ -664,25 +774,24 @@ def pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | Path,
     #     主体顶满画面时 patch 里只有局部纹理，编码不出整体身份）
     #   - 像素画用最近邻缩放（LANCZOS 会把像素块糊成渐变）
     char = refprep.prepare_reference(Image.open(char_image).convert("RGBA"), size=width)
-    eng.ensure_headroom(need_gb=2.0)
-    pipe = eng.pose_pipe(controlnet=pipe_cn, with_ipadapter=True, model="sd15")
+    eng.ensure_headroom(need_gb=2.0, keep=("pose",))
+    pipe = eng.pose_pipe(controlnet=pipe_cn, with_ipadapter=True, model=model)
     eng.apply_lora(pipe, lora, lora_scale)
     pipe.set_ip_adapter_scale(ipa_scale)
     if seed < 0:
         seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
     neg = negative or NEG_DEFAULT
-    emb = _skip_embeds(pipe, prompt, neg, clip_skip, "sd15")
-    kw: Dict[str, Any] = dict(prompt=prompt, negative_prompt=neg)
-    if emb is not None:
-        kw = dict(prompt_embeds=emb[0], negative_prompt_embeds=emb[1])
+    kw, clip_used = _text_kwargs(pipe, prompt, neg, clip_skip, model)
     torch.cuda.reset_peak_memory_stats()
     dt = _timer()
-    out = pipe(image=cond.resize((width, height)), num_inference_steps=steps,
-               guidance_scale=cfg, controlnet_conditioning_scale=cn_scale,
-               ip_adapter_image=char,
-               generator=torch.Generator("cuda").manual_seed(seed),
-               width=width, height=height, **kw).images[0]
+    out = _infer(eng, pipe, dict(
+        image=cond.resize((width, height)), num_inference_steps=steps,
+        guidance_scale=cfg, controlnet_conditioning_scale=cn_scale,
+        ip_adapter_image=char,
+        generator=torch.Generator("cuda").manual_seed(seed),
+        width=width, height=height, **kw), label="wpc").images[0]
     seconds = dt()
+    width, height = out.size
     raw = out.copy() if (matte or pixel > 1 or palette) else None
     matte_info: Dict[str, Any] = {}
     out, edge, subjects = _postprocess(
@@ -698,9 +807,10 @@ def pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | Path,
         "joints": cond_info.get("joints"), "fill": fill,
         "width": width, "height": height,
         "steps": steps, "cfg": cfg, "seed": seed,
+        "model": model,
         "cn_scale": cn_scale, "ipa_scale": ipa_scale,
         "lora": lora, "lora_scale": lora_scale if lora else None,
-        "clip_skip": clip_skip if emb is not None else 1,
+        "clip_skip": clip_used,
         "pixel_block": pixel, "palette": palette, "matte": matte,
         "matte_used": matte_info.get("backend"),
         "matte_fallback": matte_info.get("fallback"),
@@ -722,6 +832,7 @@ def sprite_swap(eng: Engine, *, sheet_image: str | Path, char_image: str | Path,
                 engine_mode: str = "auto",
                 lora: Optional[str] = None, lora_scale: float = 0.8,
                 clip_skip: int = 1, preset: Optional[str] = None,
+                model: str = "sd15",
                 matte: bool = True, matte_backend: str = "auto",
                 denoise: int = 1, clean_iso: int = 1,
                 palette: int = 32, keep_alpha: bool = False,
@@ -765,7 +876,8 @@ def sprite_swap(eng: Engine, *, sheet_image: str | Path, char_image: str | Path,
         显存更省（4.5GB vs 13.1GB），但帧间一致性略差。
     """
     if preset is not None:
-        prompt, negative = presets.build(prompt, negative, preset)
+        prompt, negative = presets.build(prompt, negative, preset,
+                                    max_tokens=presets.CHUNK_BUDGET)
 
     sheet = Image.open(sheet_image).convert("RGBA")
     if cols <= 0 or rows <= 0:
@@ -798,25 +910,24 @@ def sprite_swap(eng: Engine, *, sheet_image: str | Path, char_image: str | Path,
     if engine_mode == "animatediff":
         return _sprite_animatediff(
             eng, frames, char_image, cols, rows,
-            prompt=prompt, negative=negative, preset=preset,
+            # **不要在这里再传 preset**：prompt/negative 上面已经 build 过一次，
+            # 再 build 一遍会把契约后缀拼成两遍，白吃 15~20 个 token 的预算。
+            prompt=prompt, negative=negative, preset=None,
             pipe_cn=pipe_cn, ref_mode=ref_mode, width=width, height=height,
             steps=steps, cfg=cfg, seed=seed, cn_scale=cn_scale, ipa_scale=ipa_scale,
             lora=lora, lora_scale=lora_scale, clip_skip=clip_skip,
             matte=matte, matte_backend=matte_backend, denoise=denoise,
             palette=palette, extractor=extractor, vram_profile=vram_profile,
-            scope=scope, tag=tag)
+            model=model, scope=scope, tag=tag)
 
-    eng.ensure_headroom(need_gb=2.0)
-    pipe = eng.pose_pipe(controlnet=pipe_cn, with_ipadapter=True, model="sd15")
+    eng.ensure_headroom(need_gb=2.0, keep=("pose",))
+    pipe = eng.pose_pipe(controlnet=pipe_cn, with_ipadapter=True, model=model)
     eng.apply_lora(pipe, lora, lora_scale)
     pipe.set_ip_adapter_scale(ipa_scale)
     if seed < 0:
         seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
     neg = negative or NEG_DEFAULT
-    emb = _skip_embeds(pipe, prompt, neg, clip_skip, "sd15")
-    kw: Dict[str, Any] = dict(prompt=prompt, negative_prompt=neg)
-    if emb is not None:
-        kw = dict(prompt_embeds=emb[0], negative_prompt_embeds=emb[1])
+    kw, clip_used = _text_kwargs(pipe, prompt, neg, clip_skip, model)
 
     char = refprep.prepare_reference(Image.open(char_image).convert("RGBA"), size=width)
     char_ref_orig = Image.open(char_image).convert("RGBA")
@@ -854,11 +965,12 @@ def sprite_swap(eng: Engine, *, sheet_image: str | Path, char_image: str | Path,
         ref_area = int(framescore.subject_mask(frame.convert("RGBA")).sum())
         want = max(1, candidates)
         for k in range(want):
-            img = pipe(image=cond, num_inference_steps=steps, guidance_scale=cfg,
-                       controlnet_conditioning_scale=cn_scale,
-                       ip_adapter_image=char,
-                       generator=torch.Generator("cuda").manual_seed(seed + k * gate_seed_step),
-                       width=width, height=height, **kw).images[0]
+            img = _infer(eng, pipe, dict(
+                image=cond, num_inference_steps=steps, guidance_scale=cfg,
+                controlnet_conditioning_scale=cn_scale,
+                ip_adapter_image=char,
+                generator=torch.Generator("cuda").manual_seed(seed + k * gate_seed_step),
+                width=width, height=height, **kw), label="wss").images[0]
             cut_img = _cut(img)
             ev = framescore.evaluate(cut_img, frame, char_ref_orig, prev=prev,
                                     area_ref=ref_area)
@@ -868,12 +980,13 @@ def sprite_swap(eng: Engine, *, sheet_image: str | Path, char_image: str | Path,
         # 都没过闸门 → 用补提额度再试几轮
         if not any(ev["passed"] for _i, ev in cands) and gate_retries > 0:
             for k in range(gate_retries):
-                img = pipe(image=cond, num_inference_steps=steps, guidance_scale=cfg,
-                           controlnet_conditioning_scale=cn_scale,
-                           ip_adapter_image=char,
-                           generator=torch.Generator("cuda").manual_seed(
-                               seed + (len(cands) + k) * gate_seed_step),
-                           width=width, height=height, **kw).images[0]
+                img = _infer(eng, pipe, dict(
+                    image=cond, num_inference_steps=steps, guidance_scale=cfg,
+                    controlnet_conditioning_scale=cn_scale,
+                    ip_adapter_image=char,
+                    generator=torch.Generator("cuda").manual_seed(
+                        seed + (len(cands) + k) * gate_seed_step),
+                    width=width, height=height, **kw), label="wss").images[0]
                 cut_img = _cut(img)
                 ev = framescore.evaluate(cut_img, frame, char_ref_orig, prev=prev,
                                         area_ref=ref_area)
@@ -933,11 +1046,12 @@ def sprite_swap(eng: Engine, *, sheet_image: str | Path, char_image: str | Path,
         "cell": [cell_w, cell_h],
         "ref_mode": ref_mode,
         "ref_modes_used": sorted(set(used_modes)),
+        "model": model,
         "width": width, "height": height,
         "steps": steps, "cfg": cfg, "seed": seed,
         "cn_scale": cn_scale, "ipa_scale": ipa_scale,
         "lora": lora, "lora_scale": lora_scale if lora else None,
-        "clip_skip": clip_skip if emb is not None else 1,
+        "clip_skip": clip_used,
         "matte": matte, "matte_used": matte_info.get("backend"),
         "matte_fallback": matte_info.get("fallback"),
         "keep_alpha": keep_alpha,
@@ -985,8 +1099,7 @@ def _pack_sprite_frames(aligned: Sequence[Image.Image], frames: Sequence[tuple],
 
     Path(str(sheet_path) + ".json").write_text(
         json.dumps(meta, ensure_ascii=False, indent=2), "utf-8")
-    with (ASSETS / "index.jsonl").open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps({"sheet": str(sheet_path), **meta}, ensure_ascii=False) + "\n")
+    assetdb.append_line(ASSETS / "index.jsonl", {"sheet": str(sheet_path), **meta})
     return {
         "file": str(sheet_path),
         "url": f"/files/{sheet_path.relative_to(ASSETS).as_posix()}",
@@ -1044,7 +1157,7 @@ def _sprite_animatediff(eng: Engine, frames: Sequence[tuple], char_image: str | 
                         matte: bool = True, matte_backend: str = "auto",
                         denoise: int = 1, palette: int = 32, extractor: Any = None,
                         repair: bool = True, repair_candidates: int = 2,
-                        vram_profile: str = "auto",
+                        vram_profile: str = "auto", model: str = "sd15",
                         scope: str = "", tag: str = "wss") -> Dict[str, Any]:
     """AnimateDiff 路线：一次生成整段序列，靠时序注意力保证帧间一致。
 
@@ -1066,7 +1179,8 @@ def _sprite_animatediff(eng: Engine, frames: Sequence[tuple], char_image: str | 
     所以 meta 里会记录实际用的分辨率和降级原因。
     """
     if preset is not None:
-        prompt, negative = presets.build(prompt, negative, preset)
+        prompt, negative = presets.build(prompt, negative, preset,
+                                    max_tokens=presets.CHUNK_BUDGET)
     neg = negative or NEG_DEFAULT
     if seed < 0:
         seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
@@ -1079,9 +1193,11 @@ def _sprite_animatediff(eng: Engine, frames: Sequence[tuple], char_image: str | 
                                                   profile=vram_profile)
     width = height = size
 
-    # 先腾出显存——引擎缓存的其它管线可能还占着好几个 GB
-    eng.ensure_headroom(need_gb=2.0)
-    pipe = eng.animatediff_pipe(controlnet=pipe_cn, with_ipadapter=True, model="sd15")
+    # AnimateDiff 是显存大户（8 帧 5.8GB、32 帧 14.2GB）：先清场再加载，
+    # 别让闲置的文生图管线占着 2.6GB。
+    eng.drop_others(("animatediff",))
+    eng.ensure_headroom(need_gb=6.0, keep=("animatediff",))
+    pipe = eng.animatediff_pipe(controlnet=pipe_cn, with_ipadapter=True, model=model)
     eng.apply_lora(pipe, lora, lora_scale)
     pipe.set_ip_adapter_scale(ipa_scale)
 
@@ -1100,9 +1216,8 @@ def _sprite_animatediff(eng: Engine, frames: Sequence[tuple], char_image: str | 
 
     torch.cuda.reset_peak_memory_stats()
     dt = _timer()
-    out = pipe(
-        prompt=prompt,
-        negative_prompt=neg,
+    text_kw, clip_used = _text_kwargs(pipe, prompt, neg, clip_skip, model)
+    out = _infer(eng, pipe, dict(
         conditioning_frames=conds,
         controlnet_conditioning_scale=cn_scale,
         ip_adapter_image=char,
@@ -1111,7 +1226,7 @@ def _sprite_animatediff(eng: Engine, frames: Sequence[tuple], char_image: str | 
         guidance_scale=cfg,
         generator=torch.Generator("cuda").manual_seed(seed),
         height=height, width=width,
-    )
+        **text_kw), shrink=False, label="wss-animatediff")
     seconds = dt()
     raw_frames = [f.convert("RGB") for f in out.frames[0]]
 
@@ -1232,12 +1347,13 @@ def _sprite_animatediff(eng: Engine, frames: Sequence[tuple], char_image: str | 
         "char_image": str(char_image),
         "grid": [cols, rows], "frames": len(aligned), "cell": [cell_w, cell_h],
         "ref_mode": ref_mode, "ref_modes_used": sorted(set(used_modes)),
+        "model": model,
         "width": width, "height": height,
         "vram_profile": vram_profile, "vram_note": vram_note,
         "steps": steps, "cfg": cfg, "seed": seed,
         "cn_scale": cn_scale, "ipa_scale": ipa_scale,
         "lora": lora, "lora_scale": lora_scale if lora else None,
-        "clip_skip": clip_skip,
+        "clip_skip": clip_used,
         "matte": matte, "matte_used": matte_info.get("backend"),
         "matte_fallback": matte_info.get("fallback"),
         "palette": palette,
@@ -1267,7 +1383,7 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
              model: str = "sd15",
              candidates: int = 1, gate: bool = True, gate_min_points: int = 8,
              gate_retries: int = 2, gate_seed_step: int = 1000,
-             clip_skip: int = 1, scope: str = "",
+             clip_skip: int = 1, scope: str = "", distill: str = "",
              anim_name: str = "walk", fps: int = 10, tag: str = "w4") -> Dict[str, Any]:
     """逐帧生成 -> 锚点对齐 -> 打包 sprite sheet。固定 seed 是跨帧一致的前提。
 
@@ -1285,9 +1401,18 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
     """
     negative = negative or NEG_DEFAULT
     if preset is not None:
-        prompt, negative = presets.build(prompt, negative, preset)
+        prompt, negative = presets.build(prompt, negative, preset,
+                                    max_tokens=presets.CHUNK_BUDGET)
+    eng.ensure_headroom(need_gb=2.0, keep=("pose",))
     pipe = eng.pose_pipe(controlnet=controlnet, with_ipadapter=ref_image is not None,
                         model=model)
+    if distill:
+        eng.apply_distill(pipe, distill)
+        d = eng.DISTILL_DEFAULTS.get(distill, {})
+        if steps == 25:
+            steps = d.get("steps", steps)
+        if abs(cfg - 7.0) < 1e-6:
+            cfg = d.get("cfg", cfg)
     eng.apply_lora(pipe, lora, lora_scale)
     if ref_image is not None:
         pipe.set_ip_adapter_scale(ipa_scale)
@@ -1304,54 +1429,91 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
     # 闸门不可用时不留补提额度：没有判据的重提等于烧显卡
     retries = max(0, int(gate_retries)) if extractor is not None else 0
     attempts_max = candidates + retries
-    # clip skip 的 embeds 每帧都一样，算一次就够
-    emb = _skip_embeds(pipe, prompt, negative, clip_skip, model)
+    # 文本参数每帧都一样，算一次就够（长文本会被分段编码，别再逐帧重算）
+    text_kw, clip_used = _text_kwargs(pipe, prompt, negative, clip_skip, model)
 
-    def _one_frame(pose: Image.Image, frame_seed: int):
-        dt = _timer()
+    def _run(pose: Image.Image, seeds: Sequence[int]) -> List[Image.Image]:
+        """一次前向出 N 个候选（N=len(seeds)）。
+
+        **为什么批处理**：24GB 卡上单图只占 2.6~3.4GB，全程 batch=1 等于把
+        20GB 显存闲着。候选本来是串行的多次前向，合成一次 batch 后实测
+        512² 下 n=2 快 **1.75×**、n=4 快 **1.40×**（RTX 4090 / 8 步）。
+
+        **代价（如实记录）**：不同 batch 尺寸会走到不同的 conv 内核，
+        结果与"逐个生成"相差 1~4 级灰度（实测 mean abs diff 2.3~4.1/255），
+        **不是逐像素一致**。同配置重跑仍然完全一致（有测试钉着），
+        所以可复现性没有被破坏——变的是"跨配置对比"。
+        """
         kwargs: Dict[str, Any] = dict(
             image=pose,
             num_inference_steps=steps, guidance_scale=cfg,
             controlnet_conditioning_scale=cn_scale,
-            generator=torch.Generator("cuda").manual_seed(frame_seed),
             width=width, height=height,
         )
-        if emb is None:
-            kwargs.update(prompt=prompt, negative_prompt=negative)
+        if len(seeds) > 1:
+            kwargs["num_images_per_prompt"] = len(seeds)
+            kwargs["generator"] = [torch.Generator("cuda").manual_seed(s) for s in seeds]
         else:
-            kwargs.update(prompt_embeds=emb[0], negative_prompt_embeds=emb[1])
+            kwargs["generator"] = torch.Generator("cuda").manual_seed(seeds[0])
+        kwargs.update(text_kw)          # 短文本=字符串，长文本=分段 embeds
         if ref is not None:
             kwargs["ip_adapter_image"] = ref
-        out = pipe(**kwargs).images[0]
-        secs = dt()
-        out, _edge, _subj = _postprocess(
-            out, eng, matte=matte, matte_backend=matte_backend, denoise=denoise,
-            pixel=pixel, palette=palette, clean_iso=clean_iso, info=matte_info)
-        return out.convert("RGBA"), secs
+        return _infer(eng, pipe, kwargs, label="w4").images
+
+    def _score(outs: Sequence[Image.Image]):
+        """后处理 + 取出评分用的图。**闸门用像素化之前的图**（见 _postprocess）。"""
+        got = []
+        for raw in outs:
+            info: Dict[str, Any] = {}
+            img, _edge, _subj = _postprocess(
+                raw, eng, matte=matte, matte_backend=matte_backend, denoise=denoise,
+                pixel=pixel, palette=palette, clean_iso=clean_iso, info=info)
+            # 抠图后端信息要带回 meta（每次 _postprocess 都会重置 pre_pixel）
+            for k in ("backend", "fallback"):
+                if k in info:
+                    matte_info[k] = info[k]
+            gate_img = info.pop("pre_pixel", None) or img
+            got.append((img.convert("RGBA"), gate_img.convert("RGBA")))
+        return got
 
     matte_info: Dict[str, Any] = {}
     frames: List[Image.Image] = []
     per_frame: List[float] = []
     frame_scores: List[Dict[str, Any]] = []
     attempts_used = 0
+    prev_gate: Optional[Image.Image] = None
     torch.cuda.reset_peak_memory_stats()
     for pose_path in pose_images:
         pose = Image.open(pose_path).convert("RGB").resize((width, height))
-        prev = frames[-1] if frames else None      # 只在抠图后有意义，未抠图 drift 恒 0
-        best: Optional[tuple[Dict[str, Any], Image.Image]] = None
+        prev = prev_gate                # 只在抠图后有意义，未抠图 drift 恒 0
+        best: Optional[tuple[Dict[str, Any], Image.Image, Image.Image]] = None
         spent = 0.0
         used = 0
-        for i in range(attempts_max):
-            cand, secs = _one_frame(pose, seed + i * gate_seed_step)
-            spent += secs
-            used += 1
-            ev = quality.evaluate(cand, extractor, prev=prev, min_points=gate_min_points)
-            if best is None or ev["score"] > best[0]["score"]:
-                best = (ev, cand)
-            # 候选没凑齐就继续；凑齐后挑中的那个过了闸门就收工，不过才动用补提额度
+        # 两轮：先凑候选，都没过闸门再用补提额度。每轮一次批调用。
+        for round_seeds in (list(range(candidates)),
+                            list(range(candidates, attempts_max))):
+            round_seeds = [seed + i * gate_seed_step for i in round_seeds]
+            if not round_seeds:
+                continue
+            dt = _timer()
+            try:
+                outs = _run(pose, round_seeds)
+            except torch.OutOfMemoryError:
+                # 批量撑爆显存就退回逐个跑：慢一点，但别让任务失败
+                print("[warn] 批量候选 OOM，退回逐个生成")
+                torch.cuda.empty_cache()
+                outs = [img for s in round_seeds for img in _run(pose, [s])]
+            spent += dt()
+            used += len(round_seeds)
+            for cand, gate_img in _score(outs):
+                ev = quality.evaluate(gate_img, extractor, prev=prev,
+                                      min_points=gate_min_points)
+                if best is None or ev["score"] > best[0]["score"]:
+                    best = (ev, cand, gate_img)
+            # 候选已凑齐且挑中的过闸门 → 不动用补提额度
             if used >= candidates and (extractor is None or best[0]["passed"]):
                 break
-        ev, frame = best
+        ev, frame, prev_gate = best
         ev = {**ev, "attempts": used}
         frame_scores.append(ev)
         attempts_used += used
@@ -1366,8 +1528,8 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
         "ipa_scale": ipa_scale if ref else None, "cn_scale": cn_scale,
         "steps": steps, "cfg": cfg, "seed": seed, "frames": len(frames), "matte": matte,
         "matte_used": matte_info.get("backend"), "matte_fallback": matte_info.get("fallback"),
-        "model": model,
-        "clip_skip": clip_skip if emb is not None else 1,
+        "model": model, "distill": distill or None,
+        "clip_skip": clip_used,
         "candidates": candidates, "gate": bool(gate and extractor is not None),
         "gate_min_points": gate_min_points,
         "gate_retries": retries,
@@ -1394,6 +1556,5 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
     if export:
         info["export"] = anim_mod.export_godot(
             aligned, export, anim_name=anim_name, fps=fps, loop=True, cols=cols)
-    with (ASSETS / "index.jsonl").open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps({"sheet": info["sheet"], **meta}, ensure_ascii=False) + "\n")
+    assetdb.append_line(ASSETS / "index.jsonl", {"sheet": info["sheet"], **meta})
     return info

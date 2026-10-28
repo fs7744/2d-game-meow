@@ -26,6 +26,7 @@ import threading
 import time
 import traceback
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -39,6 +40,8 @@ from PIL import Image
 from workflows import generate as gen
 from workflows import lora as lora_reg
 from workflows import train as trainer
+from workflows import assetdb
+from workflows.assetdb import AssetIndex
 from workflows.engine import Engine
 
 ROOT = Path(__file__).resolve().parent
@@ -51,12 +54,30 @@ UPLOAD_FORMATS = {"PNG": ".png", "JPEG": ".jpg", "WEBP": ".webp",
 
 app = FastAPI(title="2D Game Asset Pipeline", version="0.1.0")
 engine = Engine(ROOT / "models")
+index = AssetIndex(ASSETS)
 
-_jobs: Dict[str, Dict[str, Any]] = {}
+# 任务表要有上限：老实现是无界 dict，长跑服务会把每个任务的完整 result/meta
+# 一直留在内存里（SPA 一开就是几 MB）。只保留最近 N 条，且优先淘汰已结束的。
+JOB_KEEP = 200
+TRAIN_KEEP = 50
+_jobs: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
 _q: "queue.Queue[tuple[str, str, Dict[str, Any]]]" = queue.Queue()
 
-# 训练任务单独跑：一次几分钟，绝不能塞进生成队列把出图全卡住
-_trains: Dict[str, Dict[str, Any]] = {}
+# 训练任务单独跑：一次几分钟，绝不能塞进生成队列把出图全卡住。
+# 但"不进队列"不等于"可以并发占卡"——训练 4.7GB + 生成 5.8GB 很容易撞顶，
+# 所以两者共用一把 GPU 锁，串行使用显卡。
+_trains: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+_gpu_lock = threading.Lock()
+
+
+def _prune(table: "OrderedDict[str, Dict[str, Any]]", keep: int) -> None:
+    """淘汰最老的条目，**跳过还在跑的**（否则前端轮询会突然 404）。"""
+    for k in list(table.keys()):
+        if len(table) <= keep:
+            break
+        if table[k].get("status") in ("queued", "running"):
+            continue
+        table.pop(k, None)
 
 
 class Job(BaseModel):
@@ -114,7 +135,8 @@ def _run(job_id: str, workflow: str, params: Dict[str, Any]) -> None:
               "w4": gen.poseswap, "wbg": gen.matte_bg,
               "w5": gen.ai_repaint, "wpx": gen.pixelify,
               "wpc": gen.pose_clone, "wss": gen.sprite_swap}[workflow]
-        job["result"] = fn(engine, **_resolve_lora(params))
+        with _gpu_lock:                    # 与训练互斥，单卡不并发
+            job["result"] = fn(engine, **_resolve_lora(params))
         job["status"] = "done"
     except Exception as exc:  # noqa: BLE001
         job.update(status="failed", error=f"{type(exc).__name__}: {exc}")
@@ -170,13 +192,14 @@ def _run_train(train_id: str, req: "TrainReq") -> None:
                                 caption=req.caption, center_crop=req.center_crop)),
             epochs=req.epochs, batch_size=req.batch)
 
-        info = trainer.train(
-            ROOT / "models", data_dir, req.name,
-            caption=req.caption, rank=req.rank, alpha=req.alpha or None,
-            lr=req.lr, steps=steps, batch_size=req.batch,
-            resolution=req.resolution, seed=req.seed,
-            center_crop=req.center_crop, progress=on_progress,
-        )
+        with _gpu_lock:                    # 与生成互斥：不并发占卡
+            info = trainer.train(
+                ROOT / "models", data_dir, req.name,
+                caption=req.caption, rank=req.rank, alpha=req.alpha or None,
+                lr=req.lr, steps=steps, batch_size=req.batch,
+                resolution=req.resolution, seed=req.seed,
+                center_crop=req.center_crop, progress=on_progress,
+            )
         _register_lora(req.name, req.label, req.trigger)
         st.update(info, status="done")
     except Exception as exc:  # noqa: BLE001
@@ -192,6 +215,7 @@ def train_submit(req: TrainReq) -> Dict[str, Any]:
     tid = uuid.uuid4().hex[:12]
     _trains[tid] = {"train_id": tid, "status": "queued", "name": req.name,
                     "params": req.model_dump(), "step": 0, "total": 0}
+    _prune(_trains, TRAIN_KEEP)
     threading.Thread(target=_run_train, args=(tid, req), daemon=True,
                      name=f"train-{tid}").start()
     return {"train_id": tid}
@@ -241,6 +265,7 @@ def submit(job: Job) -> Dict[str, Any]:
     _jobs[job_id] = {"job_id": job_id, "workflow": job.workflow, "params": job.params,
                      "status": "queued", "created": time.time()}
     _q.put((job_id, job.workflow, job.params))
+    _prune(_jobs, JOB_KEEP)
     return {"job_id": job_id, "status": "queued", "position": _q.qsize()}
 
 
@@ -259,22 +284,32 @@ def list_jobs(limit: int = 20) -> Dict[str, Any]:
 
 @app.get("/assets")
 def assets(limit: int = 50, project: str = "") -> Dict[str, Any]:
-    """资产清单。带 project 时只返回该项目的产物（项目之间相互隔离）。"""
+    """资产清单。带 project 时只返回该项目的产物（项目之间相互隔离）。
+
+    走 SQLite 读缓存（workflows/assetdb.py）：只解析 jsonl 里**新增**的字节，
+    查询按 id 倒序取一页。老实现每次都全量读取 + 逐行 json.loads + 逐条 stat，
+    3 万条时要解析 26MB 并阻塞主线程。
+    """
+    items = index.recent(limit=limit, project=project)
+    if items:
+        return {"count": len(items), "items": items}
+    # 索引库不可用（只读盘/权限）时退回全量解析：功能不能因为优化而消失。
+    # 用 errors="replace" 读：索引里混进坏字节时，坏行被跳过，而不是让整个
+    # 清单接口 500（实测出现过一次 NUL 块）。
     idx = ASSETS / "index.jsonl"
     if not idx.exists():
         return {"count": 0, "items": []}
-    lines = idx.read_text("utf-8").strip().splitlines()
+    lines = idx.read_bytes().decode("utf-8", "replace").strip().splitlines()
     items = []
     for x in reversed(lines):
         if not x.strip():
             continue
         try:
             item = json.loads(x)
-        except json.JSONDecodeError:
+        except ValueError:
             continue
         if project and item.get("scope", "default") != project:
             continue
-        # 陈旧条目（文件已被手工删掉）不再列出来，否则前端会拿到 404 的链接
         target = item.get("file")
         if target and not Path(str(target)).exists():
             continue
@@ -351,16 +386,18 @@ def delete_assets(req: DeleteReq) -> Dict[str, Any]:
             skipped.append(f"{t}: {exc}")
 
     # 索引里对应的条目也要摘掉，否则 /assets 还会列出已经不存在的文件
+    if deleted:
+        index.forget(deleted)
     idx = ASSETS / "index.jsonl"
     if idx.exists() and deleted:
         try:
             kept = []
-            for line in idx.read_text("utf-8").splitlines():
+            for line in idx.read_bytes().decode("utf-8", "replace").splitlines():
                 if not line.strip():
                     continue
                 try:
                     item = json.loads(line)
-                except json.JSONDecodeError:
+                except ValueError:
                     kept.append(line)
                     continue
                 paths = {str(item.get("file") or ""), str(item.get("raw") or ""),
@@ -372,7 +409,8 @@ def delete_assets(req: DeleteReq) -> Dict[str, Any]:
                        for path in paths):
                     continue
                 kept.append(line)
-            idx.write_text("\n".join(kept) + ("\n" if kept else ""), "utf-8")
+            # 原子重写：中途崩掉不能留下半个索引文件
+            assetdb.rewrite_atomic(idx, "\n".join(kept) + ("\n" if kept else ""))
         except OSError:
             pass
 

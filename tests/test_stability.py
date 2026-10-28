@@ -47,13 +47,18 @@ def test_free_releases_pipeline_and_controlnet(root):
 
     用独立 Engine 实例测量增量：全局显存里有别的引擎（API 测试里的 app.engine），
     只看绝对值会被污染。判据是「加载后显著上涨、free 后回到基线附近」。
+
+    **基线前必须先 free()**：引擎的权重池按 models_root 共享，前面的用例可能
+    已经把底座留在显存里。不清空的话"加载增量"测出来只有 ControlNet 那一部分
+    （实测 695MB），断言会误判成"加载没生效"。
     """
     from workflows.engine import Engine
 
+    e = Engine(root / "models")
+    e.free()                          # 先回到真正的零基线
     torch.cuda.synchronize()
     base = torch.cuda.memory_allocated() / 2**20
 
-    e = Engine(root / "models")
     e.txt2img_pipe()
     e.pose_pipe(controlnet="openpose", with_ipadapter=False)
     torch.cuda.synchronize()

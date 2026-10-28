@@ -4,6 +4,15 @@ from __future__ import annotations
 from workflows import presets
 
 
+def _tokens(text: str) -> int:
+    """预算断言要用**真实** token 数。
+
+    老的断言用的是 `rough_tokens`，而它比真实 BPE 计数高估约 3 倍——
+    拿它当判据等于容忍"只用了 1/3 预算"，正是提示词被提前截断的根源。
+    """
+    return presets.count(text)
+
+
 def test_preset_appends_suffix_and_negative():
     pos, neg = presets.build("blue slime", None, "sprite")
     assert pos.startswith("blue slime,")
@@ -96,7 +105,7 @@ def test_long_prompt_keeps_suffix():
     long_prompt = ", ".join(["a very detailed knight with flame patterns"] * 8)
     pos, _ = presets.build(long_prompt, None, "sprite")
     assert pos.endswith(presets.SPRITE_SUFFIX)
-    assert presets.rough_tokens(pos) <= 77
+    assert _tokens(pos) <= 77, _tokens(pos)
 
 
 def test_fit_never_returns_empty_for_comma_free_text():
@@ -104,7 +113,7 @@ def test_fit_never_returns_empty_for_comma_free_text():
     text = " ".join(["ugly"] * 200)
     out = presets.fit(text, budget=20)
     assert out and out.startswith("ugly")
-    assert presets.rough_tokens(out) <= 20
+    assert _tokens(out) <= 20, _tokens(out)
 
 
 def test_fit_drops_tail_sections():
