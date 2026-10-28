@@ -41,6 +41,54 @@ def test_txt2img_palette_respected(eng):
     assert r["meta"]["palette"] == 8 and r["meta"]["seed"] == 9
 
 
+def test_img2img_postprocess_and_raw(eng, assets):
+    """W2 与 W1 共用同一套后处理，并把「未后处理的原图」留下来给下游当源图。
+
+    图生图拿成品精灵回炉（已经像素化到 128 有效像素）会把色块重新糊成插画，
+    所以 raw 是这条链路的关键产物，不能省。
+    """
+    from pathlib import Path as _P
+
+    src = assets / "_test_w2_src.png"
+    im = Image.new("RGB", (256, 256), (40, 80, 160))
+    ImageDraw.Draw(im).rectangle([60, 60, 190, 200], fill=(230, 60, 60))
+    im.save(src)
+
+    r = g.img2img(eng, init_image=src, prompt="blue slime monster", strength=0.5,
+                  steps=8, seed=3, preset="none", pixel=4, palette=16, matte=True,
+                  tag="w2_test")
+    m = r["meta"]
+    assert m["workflow"] == "w2"
+    assert _P(m["init_image"]) == src
+    assert (m["pixel_block"], m["palette"], m["matte"]) == (4, 16, True)
+    assert m["strength"] == 0.5 and m["steps"] == 8
+    assert m["raw"] and _P(m["raw"]).exists(), "必须留下未后处理的原图"
+
+    out = Image.open(r["file"]).convert("RGBA")
+    colors = {p[:3] for p in out.getdata() if p[3] > 127}
+    assert len(colors) <= 16, len(colors)
+    transparent = float((np.asarray(out)[..., 3] == 0).mean())
+    assert 0 < transparent < 0.99, transparent
+
+
+def test_img2img_without_postprocess_skips_raw(eng, assets):
+    """没开后处理时不该多存一份 raw（白占一倍磁盘，而且 raw 与成品完全一样）。"""
+    src = assets / "_test_w2_plain.png"
+    Image.new("RGB", (128, 128), (90, 90, 90)).save(src)
+    r = g.img2img(eng, init_image=src, prompt="grey square", steps=4, seed=1,
+                  preset="none", tag="w2_plain")
+    assert r["meta"].get("raw") is None
+
+
+def test_txt2img_raw_saved_for_downstream(eng):
+    """W1 开了后处理就要留 raw —— 图生图节点默认拿它当源图。"""
+    r = g.txt2img(eng, prompt="blue slime monster", width=256, height=256, steps=8,
+                  seed=4, preset="none", pixel=4, tag="w1_raw")
+    raw = r["meta"].get("raw")
+    assert raw and np.asarray(Image.open(raw)).shape == (256, 256, 3)
+    assert raw != r["file"]
+
+
 def test_inpaint_leaves_outside_mask_untouched(eng, assets):
     src = assets / "_test_inpaint_src.png"
     mask = assets / "_test_inpaint_mask.png"

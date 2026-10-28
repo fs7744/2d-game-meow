@@ -4,7 +4,7 @@ import type { FavoritePrompt, LoraInfo } from '../types'
 type Props = {
   loras: LoraInfo[]
   favs: FavoritePrompt[]
-  onAddNode: () => void
+  onAddNode: (kind?: 'gen' | 'img2img') => void
   canApply: boolean
   onApplyFav: (text: string) => void
   onRemoveFav: (id: string) => void
@@ -62,8 +62,11 @@ export default function Sidebar({
         <button className="rail-toggle" title="展开侧栏" onClick={() => setCollapsed(false)}>
           »
         </button>
-        <button className="rail-icon" title="节点" onClick={() => { setCollapsed(false); onAddNode() }}>
+        <button className="rail-icon" title="图生成" onClick={() => { setCollapsed(false); onAddNode('gen') }}>
           ▣
+        </button>
+        <button className="rail-icon" title="图生图" onClick={() => { setCollapsed(false); onAddNode('img2img') }}>
+          ↳
         </button>
         <button className="rail-icon" title={`提示词收藏 ${favs.length}`} onClick={() => setCollapsed(false)}>
           ☆{favs.length ? <sup>{favs.length}</sup> : null}
@@ -87,14 +90,40 @@ export default function Sidebar({
 
       <div className="rail-scroll">
         <Section icon="▣" title="节点">
-          <div className="rail-item">
+          <div
+            className="rail-item"
+            draggable
+            onDragStart={(e) => {
+              e.dataTransfer.setData('application/x-node-type', 'gen')
+              e.dataTransfer.effectAllowed = 'copy'
+            }}
+            title="拖到画布任意位置，或点 + 放到原点"
+          >
             <span className="rail-item-main">
               <b>图生成</b>
-              <em>文生图 · 可复制删除</em>
+              <em>文生图 · 提示词 → 精灵</em>
             </span>
-            <button className="rail-add" title="放到画布原点" onClick={onAddNode}>+</button>
+            <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('gen')}>+</button>
           </div>
-          <p className="rail-tip">拖这一项到画布任意位置，也能在那里新建节点。</p>
+          <div
+            className="rail-item"
+            draggable
+            onDragStart={(e) => {
+              e.dataTransfer.setData('application/x-node-type', 'img2img')
+              e.dataTransfer.effectAllowed = 'copy'
+            }}
+            title="拖到画布任意位置，或点 + 放到原点"
+          >
+            <span className="rail-item-main">
+              <b>图生图</b>
+              <em>拿已有图改内容 / 改画风</em>
+            </span>
+            <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('img2img')}>+</button>
+          </div>
+          <p className="rail-tip">
+            拖这一项到画布任意位置，也能在那里新建节点。图生图要先有源图：
+            在生成节点下方点「↳ 图生图」会自动接上。
+          </p>
         </Section>
 
         <Section icon="☆" title="提示词收藏" count={favs.length}>

@@ -1,4 +1,10 @@
-export type Preset = 'sprite' | 'portrait' | 'wuxia' | 'none'
+export type Preset = 'sprite' | 'portrait' | 'wuxia' | 'pixel' | 'none'
+
+/** 节点类型：图生成（w1 文生图）/ 图生图（w2，需要源图） */
+export type NodeKind = 'gen' | 'img2img'
+
+/** 图生图的源：指向画布上另一个节点的产物，或直接给本地绝对路径 */
+export type NodeSource = { nodeId?: string; path?: string }
 
 export type GenParams = {
   prompt: string
@@ -13,6 +19,7 @@ export type GenParams = {
   palette: number
   matte: boolean
   clipSkip: number        // 1=最后一层（默认）；2=跳过最后一层（多数动漫/像素 LoRA 的训练设置）
+  strength: number        // 图生图的重绘幅度；文生图忽略
   lora: string            // LoRA 名（后端解析成路径）；空串表示不挂
   loraScale: number
 }
@@ -43,6 +50,8 @@ export type JobState = {
   seed?: number
   seconds?: number
   peakVram?: number
+  path?: string          // 产物绝对路径（图生图要拿它当 init_image）
+  raw?: string           // 后处理之前的原图路径（优先用它当源图）
   subjects?: number      // 抠图后的前景块数；>1 说明画了多个主体
   startedAt?: number
 }
@@ -51,11 +60,12 @@ export type NodeView = 'expanded' | 'image'
 
 export type GenNode = {
   id: string
-  kind: 'gen'
+  kind: NodeKind
   x: number
   y: number
   params: GenParams
   view: NodeView
+  source?: NodeSource
   job?: JobState
 }
 

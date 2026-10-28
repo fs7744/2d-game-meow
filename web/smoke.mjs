@@ -123,7 +123,9 @@ function check(name, cond, extra = '') {
   const doc = dom.window.document
   check('渲染出顶栏品牌', doc.querySelector('.brand .title')?.textContent?.includes('喵叫'))
   check('空状态引导可见', !!doc.querySelector('.canvas-empty .empty-card'))
-  check('侧栏存在', doc.querySelectorAll('.rail-item').length === 1)
+  check('侧栏存在（节点 2 项：图生成 / 图生图）',
+    doc.querySelectorAll('.rail-item').length === 2,
+    String(doc.querySelectorAll('.rail-item').length))
   check('缩放显示 100%', doc.querySelector('.zoom-val')?.textContent === '100%')
   check('无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
@@ -542,6 +544,77 @@ function check(name, cond, extra = '') {
     nodeLora && nodeLora.options.length === 1, String(nodeLora?.options.length))
 
   check('侧栏场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 11) 图生图节点：派生、源图解析、提交 w2
+{
+  calls.length = 0
+  const { dom, errors } = await boot('?demo=gen')
+  const doc = dom.window.document
+  const win = dom.window
+  await new Promise((r) => setTimeout(r, 1400))
+
+  // 生成节点出图后出现「↳ 图生图」派生按钮
+  const spawn = [...doc.querySelectorAll('button.mini.wide')]
+    .find((b) => (b.textContent || '').includes('图生图'))
+  check('生成节点下方有「↳ 图生图」按钮', !!spawn)
+
+  spawn?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 120))
+  check('派生出一个图生图节点', doc.querySelectorAll('.node').length === 2,
+    String(doc.querySelectorAll('.node').length))
+  const i2i = [...doc.querySelectorAll('.node')].find(
+    (n) => (n.querySelector('.node-kind')?.textContent || '').includes('图生图'))
+  check('新节点标题是「图生图」', !!i2i)
+  check('图生图卡有源图区', !!i2i?.querySelector('.src-box'))
+  check('源图下拉已自动选中上游节点', !!i2i?.querySelector('.src-box select')?.value)
+  check('源图缩略图已显示', !!i2i?.querySelector('.src-thumb img'))
+  check('图生图卡片不再要求宽高（尺寸随源图）',
+    ![...(i2i?.querySelectorAll('.row label') || [])].some((l) => /^宽/.test(l.textContent || '')))
+
+  // 提交 → 必须是 w2 且带 init_image / strength
+  i2i.querySelector('.gen-btn').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 250))
+  const sub = calls.filter((c) => c.url.endsWith('/generate')).pop()
+  const body = JSON.parse(sub.body)
+  check('提交 workflow=w2', body.workflow === 'w2', body.workflow)
+  check('带 init_image 绝对路径', typeof body.params.init_image === 'string'
+    && body.params.init_image.includes('out.png'), body.params.init_image)
+  check('带 strength', typeof body.params.strength === 'number', String(body.params.strength))
+  check('不带 width/height（由源图决定）',
+    body.params.width === undefined && body.params.height === undefined)
+
+  check('图生图场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 12) 图生图没有源图时：按钮禁用 + 不提交
+{
+  calls.length = 0
+  const { dom, errors } = await boot('')
+  const doc = dom.window.document
+  const win = dom.window
+  const addBtns = [...doc.querySelectorAll('.rail-add')]
+  addBtns[1].dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 120))
+
+  const i2i = doc.querySelector('.node')
+  check('侧栏 + 号能新建图生图节点',
+    (i2i?.querySelector('.node-kind')?.textContent || '') === '图生图')
+  const ta = i2i.querySelector('textarea.prompt')
+  const setValue = (el, v) => {
+    const setter = Object.getOwnPropertyDescriptor(win.HTMLTextAreaElement.prototype, 'value').set
+    setter.call(el, v)
+    el.dispatchEvent(new win.Event('input', { bubbles: true }))
+  }
+  setValue(ta, 'white cat knight')
+  await new Promise((r) => setTimeout(r, 80))
+  const btn = doc.querySelector('.gen-btn')
+  check('没有源图时生成按钮禁用', btn?.disabled === true)
+  check('没有源图时不提交任务', !calls.some((c) => c.url.endsWith('/generate')))
+
+  check('空源图场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 

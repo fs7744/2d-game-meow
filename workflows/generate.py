@@ -45,11 +45,22 @@ def _stamp(tag: str) -> str:
     return f"{tag}_{time.strftime('%Y%m%d_%H%M%S')}_{next(_seq) % 10000:04d}"
 
 
-def _save(img: Image.Image, name: str, tags: str, meta: dict) -> Dict[str, Any]:
+def _save(img: Image.Image, name: str, tags: str, meta: dict,
+          raw: Image.Image | None = None) -> Dict[str, Any]:
+    """落盘 PNG + sidecar + 索引。
+
+    raw 非空时额外存一份 `<name>_raw.png`（后处理**之前**的原图）。图生图的源图
+    必须用这张：已经像素化到 128 有效像素的成品再喂回 img2img，模型只会把色块
+    重新糊成插画，重绘幅度稍大就丢掉像素感。
+    """
     ASSETS.mkdir(parents=True, exist_ok=True)
     out = ASSETS / f"{name}.png"
     img.save(out)
     side = {"file": str(out), "tags": tags, "created": time.strftime("%Y-%m-%dT%H:%M:%S"), **meta}
+    if raw is not None:
+        raw_path = ASSETS / f"{name}_raw.png"
+        raw.save(raw_path)
+        side["raw"] = str(raw_path)
     Path(str(out) + ".json").write_text(json.dumps(side, ensure_ascii=False, indent=2), "utf-8")
     with (ASSETS / "index.jsonl").open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(side, ensure_ascii=False) + "\n")
@@ -59,6 +70,36 @@ def _save(img: Image.Image, name: str, tags: str, meta: dict) -> Dict[str, Any]:
 def _timer():
     t0 = time.perf_counter()
     return lambda: round(time.perf_counter() - t0, 2)
+
+
+def _postprocess(img: Image.Image, eng: Engine, *, matte: bool, matte_backend: str,
+                 denoise: int, pixel: int, palette: int, clean_iso: int,
+                 info: Dict[str, Any] | None = None):
+    """抠图 → 像素化 → 量化 → 去孤立点。返回 (图, 贴边边, 主体数)。
+
+    顺序固定，不能改：先抠图（按原始颜色判连通域更准），再像素化与量化。
+    反过来会把背景噪点量化成格纹，抠图也会因为色阶被压而失效。
+    三张卡（文生图 / 图生图 / 姿态帧）共用这一份，避免各写一遍走样。
+    """
+    edge: list[str] = []
+    subjects = None
+    if matte:
+        # 保留 alpha：转回 RGB 会把透明区域压成黑色，等于白抠
+        img = matte_mod.despeckle(
+            matte_mod.matte_auto(img.convert("RGBA"), matte_backend, eng.matte_dir,
+                                 info=info if info is not None else {}),
+            denoise_iters=denoise)
+        edge = matte_mod.edge_touch(img)
+        # 多主体是 SD1.5 画小怪物的通病（史莱姆尤甚），负向词压不住，只能量出来
+        subjects = pp.foreground_blobs(img)
+    if pixel > 1:
+        img = pp.pixelate(img, pixel)
+    if palette:
+        img = pp.quantize_palette(img, palette)
+    if clean_iso and (pixel > 1 or palette):
+        # 量化之后才去孤立点：量化本身就会把相邻色合并，此时再判「孤立」才准
+        img = pp.clean_isolated(img, passes=clean_iso)
+    return img, edge, subjects
 
 
 def _skip_embeds(pipe, prompt: str, negative: str, clip_skip: int, model: str):
@@ -116,29 +157,12 @@ def txt2img(eng: Engine, *, prompt: str, negative: Optional[str] = None,
     img = pipe(width=width, height=height, num_inference_steps=steps,
                guidance_scale=cfg, generator=gen, **kw).images[0]
     seconds = dt()
-    # 贴边检测要在抠图之后、像素化之前做（像素化会改变 alpha 边缘像素）
-    edge: list[str] = []
-    # 顺序很重要：先抠图（按原始颜色的连通域判断更准），再像素化与量化。
-    # 反过来做会把背景噪点量化成格纹，抠图也会因为色阶被压而失效。
+    # 后处理之前的原图另存一份：图生图要拿它当源图（见 _save 的说明）
+    raw = img.copy() if (matte or pixel > 1 or palette) else None
     matte_info: Dict[str, Any] = {}
-    if matte:
-        # 保留 alpha：转回 RGB 会把透明区域压成黑色，等于白抠
-        img = matte_mod.despeckle(
-            matte_mod.matte_auto(img.convert("RGBA"), matte_backend, eng.matte_dir,
-                                 info=matte_info),
-            denoise_iters=denoise)
-        edge = matte_mod.edge_touch(img)
-        # 多主体是 SD1.5 画小怪物的通病（史莱姆尤甚），负向词压不住，只能量出来
-        subjects = pp.foreground_blobs(img)
-    else:
-        subjects = None
-    if pixel > 1:
-        img = pp.pixelate(img, pixel)
-    if palette:
-        img = pp.quantize_palette(img, palette)
-    if clean_iso and (pixel > 1 or palette):
-        # 量化之后才去孤立点：量化本身就会把相邻色合并，此时再判「孤立」才准
-        img = pp.clean_isolated(img, passes=clean_iso)
+    img, edge, subjects = _postprocess(
+        img, eng, matte=matte, matte_backend=matte_backend, denoise=denoise,
+        pixel=pixel, palette=palette, clean_iso=clean_iso, info=matte_info)
     return _save(img, _stamp(tag), "txt2img", {
         "workflow": "w1", "prompt": prompt, "negative": negative or NEG_DEFAULT,
         "width": width, "height": height, "steps": steps, "cfg": cfg, "seed": seed,
@@ -150,7 +174,7 @@ def txt2img(eng: Engine, *, prompt: str, negative: Optional[str] = None,
         "clip_skip": clip_skip if emb is not None else 1,
         "subjects": subjects,
         "seconds": seconds, "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
-    })
+    }, raw=raw)
 
 
 # ---------------- W2 图生图 ----------------
@@ -159,7 +183,19 @@ def img2img(eng: Engine, *, init_image: str | Path, prompt: str,
             negative: Optional[str] = None, strength: float = 0.55, steps: int = 25,
             cfg: float = 7.0, seed: int = -1, lora: Optional[str] = None,
             lora_scale: float = 0.8, model: str = "sd15", clip_skip: int = 1,
-            tag: str = "w2") -> Dict[str, Any]:
+            preset: Optional[str] = None, pixel: int = 0, palette: int = 0,
+            matte: bool = False, matte_backend: str = "auto", denoise: int = 1,
+            clean_iso: int = 1, tag: str = "w2") -> Dict[str, Any]:
+    """在图生图里重画原图的**内容**（改姿势细节、换配色、加装饰），构图与轮廓保持。
+
+    与 W1 的区别在于「底」是已有图，所以：
+    - 输出尺寸由源图决定，不接受 width/height（diffusers 也这么做）。
+    - `strength` 是重绘幅度：0.3 只动细节，0.6 明显改画风，0.85 基本重画。
+    - 后处理（抠图/像素化/量化）与 W1 完全同一套。源图**应当**是未经像素化的
+      原图（txt2img 会额外存 `<name>_raw.png`），拿成品精灵回炉会把色块糊掉。
+    """
+    if preset is not None:
+        prompt, negative = presets.build(prompt, negative, preset)
     pipe = eng.img2img_pipe(model)
     eng.apply_lora(pipe, lora, lora_scale)
     ref = Image.open(init_image).convert("RGB")
@@ -176,12 +212,23 @@ def img2img(eng: Engine, *, init_image: str | Path, prompt: str,
                guidance_scale=cfg, generator=torch.Generator("cuda").manual_seed(seed),
                **kw).images[0]
     seconds = dt()
+    raw = img.copy() if (matte or pixel > 1 or palette) else None
+    matte_info: Dict[str, Any] = {}
+    img, edge, subjects = _postprocess(
+        img, eng, matte=matte, matte_backend=matte_backend, denoise=denoise,
+        pixel=pixel, palette=palette, clean_iso=clean_iso, info=matte_info)
     return _save(img, _stamp(tag), "img2img", {
-        "workflow": "w2", "prompt": prompt, "init_image": str(init_image),
-        "strength": strength, "steps": steps, "cfg": cfg, "seed": seed, "lora": lora,
+        "workflow": "w2", "prompt": prompt, "negative": neg,
+        "init_image": str(init_image), "strength": strength, "steps": steps,
+        "cfg": cfg, "seed": seed, "lora": lora,
+        "lora_scale": lora_scale if lora else None,
+        "pixel_block": pixel, "palette": palette, "matte": matte,
+        "matte_backend": matte_backend, "matte_used": matte_info.get("backend"),
+        "matte_fallback": matte_info.get("fallback"),
+        "edge_touch": edge, "subjects": subjects, "model": model,
         "clip_skip": clip_skip if emb is not None else 1,
         "seconds": seconds, "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
-    })
+    }, raw=raw)
 
 
 # ---------------- W3 局部重绘 ----------------
@@ -308,17 +355,9 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
             kwargs["ip_adapter_image"] = ref
         out = pipe(**kwargs).images[0]
         secs = dt()
-        if matte:
-            out = matte_mod.despeckle(
-                matte_mod.matte_auto(out.convert("RGBA"), matte_backend, eng.matte_dir,
-                                     info=matte_info),
-                denoise_iters=denoise)
-        if pixel > 1:
-            out = pp.pixelate(out, pixel)
-        if palette:
-            out = pp.quantize_palette(out, palette)
-        if clean_iso and (pixel > 1 or palette):
-            out = pp.clean_isolated(out, passes=clean_iso)
+        out, _edge, _subj = _postprocess(
+            out, eng, matte=matte, matte_backend=matte_backend, denoise=denoise,
+            pixel=pixel, palette=palette, clean_iso=clean_iso, info=matte_info)
         return out.convert("RGBA"), secs
 
     matte_info: Dict[str, Any] = {}

@@ -4,7 +4,9 @@ import type { GenNode, LoraInfo, Preset } from '../types'
 
 export const NODE_W = 300
 
-export type NodePatch = Partial<Pick<GenNode, 'x' | 'y' | 'params' | 'view' | 'job'>>
+export type NodePatch = Partial<
+  Pick<GenNode, 'x' | 'y' | 'params' | 'view' | 'job' | 'source'>
+>
 
 type Props = {
   node: GenNode
@@ -19,6 +21,11 @@ type Props = {
   onToggleFavorite: () => void
   loras: LoraInfo[]
   model: string
+  onSpawnImg2Img: () => void
+  /** 图生图的上游节点（从 source.nodeId 解析而来） */
+  sourceNode?: GenNode
+  /** 可以作为源图的节点列表 */
+  sourceOptions: { id: string; label: string }[]
 }
 
 const PRESETS: { v: Preset; label: string }[] = [
@@ -41,6 +48,9 @@ export default function GenNodeCard({
   onToggleFavorite,
   loras,
   model,
+  onSpawnImg2Img,
+  sourceNode,
+  sourceOptions,
 }: Props) {
   const dragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null)
   const p = node.params
@@ -49,6 +59,9 @@ export default function GenNodeCard({
   const busy = job?.status === 'queued' || job?.status === 'running'
   const hasImage = !!job?.url
   const imageMode = node.view === 'image' && hasImage
+  const isI2I = node.kind === 'img2img'
+  // 源图可以是上游节点的产物，也可以是节点上直接记的绝对路径
+  const hasSource = !!(sourceNode?.job?.raw || sourceNode?.job?.path || node.source?.path)
 
   const startDrag = (e: React.PointerEvent) => {
     if (e.button !== 0) return
@@ -130,7 +143,9 @@ export default function GenNodeCard({
         onPointerUp={endDrag}
         onPointerCancel={endDrag}
       >
-        <span className="node-kind">图生成</span>
+        <span className={`node-kind${isI2I ? ' i2i' : ''}`}>
+          {isI2I ? '图生图' : '图生成'}
+        </span>
         {job && <span className={`node-state s-${job.status}`}>{statusLabel(job.status)}</span>}
         <span className="spacer" />
         {hasImage && (
@@ -203,29 +218,79 @@ export default function GenNodeCard({
               : 'SD1.5 只支持英文提示词；逗号分隔，主体 + 特征 + 视角'}
           </div>
 
+          {isI2I && (
+            <div className="src-box">
+              <div className="src-thumb" title={sourceNode ? '源图' : '还没有选源图'}>
+                {sourceNode?.job?.url ? (
+                  <img src={sourceNode.job.url} alt="源图" draggable={false} />
+                ) : (
+                  <span>无源图</span>
+                )}
+              </div>
+              <div className="src-side">
+                <select
+                  value={node.source?.nodeId ?? ''}
+                  onChange={(e) =>
+                    onPatch({ source: e.target.value ? { nodeId: e.target.value } : undefined })
+                  }
+                >
+                  <option value="">（未选择源图）</option>
+                  {sourceOptions.map((o) => (
+                    <option key={o.id} value={o.id}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+                <label className="strength">
+                  <span>重绘</span>
+                  <input
+                    type="range"
+                    min={0.15}
+                    max={0.9}
+                    step={0.05}
+                    value={p.strength}
+                    onChange={(e) => setParam('strength', Number(e.target.value))}
+                  />
+                  <b>{p.strength.toFixed(2)}</b>
+                </label>
+                <div className="src-note">
+                  {sourceNode?.job?.raw
+                    ? '用原图（未像素化），保留细节'
+                    : hasSource
+                      ? '用成品，像素块会被重新糊开'
+                      : '点生成节点下方的「↳ 图生图」自动接上'}
+                </div>
+              </div>
+            </div>
+          )}
+
           <div className="row">
-            <label>
-              宽
-              <input
-                type="number"
-                value={p.width}
-                step={64}
-                min={128}
-                max={1024}
-                onChange={(e) => setParam('width', Number(e.target.value) || 512)}
-              />
-            </label>
-            <label>
-              高
-              <input
-                type="number"
-                value={p.height}
-                step={64}
-                min={128}
-                max={1024}
-                onChange={(e) => setParam('height', Number(e.target.value) || 512)}
-              />
-            </label>
+            {!isI2I && (
+              <>
+                <label>
+                  宽
+                  <input
+                    type="number"
+                    value={p.width}
+                    step={64}
+                    min={128}
+                    max={1024}
+                    onChange={(e) => setParam('width', Number(e.target.value) || 512)}
+                  />
+                </label>
+                <label>
+                  高
+                  <input
+                    type="number"
+                    value={p.height}
+                    step={64}
+                    min={128}
+                    max={1024}
+                    onChange={(e) => setParam('height', Number(e.target.value) || 512)}
+                  />
+                </label>
+              </>
+            )}
             <label>
               步数
               <input
@@ -378,9 +443,27 @@ export default function GenNodeCard({
             </div>
           )}
 
-          <button className="gen-btn" disabled={busy || !p.prompt.trim()} onClick={onGenerate}>
+          <button
+            className="gen-btn"
+            disabled={busy || !p.prompt.trim() || (isI2I && !hasSource)}
+            onClick={onGenerate}
+            title={isI2I && !hasSource ? '先选源图' : undefined}
+          >
             {busy ? (job?.status === 'queued' ? '排队中…' : '生成中…') : '生成'}
           </button>
+
+          {hasImage && (
+            <button
+              className="mini wide"
+              onClick={(e) => {
+                e.stopPropagation()
+                onSpawnImg2Img()
+              }}
+              title="以这张为源新建图生图节点"
+            >
+              ↳ 图生图
+            </button>
+          )}
 
           {job?.status === 'failed' && <div className="err">{job.error}</div>}
           {job?.status === 'done' && (

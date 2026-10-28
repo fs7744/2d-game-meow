@@ -50,6 +50,64 @@ def test_generate_roundtrip(client):
     assert job["result"]["meta"]["seed"] == 42
 
 
+def test_generate_w2_roundtrip(client, tmp_path):
+    """图生图走同一条队列：w2 只认 init_image + strength，不接受 width/height。"""
+    src = tmp_path / "w2_src.png"
+    from PIL import Image, ImageDraw
+
+    im = Image.new("RGB", (256, 256), (40, 80, 160))
+    ImageDraw.Draw(im).rectangle([70, 70, 180, 190], fill=(230, 60, 60))
+    im.save(src)
+
+    payload = {"workflow": "w2", "params": {
+        "init_image": str(src), "prompt": "blue slime monster", "strength": 0.5,
+        "steps": 6, "seed": 7, "pixel": 4, "palette": 16, "matte": True,
+        "tag": "apiw2"}}
+    r = client.post("/generate", json=payload)
+    assert r.status_code == 200
+    job_id = r.json()["job_id"]
+
+    job = None
+    for _ in range(120):
+        job = client.get(f"/jobs/{job_id}").json()
+        if job["status"] in ("done", "failed"):
+            break
+        time.sleep(0.5)
+    assert job["status"] == "done", job.get("error")
+    meta = job["result"]["meta"]
+    assert meta["workflow"] == "w2" and meta["strength"] == 0.5
+    assert Path(meta["raw"]).exists(), "w2 也要给下游留未处理的原图"
+
+
+def test_generate_w2_roundtrip(client, tmp_path):
+    """图生图走同一条队列：w2 只认 init_image + strength，不接受 width/height。"""
+    src = tmp_path / "w2_src.png"
+    from PIL import Image, ImageDraw
+
+    im = Image.new("RGB", (256, 256), (40, 80, 160))
+    ImageDraw.Draw(im).rectangle([70, 70, 180, 190], fill=(230, 60, 60))
+    im.save(src)
+
+    payload = {"workflow": "w2", "params": {
+        "init_image": str(src), "prompt": "blue slime monster", "strength": 0.5,
+        "steps": 6, "seed": 7, "pixel": 4, "palette": 16, "matte": True,
+        "tag": "apiw2"}}
+    r = client.post("/generate", json=payload)
+    assert r.status_code == 200
+    job_id = r.json()["job_id"]
+
+    job = None
+    for _ in range(120):
+        job = client.get(f"/jobs/{job_id}").json()
+        if job["status"] in ("done", "failed"):
+            break
+        time.sleep(0.5)
+    assert job["status"] == "done", job.get("error")
+    meta = job["result"]["meta"]
+    assert meta["workflow"] == "w2" and meta["strength"] == 0.5
+    assert Path(meta["raw"]).exists(), "w2 也要给下游留未处理的原图"
+
+
 def test_assets_lists_generated(client):
     r = client.get("/assets?limit=5")
     assert r.status_code == 200

@@ -185,6 +185,8 @@ button { cursor: pointer; }
 }
 .node-head:active { cursor: grabbing; }
 .node-kind { font-family: var(--chip); font-size: 10px; letter-spacing: 0.8px; color: var(--green); }
+/* 图生图用另一种颜色，一眼分清两类节点 */
+.node-kind.i2i { color: var(--cyan); }
 .node-state {
   font-family: var(--mono); font-size: 10px; padding: 2px 5px;
   border: 1px solid var(--line); color: var(--muted);
@@ -227,6 +229,8 @@ button { cursor: pointer; }
   font-size: 12px;
 }
 .mini:hover { border-color: var(--green); }
+.mini.wide { width: 100%; height: 24px; font-size: 11px; color: var(--muted); }
+.mini.wide:hover { color: var(--cyan); border-color: var(--cyan); }
 
 .fold { border: 1px solid var(--line); background: rgba(255, 255, 255, 0.02); }
 .fold > summary {
@@ -340,6 +344,25 @@ button { cursor: pointer; }
   font-size: 10.5px; line-height: 1.6; color: var(--muted-2);
   border-left: 2px solid var(--line-strong); padding-left: 6px;
 }
+.src-box {
+  display: grid; grid-template-columns: 64px 1fr; gap: 7px;
+  border: 1px solid var(--line); border-left: 2px solid var(--cyan);
+  padding: 6px; background: rgba(0, 208, 255, 0.04);
+}
+.src-thumb {
+  width: 64px; height: 64px; display: grid; place-items: center;
+  background: repeating-conic-gradient(#1a1a1f 0% 25%, #101014 0% 50%) 50% / 12px 12px;
+  border: 1px solid var(--line); overflow: hidden;
+}
+.src-thumb img { width: 100%; height: 100%; object-fit: contain; image-rendering: pixelated; }
+.src-thumb span { font-size: 9px; color: var(--muted-2); }
+.src-side { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.src-side select { height: 24px; padding: 0 4px; font-size: 11px; }
+.strength { display: flex; align-items: center; gap: 5px; font-size: 10px; color: var(--muted); }
+.strength input[type='range'] { flex: 1; min-width: 0; accent-color: var(--cyan); }
+.strength b { font-family: var(--mono); font-size: 10px; color: var(--cyan); font-weight: 400; }
+.src-note { font-size: 9.5px; line-height: 1.5; color: var(--muted-2); }
+
 .lang-hint.bad {
   color: #ffb3c4; border-left-color: var(--pink);
   background: rgba(255, 51, 102, 0.08); padding: 5px 6px;

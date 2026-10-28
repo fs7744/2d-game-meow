@@ -3,8 +3,10 @@ import Canvas from './canvas/Canvas'
 import Sidebar from './components/Sidebar'
 import TrainPanel from './components/TrainPanel'
 import { hasPrompt, loadPrompts, removePrompt, savePrompts, togglePrompt } from './store/prompts'
-import { fetchJob, fetchLoras, fetchModels, health, submitTxt2Img } from './api'
-import type { FavoritePrompt, GenNode, GenParams, LoraInfo, Viewport } from './types'
+import { fetchJob, fetchLoras, fetchModels, health, submitImg2Img, submitTxt2Img } from './api'
+import type {
+  FavoritePrompt, GenNode, GenParams, LoraInfo, NodeKind, NodeSource, Viewport,
+} from './types'
 import type { NodePatch } from './nodes/GenNodeCard'
 
 const STORAGE_KEY = 'meow.canvas.v1'
@@ -24,6 +26,8 @@ const DEFAULT_PARAMS: GenParams = {
   palette: 32,
   matte: false,
   clipSkip: 1,
+  // 图生图默认幅度：0.55 能明显改内容又不丢构图；低于 0.35 基本只是磨皮
+  strength: 0.55,
   lora: '',
   loraScale: 0.8,
 }
@@ -31,22 +35,29 @@ const DEFAULT_PARAMS: GenParams = {
 let seq = 0
 const newId = () => `n${Date.now().toString(36)}${(seq++).toString(36)}`
 
-function makeNode(x: number, y: number, params?: Partial<GenParams>): GenNode {
+function makeNode(
+  x: number,
+  y: number,
+  kind: NodeKind = 'gen',
+  params?: Partial<GenParams>,
+  source?: NodeSource,
+): GenNode {
   return {
     id: newId(),
-    kind: 'gen',
+    kind,
     x,
     y,
     view: 'expanded',
+    source,
     params: { ...DEFAULT_PARAMS, ...params },
   }
 }
 
 type Saved = { nodes: GenNode[]; viewport: Viewport }
 
-/** 老存档没有 lora/loraScale，读回来补默认值，否则下拉会显示空、强度变 NaN。 */
+/** 老存档没有 lora/loraScale/strength，读回来补默认值，否则下拉会显示空、强度变 NaN。 */
 function migrate(n: GenNode): GenNode {
-  return { ...n, params: { ...DEFAULT_PARAMS, ...n.params } }
+  return { ...n, kind: n.kind ?? 'gen', params: { ...DEFAULT_PARAMS, ...n.params } }
 }
 
 // 仅供截图/联调：?demo=1 铺一个示例节点，?demo=gen 同时触发一次生成
@@ -133,12 +144,25 @@ export default function App() {
     setNodes((list) => list.map((n) => (n.id === id ? { ...n, ...patch } : n)))
   }, [])
 
-  const addNode = useCallback((_type: string, world?: { x: number; y: number }) => {
+  const addNode = useCallback((type: string, world?: { x: number; y: number }) => {
     const at = world ?? { x: 0, y: 0 }
+    const kind: NodeKind = type === 'img2img' ? 'img2img' : 'gen'
     setNodes((list) => {
       // 原点放多个时阶梯错开，避免完全重叠
       const sameSpot = list.filter((n) => n.x === at.x && n.y === at.y).length
-      const node = makeNode(at.x + sameSpot * 24, at.y + sameSpot * 24)
+      const node = makeNode(at.x + sameSpot * 24, at.y + sameSpot * 24, kind)
+      setSelectedId(node.id)
+      return [...list, node]
+    })
+  }, [])
+
+  /** 以某个节点的产物为源，在它右边新建一个图生图节点。 */
+  const spawnImg2Img = useCallback((id: string) => {
+    setNodes((list) => {
+      const src = list.find((n) => n.id === id)
+      if (!src) return list
+      const node = makeNode(src.x + 340, src.y, 'img2img',
+        { prompt: src.params.prompt }, { nodeId: src.id })
       setSelectedId(node.id)
       return [...list, node]
     })
@@ -167,19 +191,46 @@ export default function App() {
     setSelectedId((cur) => (cur === id ? null : cur))
   }, [])
 
+  /**
+   * 图生图的源图绝对路径。优先用上游节点后处理**之前**的原图（raw）：
+   * 拿已经像素化成 128 有效像素的成品回炉，模型只会把色块重新糊成插画。
+   */
+  const sourcePathOf = useCallback((n: GenNode): string | undefined => {
+    if (n.source?.path) return n.source.path
+    const up = n.source?.nodeId
+      ? nodesRef.current.find((x) => x.id === n.source!.nodeId)
+      : undefined
+    return up?.job?.raw || up?.job?.path
+  }, [])
+
   const generate = useCallback(async (id: string) => {
     const node = nodesRef.current.find((n) => n.id === id)
     if (!node || !node.params.prompt.trim()) return
+    let init: string | undefined
+    if (node.kind === 'img2img') {
+      init = sourcePathOf(node)
+      if (!init) {
+        // 没有源图就没法提交，直接在节点上报错，别让用户等一个必然失败的任务
+        patchNode(id, {
+          job: { id: 'error', status: 'failed',
+            error: '还没有源图：先生成一张，或点生成节点下方的「↳ 图生图」' },
+        })
+        return
+      }
+    }
     patchNode(id, { job: { id: 'pending', status: 'queued', startedAt: Date.now() } })
     try {
-      const { job_id } = await submitTxt2Img(node.params, { model, matteBackend })
+      const { job_id } = init
+        ? await submitImg2Img(node.params, { model, matteBackend }, init)
+        : await submitTxt2Img(node.params, { model, matteBackend })
       patchNode(id, { job: { id: job_id, status: 'queued', startedAt: Date.now() } })
     } catch (e) {
       patchNode(id, {
         job: { id: 'error', status: 'failed', error: e instanceof Error ? e.message : '提交失败' },
       })
     }
-  }, [patchNode])
+    // 底模/抠图后端是全局设置，必须进依赖，否则切了底模还在用旧值提交
+  }, [patchNode, model, matteBackend, sourcePathOf])
 
   // 截图/联调专用：demo=gen 时自动跑一次生成
   const demoFired = useRef(false)
@@ -290,7 +341,7 @@ export default function App() {
         <div className="brand">
           <span className="logo">喵</span>
           <span className="title">喵叫工作台</span>
-          <span className="sub">画布 · 文生图</span>
+          <span className="sub">画布 · 文生图 / 图生图</span>
         </div>
         <div className="spacer" />
         <button className="train-btn" onClick={() => setTrainOpen(true)} title="训练自己的 LoRA">
@@ -312,7 +363,7 @@ export default function App() {
         <Sidebar
           loras={loras}
           favs={favs}
-          onAddNode={() => addNode('gen')}
+          onAddNode={(kind) => addNode(kind ?? 'gen')}
           canApply={!!selectedId}
           onApplyFav={applyFavorite}
           onRemoveFav={removeFavorite}
@@ -337,6 +388,7 @@ export default function App() {
           onToggleFavorite={toggleFavorite}
           loras={loras}
           onDropType={(t, world) => addNode(t, world)}
+          onSpawnImg2Img={spawnImg2Img}
         />
         <div className="badge-count">{nodes.length} 个节点</div>
       </main>

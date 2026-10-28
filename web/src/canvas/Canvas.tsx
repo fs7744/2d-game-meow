@@ -17,6 +17,7 @@ type Props = {
   onToggleFavorite: (id: string) => void
   loras: LoraInfo[]
   onDropType: (type: string, world: { x: number; y: number }) => void
+  onSpawnImg2Img: (id: string) => void
 }
 
 const MIN_Z = 0.2
@@ -37,6 +38,7 @@ export default function Canvas({
   loras,
   model,
   onDropType,
+  onSpawnImg2Img,
 }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null)
   const [panning, setPanning] = useState(false)
@@ -128,6 +130,14 @@ export default function Canvas({
     }
   }
 
+  // 图生图的源候选：任何已经出过图的节点
+  const sourceOptions = nodes
+    .filter((n) => n.job?.path || n.job?.raw)
+    .map((n) => ({
+      id: n.id,
+      label: `${n.kind === 'img2img' ? '图生图' : '图生成'} · ${n.params.prompt.slice(0, 20) || n.id}`,
+    }))
+
   const gridStyle: React.CSSProperties = {
     backgroundPosition: `${viewport.x}px ${viewport.y}px, ${viewport.x}px ${viewport.y}px`,
     backgroundSize: `${24 * viewport.z}px ${24 * viewport.z}px, ${120 * viewport.z}px ${120 * viewport.z}px, ${120 * viewport.z}px ${120 * viewport.z}px`,
@@ -172,6 +182,9 @@ export default function Canvas({
             onToggleFavorite={() => onToggleFavorite(n.id)}
             loras={loras}
             model={model}
+            onSpawnImg2Img={() => onSpawnImg2Img(n.id)}
+            sourceNode={nodes.find((x) => x.id === n.source?.nodeId)}
+            sourceOptions={sourceOptions}
           />
         ))}
       </div>
@@ -180,7 +193,7 @@ export default function Canvas({
           <div className="empty-card" data-bg="1">
             <h2 data-bg="1">空白画布</h2>
             <p data-bg="1">
-              从左侧节点列表拖入「图生成」，或点它右边的 <b>+</b> 放到原点。
+              从左侧节点列表拖入「图生成」或「图生图」，或点它右边的 <b>+</b> 放到原点。
             </p>
             <p className="dim" data-bg="1">
               拖空白处平移</p>

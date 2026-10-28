@@ -4,6 +4,7 @@ type Props = {
 
 const NODE_TYPES = [
   { type: 'gen', label: '图生成', desc: '提示词 → 像素素材', accent: 'green' as const },
+  { type: 'img2img', label: '图生图', desc: '已有图 → 改内容', accent: 'cyan' as const },
 ]
 
 export default function NodePalette({ onAdd }: Props) {
