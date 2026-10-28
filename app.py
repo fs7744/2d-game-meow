@@ -9,9 +9,11 @@
   GET  /jobs              最近任务
   GET  /assets            资产清单（读 assets/index.jsonl）
   GET  /files/{path}      取产物
+  POST /upload            上传本机图片（原始字节）→ 磁盘路径 + 展示 URL
 """
 from __future__ import annotations
 
+import io
 import json
 import queue
 import threading
@@ -21,10 +23,12 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+
+from PIL import Image
 
 from workflows import generate as gen
 from workflows import lora as lora_reg
@@ -33,6 +37,10 @@ from workflows.engine import Engine
 
 ROOT = Path(__file__).resolve().parent
 ASSETS = ROOT / "assets"
+UPLOAD_DIR = ASSETS / "uploads"
+MAX_UPLOAD = 20 * 1024 * 1024
+UPLOAD_FORMATS = {"PNG": ".png", "JPEG": ".jpg", "WEBP": ".webp",
+                  "BMP": ".bmp", "GIF": ".gif"}
 
 app = FastAPI(title="2D Game Asset Pipeline", version="0.1.0")
 engine = Engine(ROOT / "models")
@@ -240,6 +248,44 @@ def assets(limit: int = 50) -> Dict[str, Any]:
         return {"count": 0, "items": []}
     lines = idx.read_text("utf-8").strip().splitlines()[-limit:]
     return {"count": len(lines), "items": [json.loads(x) for x in reversed(lines)]}
+
+
+@app.post("/upload")
+async def upload_image(request: Request, name: str = "") -> Dict[str, Any]:
+    """接收一张本地图（请求体是**原始字节**，不是 multipart）。
+
+    为什么不用 multipart：多一个依赖（python-multipart），而浏览器端
+    `fetch(url, {body: file})` 直接就能发原始字节，少一层转换少一处出错。
+
+    校验三件事：体积上限、真能解码（防止把任意文件塞进来）、扩展名白名单。
+    文件名会被清洗（只留字母数字与 -_），再拼一个 uuid 前缀，避免覆盖与路径穿越。
+    """
+    data = await request.body()
+    if not data:
+        raise HTTPException(400, "空文件")
+    if len(data) > MAX_UPLOAD:
+        raise HTTPException(413, f"文件太大（上限 {MAX_UPLOAD // 2**20}MB）")
+    try:
+        im = Image.open(io.BytesIO(data))
+        im.load()                                  # 真的解码一遍，坏文件到这里就现原形
+        fmt = (im.format or "PNG").upper()
+        size = im.size
+    except Exception as exc:                      # noqa: BLE001
+        raise HTTPException(400, f"不是有效的图片：{exc}") from exc
+    if fmt not in UPLOAD_FORMATS:
+        raise HTTPException(400, f"不支持的图片格式：{fmt}")
+    ext = UPLOAD_FORMATS[fmt]
+    # 磁盘名只用 ASCII：中文名会让 URL 必须百分号编码，jsdom / 某些代理会出问题。
+    # 原名另外回传，前端可以显示。
+    stem = "".join(
+        ch for ch in Path(name).stem if ch.isascii() and (ch.isalnum() or ch in "-_")
+    )[:40] or "image"
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    out = UPLOAD_DIR / f"{uuid.uuid4().hex[:10]}_{stem}{ext}"
+    out.write_bytes(data)
+    return {"path": str(out), "url": f"/files/uploads/{out.name}",
+            "name": Path(name).name or out.name,
+            "w": size[0], "h": size[1], "format": fmt, "bytes": len(data)}
 
 
 @app.get("/files/{path:path}")

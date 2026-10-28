@@ -17,6 +17,15 @@ function makeFetch() {
     if (String(url).endsWith('/health')) {
       return { ok: true, json: async () => ({ ok: true, engine: { device: 'Fake GPU 24GB' } }) }
     }
+    if (String(url).includes('/upload')) {
+      return {
+        ok: true,
+        json: async () => ({
+          path: 'D:////x////uploads////abc_pic.png', url: '/files/uploads/abc_pic.png',
+          w: 256, h: 192, format: 'PNG',
+        }),
+      }
+    }
     if (String(url).endsWith('/generate')) {
       return { ok: true, json: async () => ({ job_id: 'job-1' }) }
     }
@@ -123,8 +132,8 @@ function check(name, cond, extra = '') {
   const doc = dom.window.document
   check('渲染出顶栏品牌', doc.querySelector('.brand .title')?.textContent?.includes('喵叫'))
   check('空状态引导可见', !!doc.querySelector('.canvas-empty .empty-card'))
-  check('侧栏存在（节点 2 项：图生成 / 图生图）',
-    doc.querySelectorAll('.rail-item').length === 2,
+  check('侧栏存在（节点 3 项：图生成 / 图生图 / 图片）',
+    doc.querySelectorAll('.rail-item').length === 3,
     String(doc.querySelectorAll('.rail-item').length))
   check('缩放显示 100%', doc.querySelector('.zoom-val')?.textContent === '100%')
   check('无脚本错误', errors.length === 0, errors[0] || '')
@@ -615,6 +624,118 @@ function check(name, cond, extra = '') {
   check('没有源图时不提交任务', !calls.some((c) => c.url.endsWith('/generate')))
 
   check('空源图场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 13) 拖本机图片进画布 -> 图片节点（可改大小、可当图生图的源）
+{
+  calls.length = 0
+  const { dom, errors } = await boot('')
+  const doc = dom.window.document
+  const win = dom.window
+  const viewport = doc.querySelector('.canvas-viewport')
+
+  const file = new win.File([new Uint8Array([1, 2, 3])], 'pic.png', { type: 'image/png' })
+  const ev = new win.Event('drop', { bubbles: true })
+  Object.defineProperties(ev, {
+    clientX: { value: 300 }, clientY: { value: 200 },
+    dataTransfer: { value: { types: ['Files'], files: [file], getData: () => '' } },
+  })
+  viewport.dispatchEvent(ev)
+  await new Promise((r) => setTimeout(r, 400))
+
+  check('拖入图片生成图片节点', !!doc.querySelector('.node.is-img'))
+  check('图片节点标题是「图片」',
+    (doc.querySelector('.node.is-img .node-kind')?.textContent || '') === '图片')
+  check('上传请求已发出', calls.some((c) => c.url.includes('/upload')))
+  check('图片节点渲染了图', !!doc.querySelector('.node.is-img .img-holder img'))
+  check('图片节点默认宽度按原图上限', doc.querySelector('.node.is-img')?.style.width === '256px',
+    doc.querySelector('.node.is-img')?.style.width)
+
+  // 改展示宽度
+  const wInput = doc.querySelector('.node.is-img .img-tools input')
+  const setter = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value').set
+  setter.call(wInput, '140')
+  wInput.dispatchEvent(new win.Event('input', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 100))
+  check('可自由改变展示大小', doc.querySelector('.node.is-img')?.style.width === '140px',
+    doc.querySelector('.node.is-img')?.style.width)
+
+  // 派生图生图：源就是这张本地图
+  const spawn = [...doc.querySelectorAll('.node.is-img button.mini.wide')][0]
+  spawn.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 150))
+  const i2i = [...doc.querySelectorAll('.node')].find(
+    (n) => (n.querySelector('.node-kind')?.textContent || '') === '图生图')
+  check('图片节点能派生图生图节点', !!i2i)
+  check('图生图节点接上了图片节点', !!i2i?.querySelector('.src-thumb img'))
+
+  // 提交时 init_image 必须是上传返回的磁盘路径
+  const ta = i2i.querySelector('textarea.prompt')
+  const setTa = (el, v) => {
+    const s2 = Object.getOwnPropertyDescriptor(win.HTMLTextAreaElement.prototype, 'value').set
+    s2.call(el, v)
+    el.dispatchEvent(new win.Event('input', { bubbles: true }))
+  }
+  setTa(ta, 'white cat knight')
+  await new Promise((r) => setTimeout(r, 80))
+  i2i.querySelector('.gen-btn').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 250))
+  const sub = calls.filter((c) => c.url.endsWith('/generate')).pop()
+  const body = JSON.parse(sub.body)
+  check('提交 workflow=w2 且用本地图当源',
+    body.workflow === 'w2' && body.params.init_image.includes('abc_pic.png'),
+    JSON.stringify({ w: body.workflow, i: body.params.init_image }))
+
+  check('图片节点场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 14) 连线：从图片节点的输出点拖到图生图节点
+{
+  const { dom, errors } = await boot('')
+  const doc = dom.window.document
+  const win = dom.window
+
+  // 先造一个图片节点
+  const viewport = doc.querySelector('.canvas-viewport')
+  const file = new win.File([new Uint8Array([1])], 'pic.png', { type: 'image/png' })
+  const ev = new win.Event('drop', { bubbles: true })
+  Object.defineProperties(ev, {
+    clientX: { value: 300 }, clientY: { value: 200 },
+    dataTransfer: { value: { types: ['Files'], files: [file], getData: () => '' } },
+  })
+  viewport.dispatchEvent(ev)
+  await new Promise((r) => setTimeout(r, 400))
+
+  // 再加一个空的图生图节点
+  const addBtns = [...doc.querySelectorAll('.rail-add')]
+  addBtns[1].dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 150))
+  const target = [...doc.querySelectorAll('.node')].find(
+    (n) => (n.querySelector('.node-kind')?.textContent || '') === '图生图')
+  check('有可作为连线目标的图生图节点', !!target)
+
+  // 从图片节点的输出点按下
+  const out = doc.querySelector('.node.is-img .conn.out')
+  check('节点有输出连接点', !!out)
+  out.dispatchEvent(new win.PointerEvent('pointerdown', { bubbles: true, button: 0 }))
+  await new Promise((r) => setTimeout(r, 80))
+  check('连线中出现待定线', !!doc.querySelector('svg.links path.pending'))
+
+  // 悬停到目标节点上再松手
+  target.dispatchEvent(new win.PointerEvent('pointerover', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 80))
+  win.dispatchEvent(new win.PointerEvent('pointerup', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 150))
+
+  const sel = target.querySelector('.src-box select')
+  check('连线后图生图节点的源被设成图片节点',
+    !!sel && sel.value && sel.value.length > 0, sel?.value)
+  check('画布上画出连线', doc.querySelectorAll('svg.links path.link').length >= 1,
+    String(doc.querySelectorAll('svg.links path.link').length))
+
+  check('连线场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 

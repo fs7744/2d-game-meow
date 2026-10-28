@@ -4,7 +4,7 @@ import type { FavoritePrompt, LoraInfo } from '../types'
 type Props = {
   loras: LoraInfo[]
   favs: FavoritePrompt[]
-  onAddNode: (kind?: 'gen' | 'img2img') => void
+  onAddNode: (kind?: 'gen' | 'img2img' | 'image') => void
   canApply: boolean
   onApplyFav: (text: string) => void
   onRemoveFav: (id: string) => void
@@ -120,9 +120,26 @@ export default function Sidebar({
             </span>
             <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('img2img')}>+</button>
           </div>
+          <div
+            className="rail-item"
+            draggable
+            onDragStart={(e) => {
+              e.dataTransfer.setData('application/x-node-type', 'image')
+              e.dataTransfer.effectAllowed = 'copy'
+            }}
+            title="拖一张本机图片进画布，或点 + 选择文件"
+          >
+            <span className="rail-item-main">
+              <b>图片</b>
+              <em>本地图 · 可当图生图的源</em>
+            </span>
+            <button className="rail-add" title="选择本机图片" onClick={() => onAddNode('image')}>+</button>
+          </div>
           <p className="rail-tip">
             拖这一项到画布任意位置，也能在那里新建节点。图生图要先有源图：
             在生成节点下方点「↳ 图生图」会自动接上。
+            <br />
+            把本机图片<b>直接拖进画布</b>会变成图片节点；拖到图生图节点上则直接当它的源。
           </p>
         </Section>
 

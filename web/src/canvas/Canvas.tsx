@@ -18,6 +18,8 @@ type Props = {
   loras: LoraInfo[]
   onDropType: (type: string, world: { x: number; y: number }) => void
   onSpawnImg2Img: (id: string) => void
+  onDropFiles: (files: File[], world: { x: number; y: number }, targetId?: string) => void
+  onConnect: (from: string, to: string) => void
 }
 
 const MIN_Z = 0.2
@@ -39,11 +41,21 @@ export default function Canvas({
   model,
   onDropType,
   onSpawnImg2Img,
+  onDropFiles,
+  onConnect,
 }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null)
   const [panning, setPanning] = useState(false)
   const panRef = useRef<{ sx: number; sy: number; vx: number; vy: number } | null>(null)
   const spaceRef = useRef(false)
+  // 连线：从某个节点的「输出点」拖到另一个节点上
+  const [linking, setLinking] = useState(false)
+  const [linkTip, setLinkTip] = useState<{ x: number; y: number } | null>(null)
+  const linkFrom = useRef<string | null>(null)
+  const hoverRef = useRef<string | null>(null)
+  const [hoverId, setHoverId] = useState<string | null>(null)
+  // 文件拖拽时悬停在哪个节点上（drop 时要判断「落在节点上」还是「落在空白」）
+  const dragOverRef = useRef<string | null>(null)
 
   // 世界坐标 = (屏幕 - 平移) / 缩放
   const toWorld = useCallback(
@@ -130,13 +142,73 @@ export default function Canvas({
     }
   }
 
-  // 图生图的源候选：任何已经出过图的节点
+  // 图生图的源候选：出过图的节点 + 图片节点（它们没有 job，路径在 image 上）
   const sourceOptions = nodes
-    .filter((n) => n.job?.path || n.job?.raw)
+    .filter((n) => n.job?.path || n.job?.raw || (n.kind === 'image' && n.image?.path))
     .map((n) => ({
       id: n.id,
-      label: `${n.kind === 'img2img' ? '图生图' : '图生成'} · ${n.params.prompt.slice(0, 20) || n.id}`,
+      label:
+        n.kind === 'image'
+          ? `图片 · ${n.image?.path.split(/[\\/]/).pop() || n.id}`
+          : `${n.kind === 'img2img' ? '图生图' : '图生成'} · ${n.params.prompt.slice(0, 20) || n.id}`,
     }))
+
+  const startLink = useCallback((id: string) => {
+    linkFrom.current = id
+    hoverRef.current = null
+    setHoverId(null)
+    setLinking(true)
+    setLinkTip({ x: 0, y: 0 })
+  }, [])
+
+  useEffect(() => {
+    if (!linking) return
+    const move = (e: PointerEvent) => {
+      const w = toWorld(e.clientX, e.clientY)
+      setLinkTip({ x: w.x, y: w.y })
+    }
+    const up = () => {
+      const from = linkFrom.current
+      const to = hoverRef.current
+      linkFrom.current = null
+      hoverRef.current = null
+      setHoverId(null)
+      setLinking(false)
+      setLinkTip(null)
+      if (from && to) onConnect(from, to)
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+    return () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+    }
+  }, [linking, toWorld, onConnect])
+
+  const setHover = useCallback((id: string | null) => {
+    hoverRef.current = id
+    setHoverId(id)
+  }, [])
+
+  const onDragOverNode = useCallback((id: string) => {
+    dragOverRef.current = id
+  }, [])
+
+  // 连线几何：两端都锚在卡头（y+13），这样线永远贴着卡片顶部，不会穿过内容
+  const widthOf = (n: GenNode) => (n.kind === 'image' ? n.image?.w ?? NODE_W : NODE_W)
+  const edgePath = (from: GenNode, toX: number, toY: number) => {
+    const x1 = from.x + widthOf(from)
+    const y1 = from.y + 13
+    return `M ${x1} ${y1} C ${x1 + 70} ${y1}, ${toX - 70} ${toY}, ${toX} ${toY}`
+  }
+  const edges = nodes
+    .filter((n) => n.source?.nodeId)
+    .map((n) => {
+      const from = nodes.find((x) => x.id === n.source!.nodeId)
+      if (!from) return null
+      return { id: n.id, d: edgePath(from, n.x, n.y + 13) }
+    })
+    .filter((e): e is { id: string; d: string } => e !== null)
 
   const gridStyle: React.CSSProperties = {
     backgroundPosition: `${viewport.x}px ${viewport.y}px, ${viewport.x}px ${viewport.y}px`,
@@ -153,12 +225,26 @@ export default function Canvas({
       onPointerCancel={endPan}
       onDragOver={(e) => {
         if (e.dataTransfer.types.includes('application/x-node-type')) e.preventDefault()
+        // 本机图片：允许拖进画布（空白处建图片节点，节点上则作为该节点的源）
+        if (e.dataTransfer.types.includes('Files')) {
+          e.preventDefault()
+          e.dataTransfer.dropEffect = 'copy'
+        }
       }}
       onDrop={(e) => {
+        const world = toWorld(e.clientX, e.clientY)
+        const files = e.dataTransfer.files ? Array.from(e.dataTransfer.files) : []
+        if (files.length) {
+          e.preventDefault()
+          const target = dragOverRef.current ?? undefined
+          dragOverRef.current = null
+          onDropFiles(files, world, target)
+          return
+        }
         const t = e.dataTransfer.getData('application/x-node-type')
         if (!t) return
         e.preventDefault()
-        onDropType(t, toWorld(e.clientX, e.clientY))
+        onDropType(t, world)
       }}
     >
       <div className="canvas-grid" data-bg="1" style={gridStyle} />
@@ -167,6 +253,16 @@ export default function Canvas({
         style={{ transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.z})` }}
       >
         <div className="origin-mark" style={{ left: 0, top: 0 }} title="画布原点 (0,0)" />
+        <svg className="links">
+          {edges.map((e) => (
+            <path key={e.id} className="link" d={e.d} />
+          ))}
+          {linking && linkTip && linkFrom.current && (() => {
+            const from = nodes.find((x) => x.id === linkFrom.current)
+            if (!from) return null
+            return <path className="link pending" d={edgePath(from, linkTip.x, linkTip.y)} />
+          })()}
+        </svg>
         {nodes.map((n) => (
           <GenNodeCard
             key={n.id}
@@ -185,6 +281,10 @@ export default function Canvas({
             onSpawnImg2Img={() => onSpawnImg2Img(n.id)}
             sourceNode={nodes.find((x) => x.id === n.source?.nodeId)}
             sourceOptions={sourceOptions}
+            onStartLink={() => startLink(n.id)}
+            onHover={setHover}
+            onDragOverNode={onDragOverNode}
+            linkTarget={hoverId === n.id}
           />
         ))}
       </div>

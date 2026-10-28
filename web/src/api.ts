@@ -13,6 +13,28 @@ export function fileUrl(localPath: string): string {
 
 export type SubmitResult = { job_id: string }
 
+export type UploadedImage = {
+  path: string
+  url: string
+  w: number
+  h: number
+  format: string
+}
+
+/**
+ * 上传一张本地图。请求体是**原始字节**（不是 multipart），后端省掉一个依赖。
+ * 返回的 path 是磁盘绝对路径——图生图要拿它当 init_image。
+ */
+export async function uploadImage(file: File): Promise<UploadedImage> {
+  const r = await fetch(`${base}/upload?name=${encodeURIComponent(file.name)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': file.type || 'application/octet-stream' },
+    body: file,
+  })
+  if (!r.ok) throw new Error(`上传失败：HTTP ${r.status}`)
+  return r.json() as Promise<UploadedImage>
+}
+
 export type SubmitOpts = { model?: string; matteBackend?: string }
 
 /** 两个工作流共用的参数。w2 不接受 width/height（尺寸由源图决定）。 */

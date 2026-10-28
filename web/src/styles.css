@@ -187,6 +187,48 @@ button { cursor: pointer; }
 .node-kind { font-family: var(--chip); font-size: 10px; letter-spacing: 0.8px; color: var(--green); }
 /* 图生图用另一种颜色，一眼分清两类节点 */
 .node-kind.i2i { color: var(--cyan); }
+.node-kind.img { color: var(--yellow); }
+
+/* 连线：SVG 铺在 world 层，坐标就是世界坐标 */
+svg.links {
+  position: absolute; left: 0; top: 0; width: 1px; height: 1px;
+  overflow: visible; pointer-events: none;
+}
+svg.links path.link {
+  fill: none; stroke: var(--cyan); stroke-width: 2; opacity: 0.75;
+}
+svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
+
+/* 连接点：右侧是输出（从这里拉线），左侧是接入 */
+.conn {
+  position: absolute; top: 9px; width: 11px; height: 11px; border-radius: 50%;
+  background: var(--bg-2); border: 2px solid var(--cyan); cursor: crosshair;
+}
+.conn.out { right: -6px; }
+.conn.in { left: -6px; border-color: var(--line-strong); }
+.conn.out:hover { background: var(--cyan); }
+.node.link-target { outline: 2px dashed var(--cyan); outline-offset: 2px; }
+
+/* 图片节点 */
+.node.is-img { background: var(--bg-1); }
+.img-body { display: flex; flex-direction: column; gap: 6px; padding: 8px; }
+.img-holder { position: relative; line-height: 0; background: #0d0d10; }
+.img-holder img { width: 100%; height: auto; display: block; image-rendering: pixelated; }
+.img-holder .resize {
+  position: absolute; right: -5px; bottom: -5px; width: 12px; height: 12px;
+  background: var(--cyan); border: 1px solid #000; cursor: nwse-resize; z-index: 2;
+}
+.img-tools { display: flex; align-items: center; gap: 6px; }
+.img-tools label { display: flex; align-items: center; gap: 4px; font-size: 10px; color: var(--muted); }
+.img-tools input { width: 64px; height: 24px; }
+.img-empty { padding: 18px 6px; text-align: center; font-size: 11px; color: var(--muted-2); }
+
+/* 上传失败提示 */
+.toast {
+  position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%);
+  background: var(--pink); color: #fff; padding: 8px 14px;
+  font-size: 12px; z-index: 50; box-shadow: var(--shadow-hard);
+}
 .node-state {
   font-family: var(--mono); font-size: 10px; padding: 2px 5px;
   border: 1px solid var(--line); color: var(--muted);

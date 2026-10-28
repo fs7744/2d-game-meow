@@ -5,7 +5,7 @@ import type { GenNode, LoraInfo, Preset } from '../types'
 export const NODE_W = 300
 
 export type NodePatch = Partial<
-  Pick<GenNode, 'x' | 'y' | 'params' | 'view' | 'job' | 'source'>
+  Pick<GenNode, 'x' | 'y' | 'params' | 'view' | 'job' | 'source' | 'image'>
 >
 
 type Props = {
@@ -26,6 +26,13 @@ type Props = {
   sourceNode?: GenNode
   /** 可以作为源图的节点列表 */
   sourceOptions: { id: string; label: string }[]
+  /** 从本节点的输出点拉一条连线 */
+  onStartLink?: () => void
+  /** 连线时鼠标进入/离开某个节点（用来判断连线落在哪） */
+  onHover?: (id: string | null) => void
+  /** 拖本机文件经过某个节点（落下时把它当源） */
+  onDragOverNode?: (id: string) => void
+  linkTarget?: boolean
 }
 
 const PRESETS: { v: Preset; label: string }[] = [
@@ -51,6 +58,10 @@ export default function GenNodeCard({
   onSpawnImg2Img,
   sourceNode,
   sourceOptions,
+  onStartLink,
+  onHover,
+  onDragOverNode,
+  linkTarget,
 }: Props) {
   const dragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null)
   const p = node.params
@@ -60,8 +71,17 @@ export default function GenNodeCard({
   const hasImage = !!job?.url
   const imageMode = node.view === 'image' && hasImage
   const isI2I = node.kind === 'img2img'
-  // 源图可以是上游节点的产物，也可以是节点上直接记的绝对路径
-  const hasSource = !!(sourceNode?.job?.raw || sourceNode?.job?.path || node.source?.path)
+  const isImg = node.kind === 'image'
+  // 源图可以是上游节点的产物、图片节点的本地图，也可以是节点上直接记的绝对路径
+  const hasSource = !!(
+    sourceNode?.job?.raw ||
+    sourceNode?.job?.path ||
+    (sourceNode?.kind === 'image' && sourceNode.image?.path) ||
+    node.source?.path
+  )
+  // 缩略图：图片节点用自己的图，其它节点用出图结果
+  const sourceThumb =
+    sourceNode?.kind === 'image' ? sourceNode.image?.url : sourceNode?.job?.url
 
   const startDrag = (e: React.PointerEvent) => {
     if (e.button !== 0) return
@@ -98,6 +118,33 @@ export default function GenNodeCard({
   const setParam = <K extends keyof typeof p>(k: K, v: (typeof p)[K]) =>
     onPatch({ params: { ...p, [k]: v } })
 
+  /** 图片节点的展示宽度（高度按原图比例自动算） */
+  const setImageW = (w: number) => {
+    if (!node.image) return
+    const cw = Math.max(60, Math.min(900, Math.round(w)))
+    onPatch({ image: { ...node.image, w: cw } })
+  }
+
+  /** 拖右下角的手柄改大小：屏幕像素差要除以缩放比才是世界坐标 */
+  const resizeRef = useRef<{ x: number; w: number } | null>(null)
+  const startResize = (e: React.PointerEvent) => {
+    e.stopPropagation()
+    e.preventDefault()
+    resizeRef.current = { x: e.clientX, w: node.image?.w ?? 160 }
+    const move = (ev: PointerEvent) => {
+      const st = resizeRef.current
+      if (!st) return
+      setImageW(st.w + (ev.clientX - st.x) / zoom)
+    }
+    const up = () => {
+      resizeRef.current = null
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+  }
+
   /**
    * 选 LoRA：同时把「推荐强度」和「匹配的提示词契约」一起带过来。
    * 不这么做的话，挂着武侠 LoRA 却仍在用像素契约，两边打架、两头不到位。
@@ -129,11 +176,27 @@ export default function GenNodeCard({
 
   return (
     <div
-      className={`node gen${selected ? ' selected' : ''}${imageMode ? ' image-mode' : ''}`}
-      style={{ left: node.x, top: node.y, width: NODE_W }}
+      className={`node gen${selected ? ' selected' : ''}${imageMode ? ' image-mode' : ''}${
+        isImg ? ' is-img' : ''
+      }${linkTarget ? ' link-target' : ''}`}
+      data-node-id={node.id}
+      style={{
+        left: node.x,
+        top: node.y,
+        width: isImg ? node.image?.w ?? NODE_W : NODE_W,
+      }}
       onPointerDown={(e) => {
         e.stopPropagation()
         onSelect()
+      }}
+      onPointerEnter={() => onHover?.(node.id)}
+      onPointerLeave={() => onHover?.(null)}
+      onDragOver={(e) => {
+        // 本机图片拖到节点上：落下时把它当该节点的源
+        if (e.dataTransfer.types.includes('Files')) {
+          e.preventDefault()
+          onDragOverNode?.(node.id)
+        }
       }}
     >
       <div
@@ -143,8 +206,8 @@ export default function GenNodeCard({
         onPointerUp={endDrag}
         onPointerCancel={endDrag}
       >
-        <span className={`node-kind${isI2I ? ' i2i' : ''}`}>
-          {isI2I ? '图生图' : '图生成'}
+        <span className={`node-kind${isI2I ? ' i2i' : ''}${isImg ? ' img' : ''}`}>
+          {isImg ? '图片' : isI2I ? '图生图' : '图生成'}
         </span>
         {job && <span className={`node-state s-${job.status}`}>{statusLabel(job.status)}</span>}
         <span className="spacer" />
@@ -180,9 +243,57 @@ export default function GenNodeCard({
         >
           ✕
         </button>
+        <span
+          className="conn out"
+          title="作为源图：从这里拖一条线到图生图节点"
+          onPointerDown={(e) => {
+            e.stopPropagation()
+            e.preventDefault()
+            onStartLink?.()
+          }}
+        />
       </div>
 
-      {imageMode ? (
+      {isImg ? (
+        <div className="node-body img-body">
+          {node.image ? (
+            <>
+              <div className="img-holder">
+                <img src={node.image.url} alt="" draggable={false} />
+                <span
+                  className="resize"
+                  title="拖动改变大小（也可以直接改下面的宽度）"
+                  onPointerDown={startResize}
+                />
+              </div>
+              <div className="img-tools">
+                <label>
+                  宽
+                  <input
+                    type="number"
+                    min={60}
+                    max={900}
+                    value={Math.round(node.image.w)}
+                    onChange={(e) => setImageW(Number(e.target.value) || 160)}
+                  />
+                </label>
+                <button
+                  className="mini wide"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onSpawnImg2Img()
+                  }}
+                  title="以此图为源新建图生图节点"
+                >
+                  ↳ 图生图
+                </button>
+              </div>
+            </>
+          ) : (
+            <div className="img-empty">图片没了（可能文件被删）</div>
+          )}
+        </div>
+      ) : imageMode ? (
         <div className="node-image-only">
           <img src={job!.url} alt={p.prompt} draggable={false} />
           <div className="img-badge">
@@ -221,8 +332,8 @@ export default function GenNodeCard({
           {isI2I && (
             <div className="src-box">
               <div className="src-thumb" title={sourceNode ? '源图' : '还没有选源图'}>
-                {sourceNode?.job?.url ? (
-                  <img src={sourceNode.job.url} alt="源图" draggable={false} />
+                {sourceThumb ? (
+                  <img src={sourceThumb} alt="源图" draggable={false} />
                 ) : (
                   <span>无源图</span>
                 )}
@@ -254,11 +365,13 @@ export default function GenNodeCard({
                   <b>{p.strength.toFixed(2)}</b>
                 </label>
                 <div className="src-note">
-                  {sourceNode?.job?.raw
-                    ? '用原图（未像素化），保留细节'
-                    : hasSource
-                      ? '用成品，像素块会被重新糊开'
-                      : '点生成节点下方的「↳ 图生图」自动接上'}
+                  {sourceNode?.kind === 'image'
+                    ? '用这张本地图'
+                    : sourceNode?.job?.raw
+                      ? '用原图（未像素化），保留细节'
+                      : hasSource
+                        ? '用成品，像素块会被重新糊开'
+                        : '点生成节点下方的「↳ 图生图」自动接上'}
                 </div>
               </div>
             </div>

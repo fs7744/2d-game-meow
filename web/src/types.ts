@@ -1,7 +1,15 @@
 export type Preset = 'sprite' | 'portrait' | 'wuxia' | 'pixel' | 'none'
 
-/** 节点类型：图生成（w1 文生图）/ 图生图（w2，需要源图） */
-export type NodeKind = 'gen' | 'img2img'
+/** 节点类型：图生成（w1）/ 图生图（w2）/ 图片（拖进来的本地图） */
+export type NodeKind = 'gen' | 'img2img' | 'image'
+
+/** 图片节点挂着的图 */
+export type NodeImage = {
+  path: string   // 磁盘绝对路径（当图生图的源时要传给后端）
+  url: string    // /files/... 展示用
+  w: number      // 展示宽度（px）；高度按原图比例
+  h: number      // 原图高度
+}
 
 /** 图生图的源：指向画布上另一个节点的产物，或直接给本地绝对路径 */
 export type NodeSource = { nodeId?: string; path?: string }
@@ -66,6 +74,7 @@ export type GenNode = {
   params: GenParams
   view: NodeView
   source?: NodeSource
+  image?: NodeImage
   job?: JobState
 }
 

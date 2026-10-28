@@ -108,6 +108,42 @@ def test_generate_w2_roundtrip(client, tmp_path):
     assert Path(meta["raw"]).exists(), "w2 也要给下游留未处理的原图"
 
 
+def test_upload_image(client):
+    """上传端点：原始字节进去，磁盘路径 + 可访问 URL 出来。"""
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (32, 24), (1, 2, 3)).save(buf, "PNG")
+    r = client.post("/upload?name=测试 图.png", content=buf.getvalue(),
+                    headers={"Content-Type": "image/png"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert Path(body["path"]).exists()
+    assert (body["w"], body["h"]) == (32, 24)
+    assert body["format"] == "PNG"
+    # 磁盘名只用 ASCII（中文名会让 URL 需要百分号编码），原名另外回传
+    assert "测试" not in Path(body["path"]).name
+    assert " " not in Path(body["path"]).name
+    assert body["path"].isascii()
+    assert body["name"] == "测试 图.png"
+    # 上传后要能被 /files 取回（画布上的图就是靠它显示的）
+    assert client.get(body["url"]).status_code == 200
+
+
+def test_upload_rejects_garbage(client):
+    """坏文件必须被拒：不能什么字节都往 assets 里塞。"""
+    r = client.post("/upload", content=b"not an image at all",
+                    headers={"Content-Type": "image/png"})
+    assert r.status_code == 400
+    assert "图片" in r.json()["detail"]
+
+
+def test_upload_rejects_empty_body(client):
+    assert client.post("/upload", content=b"").status_code == 400
+
+
 def test_assets_lists_generated(client):
     r = client.get("/assets?limit=5")
     assert r.status_code == 200

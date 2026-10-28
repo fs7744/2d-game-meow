@@ -3,9 +3,11 @@ import Canvas from './canvas/Canvas'
 import Sidebar from './components/Sidebar'
 import TrainPanel from './components/TrainPanel'
 import { hasPrompt, loadPrompts, removePrompt, savePrompts, togglePrompt } from './store/prompts'
-import { fetchJob, fetchLoras, fetchModels, health, submitImg2Img, submitTxt2Img } from './api'
+import {
+  fetchJob, fetchLoras, fetchModels, health, submitImg2Img, submitTxt2Img, uploadImage,
+} from './api'
 import type {
-  FavoritePrompt, GenNode, GenParams, LoraInfo, NodeKind, NodeSource, Viewport,
+  FavoritePrompt, GenNode, GenParams, LoraInfo, NodeImage, NodeKind, NodeSource, Viewport,
 } from './types'
 import type { NodePatch } from './nodes/GenNodeCard'
 
@@ -41,6 +43,7 @@ function makeNode(
   kind: NodeKind = 'gen',
   params?: Partial<GenParams>,
   source?: NodeSource,
+  image?: NodeImage,
 ): GenNode {
   return {
     id: newId(),
@@ -49,6 +52,7 @@ function makeNode(
     y,
     view: 'expanded',
     source,
+    image,
     params: { ...DEFAULT_PARAMS, ...params },
   }
 }
@@ -102,6 +106,8 @@ export default function App() {
   const [models, setModels] = useState<string[]>(['sd15'])
   const [model, setModel] = useState<string>('sd15')
   const [matteBackend, setMatteBackend] = useState('auto')
+  const [uploadMsg, setUploadMsg] = useState('')
+  const pickFiles = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => savePrompts(favs), [favs])
 
@@ -146,6 +152,11 @@ export default function App() {
 
   const addNode = useCallback((type: string, world?: { x: number; y: number }) => {
     const at = world ?? { x: 0, y: 0 }
+    if (type === 'image') {
+      // 图片节点的内容来自本机文件：走文件选择器，选完直接落成节点
+      pickFiles.current?.click()
+      return
+    }
     const kind: NodeKind = type === 'img2img' ? 'img2img' : 'gen'
     setNodes((list) => {
       // 原点放多个时阶梯错开，避免完全重叠
@@ -167,6 +178,46 @@ export default function App() {
       return [...list, node]
     })
   }, [])
+
+  /**
+   * 拖进来的本地图：落到空白处 → 变成一个图片节点；落到图生图节点上 → 直接当它的源。
+   * 上传在后端做（图生图需要磁盘绝对路径，前端传 base64 没有意义）。
+   */
+  const handleFiles = useCallback(
+    async (files: File[], world: { x: number; y: number }, targetId?: string) => {
+      const imgs = files.filter((f) => f.type.startsWith('image/'))
+      if (!imgs.length) return
+      const target = targetId ? nodesRef.current.find((n) => n.id === targetId) : undefined
+      let i = 0
+      for (const f of imgs) {
+        try {
+          const up = await uploadImage(f)
+          if (target && target.kind === 'img2img') {
+            patchNode(target.id, { source: { path: up.path } })
+            continue
+          }
+          const node = makeNode(world.x + i * 24, world.y + i * 24, 'image', undefined, undefined, {
+            path: up.path, url: up.url, w: Math.min(320, up.w), h: up.h,
+          })
+          setSelectedId(node.id)
+          setNodes((list) => [...list, node])
+        } catch (e) {
+          // 上传失败要看得见，不能静默丢文件
+          setUploadMsg(`上传失败：${e instanceof Error ? e.message : '未知错误'}`)
+          window.setTimeout(() => setUploadMsg(''), 5000)
+        }
+        i += 1
+      }
+    },
+    [patchNode],
+  )
+
+  /** 连线：把 from 接到 to（图生图节点）上。 */
+  const onConnect = useCallback((from: string, to: string) => {
+    const target = nodesRef.current.find((n) => n.id === to)
+    if (!target || target.kind !== 'img2img' || target.id === from) return
+    patchNode(to, { source: { nodeId: from } })
+  }, [patchNode])
 
   const duplicateNode = useCallback((id: string) => {
     setNodes((list) => {
@@ -200,7 +251,9 @@ export default function App() {
     const up = n.source?.nodeId
       ? nodesRef.current.find((x) => x.id === n.source!.nodeId)
       : undefined
-    return up?.job?.raw || up?.job?.path
+    if (!up) return undefined
+    if (up.kind === 'image') return up.image?.path
+    return up.job?.raw || up.job?.path
   }, [])
 
   const generate = useCallback(async (id: string) => {
@@ -389,9 +442,28 @@ export default function App() {
           loras={loras}
           onDropType={(t, world) => addNode(t, world)}
           onSpawnImg2Img={spawnImg2Img}
+          onDropFiles={(files, world, targetId) => void handleFiles(files, world, targetId)}
+          onConnect={onConnect}
         />
         <div className="badge-count">{nodes.length} 个节点</div>
       </main>
+
+      <input
+        ref={pickFiles}
+        type="file"
+        accept="image/*"
+        multiple
+        style={{ display: 'none' }}
+        onChange={(e) => {
+          const files = e.target.files ? Array.from(e.target.files) : []
+          e.target.value = ''
+          if (files.length) {
+            void handleFiles(files, { x: 120, y: 120 })
+          }
+        }}
+      />
+
+      {uploadMsg && <div className="toast">{uploadMsg}</div>}
 
       {trainOpen && (
         <TrainPanel onClose={() => setTrainOpen(false)} onTrained={reloadLoras} />

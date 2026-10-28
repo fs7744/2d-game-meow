@@ -430,7 +430,7 @@ start.bat                   # Windows 双击或命令行
 cd web && npm ci && npm run build     # 构建
 cd .. && python app.py                # FastAPI 同时托管 dist 与 API → http://127.0.0.1:8000
 cd web && npm run dev                 # 或开发模式（:5173，代理到 8000）
-npm run smoke                         # 无浏览器渲染冒烟（jsdom，92 项断言）
+npm run smoke                         # 无浏览器渲染冒烟（jsdom，108 项断言）
 ```
 
 > `start.bat` 刻意保持**纯 ASCII**：cmd.exe 按 OEM 代码页解析 .bat，中文注释会切断命令行
@@ -467,6 +467,18 @@ npm run smoke                         # 无浏览器渲染冒烟（jsdom，92 �
 | 训练入口 | 顶栏「训练 LoRA」浮层面板，有进度条/loss/显存 | 不用切命令行 |
 | **提示词语言** | 节点内固定提示「SD1.5 只支持英文」；输入含中日韩字符时实时转红警告 | 实测中文被拆成字节级乱 token（'背剑侠客' → `è ĥ Į å ī`），模型只会瞎猜甚至把乱码当文字画出来 |
 | **提示词收藏** | 提示词框右上角 ☆ 收藏，左栏「提示词收藏」列出，点条目填入选中节点 | 常用提示词不必反复输入；按文本去重、可删除、localStorage 持久化 |
+
+### 图片节点、拖本地图、连线
+
+- **把本机图片拖进画布** → 变成一个「图片」节点（黄色标题）。图片会先 POST 到
+  `/upload` 存进 `assets/uploads/`，画布存的是磁盘绝对路径 + 展示 URL 两份：
+  前者给图生图当 `init_image`，后者给 `<img>` 显示。
+- **拖到图生图节点上**（而不是空白处）→ 直接成为那个节点的源，不用先建节点。
+- **图片节点可以自由改变展示大小**：右下角有拖拽手柄（按原图比例缩放），
+  也可以直接改「宽」输入框（60~900px）。高度按原图比例自动算。
+- **连线**：每个节点卡头右侧有一个青色连接点，从这里拖一条线到图生图节点上，
+  就把它设成了源（画布上会画一条贝塞尔曲线）。图生图节点也可以在卡片里用下拉换源。
+  只有图生图节点能接源——文生图没有「底图」这回事。
 
 ### 图生图节点（w2）
 
@@ -566,9 +578,9 @@ python tools/video.py i2v assets/cat.png "the same character walking" -o assets/
 ## 测试
 
 ```bash
-python -m pytest tests -q        # 168 个用例，约 180s（含 SDXL 慢用例）
+python -m pytest tests -q        # 171 个用例，约 180s（含 SDXL 慢用例）
 # 全套超过 2 分钟会被超时杀掉，分批跑：
-#   pytest tests --ignore=tests/test_models.py   # 157 个，约 110s
+#   pytest tests --ignore=tests/test_models.py   # 160 个，约 110s
 #   pytest tests/test_models.py                  # 11 个，约 60s
 ```
 
@@ -577,7 +589,7 @@ python -m pytest tests -q        # 168 个用例，约 180s（含 SDXL 慢用例
 | `tests/test_postprocess.py` | 锚点、逐帧对齐、打包几何、色板上限、alpha 二值化、裁边、**像素块单色性**、**前景块计数** | 11 |
 | `tests/test_generate.py` | 同 seed 逐像素一致、不同 seed 相异、色板生效、**重绘选区外不变**、序列帧数、**闸门重提与批量挑帧**、**clip_skip 生效与 meta 记录**、主体数上报、**图生图后处理与 raw 留存**、显存回收、缺权重报错 | 16 |
 | `tests/test_controlnet.py` | Canny conditioning 生效、Tile 放大结构相关性 > 0.5、像素块均匀性 | 3 |
-| `tests/test_api.py` | 全部端点、队列串行性、**w2 队列往返（含 raw 留存）**、路径穿越防护、400/404 | 13 |
+| `tests/test_api.py` | 全部端点、队列串行性、**w2 队列往返（含 raw 留存）**、**上传端点（坏文件/空文件/文件名清洗）**、路径穿越防护、400/404 | 16 |
 | `tests/test_pose.py` | 检测器切换、18 点完整性、关节在画面内且头高于髋、骨架渲染、双后端一致性、引擎内的姿态提取器单例、精灵图切片 CLI | 7 |
 | `tests/test_quality.py` | 前景占比/质心/漂移、**贴边检测**（含未抠图时整体失效）、无模型时「无法判定」、关节数影响排序与闸门 | 11 |
 | `tests/test_io_paths.py` | 视频抽帧、GIF、精灵图切片（含空格子）、CLI 错误码、非 8 倍数尺寸重绘、cols 夹取、环境自检 JSON、LoRA 空接口 | 11 |
@@ -675,6 +687,19 @@ curl -X POST http://127.0.0.1:8000/generate -H "Content-Type: application/json" 
              "width": 512, "height": 768, "steps": 25, "pixel": 4, "palette": 16}
 }'
 ```
+
+上传一张本地图（画布「拖本地图进画布」走的就是它；请求体是**原始字节**，不是 multipart）：
+
+```bash
+curl -X POST "http://127.0.0.1:8000/upload?name=hero.png" \
+     --data-binary @hero.png -H "Content-Type: image/png"
+# -> {"path": "D:/.../assets/uploads/ab12cd34ef_hero.png",
+#     "url": "/files/uploads/ab12cd34ef_hero.png", "w": 512, "h": 512, "format": "PNG"}
+```
+
+拿到 `path` 就能当图生图的源：`{"workflow": "w2", "params": {"init_image": "<path>", ...}}`。
+校验：体积 ≤20MB、真能解码（坏文件 400）、格式白名单（PNG/JPEG/WEBP/BMP/GIF）、
+磁盘名只用 ASCII（中文名要 URL 编码，会坑掉某些代理）。
 
 ## 设计约束（都是踩过的坑）
 
