@@ -1807,6 +1807,14 @@ export default function GenNodeCard({
               </select>
             </label>
           </div>
+          {/* 不乘契约是"看起来无害"的默认值，实际等于放弃全身/居中/纯背景三条约束。
+              实测不选契约时 SD1.5 大量出半身特写——用户会以为是模型不行。 */}
+          {p.preset === 'none' && (
+            <p className="warn" style={{ margin: '4px 0 0' }}>
+              ⚠ 没选提示词契约＝没有「全身 / 居中 / 纯背景」约束，SD1.5 多半出半身特写。
+              要像素角色就选 <b>pixel</b> 或 <b>sprite</b>。
+            </p>
+          )}
 
           <details className="fold">
             <summary>更多设置</summary>

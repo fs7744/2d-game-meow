@@ -212,7 +212,12 @@ export default function App() {
     fetchModels().then((m) => {
       setModels(m.available)
       setRecommend(m.recommend)
-      if (m.available.length && !m.available.includes(model)) setModel(m.available[0])
+      // **有 SDXL 就默认用它**：精灵场景实测 SDXL@768 可交付率 92% / 贴边 0%，
+      // 而 SD1.5@768 是 33% / 67%——差距不在速度（同分辨率只慢约 40%），
+      // 全在构图。让所有人默认踩在差的那个上，是不合理的默认值。
+      // 显存不够（<12GB）的用户在侧栏切回 SD1.5 即可，那里也写了代价。
+      const want = m.available.includes('sdxl') ? 'sdxl' : m.available[0]
+      if (m.available.length && !m.available.includes(model)) setModel(want)
     })
   }, [model])
 
