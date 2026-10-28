@@ -14,7 +14,8 @@ import {
 import ConfirmDialog from './components/ConfirmDialog'
 import Lightbox from './components/Lightbox'
 import type {
-  FavoritePrompt, GenNode, GenParams, LoraInfo, NodeImage, NodeKind, NodeSource, Viewport,
+  FavoritePrompt, GenNode, GenParams, LoraInfo, ModelRecommend, NodeImage, NodeKind,
+  NodeSource, Viewport,
 } from './types'
 import type { NodePatch } from './nodes/GenNodeCard'
 
@@ -103,6 +104,20 @@ function makeNode(
   }
 }
 
+/** 切换底模时会跟着改的参数。只动采样，不动 prompt / lora 这些创作内容。 */
+const REC_KEYS = ['width', 'height', 'steps', 'cfg', 'pixel', 'palette'] as const
+
+function pickRec(rec?: ModelRecommend): Partial<GenParams> {
+  if (!rec) return {}
+  return { width: rec.width, height: rec.height, steps: rec.steps,
+           cfg: rec.cfg, pixel: rec.pixel, palette: rec.palette }
+}
+
+/** 这组参数是否仍等于某个底模的推荐值——等于就说明用户没手改过。 */
+function matchesRec(p: GenParams, rec?: ModelRecommend): boolean {
+  return !!rec && REC_KEYS.every((k) => p[k] === rec[k])
+}
+
 /** 老存档没有 lora/loraScale/strength，读回来补默认值，否则下拉会显示空、强度变 NaN。 */
 function migrate(n: GenNode): GenNode {
   return { ...n, kind: n.kind ?? 'gen', params: { ...DEFAULT_PARAMS, ...n.params } }
@@ -138,9 +153,12 @@ export default function App() {
   const [loras, setLoras] = useState<LoraInfo[]>([])
   const [trainOpen, setTrainOpen] = useState(false)
   const [models, setModels] = useState<string[]>(['sd15'])
+  // 每个底模的推荐采样参数，由后端 /models 给出（见 types.ts 的 ModelRecommend）
+  const [recommend, setRecommend] = useState<Record<string, ModelRecommend>>({})
   const [model, setModel] = useState<string>('sd15')
   const [matteBackend, setMatteBackend] = useState('auto')
   const [uploadMsg, setUploadMsg] = useState('')
+  const [notice, setNotice] = useState('')          // 底模切换之类的一次性提示
   const [pendingDelete, setPendingDelete] = useState<GenNode | null>(null)
   const [pendingProjectDelete, setPendingProjectDelete] = useState<string | null>(null)
   const [preview, setPreview] = useState<{ url: string; name: string } | null>(null)
@@ -156,10 +174,23 @@ export default function App() {
 
   useEffect(() => {
     fetchModels().then((m) => {
-      setModels(m)
-      if (m.length && !m.includes(model)) setModel(m[0])
+      setModels(m.available)
+      setRecommend(m.recommend)
+      if (m.available.length && !m.available.includes(model)) setModel(m.available[0])
     })
   }, [model])
+
+  useEffect(() => {
+    if (!notice) return
+    const t = setTimeout(() => setNotice(''), 3200)
+    return () => clearTimeout(t)
+  }, [notice])
+
+  // addNode 的 useCallback 依赖是空数组，拿不到最新的 recommend/model，所以走 ref
+  const recRef = useRef(recommend)
+  recRef.current = recommend
+  const modelRef = useRef(model)
+  modelRef.current = model
 
   const nodesRef = useRef(nodes)
   nodesRef.current = nodes
@@ -302,10 +333,36 @@ export default function App() {
       // 原点放多个时阶梯错开，避免完全重叠
       const sameSpot = list.filter((n) => n.x === at.x && n.y === at.y).length
       const node = makeNode(at.x + sameSpot * 24, at.y + sameSpot * 24, kind)
+      // 新节点跟当前底模走：否则选了 SDXL 还是按 SD1.5 的 512/30 步出一张废图
+      const rec = recRef.current[modelRef.current]
+      if (rec) node.params = { ...node.params, ...pickRec(rec) }
       setSelectedId(node.id)
       return [...list, node]
     })
   }, [])
+
+  /**
+   * 切换底模：把推荐采样参数套到「用户没动过」的生成节点上。
+   *
+   * 为什么不是无条件覆盖：用户可能已经为某个节点手调过步数/尺寸。
+   * 判据是「当前值仍等于旧底模的推荐值」——等于说明没动过，可以跟着换；
+   * 不等就保留，避免把人调好的参数冲掉。
+   *
+   * 为什么需要这件事：后端实测 SDXL 在 1024² 反而更差（可交付率 92%→75%），
+   * 前端若按直觉填 1024，用户会稳定拿到更差的结果且没有任何报错。
+   */
+  const switchModel = useCallback((next: string) => {
+    const oldRec = recommend[model]
+    const rec = recommend[next]
+    setModel(next)
+    if (!rec) return
+    setNodes((list) => list.map((n) => {
+      if ((n.kind ?? 'gen') !== 'gen') return n
+      if (oldRec && !matchesRec(n.params, oldRec)) return n
+      return { ...n, params: { ...n.params, ...pickRec(rec) } }
+    }))
+    setNotice(`已套用 ${next} 推荐参数：${rec.width}×${rec.height} / ${rec.steps} 步`)
+  }, [recommend, model])
 
   /** 以某个节点的产物为源，在它右边新建一个图生图节点。 */
   const spawnImg2Img = useCallback((id: string) => {
@@ -689,8 +746,9 @@ export default function App() {
           onApplyFav={applyFavorite}
           onRemoveFav={removeFavorite}
           models={models}
+          recommend={recommend}
           model={model}
-          onModel={setModel}
+          onModel={switchModel}
           matteBackend={matteBackend}
           onMatteBackend={setMatteBackend}
         />
@@ -733,7 +791,7 @@ export default function App() {
         }}
       />
 
-      {uploadMsg && <div className="toast">{uploadMsg}</div>}
+      {(uploadMsg || notice) && <div className="toast">{uploadMsg || notice}</div>}
 
       {preview && <Lightbox url={preview.url} name={preview.name} onClose={() => setPreview(null)} />}
 

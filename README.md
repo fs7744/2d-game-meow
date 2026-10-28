@@ -1505,7 +1505,10 @@ python tools/ab_base.py --rebuild --out assets/_ab_base
 ### 这些结论已经进代码
 
 - `Engine.recommend(model)` 给出每个底模在精灵管线上的推荐参数，`GET /models`
-  的 `recommend` 字段直接带出来（SDXL 推荐 768×768 / 24 步，不是 1024）。
+  的 `recommend` 字段带出来（SDXL 推荐 768×768 / 24 步，不是 1024）。
+  **前端已消费**：切换底模时自动套到「用户没改过」的生成节点上（判据是当前值
+  仍等于旧底模的推荐值），手改过的节点保持原样；新建节点也按当前底模初始化。
+  Sidebar 会显示「推荐 768×768 / 24 步」，切换时给一次 toast 说明。
 - `vramopt.plan_candidates()` 在 W4 出候选前按显存余量封顶：装不下就降候选数，
   单帧都装不下才报错。被降级的情况会写进 meta 的 `candidates_note`，
   不会静默改变行为。实测拦的就是 sdxl 1024² 批量 2（23.98GB / 耗时 17.5s）。

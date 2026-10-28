@@ -1,4 +1,4 @@
-import type { GenParams, JobState, LoraInfo } from './types'
+import type { GenParams, JobState, LoraInfo, ModelRecommend } from './types'
 
 const base = ''                                   // 生产同源；开发由 vite proxy 转发
 
@@ -401,11 +401,20 @@ export async function fetchTrain(id: string): Promise<TrainState> {
   return (await r.json()) as TrainState
 }
 
-export async function fetchModels(): Promise<string[]> {
+export type ModelList = {
+  available: string[]
+  recommend: Record<string, ModelRecommend>
+}
+
+export async function fetchModels(): Promise<ModelList> {
   const r = await fetch(`${base}/models`)
-  if (!r.ok) return ['sd15']
+  // 后端不可达时退回 SD1.5 单档：宁可少显示，也不要让下拉是空的
+  if (!r.ok) return { available: ['sd15'], recommend: {} }
   const j = await r.json()
-  return Array.isArray(j.available) ? j.available : ['sd15']
+  const available: string[] = Array.isArray(j.available) ? j.available : ['sd15']
+  const recommend: Record<string, ModelRecommend> =
+    j.recommend && typeof j.recommend === 'object' ? j.recommend : {}
+  return { available, recommend }
 }
 
 export async function fetchLoras(baseModel?: string): Promise<LoraInfo[]> {

@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react'
-import type { FavoritePrompt, LoraInfo } from '../types'
+import type { FavoritePrompt, LoraInfo, ModelRecommend } from '../types'
 import type { ProjectMeta } from '../store/projects'
 
 type Props = {
@@ -19,6 +19,7 @@ type Props = {
   onApplyFav: (text: string) => void
   onRemoveFav: (id: string) => void
   models: string[]
+  recommend: Record<string, ModelRecommend>
   model: string
   onModel: (m: string) => void
   matteBackend: string
@@ -26,8 +27,8 @@ type Props = {
 }
 
 const MODEL_LABEL: Record<string, string> = {
-  sd15: 'SD1.5 · 快（默认）',
-  sdxl: 'SDXL 1.0 · 更好但慢约 3×',
+  sd15: 'SD1.5 · 省显存（默认）',
+  sdxl: 'SDXL 1.0 · 结构更稳',
 }
 
 const MATTE_LABEL: Record<string, string> = {
@@ -106,7 +107,7 @@ function ProjectRow({
  */
 export default function Sidebar({
   loras, favs, onAddNode, canApply, onApplyFav, onRemoveFav,
-  models, model, onModel, matteBackend, onMatteBackend,
+  models, recommend, model, onModel, matteBackend, onMatteBackend,
   projects, currentProject, onSwitchProject, onCreateProject, onRenameProject, onDeleteProject,
 }: Props) {
   const [collapsed, setCollapsed] = useState(false)
@@ -341,9 +342,15 @@ export default function Sidebar({
           </label>
           <p className="rail-tip">
             {model === 'sdxl'
-              ? 'SDXL 画质更好，但 SD1.5 的 LoRA 不能通用（下面会自动只留 SDXL 可用的），且 W3/W4 暂不支持。'
-              : 'SD1.5 快、生态全（ControlNet / IP-Adapter / LoRA 都齐）。W3 局部重绘与 W4 姿态驱动只能用它。'}
+              ? '结构更稳（实测可交付率 92% vs 33%），同分辨率只慢约 40%；但 W4 显存很紧（单帧约 15GB），且 SD1.5 的 LoRA 不能通用。'
+              : '显存友好（W4 单帧约 6.6GB）、LoRA 生态全；代价是构图控制弱，需要多出候选让闸门挑。'}
           </p>
+          {recommend[model] && (
+            <p className="rail-tip">
+              推荐 {recommend[model].width}×{recommend[model].height} /{' '}
+              {recommend[model].steps} 步（切底模时自动套用，手改过的节点不动）
+            </p>
+          )}
 
           <label className="block">
             抠图方式

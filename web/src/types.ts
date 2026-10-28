@@ -41,6 +41,22 @@ export type NodeSource = { nodeId?: string; path?: string }
  */
 export type NodeCharSource = { nodeId?: string; path?: string }
 
+/**
+ * GET /models 的 recommend 字段：这个底模在**精灵管线**上的推荐采样参数。
+ *
+ * 为什么要由后端给：实测 SDXL 在 1024² 反而更差（角色在画面里占比更大、更容易
+ * 贴边，可交付率 92%→75%），加上生成慢一倍，每张可用帧贵 2.3 倍。前端如果按
+ * "SDXL 就该 1024"的直觉填表单，用户会稳定拿到更差的结果，而且没有任何报错。
+ */
+export type ModelRecommend = {
+  width: number
+  height: number
+  steps: number
+  cfg: number
+  pixel: number
+  palette: number
+}
+
 export type GenParams = {
   prompt: string
   negative: string

@@ -59,7 +59,18 @@ function makeFetch() {
       }
     }
     if (String(url).endsWith('/models')) {
-      return { ok: true, json: async () => ({ current: 'sd15', available: ['sd15', 'sdxl'] }) }
+      return {
+        ok: true,
+        json: async () => ({
+          current: 'sd15',
+          available: ['sd15', 'sdxl'],
+          // 与后端 Engine.RECOMMEND 一致：SDXL 推荐 768/24，不是 1024
+          recommend: {
+            sd15: { width: 768, height: 768, steps: 30, cfg: 7.0, pixel: 6, palette: 32 },
+            sdxl: { width: 768, height: 768, steps: 24, cfg: 6.5, pixel: 6, palette: 32 },
+          },
+        }),
+      }
     }
     if (String(url).endsWith('/loras')) {
       return {
@@ -1398,6 +1409,73 @@ function check(name, cond, extra = '') {
     JSON.stringify({ cols: body.params.cols, mode: body.params.mode }))
 
   check('序列帧替换场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 22) 切换底模：自动套用后端推荐参数，但不覆盖手改过的节点
+{
+  const { dom, errors } = await boot('')
+  const doc = dom.window.document
+  const win = dom.window
+
+  const genItem = [...section(doc, '节点').querySelectorAll('.rail-item')]
+    .find((it) => (it.querySelector('b')?.textContent || '') === '图生成')
+  const addGen = async () => {
+    genItem.querySelector('.rail-add').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+    await new Promise((r) => setTimeout(r, 120))
+  }
+  await addGen()
+  await addGen()
+
+  const num = (node, prefix) => {
+    const lab = [...node.querySelectorAll('label')]
+      .find((l) => (l.textContent || '').trim().startsWith(prefix))
+    return lab?.querySelector('input')?.value
+  }
+  let nodes = [...doc.querySelectorAll('.node')]
+  check('新节点默认用 SD1.5 的推荐值（768 / 30 步）',
+    num(nodes[0], '宽') === '768' && num(nodes[0], '步数') === '30',
+    JSON.stringify({ w: num(nodes[0], '宽'), s: num(nodes[0], '步数') }))
+
+  // 手改第二个节点的宽度，模拟"用户调过参"
+  const setNum = (el, v) => {
+    const setter = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value').set
+    setter.call(el, String(v))
+    el.dispatchEvent(new win.Event('input', { bubbles: true }))
+  }
+  const wLab = [...nodes[1].querySelectorAll('label')]
+    .find((l) => (l.textContent || '').trim().startsWith('宽'))
+  setNum(wLab.querySelector('input'), 640)
+  await new Promise((r) => setTimeout(r, 80))
+
+  const modelSel = [...doc.querySelectorAll('select')]
+    .find((s2) => (s2.closest('label')?.textContent || '').includes('底模'))
+  const setSel = (el, v) => {
+    const setter = Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value').set
+    setter.call(el, v)
+    el.dispatchEvent(new win.Event('change', { bubbles: true }))
+  }
+  setSel(modelSel, 'sdxl')
+  await new Promise((r) => setTimeout(r, 200))
+
+  nodes = [...doc.querySelectorAll('.node')]
+  check('切 SDXL 后未改动的节点套用推荐步数（30 → 24）',
+    num(nodes[0], '步数') === '24', num(nodes[0], '步数'))
+  check('推荐尺寸是 768 而不是 1024（1024 反而更差）',
+    num(nodes[0], '宽') === '768', num(nodes[0], '宽'))
+  check('手改过参数的节点不被覆盖',
+    num(nodes[1], '宽') === '640' && num(nodes[1], '步数') === '30',
+    JSON.stringify({ w: num(nodes[1], '宽'), s: num(nodes[1], '步数') }))
+  check('切换时给出提示',
+    (doc.querySelector('.toast')?.textContent || '').includes('sdxl'),
+    doc.querySelector('.toast')?.textContent)
+  check('切回 SD1.5 也能还原',
+    (setSel(modelSel, 'sd15'), true))
+  await new Promise((r) => setTimeout(r, 200))
+  check('还原后步数回到 30', num([...doc.querySelectorAll('.node')][0], '步数') === '30',
+    num([...doc.querySelectorAll('.node')][0], '步数'))
+
+  check('底模切换场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 
