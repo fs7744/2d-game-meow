@@ -100,6 +100,19 @@ function makeFetch() {
         }),
       }
     }
+    if (String(url).endsWith('/pose_dirs')) {
+      return {
+        ok: true,
+        json: async () => ({
+          count: 2,
+          items: [
+            { path: 'D:////x////assets////_pose', count: 4, sample: ['_pose_walk_00.png'],
+              name: '_pose' },
+            { path: 'D:////x////assets////pose_video', count: 8, sample: ['f00.png'], name: 'pose_video' },
+          ],
+        }),
+      }
+    }
     if (String(url).startsWith('/files/')) {
       return { ok: true, json: async () => ({}) }
     }
@@ -175,8 +188,9 @@ function check(name, cond, extra = '') {
   const doc = dom.window.document
   check('渲染出顶栏品牌', doc.querySelector('.brand .title')?.textContent?.includes('喵叫'))
   check('空状态引导可见', !!doc.querySelector('.canvas-empty .empty-card'))
-  check('侧栏存在（节点 9 项：图生成 / 图生图 / 局部重绘 / 局部AI重绘 / 角色迁移 / 序列帧替换 / 像素转换 / 抠图 / 图片）',
-    section(doc, '节点')?.querySelectorAll('.rail-item').length === 9,
+  check('侧栏存在（节点 10 项：图生成 / 图生图 / 局部重绘 / 局部AI重绘 / 角色迁移 / '
+    + '序列帧替换 / 姿态序列 / 像素转换 / 抠图 / 图片）',
+    section(doc, '节点')?.querySelectorAll('.rail-item').length === 10,
     String(section(doc, '节点')?.querySelectorAll('.rail-item').length))
   check('有「项目」分组（独立画布）', !!section(doc, '项目'))
   check('缩放显示 100%', doc.querySelector('.zoom-val')?.textContent === '100%')
@@ -567,8 +581,8 @@ function check(name, cond, extra = '') {
 
   check('侧栏存在', !!doc.querySelector('.rail'))
   const titles = [...doc.querySelectorAll('.rail-sec-title')].map((x) => x.textContent)
-  check('四个菜单分组：项目/节点/收藏/设置',
-    JSON.stringify(titles) === JSON.stringify(['项目', '节点', '提示词收藏', '设置']),
+  check('五个菜单分组：项目/底模/节点/收藏/设置',
+    JSON.stringify(titles) === JSON.stringify(['项目', '底模', '节点', '提示词收藏', '设置']),
     JSON.stringify(titles))
 
   // 分组可折叠
@@ -588,12 +602,17 @@ function check(name, cond, extra = '') {
   await new Promise((r) => setTimeout(r, 100))
   check('侧栏可展开', !doc.querySelector('.rail.collapsed'))
 
-  // 设置里的底模下拉
+  // 底模下拉（独立分组，放在节点之上——它是全局参数，藏在「设置」里找不到）
   doc.querySelector('details.fold').open = true
   await new Promise((r) => setTimeout(r, 80))
-  const setSec = section(doc, '设置')
-  const msel = setSec.querySelector('select')
-  check('设置里有底模下拉', !!msel)
+  const msel = section(doc, '底模').querySelector('select')
+  check('有独立的「底模」分组', !!section(doc, '底模'))
+  check('底模分组在节点分组之前（要显眼）',
+    titles.indexOf('底模') >= 0 && titles.indexOf('底模') < titles.indexOf('节点'),
+    JSON.stringify(titles))
+  check('底模下拉带「全局生效」说明',
+    (section(doc, '底模').textContent || '').includes('全局生效'),
+    (section(doc, '底模').textContent || '').slice(0, 60))
   check('底模下拉列出本机已装的', msel && msel.options.length === 2,
     String(msel?.options.length))
 
@@ -1573,6 +1592,131 @@ function check(name, cond, extra = '') {
     doc.querySelector('.toast')?.textContent)
 
   check('候选上限场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 26) 姿态序列节点（W4）：骨架目录 → 逐帧生成，能提交也能看到候选统计
+{
+  const { dom, errors } = await boot('')
+  const doc = dom.window.document
+  const win = dom.window
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms))
+
+  const item = [...section(doc, '节点').querySelectorAll('.rail-item')]
+    .find((it) => (it.querySelector('b')?.textContent || '') === '姿态序列')
+  check('侧栏有「姿态序列」节点', !!item)
+  item.querySelector('.rail-add').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await wait(150)
+
+  const nd = () => doc.querySelector('.node')
+  check('新建出姿态序列节点',
+    (nd().querySelector('.node-kind')?.textContent || '') === '姿态序列',
+    nd().querySelector('.node-kind')?.textContent)
+
+  // 未选目录时不能提交：W4 没有源图这条路，目录就是它的全部输入
+  check('未选骨架目录时按钮禁用', nd().querySelector('.gen-btn')?.disabled === true)
+  check('给出缺骨架帧的提示',
+    (nd().textContent || '').includes('缺骨架帧'), (nd().textContent || '').slice(-60))
+
+  // 选目录（选项来自后端 /pose_dirs）
+  const sel = nd().querySelector('.src-box select')
+  const setSel = (el, v) => {
+    const setter = Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value').set
+    setter.call(el, v)
+    el.dispatchEvent(new win.Event('change', { bubbles: true }))
+  }
+  setSel(sel, 'D:////x////assets////_pose')
+  await wait(150)
+  check('选目录后显示帧数（4 帧）',
+    (nd().textContent || '').includes('这个目录有 4 帧'),
+    (nd().textContent || '').slice(-60))
+
+  // 手填路径也要能生效（后端接受目录或通配）
+  check('有手填路径的输入框', !!nd().querySelector('.dir-input'))
+
+  // 填提示词后提交
+  const ta = nd().querySelector('textarea.prompt')
+  const setTa = (el, v) => {
+    const st = Object.getOwnPropertyDescriptor(win.HTMLTextAreaElement.prototype, 'value').set
+    st.call(el, v)
+    el.dispatchEvent(new win.Event('input', { bubbles: true }))
+  }
+  setTa(ta, 'white cat knight, red cape')
+  await wait(120)
+
+  extraMeta = { candidates: 2, attempts: 9, frames: 4, gate_passed: 4 }
+  nd().querySelector('.gen-btn').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await wait(250)
+
+  const sub = calls.filter((c) => c.url.endsWith('/generate')).pop()
+  const body = JSON.parse(sub.body)
+  check('提交 workflow=w4', body.workflow === 'w4', body.workflow)
+  check('pose_images 传的是目录（后端展开成排序后的帧列表）',
+    body.params.pose_images === 'D:////x////assets////_pose', body.params.pose_images)
+  check('带上候选与补提（W4 的产线机制）',
+    body.params.candidates === 2 && body.params.gate_retries === 1,
+    JSON.stringify({ c: body.params.candidates, r: body.params.gate_retries }))
+  check('cols=0 表示按帧数自动排',
+    body.params.cols === 0, body.params.cols)
+
+  // 结果统计（W4 分支和序列帧分支是两段独立 JSX，必须各验一次）
+  for (let i = 0; i < 20; i++) {
+    if (nd().querySelector('.meta')) break
+    await wait(200)
+  }
+  const metaLine = nd().querySelector('.meta')?.textContent || ''
+  check('W4 结果显示候选与闸门', metaLine.includes('候选 2/帧') && metaLine.includes('闸门 4/4'),
+    metaLine)
+  extraMeta = null
+
+  check('姿态序列场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 27) 节点可拖宽 + 参数 tooltip
+{
+  const { dom, errors } = await boot('')
+  const doc = dom.window.document
+  const win = dom.window
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms))
+
+  const item = [...section(doc, '节点').querySelectorAll('.rail-item')]
+    .find((it) => (it.querySelector('b')?.textContent || '') === '图生成')
+  item.querySelector('.rail-add').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await wait(150)
+
+  const nd = () => doc.querySelector('.node')
+  check('节点默认宽 300', nd().style.width === '300px', nd().style.width)
+  check('有拖宽手柄', !!nd().querySelector('.node-resize'))
+
+  // 拖右边缘 100px：宽度应变成 400
+  const h = nd().querySelector('.node-resize')
+  h.dispatchEvent(new win.MouseEvent('pointerdown', { bubbles: true, clientX: 300 }))
+  win.dispatchEvent(new win.MouseEvent('pointermove', { clientX: 400 }))
+  await wait(120)
+  check('拖动后节点变宽（300 → 400）',
+    parseInt(nd().style.width, 10) === 400, nd().style.width)
+  win.dispatchEvent(new win.MouseEvent('pointerup', {}))
+
+  // 宽度有上下限：拖到很窄也不会崩成 0
+  check('宽度不会被拖到不可用（>=260）',
+    parseInt(nd().style.width, 10) >= 260, nd().style.width)
+
+  // 参数 tooltip：每一条都要说清"是什么/影响/推荐"
+  const lab = (name) => [...nd().querySelectorAll('label')]
+    .find((l) => (l.textContent || '').trim().startsWith(name))
+  const stepsTip = lab('步数')?.getAttribute('title') || ''
+  check('步数有 tooltip', stepsTip.length > 10, stepsTip)
+  check('tooltip 含「影响」与「推荐」',
+    stepsTip.includes('影响：') && stepsTip.includes('推荐：'), stepsTip)
+  check('推荐值写的是具体数字（不是"视情况"）',
+    /\d/.test(stepsTip.split('推荐：')[1] || ''), stepsTip)
+
+  // 参数区整体覆盖率：至少 10 个 label 带说明
+  const withTip = [...nd().querySelectorAll('label[title]')]
+  check('参数区大部分控件都有 tooltip（>=10 个）', withTip.length >= 10, String(withTip.length))
+
+  check('拖宽与 tooltip 场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 

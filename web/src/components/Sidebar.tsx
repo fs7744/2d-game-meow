@@ -13,7 +13,7 @@ type Props = {
   onDeleteProject: (id: string) => void
   onAddNode: (
     kind?: 'gen' | 'img2img' | 'image' | 'bg' | 'inpaint' | 'airepaint' | 'pixelify'
-    | 'poseclone' | 'spriteswap',
+    | 'poseclone' | 'spriteswap' | 'poseswap',
   ) => void
   canApply: boolean
   onApplyFav: (text: string) => void
@@ -162,6 +162,33 @@ export default function Sidebar({
           <p className="rail-tip">每个项目是一套独立的画布，互不干涉。</p>
         </Section>
 
+        <Section icon="◈" title="底模">
+          <label className="block">
+            底模
+            <select value={model} onChange={(e) => onModel(e.target.value)}>
+              {models.length === 0 && <option value={model}>{model}（仅本机已装）</option>}
+              {models.map((m) => (
+                <option key={m} value={m}>{MODEL_LABEL[m] || m}</option>
+              ))}
+            </select>
+          </label>
+          {/* 底模影响画布上**所有**节点，不是单个节点的参数——这一点必须写明，
+              否则用户会以为只改了当前节点。引擎按 model 缓存管线，
+              两个底模同时驻留要多花十几 GB。 */}
+          <p className="rail-tip">全局生效：画布上所有节点都用它（引擎按底模缓存管线，不混跑）。</p>
+          <p className="rail-tip">
+            {model === 'sdxl'
+              ? '结构更稳（实测可交付率 92% vs 33%），同分辨率只慢约 40%；但 W4 显存很紧（单帧约 15GB），且 SD1.5 的 LoRA 不能通用。'
+              : '显存友好（W4 单帧约 6.6GB）、LoRA 生态全；代价是构图控制弱，需要多出候选让闸门挑。'}
+          </p>
+          {recommend[model] && (
+            <p className="rail-tip">
+              推荐 {recommend[model].width}×{recommend[model].height} /{' '}
+              {recommend[model].steps} 步（切底模时自动套用，手改过的节点不动）
+            </p>
+          )}
+        </Section>
+
         <Section icon="▣" title="节点">
           <div
             className="rail-item"
@@ -222,6 +249,21 @@ export default function Sidebar({
               <em>精灵图 · 逐帧换角色</em>
             </span>
             <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('spriteswap')}>+</button>
+          </div>
+          <div
+            className="rail-item"
+            draggable
+            onDragStart={(e) => {
+              e.dataTransfer.setData('application/x-node-type', 'poseswap')
+              e.dataTransfer.effectAllowed = 'copy'
+            }}
+            title="姿态序列：从一组骨架图逐帧生成（多候选择优 + 质量闸门），自动对齐脚底并打包成精灵图"
+          >
+            <span className="rail-item-main">
+              <b>姿态序列</b>
+              <em>骨架帧 · 逐帧生成全身</em>
+            </span>
+            <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('poseswap')}>+</button>
           </div>
           <div
             className="rail-item"
@@ -331,27 +373,6 @@ export default function Sidebar({
         </Section>
 
         <Section icon="⚙" title="设置">
-          <label className="block">
-            底模
-            <select value={model} onChange={(e) => onModel(e.target.value)}>
-              {models.length === 0 && <option value={model}>{model}（仅本机已装）</option>}
-              {models.map((m) => (
-                <option key={m} value={m}>{MODEL_LABEL[m] || m}</option>
-              ))}
-            </select>
-          </label>
-          <p className="rail-tip">
-            {model === 'sdxl'
-              ? '结构更稳（实测可交付率 92% vs 33%），同分辨率只慢约 40%；但 W4 显存很紧（单帧约 15GB），且 SD1.5 的 LoRA 不能通用。'
-              : '显存友好（W4 单帧约 6.6GB）、LoRA 生态全；代价是构图控制弱，需要多出候选让闸门挑。'}
-          </p>
-          {recommend[model] && (
-            <p className="rail-tip">
-              推荐 {recommend[model].width}×{recommend[model].height} /{' '}
-              {recommend[model].steps} 步（切底模时自动套用，手改过的节点不动）
-            </p>
-          )}
-
           <label className="block">
             抠图方式
             <select value={matteBackend} onChange={(e) => onMatteBackend(e.target.value)}>

@@ -1384,6 +1384,46 @@ def _sprite_animatediff(eng: Engine, frames: Sequence[tuple], char_image: str | 
 
 # ---------------- W4 姿态驱动 -> 精灵帧 ----------------
 
+POSE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+
+
+def norm_pose_inputs(src: str | Path | Sequence[str | Path]) -> List[Path]:
+    """把「目录 / 通配 / 文件列表」统一成**排序后**的帧路径列表。
+
+    为什么要接受目录：W4 的入口是 `tools/pose_from_image.py`，它一次产出一个目录
+    的骨架帧。如果前端必须把列表一个个展开，那界面上就得做多选——而用户手里本来
+    只有一个目录路径。这里让"给个目录"就够，CLI 和 API 用同一套规则。
+
+    **排序是必须的**：帧顺序决定动画顺序。按文件名自然序（frame_2 < frame_10），
+    而不是字典序（frame_10 < frame_2）——否则 10 帧以上必然乱序。
+    """
+    import re
+
+    def natural(p: Path):
+        return [int(x) if x.isdigit() else x.lower()
+                for x in re.split(r"(\d+)", p.name)]
+
+    if isinstance(src, (str, Path)):
+        s = str(src)
+        # 通配：直接交给 glob（支持 ** 由调用方决定深度）
+        if any(ch in s for ch in "*?["):
+            base = Path(s)
+            found = sorted(base.parent.glob(base.name), key=natural)
+            return [p for p in found if p.is_file() and p.suffix.lower() in POSE_EXTS]
+        p = Path(s)
+        if p.is_dir():
+            return sorted((x for x in p.iterdir()
+                           if x.is_file() and x.suffix.lower() in POSE_EXTS), key=natural)
+        if not p.exists():
+            raise FileNotFoundError(f"骨架帧路径不存在：{s}")
+        return [p]
+    out = [Path(x) for x in src]
+    missing = [str(x) for x in out if not Path(x).exists()]
+    if missing:
+        raise FileNotFoundError(f"骨架帧缺失：{', '.join(missing[:3])}")
+    return out
+
+
 def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
              negative: Optional[str] = None, ref_image: Optional[str | Path] = None,
              lora: Optional[str] = None, lora_scale: float = 0.8,
@@ -1412,6 +1452,14 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
       姿态模型缺失时闸门自动关闭并告警，此时 candidates 仍然生效（只按分数挑，
       分数里只剩占比/贴边/漂移三项）。
     """
+    # 输入可以是目录 / 通配 / 列表：前端只传目录，CLI 传列表，同一套规则
+    pose_images = norm_pose_inputs(pose_images)
+    if not pose_images:
+        raise ValueError("没有可用的骨架帧（目录里没有 png/jpg，或通配没匹配到）")
+    # cols<=0 表示"按帧数自动排一行"。以前直接传给 pack_sheet 会在
+    # `(len+cols-1)//cols` 上 ZeroDivisionError——前端把 0 当"自动"传，必须兜住。
+    if cols <= 0:
+        cols = min(len(pose_images), 8)
     negative = negative or NEG_DEFAULT
     if preset is not None:
         prompt, negative = presets.build(prompt, negative, preset,

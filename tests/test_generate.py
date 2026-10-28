@@ -785,3 +785,61 @@ def test_sprite_swap_vram_profile_low_downgrades(eng, assets):
     assert m["width"] == 384 and m["height"] == 384
     assert m["frames"] == 4, "帧数不能被砍"
     assert "low" in m["vram_note"]
+
+
+# ---------------- W4 的输入归一化（纯逻辑，不跑模型） ----------------
+
+def test_norm_pose_inputs_sorts_naturally(tmp_path):
+    """帧顺序决定动画顺序，必须按**自然序**排。
+
+    字典序会把 frame_10 排在 frame_2 前面（'1' < '2'），10 帧以上的走路序列
+    就会乱序——而且不会报错，只是播出来是跳的。
+    """
+    for i in (1, 2, 10, 11):
+        (tmp_path / f"frame_{i}.png").write_bytes(b"x")
+    got = [p.name for p in g.norm_pose_inputs(tmp_path)]
+    assert got == ["frame_1.png", "frame_2.png", "frame_10.png", "frame_11.png"], got
+
+
+def test_norm_pose_inputs_accepts_dir_glob_and_list(tmp_path):
+    """目录 / 通配 / 显式列表三种写法都要能用（前端传目录，CLI 传列表）。"""
+    for i in (0, 1, 2):
+        (tmp_path / f"p{i}.png").write_bytes(b"x")
+    (tmp_path / "note.txt").write_text("不是图", "utf-8")
+
+    assert len(g.norm_pose_inputs(tmp_path)) == 3, "非图片文件要被过滤"
+    assert len(g.norm_pose_inputs(str(tmp_path / "p*.png"))) == 3
+    listed = [tmp_path / "p2.png", tmp_path / "p0.png"]
+    assert [p.name for p in g.norm_pose_inputs(listed)] == ["p2.png", "p0.png"], \
+        "显式列表要保持给定顺序，不重排"
+
+
+def test_norm_pose_inputs_reports_missing(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        g.norm_pose_inputs(tmp_path / "nope")
+    with pytest.raises(FileNotFoundError):
+        g.norm_pose_inputs([tmp_path / "gone.png"])
+
+
+def test_poseswap_accepts_dir_and_auto_cols(eng, assets):
+    """传目录 + cols=0：自动按帧数排一行。
+
+    以前 cols 直接进 pack_sheet 的 `(len+cols-1)//cols`，0 会 ZeroDivisionError。
+    前端把 0 当"自动"传，所以必须在入口兜住。
+    """
+    d = assets / "_test_pose_dir"
+    d.mkdir(exist_ok=True)
+    poses = sorted(assets.glob("_pose_walk_*.png"))[:2]
+    if len(poses) < 2:                      # pragma: no cover
+        pytest.skip("缺骨架夹具")
+    for i, p in enumerate(poses):
+        Image.open(p).save(d / f"frame_{i}.png")
+
+    r = g.poseswap(eng, pose_images=d, prompt="white cat knight", steps=4, seed=11,
+                   width=256, height=256, cols=0, candidates=1, gate=False,
+                   gate_retries=0, tag="_test_pose_dir")
+    m = r["meta"]
+    assert m["frames"] == 2
+    # cols 在顶层（pack_sheet 的 info），meta 里只有与采样相关的字段
+    assert r["cols"] == 2, "cols=0 应自动按帧数排成一行"
+    assert Image.open(r["sheet"]).size == (256 * 2, 256)

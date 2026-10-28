@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import type { PoseDir } from '../api'
 import type { GenNode, LoraInfo, Viewport } from '../types'
 import GenNodeCard, { NODE_W, type NodePatch } from '../nodes/GenNodeCard'
 
@@ -7,6 +8,8 @@ type Props = {
   model: string
   /** 当前底模的候选数上限（后端按总显存算），透传给每个节点卡 */
   maxCandidates?: number
+  /** W4 可用的骨架帧目录 */
+  poseDirs?: PoseDir[]
   selectedId: string | null
   viewport: Viewport
   setViewport: (v: Viewport | ((prev: Viewport) => Viewport)) => void
@@ -33,6 +36,7 @@ export default function Canvas({
   nodes,
   model,
   maxCandidates,
+  poseDirs,
   selectedId,
   viewport,
   setViewport,
@@ -202,7 +206,9 @@ export default function Canvas({
   }, [])
 
   // 连线几何：两端都锚在卡头（y+13），这样线永远贴着卡片顶部，不会穿过内容
-  const widthOf = (n: GenNode) => (n.kind === 'image' ? n.image?.w ?? NODE_W : NODE_W)
+  // 节点宽度现在可拖：连线端点必须跟着实际宽度走，否则线会插进卡片中间
+  const widthOf = (n: GenNode) =>
+    (n.kind === 'image' ? n.image?.w ?? NODE_W : n.w ?? NODE_W)
   const edgePath = (from: GenNode, toX: number, toY: number) => {
     const x1 = from.x + widthOf(from)
     const y1 = from.y + 13
@@ -299,6 +305,7 @@ export default function Canvas({
             loras={loras}
             model={model}
             maxCandidates={maxCandidates}
+            poseDirs={poseDirs}
             onSpawnImg2Img={() => onSpawnImg2Img(n.id)}
             sourceNode={nodes.find((x) => x.id === n.source?.nodeId)}
             sourceOptions={sourceOptions}

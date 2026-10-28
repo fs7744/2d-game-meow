@@ -3,7 +3,7 @@ export type Preset = 'sprite' | 'portrait' | 'wuxia' | 'pixel' | 'none'
 /** 节点类型：图生成（w1）/ 图生图（w2）/ 图片 / 抠图换背景（wbg）/ 局部重绘（w3）/ 局部 AI 重绘（w5） */
 export type NodeKind =
   | 'gen' | 'img2img' | 'image' | 'bg' | 'inpaint' | 'airepaint' | 'pixelify'
-  | 'poseclone' | 'spriteswap'
+  | 'poseclone' | 'spriteswap' | 'poseswap'
 
 /** 角色迁移 / 序列帧替换：动作参考图的解释方式 */
 export type RefMode = 'auto' | 'pose' | 'outline'
@@ -108,6 +108,12 @@ export type GenParams = {
   ssCandidates: number    // 序列帧替换：每帧生成几个候选再挑最好的
   ssGateRetries: number   // 序列帧替换：候选都不合格时补提几次
   ssEngineMode: EngineMode // 序列帧替换：AnimateDiff 时序一致性 / 逐帧多候选
+  /**
+   * 姿态序列（W4）：骨架帧**目录**。可以填目录，也可以填通配
+   * （assets/_pose_walk_*.png）。后端展开并自然排序——帧名 frame_2 < frame_10，
+   * 字典序会把 10 帧以上排乱，动画顺序就错了。
+   */
+  psDir: string
   ssVramProfile: VramProfile // 序列帧替换：显存档位（auto 自动降分辨率）
   lora: string            // LoRA 名（后端解析成路径）；空串表示不挂
   loraScale: number
@@ -161,6 +167,8 @@ export type GenNode = {
   kind: NodeKind
   x: number
   y: number
+  /** 节点宽度（px）。缺省用 NODE_W；图片节点的宽度在 image.w 上，与此无关。 */
+  w?: number
   params: GenParams
   view: NodeView
   source?: NodeSource

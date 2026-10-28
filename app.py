@@ -28,7 +28,7 @@ import traceback
 import uuid
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
@@ -262,6 +262,42 @@ def loras() -> Dict[str, Any]:
     """可用 LoRA 清单（含触发词与推荐强度）。前端下拉直接用。"""
     items = lora_reg.scan(ROOT / "models")
     return {"count": len(items), "items": items}
+
+
+#: 能当 W4 输入的图片扩展名。与 generate.POSE_EXTS 保持一致。
+_POSE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+
+
+@app.get("/pose_dirs")
+def pose_dirs(limit: int = 40) -> Dict[str, Any]:
+    """可以当 W4 输入的**骨架帧目录**（含 ≥2 张图的目录，按帧数降序）。
+
+    为什么要给这个接口：W4 的入口 `tools/pose_from_image.py` 一次产出一个目录，
+    用户在界面上手里只有一个路径。让他手抄绝对路径既不友好也容易错。
+    这里只扫 assets 下两层（深度与产物结构对齐），不递归全盘——
+    assets 里已有几千个文件，深扫会把接口拖慢。
+    """
+    found: List[Dict[str, Any]] = []
+
+    def scan(d: Path, depth: int) -> None:
+        if depth > 2:
+            return
+        try:
+            entries = list(os.scandir(d))
+        except OSError:
+            return
+        imgs = sorted(e.name for e in entries
+                      if e.is_file() and Path(e.name).suffix.lower() in _POSE_EXTS)
+        if len(imgs) >= 2:
+            found.append({"path": str(d), "count": len(imgs),
+                          "sample": imgs[:3], "name": d.name})
+        for e in entries:
+            if e.is_dir() and not e.name.startswith("."):
+                scan(Path(e.path), depth + 1)
+
+    scan(ASSETS, 0)
+    found.sort(key=lambda x: (-x["count"], x["path"]))
+    return {"count": len(found[:limit]), "items": found[:limit]}
 
 
 @app.post("/generate")

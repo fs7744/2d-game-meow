@@ -117,7 +117,7 @@ function common(params: GenParams, opts: SubmitOpts) {
 }
 
 async function post(
-  workflow: 'w1' | 'w2' | 'w3' | 'w5' | 'wbg' | 'wpx' | 'wpc' | 'wss',
+  workflow: 'w1' | 'w2' | 'w3' | 'w4' | 'w5' | 'wbg' | 'wpx' | 'wpc' | 'wss',
   params: Record<string, unknown>,
 ) {
   const r = await fetch(`${base}/generate`, {
@@ -259,6 +259,55 @@ export function submitPoseClone(
     fill: params.pcFill,
     // 参考模式：auto=先试骨架，认不出人自动降级到轮廓
     ref_mode: params.pcRefMode,
+  })
+}
+
+export type PoseDir = { path: string; count: number; sample: string[]; name: string }
+
+/** 可当 W4 输入的骨架帧目录（后端扫 assets 下两层） */
+export async function fetchPoseDirs(): Promise<PoseDir[]> {
+  const r = await fetch(`${base}/pose_dirs`)
+  if (!r.ok) return []
+  const j = await r.json()
+  return Array.isArray(j.items) ? (j.items as PoseDir[]) : []
+}
+
+/**
+ * 姿态序列（w4）：一批骨架图 → 逐帧生成（多候选择优 + 质量闸门）→ 锚点对齐 → 精灵图。
+ *
+ * 与 wss 的区别：wss 是"拿现成的精灵图换角色"，w4 是"从骨架从零生成"，
+ * 所以它能吃候选/闸门这套产线机制，也是 README 里推荐的全身帧产线。
+ * poseDir 可以给目录，后端会展开成排序后的帧列表。
+ */
+export function submitPoseSeq(
+  params: GenParams,
+  opts: SubmitOpts,
+  poseDir: string,
+) {
+  return post('w4', {
+    pose_images: poseDir,
+    prompt: params.prompt,
+    negative: params.negative || undefined,
+    preset: params.preset,
+    lora: params.lora || undefined,
+    lora_scale: params.loraScale,
+    model: opts.model || 'sd15',
+    scope: opts.scope || undefined,
+    width: params.width,
+    height: params.height,
+    steps: params.steps,
+    cfg: params.cfg,
+    seed: params.seed,
+    clip_skip: params.clipSkip,
+    // 列数：0 时按帧数自动排成一行（后端 cols 默认 8，这里显式给）
+    cols: params.ssCols > 0 ? params.ssCols : 0,
+    cn_scale: params.ssCnScale,
+    palette: params.ssPalette,
+    pixel: params.pixel,
+    matte: params.matte,
+    // 多候选择优 + 闸门：w4 的默认值就是开着的，这里把用户设定透传
+    candidates: params.ssCandidates,
+    gate_retries: params.ssGateRetries,
   })
 }
 

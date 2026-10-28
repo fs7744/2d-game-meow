@@ -1,12 +1,215 @@
 import { useRef, useState } from 'react'
 import { hasCJK } from '../store/prompts'
 import MaskEditor from '../components/MaskEditor'
+import type { PoseDir } from '../api'
 import type { GenNode, LoraInfo, Preset } from '../types'
 
+/**
+ * 每个参数的说明：做什么 / 影响什么 / 推荐值。
+ *
+ * 为什么集中放一张表而不是散在 JSX 里：同一个参数（比如「候选」）在姿态序列和
+ * 序列帧两处都有，散着写一定会分叉——改一处忘一处，最后两处说法不一致。
+ *
+ * 推荐值尽量写**本项目实测过**的数字，不写"视情况而定"这种废话。
+ */
+const PARAM_HINTS: Record<string, { what: string; effect: string; rec: string }> = {
+  宽: {
+    what: '输出画面的宽度（px）',
+    effect: '决定细节量与构图余量。太小画不出全身，太大反而更容易顶边',
+    rec: '768。SD1.5 在 512 上必糊；SDXL 用 1024 反而更差（角色占比大、可交付率 92%→75%）',
+  },
+  高: { what: '输出画面的高度（px）', effect: '同宽，精灵帧要留出头顶与脚底的空隙', rec: '768（与宽一致，方形最好对齐）' },
+  图片宽: {
+    what: '这张图在画布上的显示宽度',
+    effect: '只影响画布排版，不影响生成结果',
+    rec: '200~320；拖右下角也能改',
+  },
+  步数: {
+    what: '去噪步数（采样迭代次数）',
+    effect: '太少会糊、结构不成形；太多只是变慢，画质提升很小',
+    rec: 'SD1.5 用 30、SDXL 用 24。用了蒸馏（lcm）可降到 4~8',
+  },
+  CFG: {
+    what: '提示词服从度（classifier-free guidance）',
+    effect: '低=自由但容易跑题；高=听话但僵硬、过饱和、易出伪影',
+    rec: '6.5~7.5。蒸馏模型要 1.0~2.0（高了必糊）',
+  },
+  种子: {
+    what: '随机种子。-1 表示每次随机',
+    effect: '固定种子才能复现同一张图；换种子是产线里最便宜的"重抽"手段',
+    rec: '调参时固定；批量出候选时用 seed、seed+1000、seed+2000…',
+  },
+  风格: {
+    what: '提示词契约（predefined 的构图/背景约定）',
+    effect: '自动补「扁平背景、硬描边、全身」这类产线约束，并截断到 token 预算内',
+    rec: '精灵用 sprite、立绘用 portrait、武侠 LoRA 配 wuxia、像素用 pixel',
+  },
+  反向提示词: {
+    what: '不希望出现的东西',
+    effect: 'SD1.5 上作用很大；写具体名词比堆形容词有效（如 character sheet 压多主体）',
+    rec: '留空用内置默认即可。多主体压不住时加 character sheet, multiple characters',
+  },
+  LoRA: {
+    what: '附加的风格/角色权重（LoRA）',
+    effect: '会大幅改变画风；必须与底模架构匹配（SD1.5 的 LoRA 不能用于 SDXL）',
+    rec: '像素风挂 px_illustrious(0.75)；武侠挂 wuxia_v2。不挂就是纯底模',
+  },
+  'LoRA 强度': {
+    what: 'LoRA 的作用强度',
+    effect: '过高会过拟合：构图僵、出伪影、多主体；过低则看不出风格',
+    rec: '0.6~0.85。像素 LoRA 实测 0.75 最稳，0.5 就掉风格了',
+  },
+  重绘: {
+    what: '重绘幅度（denoise strength）',
+    effect: '越低越接近原图；越高越自由、越可能丢原有结构',
+    rec: '保持原样微调 0.3；改内容 0.55~0.7；几乎重画 0.85+',
+  },
+  列: {
+    what: '精灵图一行放几帧',
+    effect: '决定打包后的网格形状，不影响每帧画面',
+    rec: '0=按帧数自动排一行。8 帧走路常用 8 列（或 4×2）',
+  },
+  行: {
+    what: '精灵图的行数',
+    effect: '同上，只影响打包排版',
+    rec: '0=自动。帧数不是列数整数倍时才需要手填',
+  },
+  动作: {
+    what: 'ControlNet 条件强度（贴不贴参考动作）',
+    effect: '高=姿态准但僵硬、易崩；低=自由但动作走形',
+    rec: '0.8~1.2。参考图本身不规范时降到 0.7',
+  },
+  身份: {
+    what: 'IP-Adapter 强度（像不像角色图）',
+    effect: '高=更像角色，但会压制姿态、画面变糊；低=姿态准但换了个角色',
+    rec: '0.7~0.9。动作复杂时降到 0.65',
+  },
+  占高: {
+    what: '人物占画面高度的比例',
+    effect: '太大会顶到画布边缘（脚被切），太小则像素化后没细节',
+    rec: '0.75~0.85，留出头顶与脚底的安全边',
+  },
+  参考: {
+    what: '参考图的解释方式',
+    effect: '骨架=只取关节（真人照片适用）；轮廓=取外形（游戏素材适用）；自动=先试骨架，认不出人再退轮廓',
+    rec: '游戏精灵图用「轮廓」；真人动作照用「骨架」；不确定用「自动」',
+  },
+  姿态: {
+    what: 'ControlNet 姿态强度（同「动作」）',
+    effect: '高=严格贴合参考骨架；低=允许自由发挥',
+    rec: '1.0；参考图比例不对时降到 0.8',
+  },
+  候选: {
+    what: '每帧生成几张再挑一张',
+    effect: '同 seed 也会漂，多张按「关节数+前景占比+贴边+漂移」挑最好的。越多越稳、越慢',
+    rec: '2~3 张。上限由显存算出（SDXL@768 是 3、@1024 只有 1）',
+  },
+  补提: {
+    what: '候选都不合格时再补生成几次',
+    effect: '只对"过了闸门才要"的帧生效；0=不补，直接留最好的那张',
+    rec: '1~2 次。开销集中在废帧上，通常划算',
+  },
+  色板: {
+    what: '量化的调色板色数（0=不量化）',
+    effect: '色数越少越"像素"；太少丢明暗层次，太多会出现脏色阶',
+    rec: '32。复古风可到 16，细节多的角色用 48',
+  },
+  方式: {
+    what: '序列帧的处理方式',
+    effect: 'AI 重绘能换体型但帧间会漂；换皮只换配色，帧间完全一致',
+    rec: '要改体型用 AI 重绘；只是换颜色（省时且零漂移）用换皮',
+  },
+  引擎: {
+    what: '生成引擎',
+    effect: 'AnimateDiff 一次出整段、靠时序注意力锁一致性；逐帧多候选更省显存、更容易挑到好帧',
+    rec: '帧数多且要连贯用 AnimateDiff；显存紧或帧数少用逐帧',
+  },
+  显存: {
+    what: '显存档位（不够时降分辨率，帧数不砍）',
+    effect: '帧数是你的动画内容不能动，所以只能牺牲分辨率',
+    rec: 'auto。OOM 频繁时手动选 low（384²）',
+  },
+  边长: {
+    what: '目标像素画的边长（原生像素数）',
+    effect: '决定最终像素密度；0=自动检测输入图的网格',
+    rec: '0（自动）。已知原图是 128px 像素画时直接填 128',
+  },
+  色数: {
+    what: '量化的调色板色数（0=不量化）',
+    effect: '越少越像素；太少丢层次，太多脏',
+    rec: '32；像素素材常用 16~48',
+  },
+  取色: {
+    what: '每一格取哪个颜色',
+    effect: 'median=中位数（抗噪）、majority=众数（色块更纯）、center=取中心点（保细节但易偏）',
+    rec: '像素画用 majority；照片转像素用 median',
+  },
+  吸附: {
+    what: '网格吸附到多少的整数倍（0=不吸附）',
+    effect: '让像素格子对齐到标准尺寸（如 4 的倍数），方便引擎里缩放不糊',
+    rec: '0；要出 2 的幂尺寸素材时填 4 或 8',
+  },
+  上下文: {
+    what: '选区外扩多少上下文给模型看',
+    effect: '大=模型知道周围是什么，接缝更自然；小=更听提示词但可能接不上',
+    rec: '0.3~0.5（按选区尺寸的比例）',
+  },
+  外扩: {
+    what: '蒙版先外扩几像素',
+    effect: '给模型留"往哪长"的余地；不扩容易在原边界留一圈旧像素',
+    rec: '8~16px（像素素材用 2~4，否则会吃掉邻格）',
+  },
+  羽化: {
+    what: '贴回时的边缘羽化半径',
+    effect: '大=接缝柔和但会糊；小=硬边（像素素材要的就是硬边）',
+    rec: '像素素材用 0；插画用 2~4',
+  },
+  网格: {
+    what: '是否检测并吸附到输入图的原生像素网格',
+    effect: '命中时能保证"每格单色"，是完美像素转换的关键；输入不是像素画时会自动回退',
+    rec: '开。只有输入本来就是连续的 AI 图、不需要网格时才关',
+  },
+  透明底: {
+    what: '把纯色背景转成透明',
+    effect: '只对纯色背景有效；复杂背景要靠「抠图」而不是这个开关',
+    rec: '开（背景是纯色/白底时）',
+  },
+  色彩校正: {
+    what: '在重绘区接缝处做色彩匹配',
+    effect: '开=接缝更自然但可能轻微偏色；关=完全按模型输出的颜色',
+    rec: '开。接缝明显时它比调强度更有效',
+  },
+  色板吸附: {
+    what: '把重绘区里接近原图的杂色吸回原色板',
+    effect: '保持整张图的色数不暴涨（像素素材尤其明显）',
+    rec: '开（像素素材必开）',
+  },
+  抠图: {
+    what: '生成后自动抠图（去背景）',
+    effect: '精灵帧必须抠（要对齐脚底）；不抠则输出仍是带背景的方图',
+    rec: '精灵/立绘开；只要一张图不做管线时关掉省时间',
+  },
+  背景方式: {
+    what: '抠图节点要把背景换成什么',
+    effect: '透明=出 PNG 带 alpha；纯色=叠一个色底；换背景图=叠到另一张图上',
+    rec: '要进引擎用「透明」；要做展示图用「纯色」或「换背景图」',
+  },
+}
+
+/** 拼成原生 title：换行分三段，扫一眼就知道"是什么/影响什么/填多少" */
+function hint(k: string): string {
+  const h = PARAM_HINTS[k]
+  if (!h) return ''
+  return `${h.what}\n影响：${h.effect}\n推荐：${h.rec}`
+}
+
 export const NODE_W = 300
+/** 节点可拖宽度范围：窄于 260 参数会换行，宽于 620 画布上就不好摆 */
+export const WIDE_MIN = 260
+export const WIDE_MAX = 620
 
 export type NodePatch = Partial<
-  Pick<GenNode, 'x' | 'y' | 'params' | 'view' | 'job' | 'source' | 'image' | 'charSource'>
+  Pick<GenNode, 'x' | 'y' | 'w' | 'params' | 'view' | 'job' | 'source' | 'image' | 'charSource'>
 >
 
 type Props = {
@@ -24,6 +227,8 @@ type Props = {
   model: string
   /** 当前底模在 W4 上能批量几个候选（后端按总显存算）；缺省不限制 */
   maxCandidates?: number
+  /** 可当 W4 输入的骨架帧目录（后端扫出来的） */
+  poseDirs?: PoseDir[]
   onSpawnImg2Img: () => void
   /** 图生图的上游节点（从 source.nodeId 解析而来） */
   sourceNode?: GenNode
@@ -67,6 +272,7 @@ export default function GenNodeCard({
   loras,
   model,
   maxCandidates,
+  poseDirs,
   onSpawnImg2Img,
   sourceNode,
   sourceOptions,
@@ -102,6 +308,9 @@ export default function GenNodeCard({
   const isPixelify = node.kind === 'pixelify'
   const isPoseClone = node.kind === 'poseclone'
   const isSpriteSwap = node.kind === 'spriteswap'
+  const isPoseSwap = node.kind === 'poseswap'
+  // 当前选中的骨架目录（可能是手填的通配，那就匹配不到，只是没有帧数提示）
+  const poseDirInfo = (poseDirs || []).find((d) => d.path === p.psDir)
   const [maskOpen, setMaskOpen] = useState(false)
   // 源图可以是上游节点的产物、图片节点的本地图，也可以是节点上直接记的绝对路径
   const hasSource = !!(
@@ -165,6 +374,29 @@ export default function GenNodeCard({
 
   /** 拖右下角的手柄改大小：屏幕像素差要除以缩放比才是世界坐标 */
   const resizeRef = useRef<{ x: number; w: number } | null>(null)
+  /**
+   * 拖右边缘改节点宽度。
+   *
+   * 为什么要能拖：采样参数横排时，"宽/高/步数/CFG/种子"在 300px 里会挤成两列，
+   * 标签被截断就只能靠猜。而参数 tooltip 又需要一行放得下说明，所以宽度得可调。
+   */
+  const startWiden = (e: React.PointerEvent) => {
+    e.stopPropagation()
+    e.preventDefault()
+    const startX = e.clientX
+    const startW = node.w ?? NODE_W
+    const move = (ev: PointerEvent) => {
+      const next = Math.round(startW + (ev.clientX - startX) / zoom)
+      onPatch({ w: Math.min(WIDE_MAX, Math.max(WIDE_MIN, next)) })
+    }
+    const up = () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+  }
+
   const startResize = (e: React.PointerEvent) => {
     e.stopPropagation()
     e.preventDefault()
@@ -237,7 +469,7 @@ export default function GenNodeCard({
           ))}
         </select>
         {isI2I && (
-          <label className="strength">
+          <label className="strength" title={hint('重绘')}>
             <span>重绘</span>
             <input
               type="range"
@@ -272,7 +504,7 @@ export default function GenNodeCard({
       style={{
         left: node.x,
         top: node.y,
-        width: isImg ? node.image?.w ?? NODE_W : NODE_W,
+        width: isImg ? node.image?.w ?? NODE_W : node.w ?? NODE_W,
       }}
       onPointerDown={(e) => {
         e.stopPropagation()
@@ -300,10 +532,13 @@ export default function GenNodeCard({
             isBg ? ' bg' : ''
           }${isInpaint ? ' inpaint' : ''}${isAiRepaint ? ' airepaint' : ''}${
             isPixelify ? ' pixelify' : ''
-          }${isPoseClone ? ' poseclone' : ''}${isSpriteSwap ? ' spriteswap' : ''}`}
+          }${isPoseClone ? ' poseclone' : ''}${isSpriteSwap ? ' spriteswap' : ''}${
+            isPoseSwap ? ' poseswap' : ''
+          }`}
         >
           {isImg ? '图片' : isBg ? '抠图' : isPixelify ? '像素转换'
             : isPoseClone ? '角色迁移'
+              : isPoseSwap ? '姿态序列'
               : isSpriteSwap ? '序列帧替换'
                 : isAiRepaint ? '局部AI重绘'
                   : isInpaint ? '局部重绘' : isI2I ? '图生图' : '图生成'}
@@ -365,7 +600,152 @@ export default function GenNodeCard({
         />
       </div>
 
-      {isSpriteSwap ? (
+      {isPoseSwap ? (
+        <div className="node-body poseclone-body">
+          <div className="src-box">
+            <div className="src-side" style={{ flex: 1 }}>
+              <select
+                value={poseDirInfo ? p.psDir : ''}
+                onChange={(e) => setParam('psDir', e.target.value)}
+                title="用 tools/pose_from_image.py 从图片/视频/GIF 提骨架，产物是一个目录"
+              >
+                <option value="">（选骨架帧目录）</option>
+                {(poseDirs || []).map((d) => (
+                  <option key={d.path} value={d.path}>
+                    {d.name}（{d.count} 帧）
+                  </option>
+                ))}
+              </select>
+              <input
+                className="dir-input"
+                value={p.psDir}
+                placeholder="或手填目录 / 通配：assets/_pose_walk_*.png"
+                onChange={(e) => setParam('psDir', e.target.value)}
+              />
+              <div className="src-note">
+                {poseDirInfo
+                  ? `这个目录有 ${poseDirInfo.count} 帧 → 出 ${poseDirInfo.count} 帧精灵图`
+                  : p.psDir
+                    ? '手填路径（后端展开成排序后的帧列表，按文件名自然序）'
+                    : '缺骨架帧：先跑 tools/pose_from_image.py，或选已有目录'}
+              </div>
+            </div>
+          </div>
+          <div className="prompt-wrap">
+            <textarea
+              className="prompt"
+              rows={2}
+              placeholder="角色描述？e.g. white cat knight, red cape, katana, front view"
+              value={p.prompt}
+              onChange={(e) => setParam('prompt', e.target.value)}
+            />
+          </div>
+          <details className="adv">
+            <summary>更多设置</summary>
+            <label className="strength" title={hint('列')}>
+              <span>列</span>
+              <input
+                type="number"
+                min={0}
+                max={32}
+                value={p.ssCols}
+                onChange={(e) => setParam('ssCols', Number(e.target.value) || 0)}
+              />
+              <b>{p.ssCols > 0 ? '列' : '自动'}</b>
+            </label>
+            <label className="strength" title={hint('动作')}>
+              <span>动作</span>
+              <input
+                type="range"
+                min={0.2}
+                max={1.5}
+                step={0.05}
+                value={p.ssCnScale}
+                onChange={(e) => setParam('ssCnScale', Number(e.target.value))}
+              />
+              <b>{p.ssCnScale.toFixed(2)}</b>
+            </label>
+            <label className="strength" title={hint('候选')}>
+              <span>候选</span>
+              <input
+                type="number"
+                min={1}
+                max={candCap}
+                value={p.ssCandidates}
+                onChange={(e) => setParam('ssCandidates',
+                  Math.min(candCap, Math.max(1, Number(e.target.value) || 1)))}
+              />
+              <b>张/帧</b>
+            </label>
+            <label className="strength" title={hint('补提')}>
+              <span>补提</span>
+              <input
+                type="number"
+                min={0}
+                max={5}
+                value={p.ssGateRetries}
+                onChange={(e) => setParam('ssGateRetries', Math.max(0, Number(e.target.value) || 0))}
+              />
+              <b>次</b>
+            </label>
+            <label className="strength" title={hint('色板')}>
+              <span>色板</span>
+              <input
+                type="number"
+                min={0}
+                max={64}
+                value={p.ssPalette}
+                onChange={(e) => setParam('ssPalette', Number(e.target.value) || 0)}
+              />
+              <b>{p.ssPalette > 0 ? '色' : '关'}</b>
+            </label>
+            <div className="src-note">
+              每帧生成 {candCap >= p.ssCandidates ? p.ssCandidates : candCap} 个候选，
+              按「关节数 + 前景占比 + 贴边 + 帧间漂移」挑一张；
+              都没过闸门才补提。上限 {candCap} 张/帧由显存算出。
+            </div>
+          </details>
+          {hasImage && (
+            <div
+              className="preview"
+              onClick={(e) => {
+                e.stopPropagation()
+                onPreview?.(job!.url!, previewName)
+              }}
+              title="点击全屏预览"
+            >
+              <img src={job!.url} alt="姿态序列结果" draggable={false} />
+            </div>
+          )}
+          <button
+            className="gen-btn"
+            disabled={busy || !p.psDir.trim() || !p.prompt.trim()}
+            onClick={onGenerate}
+            title={
+              !p.psDir.trim() ? '先选一个骨架帧目录'
+                : !p.prompt.trim() ? '写上角色长什么样' : undefined
+            }
+          >
+            {busy ? '生成中…' : '生成精灵帧'}
+          </button>
+          {job?.status === 'failed' && <div className="err">{job.error}</div>}
+          {job?.status === 'done' && (
+            <div className="meta">
+              种子 {job.seed ?? p.seed}
+              {typeof job.seconds === 'number' ? ` · ${job.seconds}s` : ''}
+              {typeof sCand === 'number' ? ` · 候选 ${sCand}/帧` : ''}
+              {typeof sAttempts === 'number' && typeof sFrames === 'number'
+                && typeof sCand === 'number' && sAttempts > sFrames * sCand
+                ? ` · 补提 ${sAttempts - sFrames * sCand} 次` : ''}
+              {typeof sGate === 'number' && typeof sFrames === 'number'
+                ? ` · 闸门 ${sGate}/${sFrames}` : ''}
+            </div>
+          )}
+          {job?.status === 'done' && job.candidatesNote && (
+            <div className="warn">⚠ {job.candidatesNote}</div>
+          )}
+        </div>
+      ) : isSpriteSwap ? (
         <div className="node-body poseclone-body">
           {sourceBox}
           <div className="src-box char-box">
@@ -399,7 +779,7 @@ export default function GenNodeCard({
               </div>
             </div>
           </div>
-          <label className="bg-mode">
+          <label className="bg-mode" title={hint('方式')}>
             方式
             <select
               value={p.ssMode}
@@ -410,7 +790,7 @@ export default function GenNodeCard({
             </select>
           </label>
           {p.ssMode === 'generate' && (
-            <label className="bg-mode">
+            <label className="bg-mode" title={hint('引擎')}>
               引擎
               <select
                 value={p.ssEngineMode}
@@ -423,7 +803,7 @@ export default function GenNodeCard({
             </label>
           )}
           {p.ssMode === 'generate' && p.ssEngineMode !== 'frame' && (
-            <label className="bg-mode">
+            <label className="bg-mode" title={hint('显存')}>
               显存
               <select
                 value={p.ssVramProfile}
@@ -449,7 +829,7 @@ export default function GenNodeCard({
           )}
           <details className="adv">
             <summary>更多设置</summary>
-            <label className="strength">
+            <label className="strength" title={hint('列')}>
               <span>列</span>
               <input
                 type="number"
@@ -460,7 +840,7 @@ export default function GenNodeCard({
               />
               <b>{p.ssCols > 0 ? '列' : '自动'}</b>
             </label>
-            <label className="strength">
+            <label className="strength" title={hint('行')}>
               <span>行</span>
               <input
                 type="number"
@@ -473,7 +853,7 @@ export default function GenNodeCard({
             </label>
             {p.ssMode === 'generate' && (
               <>
-                <label className="bg-mode">
+                <label className="bg-mode" title={hint('参考')}>
                   参考
                   <select
                     value={p.ssRefMode}
@@ -484,7 +864,7 @@ export default function GenNodeCard({
                     <option value="pose">骨架（真人照片）</option>
                   </select>
                 </label>
-                <label className="strength">
+                <label className="strength" title={hint('动作')}>
                   <span>动作</span>
                   <input
                     type="range"
@@ -496,7 +876,7 @@ export default function GenNodeCard({
                   />
                   <b>{p.ssCnScale.toFixed(2)}</b>
                 </label>
-                <label className="strength">
+                <label className="strength" title={hint('身份')}>
                   <span>身份</span>
                   <input
                     type="range"
@@ -510,7 +890,7 @@ export default function GenNodeCard({
                 </label>
               </>
             )}
-            <label className="strength">
+            <label className="strength" title={hint('色板')}>
               <span>色板</span>
               <input
                 type="number"
@@ -523,7 +903,7 @@ export default function GenNodeCard({
             </label>
             {p.ssMode === 'generate' && p.ssEngineMode !== 'animatediff' && (
               <>
-                <label className="strength">
+                <label className="strength" title={hint('候选')}>
                   <span>候选</span>
                   <input
                     type="number"
@@ -539,7 +919,7 @@ export default function GenNodeCard({
                   />
                   <b>张/帧</b>
                 </label>
-                <label className="strength">
+                <label className="strength" title={hint('补提')}>
                   <span>补提</span>
                   <input
                     type="number"
@@ -660,7 +1040,7 @@ export default function GenNodeCard({
           </div>
           <details className="adv">
             <summary>更多设置</summary>
-            <label className="strength">
+            <label className="strength" title={hint('姿态')}>
               <span>姿态</span>
               <input
                 type="range"
@@ -672,7 +1052,7 @@ export default function GenNodeCard({
               />
               <b>{p.pcCnScale.toFixed(2)}</b>
             </label>
-            <label className="strength">
+            <label className="strength" title={hint('身份')}>
               <span>身份</span>
               <input
                 type="range"
@@ -684,7 +1064,7 @@ export default function GenNodeCard({
               />
               <b>{p.pcIpaScale.toFixed(2)}</b>
             </label>
-            <label className="strength">
+            <label className="strength" title={hint('占高')}>
               <span>占高</span>
               <input
                 type="range"
@@ -696,7 +1076,7 @@ export default function GenNodeCard({
               />
               <b>{p.pcFill.toFixed(2)}</b>
             </label>
-            <label className="bg-mode">
+            <label className="bg-mode" title={hint('参考')}>
               参考
               <select
                 value={p.pcRefMode}
@@ -752,7 +1132,7 @@ export default function GenNodeCard({
         <div className="node-body pixelify-body">
           {sourceBox}
           <div className="px-opts">
-            <label className="strength">
+            <label className="strength" title={hint('边长')}>
               <span>边长</span>
               <input
                 type="number"
@@ -763,7 +1143,7 @@ export default function GenNodeCard({
               />
               <b>{p.pxTarget > 0 ? 'px' : '自动'}</b>
             </label>
-            <label className="strength">
+            <label className="strength" title={hint('色数')}>
               <span>色数</span>
               <input
                 type="number"
@@ -774,7 +1154,7 @@ export default function GenNodeCard({
               />
               <b>色</b>
             </label>
-            <label className="bg-mode">
+            <label className="bg-mode" title={hint('取色')}>
               取色
               <select
                 value={p.pxSample}
@@ -785,7 +1165,7 @@ export default function GenNodeCard({
                 <option value="center">中心点</option>
               </select>
             </label>
-            <label className="strength">
+            <label className="strength" title={hint('吸附')}>
               <span>吸附</span>
               <input
                 type="number"
@@ -796,7 +1176,7 @@ export default function GenNodeCard({
               />
               <b>{p.pxSnapTo > 0 ? '倍' : '关'}</b>
             </label>
-            <label className="check">
+            <label className="check" title={hint('网格')}>
               <input
                 type="checkbox"
                 checked={p.pxGridSnap}
@@ -804,7 +1184,7 @@ export default function GenNodeCard({
               />
               网格检测（关掉=普通降采样）
             </label>
-            <label className="check">
+            <label className="check" title={hint('透明底')}>
               <input
                 type="checkbox"
                 checked={p.pxTransparentBg}
@@ -885,7 +1265,7 @@ export default function GenNodeCard({
               onChange={(e) => setParam('prompt', e.target.value)}
             />
           </div>
-          <label className="strength">
+          <label className="strength" title={hint('重绘')}>
             <span>重绘</span>
             <input
               type="range"
@@ -899,7 +1279,7 @@ export default function GenNodeCard({
           </label>
           <details className="adv">
             <summary>更多设置</summary>
-            <label className="strength">
+            <label className="strength" title={hint('上下文')}>
               <span>上下文</span>
               <input
                 type="range"
@@ -911,7 +1291,7 @@ export default function GenNodeCard({
               />
               <b>{p.rpContext.toFixed(2)}</b>
             </label>
-            <label className="strength">
+            <label className="strength" title={hint('外扩')}>
               <span>外扩</span>
               <input
                 type="number"
@@ -922,7 +1302,7 @@ export default function GenNodeCard({
               />
               <b>px</b>
             </label>
-            <label className="strength">
+            <label className="strength" title={hint('羽化')}>
               <span>羽化</span>
               <input
                 type="number"
@@ -933,7 +1313,7 @@ export default function GenNodeCard({
               />
               <b>px</b>
             </label>
-            <label className="check">
+            <label className="check" title={hint('色彩校正')}>
               <input
                 type="checkbox"
                 checked={p.rpMatchColor}
@@ -941,7 +1321,7 @@ export default function GenNodeCard({
               />
               接缝色彩校正（只在边界带）
             </label>
-            <label className="check">
+            <label className="check" title={hint('色板吸附')}>
               <input
                 type="checkbox"
                 checked={p.rpPaletteSnap}
@@ -1045,7 +1425,7 @@ export default function GenNodeCard({
               onChange={(e) => setParam('prompt', e.target.value)}
             />
           </div>
-          <label className="strength">
+          <label className="strength" title={hint('重绘')}>
             <span>重绘</span>
             <input
               type="range"
@@ -1115,7 +1495,7 @@ export default function GenNodeCard({
         <div className="node-body bg-body">
           {sourceBox}
           <div className="bg-opts">
-            <label className="bg-mode">
+            <label className="bg-mode" title={hint('背景方式')}>
               <input
                 type="radio"
                 checked={p.bgMode === 'alpha'}
@@ -1123,7 +1503,7 @@ export default function GenNodeCard({
               />
               透明（去背景）
             </label>
-            <label className="bg-mode">
+            <label className="bg-mode" title={hint('背景方式')}>
               <input
                 type="radio"
                 checked={p.bgMode === 'color'}
@@ -1137,7 +1517,7 @@ export default function GenNodeCard({
                 onChange={(e) => setParam('bgColor', e.target.value)}
               />
             </label>
-            <label className="bg-mode">
+            <label className="bg-mode" title={hint('背景方式')}>
               <input
                 type="radio"
                 checked={p.bgMode === 'image'}
@@ -1213,7 +1593,7 @@ export default function GenNodeCard({
                 />
               </div>
               <div className="img-tools">
-                <label>
+                <label title={hint('图片宽')}>
                   宽
                   <input
                     type="number"
@@ -1300,7 +1680,7 @@ export default function GenNodeCard({
           <div className="row">
             {!isI2I && (
               <>
-                <label>
+                <label title={hint('宽')}>
                   宽
                   <input
                     type="number"
@@ -1311,7 +1691,7 @@ export default function GenNodeCard({
                     onChange={(e) => setParam('width', Number(e.target.value) || 512)}
                   />
                 </label>
-                <label>
+                <label title={hint('高')}>
                   高
                   <input
                     type="number"
@@ -1324,7 +1704,7 @@ export default function GenNodeCard({
                 </label>
               </>
             )}
-            <label>
+            <label title={hint('步数')}>
               步数
               <input
                 type="number"
@@ -1337,7 +1717,7 @@ export default function GenNodeCard({
           </div>
 
           <div className="row">
-            <label className="grow">
+            <label className="grow" title={hint('种子')}>
               种子
               <input
                 type="number"
@@ -1352,7 +1732,7 @@ export default function GenNodeCard({
             >
               🎲
             </button>
-            <label className="grow">
+            <label className="grow" title={hint('风格')}>
               风格
               <select
                 value={p.preset}
@@ -1370,7 +1750,7 @@ export default function GenNodeCard({
           <details className="fold">
             <summary>更多设置</summary>
             <div className="fold-body">
-              <label className="block">
+              <label className="block" title={hint('反向提示词')}>
                 反向提示词
                 <textarea
                   rows={2}
@@ -1379,7 +1759,7 @@ export default function GenNodeCard({
                   onChange={(e) => setParam('negative', e.target.value)}
                 />
               </label>
-              <label className="block">
+              <label className="block" title={hint('LoRA')}>
                 LoRA
                 <select value={p.lora} onChange={(e) => chooseLora(e.target.value)}>
                   <option value="">不挂（纯底模）</option>
@@ -1406,7 +1786,7 @@ export default function GenNodeCard({
                 </div>
               )}
               <div className="row">
-                <label>
+                <label title={hint('LoRA 强度')}>
                   LoRA 强度
                   <input
                     type="number"
@@ -1418,7 +1798,7 @@ export default function GenNodeCard({
                     onChange={(e) => setParam('loraScale', Number(e.target.value))}
                   />
                 </label>
-                <label>
+                <label title={hint('CFG')}>
                   CFG
                   <input
                     type="number"
@@ -1427,7 +1807,7 @@ export default function GenNodeCard({
                     onChange={(e) => setParam('cfg', Number(e.target.value) || 7.5)}
                   />
                 </label>
-                <label>
+                <label title={hint('像素块')}>
                   像素块
                   <input
                     type="number"
@@ -1437,7 +1817,7 @@ export default function GenNodeCard({
                     onChange={(e) => setParam('pixel', Number(e.target.value) || 0)}
                   />
                 </label>
-                <label>
+                <label title={hint('色数')}>
                   色数
                   <input
                     type="number"
@@ -1455,11 +1835,16 @@ export default function GenNodeCard({
                     max={4}
                     value={p.clipSkip}
                     disabled={model === 'sdxl'}
+                    // 灰掉要给原因：SDXL 有两个文本编码器 + pooled embeds，
+                    // clip skip 不是"改个层号"就能对的事，后端会直接忽略
+                    title={model === 'sdxl'
+                      ? 'SDXL 不支持 clip skip（两个文本编码器要一起改），切回 SD1.5 才生效'
+                      : '1 = 最后一层（默认）；2 = 跳过最后一层，多数动漫/像素 LoRA 的训练设置'}
                     onChange={(e) => setParam('clipSkip', Number(e.target.value) || 1)}
                   />
                 </label>
               </div>
-              <label className="check">
+              <label className="check" title={hint('抠图')}>
                 <input
                   type="checkbox"
                   checked={p.matte}
@@ -1533,6 +1918,14 @@ export default function GenNodeCard({
             </div>
           )}
         </div>
+      )}
+      {/* 右边缘拖宽。图片节点有自己的手柄（改的是 image.w），这里只管参数面板 */}
+      {!isImg && (
+        <div
+          className="node-resize"
+          title="拖动改变节点宽度（参数挤的时候拖宽一点）"
+          onPointerDown={startWiden}
+        />
       )}
     </div>
   )

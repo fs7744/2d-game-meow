@@ -177,6 +177,19 @@ button { cursor: pointer; }
 .node.gen { border-color: rgba(0, 255, 136, 0.5); }
 .node.selected { box-shadow: var(--shadow-hard), 0 0 0 2px rgba(0, 255, 136, 0.55); }
 
+/* 右边缘拖宽手柄：平时几乎看不见，hover 才显形——不抢视觉，但要拖得到 */
+.node-resize {
+  position: absolute; right: -4px; top: 26px; bottom: 26px; width: 9px;
+  cursor: ew-resize; border-radius: 3px;
+  background: transparent; transition: background 0.12s;
+}
+.node-resize::after {
+  content: ''; position: absolute; left: 4px; top: 50%; width: 1px; height: 22px;
+  transform: translateY(-50%); background: var(--line-strong); opacity: 0.6;
+}
+.node-resize:hover { background: rgba(0, 255, 136, 0.14); }
+.node-resize:hover::after { background: var(--cyan); opacity: 1; }
+
 .node-head {
   display: flex; align-items: center; gap: 6px;
   padding: 7px 8px; cursor: grab;
@@ -549,7 +562,28 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
 .src-thumb span { font-size: 9px; color: var(--muted-2); }
 .src-side { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .src-side select { height: 24px; padding: 0 4px; font-size: 11px; }
+/* 目录/通配手填框：与 select 同高，等宽字体便于核对路径 */
+.dir-input {
+  height: 24px; padding: 0 5px; font-size: 10.5px; font-family: var(--mono);
+  color: var(--fg); background: var(--bg-2); border: 1px solid var(--line);
+  border-radius: 3px; min-width: 0;
+}
+.dir-input::placeholder { color: var(--muted-2); }
 .strength { display: flex; align-items: center; gap: 5px; font-size: 10px; color: var(--muted); }
+/* 带说明的参数：虚下划线 + help 光标。
+   光加 title 不够——用户不知道"这里能 hover"，也就不会去看说明。 */
+.node label[title] { cursor: help; }
+.node label[title].strength > span:first-child,
+.node label[title].bg-mode,
+.node label[title].block {
+  text-decoration: underline dotted rgba(255, 255, 255, 0.22);
+  text-underline-offset: 3px;
+}
+.node label[title].strength:hover > span:first-child,
+.node label[title].bg-mode:hover,
+.node label[title].block:hover {
+  text-decoration-color: var(--cyan);
+}
 .strength input[type='range'] { flex: 1; min-width: 0; accent-color: var(--cyan); }
 .strength b { font-family: var(--mono); font-size: 10px; color: var(--cyan); font-weight: 400; }
 .src-note { font-size: 9.5px; line-height: 1.5; color: var(--muted-2); }

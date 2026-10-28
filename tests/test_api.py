@@ -674,3 +674,24 @@ def test_generate_rejects_unknown_workflow(client):
     """未知工作流必须被拒（别让它进队列再失败）。"""
     r = client.post("/generate", json={"workflow": "wzz", "params": {}})
     assert r.status_code == 400
+
+
+def test_pose_dirs_lists_directories_with_frames(client):
+    """W4 的输入目录清单：前端下拉直接用，不能返回空壳或超时。
+
+    assets 里已有几千个文件，深扫会把接口拖慢；这里只扫两层。
+    """
+    import time
+
+    t0 = time.perf_counter()
+    r = client.get("/pose_dirs?limit=10")
+    elapsed = time.perf_counter() - t0
+    assert r.status_code == 200
+    body = r.json()
+    assert elapsed < 1.0, f"扫目录花了 {elapsed:.2f}s，接口会被前端的下拉请求拖住"
+    assert body["count"] == len(body["items"]) <= 10
+
+    for it in body["items"]:
+        assert it["count"] >= 2, "少于 2 张图的目录不该出现在候选里"
+        assert isinstance(it["path"], str) and it["path"]
+        assert isinstance(it["sample"], list) and it["sample"]

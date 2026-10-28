@@ -8,11 +8,12 @@ import {
 } from './store/projects'
 import {
   deleteAssets, fetchJob, fetchLoras, fetchModels, health, submitAiRepaint, submitImg2Img,
-  submitInpaint, submitMatte, submitPixelify, submitPoseClone, submitSpriteSwap, submitTxt2Img,
-  uploadImage,
+  fetchPoseDirs, submitInpaint, submitMatte, submitPixelify, submitPoseClone, submitPoseSeq,
+  submitSpriteSwap, submitTxt2Img, uploadImage,
 } from './api'
 import ConfirmDialog from './components/ConfirmDialog'
 import Lightbox from './components/Lightbox'
+import type { PoseDir } from './api'
 import type {
   FavoritePrompt, GenNode, GenParams, LoraInfo, ModelRecommend, NodeImage, NodeKind,
   NodeSource, Viewport,
@@ -77,6 +78,8 @@ const DEFAULT_PARAMS: GenParams = {
   // 引擎：AnimateDiff 走时序注意力，帧间一致性更好（实测 8 帧 7.4s / 13.1GB）
   ssEngineMode: 'auto',
   ssVramProfile: 'auto',
+  // 姿态序列（w4）的输入：骨架帧目录（也接受通配，如 assets/_pose_walk_*.png）
+  psDir: '',
   lora: '',
   loraScale: 0.8,
 }
@@ -156,6 +159,8 @@ export default function App() {
   // 每个底模的推荐采样参数，由后端 /models 给出（见 types.ts 的 ModelRecommend）
   const [recommend, setRecommend] = useState<Record<string, ModelRecommend>>({})
   const [model, setModel] = useState<string>('sd15')
+  // W4 的输入是"一组骨架帧"，后端扫 assets 给出可选目录，前端只做下拉
+  const [poseDirs, setPoseDirs] = useState<PoseDir[]>([])
   const [matteBackend, setMatteBackend] = useState('auto')
   const [uploadMsg, setUploadMsg] = useState('')
   const [notice, setNotice] = useState('')          // 底模切换之类的一次性提示
@@ -171,6 +176,13 @@ export default function App() {
   }, [model])
 
   useEffect(() => { reloadLoras() }, [reloadLoras])
+
+  // 骨架目录一次拉完即可（后端 20ms 扫完 assets 两层）；失败就空列表，
+  // 节点里仍然可以手填路径，功能不因这个接口挂掉而消失。
+  const reloadPoseDirs = useCallback(() => {
+    fetchPoseDirs().then(setPoseDirs).catch(() => setPoseDirs([]))
+  }, [])
+  useEffect(() => { reloadPoseDirs() }, [reloadPoseDirs])
 
   useEffect(() => {
     fetchModels().then((m) => {
@@ -328,6 +340,7 @@ export default function App() {
               : type === 'pixelify' ? 'pixelify'
                 : type === 'poseclone' ? 'poseclone'
                   : type === 'spriteswap' ? 'spriteswap'
+                    : type === 'poseswap' ? 'poseswap'
                     : 'gen'
     setNodes((list) => {
       // 原点放多个时阶梯错开，避免完全重叠
@@ -568,6 +581,19 @@ export default function App() {
         const r = await submitSpriteSwap(
           node.params, { model, matteBackend, scope: currentId }, sheetPath, charPath)
         jobId = r.job_id
+      } else if (node.kind === 'poseswap') {
+        // W4 的输入是一组骨架帧（目录），不是单张源图——所以不走 init 那条路
+        const dir = node.params.psDir.trim()
+        if (!dir) {
+          patchNode(id, {
+            job: { id: 'error', status: 'failed',
+              error: '先选一个骨架帧目录：用 tools/pose_from_image.py 从图片/视频提骨架，'
+                + '或在下拉里选已有目录' },
+          })
+          return
+        }
+        const r = await submitPoseSeq(node.params, { model, matteBackend, scope: currentId }, dir)
+        jobId = r.job_id
       } else if (node.kind === 'pixelify') {
         const r = await submitPixelify(
           node.params, { model, matteBackend, scope: currentId }, init!)
@@ -764,6 +790,7 @@ export default function App() {
           nodes={nodes}
           model={model}
           maxCandidates={recommend[model]?.max_candidates}
+          poseDirs={poseDirs}
           selectedId={selectedId}
           viewport={viewport}
           setViewport={setViewport}
