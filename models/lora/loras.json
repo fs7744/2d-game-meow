@@ -152,5 +152,16 @@
     "rank": 128,
     "note": "144MB / rank 128 的 SD1.5 像素 LoRA——比 px_illustrious（36MB / rank 32）大 4 倍，容量更高，细节可能更足。训练元数据里最高频 tag 是 'pixel'，但**触发词留空**：像素 LoRA 加触发词在本项目实测会让多主体率上升（px_illustrious 是 3/3 全变多主体），这条结论先沿用，未对这个权重单独验证。尚未 A/B，先按 preset=pixel + 0.8 强度试；要定论就跑 python tools/ab_base.py --models sd15 --lora pixel_f2。",
     "source": "auto"
+  },
+  "pixel_sprites_32": {
+    "label": "像素精灵 Sprites32（2D Pixel Toolkit）",
+    "trigger": "pixelart",
+    "scale": 0.8,
+    "preset": "pixel",
+    "matte": true,
+    "base": "sd15",
+    "rank": 16,
+    "note": "mushenL/2D-Pixel-Toolkit-2D 的 Sprites_32 分支：拿 32px 精灵图训的 SD1.5\nLoRA（36MB / rank 16）。**必须带触发词 pixelart，否则完全不起作用**——\n实测不加触发词时贴边 67%/多主体 17%，与不挂 LoRA 一模一样；加上后\n多主体 0%、贴边 50%、可交付率 17%→50%（各 6 张，样本小）。\n这条**修正了「像素 LoRA 一律不加触发词」的旧结论**：那条来自 px_illustrious\n（它加触发词会多主体），对这个是反的——所以 trigger 是不是该填，\n必须每个 LoRA 单独测，不能一刀切。选中后点「+ 填入」把 pixelart 加进提示词。",
+    "source": "auto"
   }
 }
