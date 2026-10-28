@@ -297,6 +297,7 @@ export function submitSpriteSwap(
     gate_retries: params.ssGateRetries,
     // 引擎：animatediff=时序注意力（帧间更稳），frame=逐帧多候选（更省显存）
     engine_mode: params.ssEngineMode,
+    vram_profile: params.ssVramProfile,
     width: params.width,
     height: params.height,
     steps: params.steps,

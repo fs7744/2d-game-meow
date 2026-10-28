@@ -1327,6 +1327,10 @@ function check(name, cond, extra = '') {
   const engineSel = [...node.querySelectorAll('select')].find((s) =>
     [...s.options].some((o) => o.textContent.includes('AnimateDiff')))
   check('有 AnimateDiff/逐帧 引擎选择', !!engineSel)
+  // 显存档位：auto / low / medium / high
+  const vramSel = [...node.querySelectorAll('select')].find((s) =>
+    [...s.options].some((o) => o.textContent.includes('省显存')))
+  check('有显存档位选择', !!vramSel)
 
   // 拖一个本地图进来 -> 序列帧源
   const viewport = doc.querySelector('.canvas-viewport')

@@ -14,6 +14,9 @@ export type SwapMode = 'generate' | 'recolor'
 /** 序列帧替换：用哪个引擎生成 */
 export type EngineMode = 'auto' | 'animatediff' | 'frame'
 
+/** 显存档位：显存不够时降分辨率（帧数不能砍——那是用户的动画内容） */
+export type VramProfile = 'auto' | 'low' | 'medium' | 'high'
+
 /** 完美像素转换的每格取色方式 */
 export type PixelSample = 'median' | 'majority' | 'center'
 
@@ -83,6 +86,7 @@ export type GenParams = {
   ssCandidates: number    // 序列帧替换：每帧生成几个候选再挑最好的
   ssGateRetries: number   // 序列帧替换：候选都不合格时补提几次
   ssEngineMode: EngineMode // 序列帧替换：AnimateDiff 时序一致性 / 逐帧多候选
+  ssVramProfile: VramProfile // 序列帧替换：显存档位（auto 自动降分辨率）
   lora: string            // LoRA 名（后端解析成路径）；空串表示不挂
   loraScale: number
 }

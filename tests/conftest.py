@@ -30,10 +30,18 @@ def assets() -> Path:
 
 @pytest.fixture(scope="session")
 def eng(root):
-    """整套测试共用一个 Engine，避免反复加载权重。"""
+    """整套测试共用一个 Engine，避免反复加载权重。
+
+    **必须缓存实例**：session 级 fixture 只是缓存「函数结果」，
+    但这里每次调用都会 `Engine(...)` 新建一个——引擎是管线的持有者，
+    新实例 = 新的管线缓存 = 新的显存占用。
+    实测不缓存时连续跑测试，峰值显存能到 14.9GB（单跑只有 5.78GB）。
+    """
     from workflows.engine import Engine
 
-    return Engine(root / "models")
+    if not hasattr(eng, "_instance"):
+        eng._instance = Engine(root / "models")
+    return eng._instance
 
 
 @pytest.fixture(scope="session")

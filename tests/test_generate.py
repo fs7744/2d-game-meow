@@ -738,3 +738,50 @@ def test_sprite_swap_animatediff_missing_weight_errors(eng, assets, monkeypatch)
         g.sprite_swap(eng, sheet_image=sheet, char_image=char,
                       prompt="x", cols=4, rows=1, engine_mode="animatediff",
                       tag="wss_ad_missing")
+
+
+def test_sprite_swap_animatediff_vram_is_bounded(eng, assets):
+    """AnimateDiff 路线的显存必须有界，且 meta 里记录了规划结果。
+
+    回归点：补提曾经用独立的 pose_pipe()，那会**再加载一整套**
+    UNet/VAE/ControlNet/IP-Adapter（实测多占 3.23GB）——两条管线权重重复。
+    现在补提直接用 AnimateDiff 管线跑 2 帧，零额外权重。
+    """
+    if not eng.animatediff_available():
+        import pytest
+        pytest.skip("缺少 AnimateDiff motion adapter 权重")
+
+    sheet = _sprite_sheet(assets)
+    char = _slime_char(assets)
+    r = g.sprite_swap(eng, sheet_image=sheet, char_image=char,
+                      prompt="green slime monster", negative=None, preset="sprite",
+                      cols=4, rows=1, width=256, height=256, steps=6, seed=31,
+                      cn_scale=1.0, ipa_scale=0.8, palette=8, matte=True,
+                      engine_mode="animatediff", vram_profile="custom",
+                      tag="wss_vram")
+    m = r["meta"]
+    assert "vram_profile" in m and "vram_note" in m
+    assert m["vram_profile"] == "custom"
+    assert m["peak_vram_gb"] > 0
+    # 显存必须有界——不能因为重复加载权重而膨胀
+    assert m["peak_vram_gb"] < 8.0, f"峰值显存 {m['peak_vram_gb']}GB 过高"
+
+
+def test_sprite_swap_vram_profile_low_downgrades(eng, assets):
+    """low 档位要真的降分辨率（帧数不砍）。"""
+    if not eng.animatediff_available():
+        import pytest
+        pytest.skip("缺少 AnimateDiff motion adapter 权重")
+
+    sheet = _sprite_sheet(assets)
+    char = _slime_char(assets)
+    r = g.sprite_swap(eng, sheet_image=sheet, char_image=char,
+                      prompt="green slime monster", negative=None, preset="sprite",
+                      cols=4, rows=1, width=512, height=512, steps=6, seed=37,
+                      cn_scale=1.0, ipa_scale=0.8, palette=8, matte=True,
+                      engine_mode="animatediff", vram_profile="low",
+                      tag="wss_lowvram")
+    m = r["meta"]
+    assert m["width"] == 384 and m["height"] == 384
+    assert m["frames"] == 4, "帧数不能被砍"
+    assert "low" in m["vram_note"]

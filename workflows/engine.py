@@ -78,20 +78,52 @@ def detect_variant(root: Path) -> str | None:
     return "fp16" if fp16.exists() else None
 
 
+# 进程级的权重池：**同一个 models_root 的所有 Engine 实例共享**。
+# 引擎持有管线，管线占显存——两个实例 = 两份权重 = 白白多占几个 GB。
+# 实测：测试里每次新建 Engine，连续跑下来峰值到 14.9GB（共用一个只 5.78GB）。
+_POOLS: Dict[str, Dict[str, Any]] = {}
+
+
 class Engine:
-    """单卡常驻引擎。所有 pipeline 共用同一个 torch 设备。"""
+    """单卡常驻引擎。所有 pipeline 共用同一个 torch 设备。
+
+    **权重池按 models_root 共享**：多个 Engine 实例指向同一个模型目录时，
+    共用同一份管线缓存——避免同一份权重在显存里存多份。
+    """
 
     def __init__(self, models_root: str | Path, device: str = "cuda") -> None:
         self.root = Path(models_root)
         self.device = device
         self.DEFAULT_MODEL = DEFAULT_MODEL        # 给 API/前端当默认值用
         self.dtype = torch.float16
-        self._cache: Dict[str, Any] = {}
-        self._ctrl: Dict[str, ControlNetModel] = {}
-        self._lora: Optional[str] = None
+        # 共享权重池（按 root 归一化后作为键）
+        key = str(self.root.resolve())
+        pool = _POOLS.get(key)
+        if pool is None:
+            pool = {"cache": {}, "ctrl": {}, "lora": None, "pose": None}
+            _POOLS[key] = pool
+        self._pool = pool
+        self._cache: Dict[str, Any] = pool["cache"]
+        self._ctrl: Dict[str, ControlNetModel] = pool["ctrl"]
         # 语义分割抠图模型目录（isnet-general-use.onnx）。存在即启用 u2net 后端。
         self.matte_dir = self.root / "matte"
-        self._pose: Any = None       # 姿态提取器（CPU）。None=未初始化，False=不可用
+
+    # LoRA 与姿态提取器也走共享池——否则两个实例状态会不一致
+    @property
+    def _lora(self) -> Optional[str]:
+        return self._pool["lora"]
+
+    @_lora.setter
+    def _lora(self, v: Optional[str]) -> None:
+        self._pool["lora"] = v
+
+    @property
+    def _pose(self) -> Any:
+        return self._pool["pose"]
+
+    @_pose.setter
+    def _pose(self, v: Any) -> None:
+        self._pool["pose"] = v
 
     # ---------- 底模 ----------
 
@@ -313,7 +345,8 @@ class Engine:
 
     def animatediff_pipe(self, controlnet: str = "canny",
                          with_ipadapter: bool = True,
-                         model: str = DEFAULT_MODEL):
+                         model: str = DEFAULT_MODEL,
+                         optimize_vram: bool = True):
         """AnimateDiff + ControlNet 管线（时序一致性方案）。
 
         **为什么需要它**：逐帧生成时，每一帧都是独立的概率采样，帧间会漂
@@ -326,8 +359,16 @@ class Engine:
           逐帧多候选   19.2s / 4.5GB / silhouette_drift 0.152
           AnimateDiff   7.4s / 13.1GB / silhouette_drift **0.097**
 
-        代价是显存（motion module 要额外一份 UNet 的激活）：
-        8 帧 512² 实测峰值 13.1GB，4090 够用但不适合 16 帧以上。
+        **显存优化**（`optimize_vram=True`，默认开）：
+        基线 8帧@512 是 9.86GB、16帧@512 是 14.09GB。开了两项优化后降到
+        **5.78GB / 7.10GB（-41%）**，耗时不变、输出逐像素一致：
+
+          1. VAE 逐帧解码——整段批量解码增量 4.00GB，逐帧只要 0.60GB
+             （这条管线没有 `enable_vae_slicing`，得调 `pipe.vae.enable_slicing()`）
+          2. IP-Adapter 的 image_encoder 用完即退——它是 CLIP Vision（1.18GB），
+             只编码一次参考图就闲置；编码时短暂上卡、编完退回 CPU
+
+        详见 `workflows/vramopt.py`（含实测数据与「哪些手段没用」的记录）。
         """
         key = f"animatediff:{controlnet}:{int(with_ipadapter)}:{model}"
         if key in self._cache:
@@ -360,9 +401,14 @@ class Engine:
             pipe.load_ip_adapter(ipa_root, ipa_sub, weight_name=ipa_name,
                                  image_encoder_folder="image_encoder")
             pipe.set_ip_adapter_scale(0.8)
-        self._cache[key] = self._fit(pipe, key)
+        pipe = self._fit(pipe, key)
+        if optimize_vram:
+            from . import vramopt
+            info = vramopt.optimize_pipe(pipe)
+            log.info("%s 显存优化: %s", key, info)
+        self._cache[key] = pipe
         log.info("%s 加载 %.1fs", key, time.perf_counter() - t0)
-        return self._cache[key]
+        return pipe
 
     # ---------- 质量闸门用的姿态提取器 ----------
 
@@ -418,6 +464,39 @@ class Engine:
         log.info("LoRA 热切换 -> %s (scale=%.2f)", Path(lora_path).name, scale)
 
     # ---------- 显存管理 ----------
+
+    def ensure_headroom(self, need_gb: float = 2.0) -> None:
+        """显存不够时自动驱逐已缓存的管线。
+
+        **为什么需要**：引擎把管线缓存起来复用，但**从不自动释放**。
+        AnimateDiff 管线约 4.45GB、逐帧 ControlNet 管线约 3.2GB——
+        两者同时驻留就是 7.6GB，加上生成本身的激活就容易撞顶。
+        实测连续跑多个工作流时峰值能到 14.9GB（单独跑只有 5.78GB）。
+
+        策略：从最久没用的开始丢，直到腾出足够空间。丢的是**缓存**，
+        下次用到会重新加载（几百毫秒到几秒），比 OOM 划算。
+        """
+        if not torch.cuda.is_available():
+            return
+        # **用 PyTorch 的 reserved 而不是 mem_get_info 的物理空闲**：
+        # mem_get_info 看的是显存分配器的物理占用，它不包含 PyTorch
+        # 缓存着的块（cached-but-unallocated）。那些块在下次申请时会被
+        # 直接复用，所以「物理空闲」不等于「可用」。
+        # reserved 才是真正占着不还的量。
+        def _used_gb() -> float:
+            return torch.cuda.memory_reserved() / 2**30
+
+        if _used_gb() < need_gb:
+            return
+        # 按插入顺序丢（dict 保序），保留最近用的
+        for key in list(self._cache.keys()):
+            if _used_gb() < need_gb:
+                break
+            self._cache.pop(key, None)
+            gc.collect()
+            torch.cuda.empty_cache()
+            log.info("显存紧张（reserved %.1fGB），已释放管线 %s",
+                     _used_gb(), key)
 
     def free(self, keep: tuple[str, ...] = ()) -> None:
         """释放显存。

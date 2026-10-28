@@ -81,8 +81,13 @@ def main() -> None:
     )
     m = r["meta"]
     print(f"  网格={m['grid']} 帧数={m['frames']} 格子={m['cell']} 模式={m['mode']}")
-    print(f"  抠图={m['matte_used']} 色板={m['palette_size']} 色")
-    print(f"  每帧={m['per_frame_seconds']} 总={m['seconds_total']}s 显存={m['peak_vram_gb']}GB")
+    print(f"  引擎={m.get('engine_mode')} 抠图={m['matte_used']} 色板={m['palette_size']} 色")
+    print(f"  总={m['seconds_total']}s 显存={m['peak_vram_gb']}GB "
+          f"分辨率={m.get('width')}²")
+    if m.get("vram_note"):
+        print(f"  显存规划={m['vram_note']}")
+    if m.get("repaired_frames") is not None:
+        print(f"  补提帧={m['repaired_frames']} 闸门={m.get('gate_passed')}/{m['frames']}")
     for p in sorted(Path(r["frames_dir"]).glob("frame_*.png")):
         print(f"    {p.name} 主体像素={subject_px(p)}")
 

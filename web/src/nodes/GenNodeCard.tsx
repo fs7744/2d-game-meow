@@ -411,6 +411,20 @@ export default function GenNodeCard({
               </select>
             </label>
           )}
+          {p.ssMode === 'generate' && p.ssEngineMode !== 'frame' && (
+            <label className="bg-mode">
+              显存
+              <select
+                value={p.ssVramProfile}
+                onChange={(e) => setParam('ssVramProfile', e.target.value as typeof p.ssVramProfile)}
+              >
+                <option value="auto">自动（不够就降分辨率）</option>
+                <option value="low">省显存（384²）</option>
+                <option value="medium">平衡（512²）</option>
+                <option value="high">高质量（512²，最多 32 帧）</option>
+              </select>
+            </label>
+          )}
           {p.ssMode === 'generate' && (
             <div className="prompt-wrap">
               <textarea
@@ -529,7 +543,9 @@ export default function GenNodeCard({
             {p.ssMode === 'generate' && p.ssEngineMode !== 'frame' && (
               <div className="src-note">
                 AnimateDiff 一次生成整段，靠时序注意力锁住帧间一致性——
-                实测 8 帧比逐帧方案快 2.6× 且漂移少 36%，但显存更高（13GB）。
+                实测 8 帧比逐帧方案快 2.6× 且漂移少 36%。
+                显存已优化（VAE 逐帧解码 + 参考图编码器用完即退）：
+                8 帧 5.8GB、16 帧 7.1GB，比基线省 41%。
               </div>
             )}
             <div className="src-note">

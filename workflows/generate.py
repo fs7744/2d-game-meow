@@ -664,6 +664,7 @@ def pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | Path,
     #     主体顶满画面时 patch 里只有局部纹理，编码不出整体身份）
     #   - 像素画用最近邻缩放（LANCZOS 会把像素块糊成渐变）
     char = refprep.prepare_reference(Image.open(char_image).convert("RGBA"), size=width)
+    eng.ensure_headroom(need_gb=2.0)
     pipe = eng.pose_pipe(controlnet=pipe_cn, with_ipadapter=True, model="sd15")
     eng.apply_lora(pipe, lora, lora_scale)
     pipe.set_ip_adapter_scale(ipa_scale)
@@ -726,6 +727,7 @@ def sprite_swap(eng: Engine, *, sheet_image: str | Path, char_image: str | Path,
                 palette: int = 32, keep_alpha: bool = False,
                 candidates: int = 2, gate_retries: int = 1,
                 gate_seed_step: int = 1000,
+                vram_profile: str = "auto",
                 scope: str = "", tag: str = "wss") -> Dict[str, Any]:
     """序列帧角色替换：把一段游戏动画里的角色换成目标角色，逐帧对齐后重新打包。
 
@@ -801,8 +803,10 @@ def sprite_swap(eng: Engine, *, sheet_image: str | Path, char_image: str | Path,
             steps=steps, cfg=cfg, seed=seed, cn_scale=cn_scale, ipa_scale=ipa_scale,
             lora=lora, lora_scale=lora_scale, clip_skip=clip_skip,
             matte=matte, matte_backend=matte_backend, denoise=denoise,
-            palette=palette, extractor=extractor, scope=scope, tag=tag)
+            palette=palette, extractor=extractor, vram_profile=vram_profile,
+            scope=scope, tag=tag)
 
+    eng.ensure_headroom(need_gb=2.0)
     pipe = eng.pose_pipe(controlnet=pipe_cn, with_ipadapter=True, model="sd15")
     eng.apply_lora(pipe, lora, lora_scale)
     pipe.set_ip_adapter_scale(ipa_scale)
@@ -1040,6 +1044,7 @@ def _sprite_animatediff(eng: Engine, frames: Sequence[tuple], char_image: str | 
                         matte: bool = True, matte_backend: str = "auto",
                         denoise: int = 1, palette: int = 32, extractor: Any = None,
                         repair: bool = True, repair_candidates: int = 2,
+                        vram_profile: str = "auto",
                         scope: str = "", tag: str = "wss") -> Dict[str, Any]:
     """AnimateDiff 路线：一次生成整段序列，靠时序注意力保证帧间一致。
 
@@ -1052,11 +1057,13 @@ def _sprite_animatediff(eng: Engine, frames: Sequence[tuple], char_image: str | 
     提供**跨帧时序注意力**——生成第 N 帧时会参考相邻帧的潜在表示。
     这是架构级的约束，而「固定 seed」只是概率层面的。
 
-    **代价是显存**：motion module 要额外一份 UNet 激活，8 帧 512² 实测 13.1GB。
-    帧数越多显存越高（帧数 × 分辨率的乘积决定），16 帧 512² 会超出 4090。
+    **显存**：motion module 要额外一份 UNet 激活，基线 8 帧 512² 是 9.86GB。
+    引擎层开了两项优化（VAE 逐帧解码 + IP-Adapter encoder 用完即退）后
+    降到 **5.78GB**，16 帧是 **7.10GB**（实测，详见 workflows/vramopt.py）。
 
-    **帧数上限**：motion module 的 max_seq_length 是 32，但显存才是真限制。
-    这里不主动截断——超了会 OOM，让调用方自己控制帧数与分辨率。
+    **自适应降级**：显存不够时按 `vram_profile` 降分辨率（帧数是用户给的
+    动画内容，不能砍）。降分辨率是最后手段——SD1.5 在低分辨率出图偏糊，
+    所以 meta 里会记录实际用的分辨率和降级原因。
     """
     if preset is not None:
         prompt, negative = presets.build(prompt, negative, preset)
@@ -1065,6 +1072,15 @@ def _sprite_animatediff(eng: Engine, frames: Sequence[tuple], char_image: str | 
         seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
 
     n = len(frames)
+
+    # **显存规划**：装不下就降分辨率（帧数不能砍——那是用户的动画内容）。
+    from . import vramopt
+    n, size, vram_note = vramopt.plan_generation(n, max(width, height),
+                                                  profile=vram_profile)
+    width = height = size
+
+    # 先腾出显存——引擎缓存的其它管线可能还占着好几个 GB
+    eng.ensure_headroom(need_gb=2.0)
     pipe = eng.animatediff_pipe(controlnet=pipe_cn, with_ipadapter=True, model="sd15")
     eng.apply_lora(pipe, lora, lora_scale)
     pipe.set_ip_adapter_scale(ipa_scale)
@@ -1141,19 +1157,32 @@ def _sprite_animatediff(eng: Engine, frames: Sequence[tuple], char_image: str | 
     repaired_full: Dict[int, Image.Image] = {}
     repaired: List[int] = []
     if bad and repair:
-        fpipe = eng.pose_pipe(controlnet=pipe_cn, with_ipadapter=True, model="sd15")
-        eng.apply_lora(fpipe, lora, lora_scale)
-        fpipe.set_ip_adapter_scale(ipa_scale)
+        # **直接用 AnimateDiff 管线跑单帧**（num_frames=1）：零额外显存。
+        # 单独 pose_pipe() 会再加载一整套 UNet/VAE/ControlNet/IP-Adapter
+        # （实测多占 3.23GB），而两条管线的权重完全重复。
+        # AnimateDiff 管线 num_frames=1 时 motion module 的时序注意力
+        # 退化成恒等映射，效果就是普通单帧生成。
+        fpipe = pipe
         for i in bad:
             cand: List[Tuple[Image.Image, Dict[str, Any], Image.Image]] = []
             for k in range(max(1, repair_candidates)):
-                img = fpipe(
-                    image=conds[i], num_inference_steps=steps, guidance_scale=cfg,
-                    controlnet_conditioning_scale=cn_scale, ip_adapter_image=char,
-                    generator=torch.Generator("cuda").manual_seed(seed + 7919 * (i + 1) + k),
-                    width=width, height=height,
+                # **必须跑 2 帧，不能跑 1 帧**：AnimateDiff 的 motion module
+                # 在 num_frames=1 时输出畸形（实测 area_ratio 5.5——
+                # 主体膨胀了 5 倍，剪影 IoU 只有 0.17）；2 帧时
+                # motion module 的时序注意力正常工作（IoU 0.81~0.85）。
+                # 取 2 帧里的第一帧。
+                out = fpipe(
                     prompt=prompt, negative_prompt=neg,
-                ).images[0]
+                    conditioning_frames=[conds[i], conds[i]],
+                    controlnet_conditioning_scale=cn_scale,
+                    ip_adapter_image=char,
+                    num_frames=2,
+                    num_inference_steps=steps, guidance_scale=cfg,
+                    generator=torch.Generator("cuda").manual_seed(
+                        seed + 7919 * (i + 1) + k),
+                    height=height, width=width,
+                )
+                img = out.frames[0][0]
                 c = (matte_mod.matte_auto(img, matte_backend, eng.matte_dir, info=matte_info)
                      if matte else img.convert("RGBA"))
                 c = matte_mod.despeckle(c, denoise_iters=denoise)
@@ -1204,6 +1233,7 @@ def _sprite_animatediff(eng: Engine, frames: Sequence[tuple], char_image: str | 
         "grid": [cols, rows], "frames": len(aligned), "cell": [cell_w, cell_h],
         "ref_mode": ref_mode, "ref_modes_used": sorted(set(used_modes)),
         "width": width, "height": height,
+        "vram_profile": vram_profile, "vram_note": vram_note,
         "steps": steps, "cfg": cfg, "seed": seed,
         "cn_scale": cn_scale, "ipa_scale": ipa_scale,
         "lora": lora, "lora_scale": lora_scale if lora else None,

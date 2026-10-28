@@ -75,6 +75,7 @@ const DEFAULT_PARAMS: GenParams = {
   ssGateRetries: 1,
   // 引擎：AnimateDiff 走时序注意力，帧间一致性更好（实测 8 帧 7.4s / 13.1GB）
   ssEngineMode: 'auto',
+  ssVramProfile: 'auto',
   lora: '',
   loraScale: 0.8,
 }
