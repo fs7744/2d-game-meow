@@ -430,7 +430,7 @@ start.bat                   # Windows 双击或命令行
 cd web && npm ci && npm run build     # 构建
 cd .. && python app.py                # FastAPI 同时托管 dist 与 API → http://127.0.0.1:8000
 cd web && npm run dev                 # 或开发模式（:5173，代理到 8000）
-npm run smoke                         # 无浏览器渲染冒烟（jsdom，141 项断言）
+npm run smoke                         # 无浏览器渲染冒烟（jsdom，150 项断言）
 ```
 
 > `start.bat` 刻意保持**纯 ASCII**：cmd.exe 按 OEM 代码页解析 .bat，中文注释会切断命令行
@@ -514,6 +514,21 @@ assets/
 
 > 历史文件（项目功能之前生成的，还在 `assets/` 根目录）仍可访问，也能当图生图的源，
 > 它们属于「公共区」；但它们不会被任何项目的新产物覆盖或混进去。
+
+### 全屏预览与下载
+
+图在卡片里只是缩略图，看不清像素细节。三种方式进全屏（灯箱）：
+
+- **点缩略图**（参数视图下方的预览图）
+- **点卡头的 ⤢ 按钮**
+- 图片节点的本地图直接点图
+
+灯箱是全屏遮罩，显示原图（`image-rendering: pixelated`，像素画放大不糊），顶部有文件名和
+**「⭳ 下载」**按钮。三种关闭方式：点背景、按 `Esc`、点「✕ 关闭」。
+
+下载走 `GET /files/<相对路径>?download=1`——后端会带上
+`Content-Disposition: attachment; filename="xxx.png"`，浏览器直接存盘而不是内联打开。
+不带 `download=1` 时是内联显示（预览用）。
 
 ### 删除：确认框 + 真删
 
@@ -645,9 +660,9 @@ python tools/video.py i2v assets/cat.png "the same character walking" -o assets/
 ## 测试
 
 ```bash
-python -m pytest tests -q        # 178 个用例，约 185s（含 SDXL 慢用例）
+python -m pytest tests -q        # 179 个用例，约 180s（含 SDXL 慢用例）
 # 全套超过 2 分钟会被超时杀掉，分批跑：
-#   pytest tests --ignore=tests/test_models.py   # 167 个，约 116s
+#   pytest tests --ignore=tests/test_models.py   # 168 个，约 110s
 #   pytest tests/test_models.py                  # 11 个，约 60s
 ```
 
@@ -656,7 +671,7 @@ python -m pytest tests -q        # 178 个用例，约 185s（含 SDXL 慢用例
 | `tests/test_postprocess.py` | 锚点、逐帧对齐、打包几何、色板上限、alpha 二值化、裁边、**像素块单色性**、**前景块计数** | 11 |
 | `tests/test_generate.py` | 同 seed 逐像素一致、不同 seed 相异、色板生效、**重绘选区外不变**、序列帧数、**闸门重提与批量挑帧**、**clip_skip 生效与 meta 记录**、主体数上报、**图生图后处理与 raw 留存**、**项目隔离（产物分目录 + 跨项目引用被拒）**、显存回收、缺权重报错 | 18 |
 | `tests/test_controlnet.py` | Canny conditioning 生效、Tile 放大结构相关性 > 0.5、像素块均匀性 | 3 |
-| `tests/test_api.py` | 全部端点、队列串行性、**w2 队列往返（含 raw 留存）**、**上传端点（坏文件/空文件/文件名清洗/进项目目录）**、**真删（连带 sidecar/raw、索引清理、路径穿越防护、索引不可删）**、**资产按项目过滤**、400/404 | 21 |
+| `tests/test_api.py` | 全部端点、队列串行性、**w2 队列往返（含 raw 留存）**、**上传端点（坏文件/空文件/文件名清洗/进项目目录）**、**真删（连带 sidecar/raw、索引清理、路径穿越防护、索引不可删）**、**资产按项目过滤**、**下载的 Content-Disposition**、400/404 | 22 |
 | `tests/test_pose.py` | 检测器切换、18 点完整性、关节在画面内且头高于髋、骨架渲染、双后端一致性、引擎内的姿态提取器单例、精灵图切片 CLI | 7 |
 | `tests/test_quality.py` | 前景占比/质心/漂移、**贴边检测**（含未抠图时整体失效）、无模型时「无法判定」、关节数影响排序与闸门 | 11 |
 | `tests/test_io_paths.py` | 视频抽帧、GIF、精灵图切片（含空格子）、CLI 错误码、非 8 倍数尺寸重绘、cols 夹取、环境自检 JSON、LoRA 空接口 | 11 |

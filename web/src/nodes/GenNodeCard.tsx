@@ -33,6 +33,8 @@ type Props = {
   /** 拖本机文件经过某个节点（落下时把它当源） */
   onDragOverNode?: (id: string) => void
   linkTarget?: boolean
+  /** 全屏预览（灯箱） */
+  onPreview?: (url: string, name: string) => void
 }
 
 const PRESETS: { v: Preset; label: string }[] = [
@@ -62,6 +64,7 @@ export default function GenNodeCard({
   onHover,
   onDragOverNode,
   linkTarget,
+  onPreview,
 }: Props) {
   const dragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null)
   const p = node.params
@@ -82,6 +85,11 @@ export default function GenNodeCard({
   // 缩略图：图片节点用自己的图，其它节点用出图结果
   const sourceThumb =
     sourceNode?.kind === 'image' ? sourceNode.image?.url : sourceNode?.job?.url
+  // 可全屏预览的图（图片节点的本地图 / 生成节点的产物）
+  const previewUrl = isImg ? node.image?.url : job?.url
+  const previewName = previewUrl
+    ? decodeURIComponent(previewUrl.split('/').pop() || 'image.png')
+    : ''
 
   const startDrag = (e: React.PointerEvent) => {
     if (e.button !== 0) return
@@ -223,6 +231,18 @@ export default function GenNodeCard({
             {imageMode ? '▤ 参数' : '▣'}
           </button>
         )}
+        {previewUrl && (
+          <button
+            className="icon-btn"
+            title="全屏预览 / 下载"
+            onClick={(e) => {
+              e.stopPropagation()
+              onPreview?.(previewUrl, previewName)
+            }}
+          >
+            ⤢
+          </button>
+        )}
         <button
           className="icon-btn"
           title="复制节点 (Ctrl+D)"
@@ -259,7 +279,16 @@ export default function GenNodeCard({
           {node.image ? (
             <>
               <div className="img-holder">
-                <img src={node.image.url} alt="" draggable={false} />
+                <img
+                  src={node.image.url}
+                  alt=""
+                  draggable={false}
+                  title="点击全屏预览"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onPreview?.(node.image!.url, previewName)
+                  }}
+                />
                 <span
                   className="resize"
                   title="拖动改变大小（也可以直接改下面的宽度）"
@@ -295,7 +324,16 @@ export default function GenNodeCard({
         </div>
       ) : imageMode ? (
         <div className="node-image-only">
-          <img src={job!.url} alt={p.prompt} draggable={false} />
+          <img
+            src={job!.url}
+            alt={p.prompt}
+            draggable={false}
+            title="点击全屏预览"
+            onClick={(e) => {
+              e.stopPropagation()
+              onPreview?.(job!.url!, previewName)
+            }}
+          />
           <div className="img-badge">
             种子 {job!.seed ?? p.seed}
             {typeof job!.seconds === 'number' ? ` · ${job!.seconds}s` : ''}
@@ -551,7 +589,14 @@ export default function GenNodeCard({
           </details>
 
           {hasImage && (
-            <div className="preview" onClick={() => onPatch({ view: 'image' })} title="点击只看图">
+            <div
+              className="preview"
+              onClick={(e) => {
+                e.stopPropagation()
+                onPreview?.(job!.url!, previewName)
+              }}
+              title="点击全屏预览"
+            >
               <img src={job!.url} alt={p.prompt} draggable={false} />
             </div>
           )}

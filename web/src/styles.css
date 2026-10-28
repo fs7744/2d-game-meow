@@ -223,6 +223,32 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
 .img-tools input { width: 64px; height: 24px; }
 .img-empty { padding: 18px 6px; text-align: center; font-size: 11px; color: var(--muted-2); }
 
+/* 全屏预览（灯箱） */
+.lightbox {
+  position: fixed; inset: 0; z-index: 70;
+  background: rgba(0, 0, 0, 0.88);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 10px; padding: 16px;
+}
+.lightbox-bar {
+  display: flex; align-items: center; gap: 8px; width: 100%; max-width: 1200px;
+  color: var(--muted); font-size: 12px;
+}
+.lightbox-name {
+  font-family: var(--mono); font-size: 11px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.lightbox-bar .mini.wide {
+  width: auto; height: 28px; padding: 0 10px; text-decoration: none;
+  display: inline-flex; align-items: center; gap: 4px; color: var(--muted);
+}
+.lightbox-bar a.mini.wide:hover { color: var(--green); border-color: var(--green); }
+.lightbox-img {
+  max-width: 100%; max-height: calc(100vh - 70px);
+  object-fit: contain; image-rendering: pixelated;
+  box-shadow: 0 0 0 1px var(--line-strong);
+}
+
 /* 删除确认框 */
 .modal-mask {
   position: fixed; inset: 0; background: rgba(0, 0, 0, 0.62);

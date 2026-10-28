@@ -11,6 +11,7 @@ import {
   uploadImage,
 } from './api'
 import ConfirmDialog from './components/ConfirmDialog'
+import Lightbox from './components/Lightbox'
 import type {
   FavoritePrompt, GenNode, GenParams, LoraInfo, NodeImage, NodeKind, NodeSource, Viewport,
 } from './types'
@@ -100,6 +101,7 @@ export default function App() {
   const [uploadMsg, setUploadMsg] = useState('')
   const [pendingDelete, setPendingDelete] = useState<GenNode | null>(null)
   const [pendingProjectDelete, setPendingProjectDelete] = useState<string | null>(null)
+  const [preview, setPreview] = useState<{ url: string; name: string } | null>(null)
   const pickFiles = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => savePrompts(favs), [favs])
@@ -437,6 +439,10 @@ export default function App() {
       const el = e.target as HTMLElement
       const typing =
         el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable
+      if (e.key === 'Escape' && preview) {
+        setPreview(null)
+        return
+      }
       if (!selectedId) return
       if ((e.key === 'Delete' || e.key === 'Backspace') && !typing) {
         e.preventDefault()
@@ -449,7 +455,7 @@ export default function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [selectedId, requestDelete, duplicateNode])
+  }, [selectedId, requestDelete, duplicateNode, preview])
 
   const fit = useCallback(() => {
     const list = nodesRef.current
@@ -567,6 +573,7 @@ export default function App() {
           onSpawnImg2Img={spawnImg2Img}
           onDropFiles={(files, world, targetId) => void handleFiles(files, world, targetId)}
           onConnect={onConnect}
+          onPreview={(url, name) => setPreview({ url, name })}
         />
         <div className="badge-count">{nodes.length} 个节点</div>
       </main>
@@ -587,6 +594,8 @@ export default function App() {
       />
 
       {uploadMsg && <div className="toast">{uploadMsg}</div>}
+
+      {preview && <Lightbox url={preview.url} name={preview.name} onClose={() => setPreview(null)} />}
 
       {pendingProjectDelete && (() => {
         const proj = projectMeta.find((p) => p.id === pendingProjectDelete)

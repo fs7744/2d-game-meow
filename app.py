@@ -8,7 +8,7 @@
   GET  /jobs/{job_id}     查询任务
   GET  /jobs              最近任务
   GET  /assets            资产清单（读 assets/index.jsonl）
-  GET  /files/{path}      取产物
+  GET  /files/{path}      取产物（?download=1 带 Content-Disposition 直接下载）
   POST /upload            上传本机图片（原始字节）→ 磁盘路径 + 展示 URL
   DELETE /assets          真删：删磁盘产物 + 清索引
 """
@@ -421,10 +421,14 @@ async def upload_image(request: Request, name: str = "",
 
 
 @app.get("/files/{path:path}")
-def files(path: str) -> FileResponse:
+def files(path: str, download: int = 0) -> FileResponse:
+    """取产物。download=1 时带 Content-Disposition，浏览器直接存盘。"""
     target = (ASSETS / path).resolve()
     if not str(target).startswith(str(ASSETS.resolve())) or not target.exists():
         raise HTTPException(404, "not found")
+    if download:
+        # FileResponse(filename=…) 会设成 attachment；产物名已经带后缀
+        return FileResponse(target, filename=target.name)
     return FileResponse(target)
 
 

@@ -20,6 +20,7 @@ type Props = {
   onSpawnImg2Img: (id: string) => void
   onDropFiles: (files: File[], world: { x: number; y: number }, targetId?: string) => void
   onConnect: (from: string, to: string) => void
+  onPreview: (url: string, name: string) => void
 }
 
 const MIN_Z = 0.2
@@ -43,6 +44,7 @@ export default function Canvas({
   onSpawnImg2Img,
   onDropFiles,
   onConnect,
+  onPreview,
 }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null)
   const [panning, setPanning] = useState(false)
@@ -285,6 +287,7 @@ export default function Canvas({
             onHover={setHover}
             onDragOverNode={onDragOverNode}
             linkTarget={hoverId === n.id}
+            onPreview={onPreview}
           />
         ))}
       </div>

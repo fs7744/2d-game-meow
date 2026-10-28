@@ -912,6 +912,45 @@ function check(name, cond, extra = '') {
   dom.window.close()
 }
 
+// 18) 全屏预览 + 下载
+{
+  const { dom, errors } = await boot('?demo=gen')
+  const doc = dom.window.document
+  const win = dom.window
+  await new Promise((r) => setTimeout(r, 1400))
+
+  const fullBtn = [...doc.querySelectorAll('.icon-btn')].find(
+    (b) => (b.getAttribute('title') || '').includes('全屏'))
+  check('卡头有全屏预览按钮', !!fullBtn)
+
+  // 点缩略图 -> 灯箱
+  doc.querySelector('.preview img')?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 120))
+  check('点图片打开全屏预览', !!doc.querySelector('.lightbox'))
+  check('灯箱里有大图', !!doc.querySelector('.lightbox-img'))
+  const dl = doc.querySelector('.lightbox a.mini.wide')
+  check('灯箱里有下载按钮', !!dl && (dl.textContent || '').includes('下载'))
+  check('下载链接带 download=1', (dl?.getAttribute('href') || '').includes('download=1'),
+    dl?.getAttribute('href'))
+
+  // Esc 关闭
+  win.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+  await new Promise((r) => setTimeout(r, 120))
+  check('Esc 关掉灯箱', !doc.querySelector('.lightbox'))
+
+  // 卡头的 ⤢ 也能开
+  fullBtn?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 120))
+  check('卡头按钮也能打开灯箱', !!doc.querySelector('.lightbox'))
+  // 点背景关闭
+  doc.querySelector('.lightbox')?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 120))
+  check('点背景关闭灯箱', !doc.querySelector('.lightbox'))
+
+  check('灯箱场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
 const failed = results.filter((r) => !r.ok)
 console.log(`\n${results.length - failed.length}/${results.length} 通过`)
 process.exit(failed.length ? 1 : 0)

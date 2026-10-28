@@ -262,6 +262,29 @@ def test_files_serves_asset(client):
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_files_download_sets_attachment(client):
+    """?download=1 要带 Content-Disposition，浏览器才会直接存盘而不是内联显示。"""
+    import shutil
+
+    assets = Path(__file__).resolve().parents[1] / "assets"
+    d = assets / "projects" / "_dl_test_proj"
+    d.mkdir(parents=True, exist_ok=True)
+    png = d / "hero.png"
+    png.write_bytes(b"12345")
+    try:
+        rel = png.resolve().relative_to(assets.resolve()).as_posix()
+        r = client.get(f"/files/{rel}?download=1")
+        assert r.status_code == 200
+        cd = r.headers.get("content-disposition", "")
+        assert "attachment" in cd, cd
+        assert "hero.png" in cd, cd
+        assert r.content == b"12345"
+        # 不带 download 时是内联显示（没有 disposition）
+        assert client.get(f"/files/{rel}").headers.get("content-disposition") is None
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_files_blocks_path_traversal(client):
     r = client.get("/files/..%2F..%2Fapp.py")
     assert r.status_code == 404
