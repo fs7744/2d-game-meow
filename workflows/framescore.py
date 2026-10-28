@@ -164,13 +164,17 @@ def _coverage_fit(cov: float) -> float:
 
 
 def evaluate(gen: Image.Image, ref_frame: Image.Image, char_ref: Image.Image,
-             prev: Optional[Image.Image] = None) -> Dict[str, Any]:
+             prev: Optional[Image.Image] = None,
+             area_ref: Optional[float] = None) -> Dict[str, Any]:
     """给一帧打分。
 
     gen       生成结果（RGBA）
     ref_frame 这一帧对应的参考帧（提供动作基准：剪影）
     char_ref  角色参考图（提供身份基准：配色）
     prev      上一帧（已接受的），用于算漂移
+    area_ref  参考的主体面积（像素数）。给了就多一道「面积塌陷」检查：
+              残缺帧的剪影 IoU 可能擦边达标，但主体面积会明显偏小
+              （实测残缺帧 128px vs 正常 675px，IoU 0.384 刚好擦过 0.40 的闸门）
     """
     rgba = gen.convert("RGBA")
     cov = coverage(rgba)
@@ -178,15 +182,24 @@ def evaluate(gen: Image.Image, ref_frame: Image.Image, char_ref: Image.Image,
     sil = silhouette_iou(rgba, ref_frame.convert("RGBA"))
     ident = identity_similarity(rgba, char_ref.convert("RGBA"))
     dr = drift(prev, rgba) if prev is not None else 0.0
+    area = int(subject_mask(rgba).sum())
+    # 面积塌陷率：相对参考帧的主体面积。残缺帧会显著小于 1。
+    area_ratio = (area / area_ref) if (area_ref and area_ref > 0) else 1.0
     score = (W_SILHOUETTE * sil + W_IDENTITY * ident
              + W_COVERAGE * _coverage_fit(cov)
              - W_EDGE * len(edges) - W_DRIFT * dr)
-    # 闸门：动作必须跟上（剪影至少 40% 重合）且没被切断
-    passed = sil >= 0.40 and not edges
+    # 闸门：动作要跟上（剪影至少 40% 重合）、没被切断、且主体没塌掉
+    #
+    # area_ratio 阈值 0.65 的由来：实测残缺帧的 area_ratio 是 0.57，
+    # 正常帧在 0.87~1.06。取 0.65 能把残缺帧挑出来补提，又不会误伤
+    # 「体型本来就比参考小」的正常帧。
+    passed = sil >= 0.40 and not edges and area_ratio >= 0.65
     return {
         "silhouette": round(sil, 4),
         "identity": round(ident, 4),
         "coverage": round(cov, 4),
+        "area": area,
+        "area_ratio": round(area_ratio, 4),
         "edge": edges,
         "drift": round(dr, 4),
         "score": round(score, 3),

@@ -11,6 +11,9 @@ export type RefMode = 'auto' | 'pose' | 'outline'
 /** 序列帧替换：怎么处理角色 */
 export type SwapMode = 'generate' | 'recolor'
 
+/** 序列帧替换：用哪个引擎生成 */
+export type EngineMode = 'auto' | 'animatediff' | 'frame'
+
 /** 完美像素转换的每格取色方式 */
 export type PixelSample = 'median' | 'majority' | 'center'
 
@@ -79,6 +82,7 @@ export type GenParams = {
   ssPalette: number       // 序列帧替换：共享色板色数
   ssCandidates: number    // 序列帧替换：每帧生成几个候选再挑最好的
   ssGateRetries: number   // 序列帧替换：候选都不合格时补提几次
+  ssEngineMode: EngineMode // 序列帧替换：AnimateDiff 时序一致性 / 逐帧多候选
   lora: string            // LoRA 名（后端解析成路径）；空串表示不挂
   loraScale: number
 }

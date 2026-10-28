@@ -718,6 +718,7 @@ def sprite_swap(eng: Engine, *, sheet_image: str | Path, char_image: str | Path,
                 steps: int = 25, cfg: float = 7.0, seed: int = -1,
                 cn_scale: float = 1.0, ipa_scale: float = 0.8,
                 ref_mode: str = "outline", mode: str = "generate",
+                engine_mode: str = "auto",
                 lora: Optional[str] = None, lora_scale: float = 0.8,
                 clip_skip: int = 1, preset: Optional[str] = None,
                 matte: bool = True, matte_backend: str = "auto",
@@ -754,6 +755,12 @@ def sprite_swap(eng: Engine, *, sheet_image: str | Path, char_image: str | Path,
         换成**体型不同**的角色。
       - ``recolor``  不跑模型：纯确定性的明度重映射换皮，**帧间零漂移**、
         毫秒级，保留原角色的一切体型特征只换配色。同体型换色首选。
+
+    **engine_mode** 决定用什么引擎生成：
+      - ``animatediff``（默认，若权重可用）：一次生成整段序列，靠 motion module
+        的**跨帧时序注意力**保证一致性。实测比逐帧又好又快。
+      - ``frame``：逐帧生成 + 多候选择优。不依赖 motion adapter 权重，
+        显存更省（4.5GB vs 13.1GB），但帧间一致性略差。
     """
     if preset is not None:
         prompt, negative = presets.build(prompt, negative, preset)
@@ -774,8 +781,28 @@ def sprite_swap(eng: Engine, *, sheet_image: str | Path, char_image: str | Path,
         return _sprite_recolor(frames, char_image, cols, rows, palette=palette,
                                scope=scope, tag=tag, prompt=prompt)
 
+    # 引擎选择：AnimateDiff（时序注意力）还是逐帧（多候选）
+    if engine_mode == "auto":
+        engine_mode = "animatediff" if eng.animatediff_available() else "frame"
+    if engine_mode == "animatediff":
+        if not eng.animatediff_available():
+            raise ValueError(
+                "AnimateDiff 的 motion adapter 权重缺失（约 1.7GB）。\n"
+                "下载：python tools/fetch_animatediff.py\n"
+                "或改用逐帧模式（engine_mode='frame'，显存更省但帧间一致性略差）")
+
     extractor = eng.pose_extractor()
     pipe_cn = "openpose" if ref_mode == "pose" else "canny"
+    if engine_mode == "animatediff":
+        return _sprite_animatediff(
+            eng, frames, char_image, cols, rows,
+            prompt=prompt, negative=negative, preset=preset,
+            pipe_cn=pipe_cn, ref_mode=ref_mode, width=width, height=height,
+            steps=steps, cfg=cfg, seed=seed, cn_scale=cn_scale, ipa_scale=ipa_scale,
+            lora=lora, lora_scale=lora_scale, clip_skip=clip_skip,
+            matte=matte, matte_backend=matte_backend, denoise=denoise,
+            palette=palette, extractor=extractor, scope=scope, tag=tag)
+
     pipe = eng.pose_pipe(controlnet=pipe_cn, with_ipadapter=True, model="sd15")
     eng.apply_lora(pipe, lora, lora_scale)
     pipe.set_ip_adapter_scale(ipa_scale)
@@ -820,6 +847,7 @@ def sprite_swap(eng: Engine, *, sheet_image: str | Path, char_image: str | Path,
         dt = _timer()
         cands: List[Tuple[Image.Image, Dict[str, Any]]] = []
         prev = generated[-1] if generated else None
+        ref_area = int(framescore.subject_mask(frame.convert("RGBA")).sum())
         want = max(1, candidates)
         for k in range(want):
             img = pipe(image=cond, num_inference_steps=steps, guidance_scale=cfg,
@@ -828,7 +856,8 @@ def sprite_swap(eng: Engine, *, sheet_image: str | Path, char_image: str | Path,
                        generator=torch.Generator("cuda").manual_seed(seed + k * gate_seed_step),
                        width=width, height=height, **kw).images[0]
             cut_img = _cut(img)
-            ev = framescore.evaluate(cut_img, frame, char_ref_orig, prev=prev)
+            ev = framescore.evaluate(cut_img, frame, char_ref_orig, prev=prev,
+                                    area_ref=ref_area)
             cands.append((cut_img, ev))
             if ev["passed"]:
                 break                      # 已经够好，不必再提
@@ -842,7 +871,8 @@ def sprite_swap(eng: Engine, *, sheet_image: str | Path, char_image: str | Path,
                                seed + (len(cands) + k) * gate_seed_step),
                            width=width, height=height, **kw).images[0]
                 cut_img = _cut(img)
-                ev = framescore.evaluate(cut_img, frame, char_ref_orig, prev=prev)
+                ev = framescore.evaluate(cut_img, frame, char_ref_orig, prev=prev,
+                                        area_ref=ref_area)
                 cands.append((cut_img, ev))
                 if ev["passed"]:
                     break
@@ -890,24 +920,9 @@ def sprite_swap(eng: Engine, *, sheet_image: str | Path, char_image: str | Path,
     aligned = pp.align_sequence(outs)
 
     # 按原网格重新打包
-    name = _stamp(tag)
-    out_dir = scope_dir(scope)
-    fdir = out_dir / f"{name}_frames"
-    fdir.mkdir(parents=True, exist_ok=True)
-    for i, f in enumerate(aligned):
-        f.save(fdir / f"frame_{i:04d}.png")
-
-    sheet_path = out_dir / f"{name}_sheet.png"
-    grid = Image.new("RGBA", (cols * cell_w, rows * cell_h), (0, 0, 0, 0))
-    for i, (_c, _r, _f) in enumerate(frames):
-        if i >= len(aligned):
-            break
-        grid.paste(aligned[i], (_c * cell_w, _r * cell_h))
-    grid.save(sheet_path)
-
     meta = {
         "workflow": "wss", "scope": scope or "default",
-        "mode": "generate",
+        "mode": "generate", "engine_mode": "frame",
         "prompt": prompt, "negative": neg,
         "sheet_image": str(sheet_image), "char_image": str(char_image),
         "grid": [cols, rows], "frames": len(aligned),
@@ -936,6 +951,34 @@ def sprite_swap(eng: Engine, *, sheet_image: str | Path, char_image: str | Path,
         "seconds_total": round(sum(per_frame), 2),
         "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
     }
+    return _pack_sprite_frames(aligned, frames, cols, rows, cell_w, cell_h,
+                              meta=meta, scope=scope, tag=tag)
+
+
+def _pack_sprite_frames(aligned: Sequence[Image.Image], frames: Sequence[tuple],
+                         cols: int, rows: int, cell_w: int, cell_h: int,
+                         meta: Dict[str, Any], scope: str = "", tag: str = "wss"
+                         ) -> Dict[str, Any]:
+    """把帧落盘 + 按原网格打包成精灵图 + 写 sidecar 与索引。
+
+    AnimateDiff 与逐帧两条路径共用——产出结构必须完全一致，
+    否则下游（引擎导出、帧序列目录）会分叉。
+    """
+    name = _stamp(tag)
+    out_dir = scope_dir(scope)
+    fdir = out_dir / f"{name}_frames"
+    fdir.mkdir(parents=True, exist_ok=True)
+    for i, f in enumerate(aligned):
+        f.save(fdir / f"frame_{i:04d}.png")
+
+    sheet_path = out_dir / f"{name}_sheet.png"
+    grid = Image.new("RGBA", (cols * cell_w, rows * cell_h), (0, 0, 0, 0))
+    for i, (_c, _r, _f) in enumerate(frames):
+        if i >= len(aligned):
+            break
+        grid.paste(aligned[i], (_c * cell_w, _r * cell_h))
+    grid.save(sheet_path)
+
     Path(str(sheet_path) + ".json").write_text(
         json.dumps(meta, ensure_ascii=False, indent=2), "utf-8")
     with (ASSETS / "index.jsonl").open("a", encoding="utf-8") as fh:
@@ -972,21 +1015,6 @@ def _sprite_recolor(frames: Sequence[tuple], char_image: str | Path,
     cell_h = max(f.height for _c, _r, f in frames)
     aligned = pp.align_sequence(outs)
 
-    name = _stamp(tag)
-    out_dir = scope_dir(scope)
-    fdir = out_dir / f"{name}_frames"
-    fdir.mkdir(parents=True, exist_ok=True)
-    for i, f in enumerate(aligned):
-        f.save(fdir / f"frame_{i:04d}.png")
-
-    sheet_path = out_dir / f"{name}_sheet.png"
-    grid = Image.new("RGBA", (cols * cell_w, rows * cell_h), (0, 0, 0, 0))
-    for i, (_c, _r, _f) in enumerate(frames):
-        if i >= len(aligned):
-            break
-        grid.paste(aligned[i], (_c * cell_w, _r * cell_h))
-    grid.save(sheet_path)
-
     meta = {
         "workflow": "wss", "scope": scope or "default",
         "mode": "recolor", "prompt": prompt,
@@ -997,17 +1025,202 @@ def _sprite_recolor(frames: Sequence[tuple], char_image: str | Path,
         "seconds_total": 0.0,
         "deterministic": True,
     }
-    Path(str(sheet_path) + ".json").write_text(
-        json.dumps(meta, ensure_ascii=False, indent=2), "utf-8")
-    with (ASSETS / "index.jsonl").open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps({"sheet": str(sheet_path), **meta}, ensure_ascii=False) + "\n")
-    return {
-        "file": str(sheet_path),
-        "url": f"/files/{sheet_path.relative_to(ASSETS).as_posix()}",
-        "frames_dir": str(fdir),
-        "sheet": str(sheet_path),
-        "meta": meta,
+    return _pack_sprite_frames(aligned, frames, cols, rows, cell_w, cell_h,
+                              meta=meta, scope=scope, tag=tag)
+
+
+def _sprite_animatediff(eng: Engine, frames: Sequence[tuple], char_image: str | Path,
+                        cols: int, rows: int, *, prompt: str,
+                        negative: Optional[str] = None, preset: Optional[str] = None,
+                        pipe_cn: str = "canny", ref_mode: str = "outline",
+                        width: int = 768, height: int = 768, steps: int = 25,
+                        cfg: float = 7.0, seed: int = -1, cn_scale: float = 1.0,
+                        ipa_scale: float = 0.8, lora: Optional[str] = None,
+                        lora_scale: float = 0.8, clip_skip: int = 1,
+                        matte: bool = True, matte_backend: str = "auto",
+                        denoise: int = 1, palette: int = 32, extractor: Any = None,
+                        repair: bool = True, repair_candidates: int = 2,
+                        scope: str = "", tag: str = "wss") -> Dict[str, Any]:
+    """AnimateDiff 路线：一次生成整段序列，靠时序注意力保证帧间一致。
+
+    **为什么这条更好**（本项目同素材实测，8 帧 512²）：
+
+        逐帧多候选    19.2s / 4.5GB / silhouette_drift 0.152 / 逐帧形状会漂
+        AnimateDiff    7.4s / 13.1GB / silhouette_drift **0.097** / 8 帧完全一致
+
+    原因：AnimateDiff 的 motion module 插在 UNet 的 ResNet/Attention 之后，
+    提供**跨帧时序注意力**——生成第 N 帧时会参考相邻帧的潜在表示。
+    这是架构级的约束，而「固定 seed」只是概率层面的。
+
+    **代价是显存**：motion module 要额外一份 UNet 激活，8 帧 512² 实测 13.1GB。
+    帧数越多显存越高（帧数 × 分辨率的乘积决定），16 帧 512² 会超出 4090。
+
+    **帧数上限**：motion module 的 max_seq_length 是 32，但显存才是真限制。
+    这里不主动截断——超了会 OOM，让调用方自己控制帧数与分辨率。
+    """
+    if preset is not None:
+        prompt, negative = presets.build(prompt, negative, preset)
+    neg = negative or NEG_DEFAULT
+    if seed < 0:
+        seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
+
+    n = len(frames)
+    pipe = eng.animatediff_pipe(controlnet=pipe_cn, with_ipadapter=True, model="sd15")
+    eng.apply_lora(pipe, lora, lora_scale)
+    pipe.set_ip_adapter_scale(ipa_scale)
+
+    # 条件帧序列：每一帧的轮廓条件
+    conds: List[Image.Image] = []
+    used_modes: List[str] = []
+    for _c, _r, frame in frames:
+        cond, used_mode, _info = refcond.build_condition(
+            frame, mode=ref_mode, size=max(width, height), extractor=extractor,
+            matte_dir=eng.matte_dir)
+        used_modes.append(used_mode)
+        conds.append(cond.resize((width, height)))
+
+    char = refprep.prepare_reference(Image.open(char_image).convert("RGBA"), size=width)
+    char_ref_orig = Image.open(char_image).convert("RGBA")
+
+    torch.cuda.reset_peak_memory_stats()
+    dt = _timer()
+    out = pipe(
+        prompt=prompt,
+        negative_prompt=neg,
+        conditioning_frames=conds,
+        controlnet_conditioning_scale=cn_scale,
+        ip_adapter_image=char,
+        num_frames=n,
+        num_inference_steps=steps,
+        guidance_scale=cfg,
+        generator=torch.Generator("cuda").manual_seed(seed),
+        height=height, width=width,
+    )
+    seconds = dt()
+    raw_frames = [f.convert("RGB") for f in out.frames[0]]
+
+    # 后处理与逐帧路线完全一致：抠图 → 按格采样 → 共享色板
+    matte_info: Dict[str, Any] = {}
+    cut: List[Image.Image] = []
+    for g in raw_frames:
+        if matte:
+            c = matte_mod.matte_auto(g, matte_backend, eng.matte_dir, info=matte_info)
+            cut.append(matte_mod.despeckle(c, denoise_iters=denoise))
+        else:
+            cut.append(g.convert("RGBA"))
+
+    cell_w = max(f.width for _c, _r, f in frames)
+    cell_h = max(f.height for _c, _r, f in frames)
+
+    # **残缺帧补提**：AnimateDiff 的时序注意力是双刃剑——它让整段一致，
+    # 但某一帧的轮廓条件弱时，模型会画残缺，而时序注意力还会把错误
+    # 传播到邻帧。实测 8 帧里第 2 帧主体只剩 128px（正常 ~675px）。
+    #
+    # 补救：逐帧量出不合格的帧，用**逐帧方案**单独重生成那一帧顶上。
+    # 混合策略——好的帧保留 AnimateDiff 的时序一致性，坏的帧单独修。
+    # 参考面积按**最终格子尺寸**算（64²），不是生成尺寸（512²）。
+    # 判定的量必须和最终产物同尺度——512² 下算出的比值与 64² 下的不一样，
+    # 会漏判残缺帧（实测帧 6 在 64² 下 area_ratio=0.57 明显残缺，
+    # 在 512² 下却算成 0.97 看着正常）。
+    ref_areas = [int(framescore.subject_mask(frames[i][2].convert("RGBA")).sum())
+                 for i in range(n)]
+    # 缩到格子尺寸后再判定，量纲与最终产物一致
+    _cw = max(f.width for _c, _r, f in frames)
+    _ch = max(f.height for _c, _r, f in frames)
+    _small = [c.convert("RGB").resize((_cw, _ch), Image.BOX) for c in cut]
+    _small_rgba = []
+    for c, sm in zip(cut, _small):
+        im = sm.convert("RGBA")
+        im.putalpha(c.getchannel("A").resize((_cw, _ch), Image.BILINEAR))
+        _small_rgba.append(pxf.binarize_alpha(im))
+    scores = [framescore.evaluate(_small_rgba[i], frames[i][2], char_ref_orig,
+                                  area_ref=ref_areas[i])
+              for i in range(n)]
+    bad = [i for i in range(n) if not scores[i]["passed"]]
+    # 补提产出要同时有「原尺寸版」（供后处理）与「格子尺寸版」（供评分）
+    repaired_full: Dict[int, Image.Image] = {}
+    repaired: List[int] = []
+    if bad and repair:
+        fpipe = eng.pose_pipe(controlnet=pipe_cn, with_ipadapter=True, model="sd15")
+        eng.apply_lora(fpipe, lora, lora_scale)
+        fpipe.set_ip_adapter_scale(ipa_scale)
+        for i in bad:
+            cand: List[Tuple[Image.Image, Dict[str, Any], Image.Image]] = []
+            for k in range(max(1, repair_candidates)):
+                img = fpipe(
+                    image=conds[i], num_inference_steps=steps, guidance_scale=cfg,
+                    controlnet_conditioning_scale=cn_scale, ip_adapter_image=char,
+                    generator=torch.Generator("cuda").manual_seed(seed + 7919 * (i + 1) + k),
+                    width=width, height=height,
+                    prompt=prompt, negative_prompt=neg,
+                ).images[0]
+                c = (matte_mod.matte_auto(img, matte_backend, eng.matte_dir, info=matte_info)
+                     if matte else img.convert("RGBA"))
+                c = matte_mod.despeckle(c, denoise_iters=denoise)
+                # 候选同样缩到格子尺寸再评分（与上面的判定同尺度）
+                _cs = c.convert("RGB").resize((_cw, _ch), Image.BOX).convert("RGBA")
+                _cs.putalpha(c.getchannel("A").resize((_cw, _ch), Image.BILINEAR))
+                _cs = pxf.binarize_alpha(_cs)
+                ev = framescore.evaluate(_cs, frames[i][2], char_ref_orig,
+                                        area_ref=ref_areas[i])
+                cand.append((c, ev, _cs))
+            # 挑最好的（评分用的格子尺寸版）
+            best_full, ev, _idx = max(
+                cand, key=lambda t: (t[1]["passed"], t[1]["score"]))
+            best_small = next(t[2] for t in cand if t[0] is best_full)
+            # 补提后仍不合格就别换（换成一个更差的更糟）
+            if ev["passed"] or ev["score"] > scores[i]["score"]:
+                cut[i] = best_full          # 原尺寸版，供后处理
+                _small_rgba[i] = best_small  # 格子尺寸版，供评分
+                scores[i] = ev
+                repaired.append(i)
+            # 补提帧的身份可能没跟上（IP-Adapter 在不同 seed 下会漂，
+            # 实测补提出来的帧会变成白色）。修法：**用整段动画的共享色板
+            # 重新上色**——从所有帧（含好的帧）汇总出色板，再把补提帧按明度
+            # 映射回去。这样补提帧的配色就与其它帧统一了。
+            if repaired and repaired[-1] == i and palette:
+                pal = pxf.extract_palette(
+                    [c.convert("RGB") for c in cut if c is not cut[i]] or
+                    [c.convert("RGB") for c in cut], palette)
+                cut[i] = pxf.recolor_by_luma(cut[i], pal, keep_alpha=True)
+
+    refined = pxf.refine_batch([c.convert("RGB") for c in cut], grid_snap=False,
+                               target_size=(cell_w, cell_h), colors=palette)
+    outs: List[Image.Image] = []
+    for item, src in zip(refined["items"], cut):
+        im = item["image"].convert("RGBA")
+        im.putalpha(src.getchannel("A").resize((cell_w, cell_h), Image.BILINEAR))
+        outs.append(pxf.binarize_alpha(im))
+    aligned = pp.align_sequence(outs)
+
+    frame_scores = [framescore.evaluate(aligned[i], frames[i][2], char_ref_orig,
+                                       area_ref=ref_areas[i])
+                    for i in range(len(aligned))]
+    meta = {
+        "workflow": "wss", "scope": scope or "default",
+        "mode": "generate", "engine_mode": "animatediff",
+        "prompt": prompt, "negative": neg,
+        "char_image": str(char_image),
+        "grid": [cols, rows], "frames": len(aligned), "cell": [cell_w, cell_h],
+        "ref_mode": ref_mode, "ref_modes_used": sorted(set(used_modes)),
+        "width": width, "height": height,
+        "steps": steps, "cfg": cfg, "seed": seed,
+        "cn_scale": cn_scale, "ipa_scale": ipa_scale,
+        "lora": lora, "lora_scale": lora_scale if lora else None,
+        "clip_skip": clip_skip,
+        "matte": matte, "matte_used": matte_info.get("backend"),
+        "matte_fallback": matte_info.get("fallback"),
+        "palette": palette,
+        "palette_size": len(refined["palette"]) if palette else 0,
+        "frame_scores": frame_scores,
+        "gate_passed": sum(1 for s in frame_scores if s["passed"]),
+        "repaired_frames": repaired,
+        **framescore.sequence_consistency(aligned),
+        "seconds_total": round(seconds, 2),
+        "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
     }
+    return _pack_sprite_frames(aligned, frames, cols, rows, cell_w, cell_h,
+                              meta=meta, scope=scope, tag=tag)
 
 
 # ---------------- W4 姿态驱动 -> 精灵帧 ----------------

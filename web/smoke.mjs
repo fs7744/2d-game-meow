@@ -1323,6 +1323,10 @@ function check(name, cond, extra = '') {
   const modeSel = [...node.querySelectorAll('select')].find((s) =>
     [...s.options].some((o) => o.textContent.includes('换皮')))
   check('有 AI重绘/换皮 方式选择', !!modeSel)
+  // 引擎选择：AnimateDiff 时序一致性 / 逐帧多候选
+  const engineSel = [...node.querySelectorAll('select')].find((s) =>
+    [...s.options].some((o) => o.textContent.includes('AnimateDiff')))
+  check('有 AnimateDiff/逐帧 引擎选择', !!engineSel)
 
   // 拖一个本地图进来 -> 序列帧源
   const viewport = doc.querySelector('.canvas-viewport')

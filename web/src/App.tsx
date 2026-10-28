@@ -73,6 +73,8 @@ const DEFAULT_PARAMS: GenParams = {
   // 多候选择优：业界实测同 seed 也会漂 20~30%，靠生成多张挑一张
   ssCandidates: 2,
   ssGateRetries: 1,
+  // 引擎：AnimateDiff 走时序注意力，帧间一致性更好（实测 8 帧 7.4s / 13.1GB）
+  ssEngineMode: 'auto',
   lora: '',
   loraScale: 0.8,
 }

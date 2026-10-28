@@ -629,8 +629,10 @@ def test_sprite_swap_multi_candidate_picks_best(eng, assets):
                       prompt="green slime monster", negative=None, preset="sprite",
                       cols=4, rows=1, width=512, height=512, steps=6, seed=11,
                       cn_scale=1.0, ipa_scale=0.8, palette=8, matte=True,
-                      candidates=3, gate_retries=1, tag="wss_cand")
+                      candidates=3, gate_retries=1, engine_mode="frame",
+                      tag="wss_cand")
     m = r["meta"]
+    assert m["engine_mode"] == "frame"
     assert m["candidates"] == 3
     assert len(m["frame_scores"]) == 4, "每帧都要有评分"
     for ev in m["frame_scores"]:
@@ -682,3 +684,57 @@ def test_pose_clone_uses_clean_reference(eng, assets):
                      width=512, height=512, steps=6, seed=17, ref_mode="auto",
                      matte=True, tag="pc_clean")
     assert Path(r["file"]).exists()
+
+
+def test_engine_animatediff_available(eng):
+    """motion adapter 在不在。缺失时整个 AnimateDiff 路线不可用（但不是错误）。"""
+    ok = eng.animatediff_available()
+    assert isinstance(ok, bool)
+    if ok:
+        d = eng.root / eng.ANIMATEDIFF_DIR
+        assert (d / "config.json").exists()
+
+
+def test_sprite_swap_animatediff_mode(eng, assets):
+    """AnimateDiff 路线：一次生成整段，时序注意力保证帧间一致。
+
+    这条链路的价值：业界实测 IP-Adapter + ControlNet 的帧间一致性只有
+    70~80%，逐帧生成必然漂；AnimateDiff 的 motion module 提供**跨帧
+    时序注意力**，是架构级的约束。
+    """
+    if not eng.animatediff_available():
+        import pytest
+        pytest.skip("缺少 AnimateDiff motion adapter 权重")
+
+    sheet = _sprite_sheet(assets)
+    char = _slime_char(assets)
+    r = g.sprite_swap(eng, sheet_image=sheet, char_image=char,
+                      prompt="green slime monster", negative=None, preset="sprite",
+                      cols=4, rows=1, width=256, height=256, steps=6, seed=21,
+                      cn_scale=1.0, ipa_scale=0.8, palette=8, matte=True,
+                      engine_mode="animatediff", tag="wss_ad")
+    m = r["meta"]
+    assert m["engine_mode"] == "animatediff"
+    assert m["frames"] == 4
+    assert m["cell"] == [64, 64]
+    assert len(m["frame_scores"]) == 4
+    # 序列一致性指标必须写进 meta
+    assert "identity_drift" in m and "silhouette_drift" in m
+    # 残缺帧补提：记录哪些帧被单独重生成过
+    assert "repaired_frames" in m
+    frames = sorted(Path(r["frames_dir"]).glob("frame_*.png"))
+    assert len(frames) == 4
+    for p in frames:
+        assert Image.open(p).size == (64, 64)
+
+
+def test_sprite_swap_animatediff_missing_weight_errors(eng, assets, monkeypatch):
+    """权重缺失时必须明确报错并给出下载指引，而不是默默退回逐帧。"""
+    import pytest
+    monkeypatch.setattr(eng, "animatediff_available", lambda: False)
+    sheet = _sprite_sheet(assets)
+    char = _slime_char(assets)
+    with pytest.raises(ValueError, match="motion adapter"):
+        g.sprite_swap(eng, sheet_image=sheet, char_image=char,
+                      prompt="x", cols=4, rows=1, engine_mode="animatediff",
+                      tag="wss_ad_missing")

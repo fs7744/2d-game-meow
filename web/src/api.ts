@@ -295,6 +295,8 @@ export function submitSpriteSwap(
     // 多候选择优：每帧生成几个候选，按「动作贴合 + 身份贴合」挑最好的
     candidates: params.ssCandidates,
     gate_retries: params.ssGateRetries,
+    // 引擎：animatediff=时序注意力（帧间更稳），frame=逐帧多候选（更省显存）
+    engine_mode: params.ssEngineMode,
     width: params.width,
     height: params.height,
     steps: params.steps,
