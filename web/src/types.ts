@@ -77,6 +77,8 @@ export type GenParams = {
   ssCnScale: number       // 序列帧替换：动作强度
   ssIpaScale: number      // 序列帧替换：身份强度
   ssPalette: number       // 序列帧替换：共享色板色数
+  ssCandidates: number    // 序列帧替换：每帧生成几个候选再挑最好的
+  ssGateRetries: number   // 序列帧替换：候选都不合格时补提几次
   lora: string            // LoRA 名（后端解析成路径）；空串表示不挂
   loraScale: number
 }

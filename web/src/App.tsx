@@ -70,6 +70,9 @@ const DEFAULT_PARAMS: GenParams = {
   ssCnScale: 1.0,
   ssIpaScale: 0.85,
   ssPalette: 32,
+  // 多候选择优：业界实测同 seed 也会漂 20~30%，靠生成多张挑一张
+  ssCandidates: 2,
+  ssGateRetries: 1,
   lora: '',
   loraScale: 0.8,
 }

@@ -25,6 +25,8 @@ from . import refcond
 from . import repaint as rp
 from . import presets
 from . import quality
+from . import framescore
+from . import refprep
 from . import sheet as sheet_mod
 from .engine import Engine
 
@@ -654,7 +656,14 @@ def pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | Path,
         pipe_cn = "canny"
 
     # 2) 角色图 → IP-Adapter 参考
-    char = Image.open(char_image).convert("RGB").resize((width, height))
+    # **必须先做参考图预处理**（refprep.prepare_reference）：
+    #   - 透明区填白而不是黑（直接 convert("RGB") 会让透明区变黑，
+    #     实测 66.5% 的角色图是纯黑背景，IP-Adapter 会把黑色当成角色的
+    #     暗部，身份特征被污染）
+    #   - 裁到主体包围盒 + 居中留白（CLIP Vision 在 224² 上切 14×14 patch，
+    #     主体顶满画面时 patch 里只有局部纹理，编码不出整体身份）
+    #   - 像素画用最近邻缩放（LANCZOS 会把像素块糊成渐变）
+    char = refprep.prepare_reference(Image.open(char_image).convert("RGBA"), size=width)
     pipe = eng.pose_pipe(controlnet=pipe_cn, with_ipadapter=True, model="sd15")
     eng.apply_lora(pipe, lora, lora_scale)
     pipe.set_ip_adapter_scale(ipa_scale)
@@ -714,6 +723,8 @@ def sprite_swap(eng: Engine, *, sheet_image: str | Path, char_image: str | Path,
                 matte: bool = True, matte_backend: str = "auto",
                 denoise: int = 1, clean_iso: int = 1,
                 palette: int = 32, keep_alpha: bool = False,
+                candidates: int = 2, gate_retries: int = 1,
+                gate_seed_step: int = 1000,
                 scope: str = "", tag: str = "wss") -> Dict[str, Any]:
     """序列帧角色替换：把一段游戏动画里的角色换成目标角色，逐帧对齐后重新打包。
 
@@ -776,57 +787,100 @@ def sprite_swap(eng: Engine, *, sheet_image: str | Path, char_image: str | Path,
     if emb is not None:
         kw = dict(prompt_embeds=emb[0], negative_prompt_embeds=emb[1])
 
-    char = Image.open(char_image).convert("RGB").resize((width, height))
+    char = refprep.prepare_reference(Image.open(char_image).convert("RGBA"), size=width)
+    char_ref_orig = Image.open(char_image).convert("RGBA")
     torch.cuda.reset_peak_memory_stats()
     total = _timer()
 
     generated: List[Image.Image] = []
     per_frame: List[float] = []
     used_modes: List[str] = []
+    frame_scores: List[Dict[str, Any]] = []
+    attempts_used = 0
+    matte_info: Dict[str, Any] = {}
+
+    def _cut(img: Image.Image) -> Image.Image:
+        """抠图（候选评分前就要有 alpha 才能量剪影）。"""
+        if not matte:
+            return img.convert("RGBA")
+        cut_img = matte_mod.matte_auto(img.convert("RGB"), matte_backend,
+                                       eng.matte_dir, info=matte_info)
+        return matte_mod.despeckle(cut_img, denoise_iters=denoise)
+
     for _c, _r, frame in frames:
         cond, used_mode, _info = refcond.build_condition(
             frame, mode=ref_mode, size=max(width, height), extractor=extractor,
             matte_dir=eng.matte_dir)
         used_modes.append(used_mode)
-        dt = _timer()
-        out = pipe(image=cond.resize((width, height)),
-                   num_inference_steps=steps, guidance_scale=cfg,
-                   controlnet_conditioning_scale=cn_scale,
-                   ip_adapter_image=char,
-                   generator=torch.Generator("cuda").manual_seed(seed),
-                   width=width, height=height, **kw).images[0]
-        per_frame.append(dt())
-        generated.append(out)
+        cond = cond.resize((width, height))
 
-    matte_info: Dict[str, Any] = {}
-    if matte:
-        cut: List[Image.Image] = []
-        for g in generated:
-            cut.append(matte_mod.matte_auto(
-                g.convert("RGB"), matte_backend, eng.matte_dir, info=matte_info))
-            cut[-1] = matte_mod.despeckle(cut[-1], denoise_iters=denoise)
-    else:
-        cut = [g.convert("RGBA") for g in generated]
+        # **多候选择优**（业界标准做法）：同 seed 也会漂 20~30%，
+        # 所以每帧生成几个候选，按「动作贴合度 + 身份贴合度」挑最好的。
+        # 挑不出好的就用补提额度再试几轮。
+        dt = _timer()
+        cands: List[Tuple[Image.Image, Dict[str, Any]]] = []
+        prev = generated[-1] if generated else None
+        want = max(1, candidates)
+        for k in range(want):
+            img = pipe(image=cond, num_inference_steps=steps, guidance_scale=cfg,
+                       controlnet_conditioning_scale=cn_scale,
+                       ip_adapter_image=char,
+                       generator=torch.Generator("cuda").manual_seed(seed + k * gate_seed_step),
+                       width=width, height=height, **kw).images[0]
+            cut_img = _cut(img)
+            ev = framescore.evaluate(cut_img, frame, char_ref_orig, prev=prev)
+            cands.append((cut_img, ev))
+            if ev["passed"]:
+                break                      # 已经够好，不必再提
+        # 都没过闸门 → 用补提额度再试几轮
+        if not any(ev["passed"] for _i, ev in cands) and gate_retries > 0:
+            for k in range(gate_retries):
+                img = pipe(image=cond, num_inference_steps=steps, guidance_scale=cfg,
+                           controlnet_conditioning_scale=cn_scale,
+                           ip_adapter_image=char,
+                           generator=torch.Generator("cuda").manual_seed(
+                               seed + (len(cands) + k) * gate_seed_step),
+                           width=width, height=height, **kw).images[0]
+                cut_img = _cut(img)
+                ev = framescore.evaluate(cut_img, frame, char_ref_orig, prev=prev)
+                cands.append((cut_img, ev))
+                if ev["passed"]:
+                    break
+        best_img, best_ev, best_i = framescore.pick_best(cands)
+        frame_scores.append({**best_ev, "attempts": len(cands), "picked": best_i})
+        attempts_used += len(cands)
+        per_frame.append(dt())
+        generated.append(best_img)
+
+    cut: List[Image.Image] = list(generated)
 
     if keep_alpha:
         # 用参考帧的 alpha 覆盖：形状逐像素精确，帧间零漂移
         for i, (_c, _r, frame) in enumerate(frames):
             cut[i].putalpha(frame.getchannel("A"))
 
-    # 缩回原格子尺寸：序列帧要塞回游戏，尺寸必须和原帧一致
+    # 缩回原格子尺寸：序列帧要塞回游戏，尺寸必须和原帧一致。
+    #
+    # **必须从生成尺寸直接一步缩到位**：BOX 降采样会把每个像素格里的
+    # 多种颜色**混**在一起，边界就散了——像素画最忌讳这个。
+    # 正确做法是「按格采样，每格取一个代表色」。
+    # 参考帧本身是像素画（每格一色），所以格数是已知的：
+    #   生成图 768² → 原格 64²，比例 12:1，每 12×12 像素对应原图 1 格。
     cell_w = max(f.width for _c, _r, f in frames)
     cell_h = max(f.height for _c, _r, f in frames)
-    small = [f.convert("RGB").resize((cell_w, cell_h), Image.BOX) for f in cut]
-
-    # 整段动画共享一套色板
-    refined = pxf.refine_batch(small, grid_snap=False,
-                               target_size=(cell_w, cell_h), colors=palette)
+    # 整段动画共享一套色板（逐帧各自量化会让相邻帧颜色打架）
+    refined = pxf.refine_batch(
+        [c.convert("RGB") for c in cut],
+        grid_snap=False,
+        target_size=(cell_w, cell_h),
+        colors=palette,
+    )
     outs: List[Image.Image] = []
     for item, src in zip(refined["items"], cut):
         im = item["image"]
         if src.mode == "RGBA":
             im = im.convert("RGBA")
-            # alpha 要跟着缩到格子尺寸（src 还是生成时的 768²）
+            # alpha 跟着缩到格子尺寸（src 还是生成时的 768²）
             a = src.getchannel("A").resize((cell_w, cell_h), Image.BILINEAR)
             im.putalpha(a)
             im = pxf.binarize_alpha(im)
@@ -870,6 +924,14 @@ def sprite_swap(eng: Engine, *, sheet_image: str | Path, char_image: str | Path,
         "keep_alpha": keep_alpha,
         "palette": palette,
         "palette_size": len(refined["palette"]) if palette else 0,
+        # 逐帧评分（多候选择优的依据）
+        "candidates": max(1, candidates),
+        "gate_retries": gate_retries,
+        "attempts": attempts_used,
+        "frame_scores": frame_scores,
+        "gate_passed": sum(1 for s in frame_scores if s["passed"]),
+        # 整段序列的一致性（产线据此判断要不要重跑）
+        **framescore.sequence_consistency(outs),
         "per_frame_seconds": [round(s, 2) for s in per_frame],
         "seconds_total": round(sum(per_frame), 2),
         "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),

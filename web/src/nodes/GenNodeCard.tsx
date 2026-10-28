@@ -483,6 +483,36 @@ export default function GenNodeCard({
               />
               <b>{p.ssPalette > 0 ? '色' : '关'}</b>
             </label>
+            {p.ssMode === 'generate' && (
+              <>
+                <label className="strength">
+                  <span>候选</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={6}
+                    value={p.ssCandidates}
+                    onChange={(e) => setParam('ssCandidates', Math.max(1, Number(e.target.value) || 1))}
+                  />
+                  <b>张/帧</b>
+                </label>
+                <label className="strength">
+                  <span>补提</span>
+                  <input
+                    type="number"
+                    min={0}
+                    max={5}
+                    value={p.ssGateRetries}
+                    onChange={(e) => setParam('ssGateRetries', Math.max(0, Number(e.target.value) || 0))}
+                  />
+                  <b>次</b>
+                </label>
+                <div className="src-note">
+                  候选越多越稳（每帧生成几张按「动作贴合 + 身份贴合」挑一张），
+                  但更慢。
+                </div>
+              </>
+            )}
             <div className="src-note">
               源图是精灵图：横向排了几帧就填几列，纵向排了几帧就填几行；
               填 0 由后端自动检测。

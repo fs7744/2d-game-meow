@@ -1366,6 +1366,15 @@ function check(name, cond, extra = '') {
   setTa(ta, 'a blue slime monster')
   await new Promise((r) => setTimeout(r, 80))
 
+  // 先切到换皮模式：此时不需要提示词也能提交
+  // （必须放在提交之前——提交后任务进队列，按钮本来就会禁用）
+  const modeSet = Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value').set
+  modeSet.call(modeSel, 'recolor')
+  modeSel.dispatchEvent(new win.Event('change', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 150))
+  check('换皮模式下不需要提示词也能提交',
+    ssNode.querySelector('.gen-btn')?.disabled === false)
+
   ssNode.querySelector('.gen-btn').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
   await new Promise((r) => setTimeout(r, 250))
   const sub = calls.filter((c) => c.url.endsWith('/generate')).pop()
@@ -1379,14 +1388,6 @@ function check(name, cond, extra = '') {
     body.params.cols === undefined && body.params.rows === undefined &&
     typeof body.params.mode === 'string',
     JSON.stringify({ cols: body.params.cols, mode: body.params.mode }))
-
-  // 切到换皮模式后不需要提示词
-  const modeSet = Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value').set
-  modeSet.call(modeSel, 'recolor')
-  modeSel.dispatchEvent(new win.Event('change', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 150))
-  check('换皮模式下不需要提示词也能提交',
-    ssNode.querySelector('.gen-btn')?.disabled === false)
 
   check('序列帧替换场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()

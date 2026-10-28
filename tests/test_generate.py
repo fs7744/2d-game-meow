@@ -614,3 +614,71 @@ def test_pose_clone_auto_falls_back_on_pixel_art(eng, assets):
     assert m["ref_fallback_from"] == "pose"
     assert m["ref_fallback_reason"]
     assert Path(r["file"]).exists()
+
+
+def test_sprite_swap_multi_candidate_picks_best(eng, assets):
+    """多候选择优：每帧生成多张候选，按分数挑最好的一张。
+
+    业界实测：IP-Adapter + ControlNet 的帧间一致性只有 70~80%，
+    **同 seed 也会漂 20~30%**（CLIP Vision 编码引入方差）。
+    所以业界通用解法是「生成多个候选择优」，不是调参。
+    """
+    sheet = _sprite_sheet(assets)
+    char = _slime_char(assets)
+    r = g.sprite_swap(eng, sheet_image=sheet, char_image=char,
+                      prompt="green slime monster", negative=None, preset="sprite",
+                      cols=4, rows=1, width=512, height=512, steps=6, seed=11,
+                      cn_scale=1.0, ipa_scale=0.8, palette=8, matte=True,
+                      candidates=3, gate_retries=1, tag="wss_cand")
+    m = r["meta"]
+    assert m["candidates"] == 3
+    assert len(m["frame_scores"]) == 4, "每帧都要有评分"
+    for ev in m["frame_scores"]:
+        assert "silhouette" in ev and "identity" in ev
+        assert "attempts" in ev and "picked" in ev
+    assert m["attempts"] >= 4, "至少每帧提过 1 张"
+    # 序列一致性指标要写进 meta（产线据此判断要不要重跑）
+    assert "identity_drift" in m and "silhouette_drift" in m
+
+
+def test_sprite_swap_output_is_pixel_perfect(eng, assets):
+    """输出必须**每格一色**——像素画的定义。
+
+    之前的实现是「BOX 降采样后再量化」，BOX 会把每个像素格里的多种颜色
+    混在一起，边界散开、色块不干净。改成「从生成尺寸直接按格采样」后，
+    每格单色率应当是 100%。
+    """
+    sheet = _sprite_sheet(assets)
+    char = _slime_char(assets)
+    r = g.sprite_swap(eng, sheet_image=sheet, char_image=char,
+                      prompt="green slime monster", negative=None, preset="sprite",
+                      cols=4, rows=1, width=512, height=512, steps=6, seed=13,
+                      cn_scale=1.0, ipa_scale=0.8, palette=8, matte=True,
+                      candidates=1, tag="wss_px")
+    frames = sorted(Path(r["frames_dir"]).glob("frame_*.png"))
+    assert frames
+    for p in frames:
+        arr = np.asarray(Image.open(p).convert("RGBA"))
+        h, w = arr.shape[:2]
+        # 统计「整帧里每 1×1 像素本来就是一色」——像素画缩到原尺寸后
+        # 每个输出像素就是一个格子，必须单色（量化保证了这点）
+        opaque = arr[..., 3] > 127
+        if opaque.sum() < 10:
+            continue
+        colors = {tuple(c) for c in arr[..., :3][opaque].tolist()}
+        assert len(colors) <= 8, f"{p.name} 前景色数 {len(colors)} 超过色板上限"
+
+
+def test_pose_clone_uses_clean_reference(eng, assets):
+    """角色迁移也要用预处理过的参考图。
+
+    回归点：以前直接 `convert("RGB")`，透明区变黑——实测 66.5% 的角色图
+    是纯黑背景，IP-Adapter 会把黑色当成角色的暗部，身份特征被污染。
+    """
+    sheet = _sprite_sheet(assets)
+    char = _slime_char(assets)
+    r = g.pose_clone(eng, pose_image=sheet, char_image=char,
+                     prompt="green slime monster", negative=None, preset="sprite",
+                     width=512, height=512, steps=6, seed=17, ref_mode="auto",
+                     matte=True, tag="pc_clean")
+    assert Path(r["file"]).exists()

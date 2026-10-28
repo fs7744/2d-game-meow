@@ -292,6 +292,9 @@ export function submitSpriteSwap(
     cn_scale: params.ssCnScale,
     ipa_scale: params.ssIpaScale,
     palette: params.ssPalette,
+    // 多候选择优：每帧生成几个候选，按「动作贴合 + 身份贴合」挑最好的
+    candidates: params.ssCandidates,
+    gate_retries: params.ssGateRetries,
     width: params.width,
     height: params.height,
     steps: params.steps,
