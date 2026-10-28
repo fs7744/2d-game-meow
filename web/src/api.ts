@@ -116,7 +116,7 @@ function common(params: GenParams, opts: SubmitOpts) {
   }
 }
 
-async function post(workflow: 'w1' | 'w2' | 'w3' | 'w5' | 'wbg', params: Record<string, unknown>) {
+async function post(workflow: 'w1' | 'w2' | 'w3' | 'w5' | 'wbg' | 'wpx', params: Record<string, unknown>) {
   const r = await fetch(`${base}/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -199,6 +199,29 @@ export function submitAiRepaint(
     feather: params.rpFeather,
     match_color: params.rpMatchColor,
     palette_snap: params.rpPaletteSnap,
+  })
+}
+
+/**
+ * 完美像素转换（wpx）。任意图 → 像素完美（每格一色、边界对齐）的像素画。
+ * 不跑模型，纯确定性处理。
+ */
+export function submitPixelify(
+  params: GenParams,
+  opts: SubmitOpts,
+  initImage: string,
+) {
+  return post('wpx', {
+    init_image: initImage,
+    // target 为 0 时后端用自动检测到的网格，不给 target
+    target: params.pxTarget > 0 ? [params.pxTarget, params.pxTarget] : undefined,
+    colors: params.pxColors,
+    sample_method: params.pxSample,
+    grid_snap: params.pxGridSnap,
+    transparent_bg: params.pxTransparentBg,
+    // snap_to=0 表示不吸附，保留检测到的原始网格
+    snap_to: params.pxSnapTo > 0 ? params.pxSnapTo : null,
+    scope: opts.scope || undefined,
   })
 }
 

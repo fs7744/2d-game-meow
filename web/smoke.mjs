@@ -152,8 +152,8 @@ function check(name, cond, extra = '') {
   const doc = dom.window.document
   check('渲染出顶栏品牌', doc.querySelector('.brand .title')?.textContent?.includes('喵叫'))
   check('空状态引导可见', !!doc.querySelector('.canvas-empty .empty-card'))
-  check('侧栏存在（节点 6 项：图生成 / 图生图 / 局部重绘 / 局部AI重绘 / 抠图 / 图片）',
-    section(doc, '节点')?.querySelectorAll('.rail-item').length === 6,
+  check('侧栏存在（节点 7 项：图生成 / 图生图 / 局部重绘 / 局部AI重绘 / 像素转换 / 抠图 / 图片）',
+    section(doc, '节点')?.querySelectorAll('.rail-item').length === 7,
     String(section(doc, '节点')?.querySelectorAll('.rail-item').length))
   check('有「项目」分组（独立画布）', !!section(doc, '项目'))
   check('缩放显示 100%', doc.querySelector('.zoom-val')?.textContent === '100%')
@@ -1147,6 +1147,70 @@ function check(name, cond, extra = '') {
   check('能关掉笔刷', !doc.querySelector('.mask-editor'))
 
   check('局部AI重绘场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 22) 像素转换节点：源图 + 参数 + 提交 wpx
+{
+  const { dom, errors } = await boot('')
+  const doc = dom.window.document
+  const win = dom.window
+
+  const nodeItems = [...section(doc, '节点').querySelectorAll('.rail-item')]
+  const pxItem = nodeItems.find((it) => (it.querySelector('b')?.textContent || '') === '像素转换')
+  check('侧栏有「像素转换」节点类型', !!pxItem)
+  pxItem?.querySelector('.rail-add').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 150))
+
+  const node = doc.querySelector('.node')
+  check('新建出像素转换节点',
+    (node?.querySelector('.node-kind')?.textContent || '') === '像素转换',
+    node?.querySelector('.node-kind')?.textContent)
+  check('有源图区', !!node?.querySelector('.src-box'))
+  check('没有源图时不能提交', node?.querySelector('.gen-btn')?.disabled === true)
+  check('有边长/色数/吸附/取色/两个开关',
+    node?.querySelectorAll('.px-opts .strength input[type=number]').length === 3 &&
+    !!node?.querySelector('.px-opts select') &&
+    node.querySelectorAll('.px-opts .check').length === 2,
+    String(node?.querySelectorAll('.px-opts .check').length))
+
+  // 接一个图片节点当源
+  const viewport = doc.querySelector('.canvas-viewport')
+  const file = new win.File([new Uint8Array([1])], 'pic.png', { type: 'image/png' })
+  const ev = new win.Event('drop', { bubbles: true })
+  Object.defineProperties(ev, {
+    clientX: { value: 300 }, clientY: { value: 200 },
+    dataTransfer: { value: { types: ['Files'], files: [file], getData: () => '' } },
+  })
+  viewport.dispatchEvent(ev)
+  await new Promise((r) => setTimeout(r, 400))
+  const imgNode = [...doc.querySelectorAll('.node')].find(
+    (n) => (n.querySelector('.node-kind')?.textContent || '') === '图片')
+  const pxNode = [...doc.querySelectorAll('.node')].find(
+    (n) => (n.querySelector('.node-kind')?.textContent || '') === '像素转换')
+  imgNode?.querySelector('.conn.out')
+    .dispatchEvent(new win.PointerEvent('pointerdown', { bubbles: true, button: 0 }))
+  await new Promise((r) => setTimeout(r, 60))
+  pxNode.dispatchEvent(new win.PointerEvent('pointerover', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 60))
+  win.dispatchEvent(new win.PointerEvent('pointerup', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 150))
+  check('连线后像素转换节点接上了源',
+    !!pxNode.querySelector('.src-box select')?.value)
+  check('有源图后可以提交了', pxNode.querySelector('.gen-btn')?.disabled === false)
+
+  pxNode.querySelector('.gen-btn').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 250))
+  const sub = calls.filter((c) => c.url.endsWith('/generate')).pop()
+  const body = JSON.parse(sub.body)
+  check('提交 workflow=wpx', body.workflow === 'wpx', body.workflow)
+  check('带上了源图路径', typeof body.params.init_image === 'string'
+    && body.params.init_image.length > 0, body.params.init_image)
+  check('带上了色数与取色方式',
+    typeof body.params.colors === 'number' && typeof body.params.sample_method === 'string',
+    JSON.stringify({ c: body.params.colors, s: body.params.sample_method }))
+
+  check('像素转换场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 

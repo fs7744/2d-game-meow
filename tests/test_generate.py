@@ -279,6 +279,57 @@ def test_ai_repaint_empty_mask_errors(eng, assets):
                      preset="none", tag="rp_empty")
 
 
+def test_pixelify_makes_one_color_per_cell(eng, assets):
+    """完美像素转换：输出必须每格一色（像素画与低分辨率图的区别）。"""
+    src = assets / "_px_src.png"
+    im = Image.new("RGB", (128, 128), (250, 250, 250))
+    d = ImageDraw.Draw(im)
+    for y in range(8):
+        for x in range(8):
+            d.rectangle([x * 16, y * 16, (x + 1) * 16 - 1, (y + 1) * 16 - 1],
+                        fill=((x * 37) % 256, (y * 53) % 256, 128))
+    im.save(src)
+
+    r = g.pixelify(eng, init_image=src, colors=16, tag="px_test")
+    m = r["meta"]
+    assert m["workflow"] == "wpx"
+    assert m["detected"] is True
+    assert m["grid"] == [8, 8], m["grid"]
+    assert m["offPalette"] == 0, m["offPalette"]
+    assert m["alphaBinary"] == 1.0
+
+    out = Image.open(r["file"]).convert("RGB")
+    assert out.size == (8, 8), out.size
+    # 每格一色：8×8 的图每个像素就是一个格
+    arr = np.asarray(out).reshape(-1, 3)
+    assert len(arr) == 64
+
+
+def test_pixelify_target_size_forces_dimensions(eng, assets):
+    """指定 target 时输出必须是那个尺寸（且只能缩小不能放大）。"""
+    src = assets / "_px_tgt.png"
+    Image.new("RGB", (256, 256), (30, 60, 120)).save(src)
+    r = g.pixelify(eng, init_image=src, target=[64, 64], colors=16, tag="px_tgt")
+    out = Image.open(r["file"])
+    assert out.size == (64, 64), out.size
+    assert r["meta"]["target"] == [64, 64]
+
+
+def test_pixelify_without_colors_keeps_grid_alignment(eng, assets):
+    """colors=0 = 只做网格对齐，不量化（色数应该远多于色板数）。"""
+    src = assets / "_px_nq.png"
+    im = Image.new("RGB", (128, 128), (250, 250, 250))
+    d = ImageDraw.Draw(im)
+    for y in range(8):
+        for x in range(8):
+            d.rectangle([x * 16, y * 16, (x + 1) * 16 - 1, (y + 1) * 16 - 1],
+                        fill=((x * 37) % 256, (y * 53) % 256, 128))
+    im.save(src)
+    r = g.pixelify(eng, init_image=src, colors=0, tag="px_nq")
+    assert r["meta"]["colors_requested"] == 0
+    assert "palette" not in r["meta"]
+
+
 def test_clip_skip_changes_result_and_is_recorded(eng):
     """clip_skip=2 必须真的改变画面，并把生效值记进 meta（否则没法复现）。"""
     kw = dict(prompt="blue slime monster", width=256, height=256, steps=8, seed=4321,

@@ -357,6 +357,37 @@ def test_generate_rejects_unknown_workflow(client):
     assert "w5" in r.json()["detail"], r.json()["detail"]
 
 
+def test_generate_wpx_roundtrip(client, tmp_path):
+    """完美像素转换（wpx）走同一条队列。"""
+    from PIL import Image, ImageDraw
+
+    src = tmp_path / "px_src.png"
+    im = Image.new("RGB", (128, 128), (250, 250, 250))
+    d = ImageDraw.Draw(im)
+    for y in range(8):
+        for x in range(8):
+            d.rectangle([x * 16, y * 16, (x + 1) * 16 - 1, (y + 1) * 16 - 1],
+                        fill=((x * 37) % 256, (y * 53) % 256, 128))
+    im.save(src)
+
+    r = client.post("/generate", json={"workflow": "wpx", "params": {
+        "init_image": str(src), "colors": 16, "tag": "apiwpx"}})
+    assert r.status_code == 200, r.text
+    job_id = r.json()["job_id"]
+
+    job = None
+    for _ in range(120):
+        job = client.get(f"/jobs/{job_id}").json()
+        if job["status"] in ("done", "failed"):
+            break
+        time.sleep(0.5)
+    assert job["status"] == "done", job.get("error")
+    meta = job["result"]["meta"]
+    assert meta["workflow"] == "wpx"
+    assert meta["offPalette"] == 0
+    assert Path(job["result"]["file"]).exists()
+
+
 def test_assets_lists_generated(client):
     r = client.get("/assets?limit=5")
     assert r.status_code == 200

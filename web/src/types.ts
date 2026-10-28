@@ -1,7 +1,11 @@
 export type Preset = 'sprite' | 'portrait' | 'wuxia' | 'pixel' | 'none'
 
 /** 节点类型：图生成（w1）/ 图生图（w2）/ 图片 / 抠图换背景（wbg）/ 局部重绘（w3）/ 局部 AI 重绘（w5） */
-export type NodeKind = 'gen' | 'img2img' | 'image' | 'bg' | 'inpaint' | 'airepaint'
+export type NodeKind =
+  | 'gen' | 'img2img' | 'image' | 'bg' | 'inpaint' | 'airepaint' | 'pixelify'
+
+/** 完美像素转换的每格取色方式 */
+export type PixelSample = 'median' | 'majority' | 'center'
 
 /** 抠图节点的背景方式 */
 export type BgMode = 'alpha' | 'color' | 'image'
@@ -42,6 +46,12 @@ export type GenParams = {
   rpFeather: number       // AI 重绘：贴回羽化 px（0 = 硬边）
   rpMatchColor: boolean   // AI 重绘：接缝带做色彩校正
   rpPaletteSnap: boolean  // AI 重绘：把重绘区里接近源色的杂色吸回源图色板
+  pxTarget: number        // 像素转换：目标原生像素边长（0 = 用自动检测的网格）
+  pxColors: number        // 像素转换：共享色板色数（0 = 不量化）
+  pxSample: PixelSample   // 像素转换：每格取色方式
+  pxGridSnap: boolean     // 像素转换：是否做网格检测/吸附
+  pxTransparentBg: boolean// 像素转换：把纯色背景转成透明
+  pxSnapTo: number        // 像素转换：网格吸附到这个数的整数倍（0 = 不吸附）
   lora: string            // LoRA 名（后端解析成路径）；空串表示不挂
   loraScale: number
 }

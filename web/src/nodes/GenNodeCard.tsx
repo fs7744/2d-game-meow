@@ -85,6 +85,7 @@ export default function GenNodeCard({
   const isBg = node.kind === 'bg'
   const isInpaint = node.kind === 'inpaint'
   const isAiRepaint = node.kind === 'airepaint'
+  const isPixelify = node.kind === 'pixelify'
   const [maskOpen, setMaskOpen] = useState(false)
   // 源图可以是上游节点的产物、图片节点的本地图，也可以是节点上直接记的绝对路径
   const hasSource = !!(
@@ -279,10 +280,13 @@ export default function GenNodeCard({
         <span
           className={`node-kind${isI2I ? ' i2i' : ''}${isImg ? ' img' : ''}${
             isBg ? ' bg' : ''
-          }${isInpaint ? ' inpaint' : ''}${isAiRepaint ? ' airepaint' : ''}`}
+          }${isInpaint ? ' inpaint' : ''}${isAiRepaint ? ' airepaint' : ''}${
+            isPixelify ? ' pixelify' : ''
+          }`}
         >
-          {isImg ? '图片' : isBg ? '抠图' : isAiRepaint ? '局部AI重绘'
-            : isInpaint ? '局部重绘' : isI2I ? '图生图' : '图生成'}
+          {isImg ? '图片' : isBg ? '抠图' : isPixelify ? '像素转换'
+            : isAiRepaint ? '局部AI重绘'
+              : isInpaint ? '局部重绘' : isI2I ? '图生图' : '图生成'}
         </span>
         {job && <span className={`node-state s-${job.status}`}>{statusLabel(job.status)}</span>}
         <span className="spacer" />
@@ -341,7 +345,105 @@ export default function GenNodeCard({
         />
       </div>
 
-      {isAiRepaint ? (
+      {isPixelify ? (
+        <div className="node-body pixelify-body">
+          {sourceBox}
+          <div className="px-opts">
+            <label className="strength">
+              <span>边长</span>
+              <input
+                type="number"
+                min={0}
+                max={512}
+                value={p.pxTarget}
+                onChange={(e) => setParam('pxTarget', Number(e.target.value) || 0)}
+              />
+              <b>{p.pxTarget > 0 ? 'px' : '自动'}</b>
+            </label>
+            <label className="strength">
+              <span>色数</span>
+              <input
+                type="number"
+                min={0}
+                max={256}
+                value={p.pxColors}
+                onChange={(e) => setParam('pxColors', Number(e.target.value) || 0)}
+              />
+              <b>色</b>
+            </label>
+            <label className="bg-mode">
+              取色
+              <select
+                value={p.pxSample}
+                onChange={(e) => setParam('pxSample', e.target.value as typeof p.pxSample)}
+              >
+                <option value="median">中位色（最稳）</option>
+                <option value="majority">多数表决</option>
+                <option value="center">中心点</option>
+              </select>
+            </label>
+            <label className="strength">
+              <span>吸附</span>
+              <input
+                type="number"
+                min={0}
+                max={64}
+                value={p.pxSnapTo}
+                onChange={(e) => setParam('pxSnapTo', Number(e.target.value) || 0)}
+              />
+              <b>{p.pxSnapTo > 0 ? '倍' : '关'}</b>
+            </label>
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={p.pxGridSnap}
+                onChange={(e) => setParam('pxGridSnap', e.target.checked)}
+              />
+              网格检测（关掉=普通降采样）
+            </label>
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={p.pxTransparentBg}
+                onChange={(e) => setParam('pxTransparentBg', e.target.checked)}
+              />
+              纯色背景转透明
+            </label>
+          </div>
+          {hasImage && (
+            <div
+              className="preview"
+              onClick={(e) => {
+                e.stopPropagation()
+                onPreview?.(job!.url!, previewName)
+              }}
+              title="点击全屏预览"
+            >
+              <img src={job!.url} alt="像素画" draggable={false} />
+            </div>
+          )}
+          <button
+            className="gen-btn"
+            disabled={busy || !hasSource}
+            onClick={onGenerate}
+            title={hasSource ? undefined : '先接一张源图（连线或直接拖图）'}
+          >
+            {busy ? '转换中…' : '转成像素画'}
+          </button>
+          {hasImage && (
+            <button
+              className="mini wide"
+              onClick={(e) => {
+                e.stopPropagation()
+                onSpawnImg2Img()
+              }}
+              title="以这张为源新建图生图节点"
+            >
+              ↳ 图生图
+            </button>
+          )}
+        </div>
+      ) : isAiRepaint ? (
         <div className="node-body inpaint-body">
           {sourceBox}
           <div className="mask-box">

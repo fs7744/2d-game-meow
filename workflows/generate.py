@@ -19,6 +19,7 @@ from PIL import Image
 from . import anim as anim_mod
 from . import clip as clip_mod
 from . import matte as matte_mod
+from . import pixelfy as pxf
 from . import postprocess as pp
 from . import repaint as rp
 from . import presets
@@ -544,6 +545,59 @@ def ai_repaint(eng: Engine, *, image: str | Path, mask: str | Path, prompt: str,
         "seconds": seconds,
         "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
     }, scope=scope)
+
+
+# ---------------- WPX 完美像素转换 ----------------
+
+def pixelify(eng: Engine, *, init_image: str | Path,
+             target: Optional[Sequence[int]] = None,
+             grid_size: Optional[Sequence[int]] = None,
+             grid_snap: bool = True,
+             sample_method: str = "median",
+             colors: int = 32, transparent_bg: bool = False,
+             snap_to: Optional[int] = 16,
+             scope: str = "", tag: str = "wpx") -> Dict[str, Any]:
+    """完美像素转换：任意图 → **像素完美**的像素画。**不跑模型**，纯确定性处理。
+
+    和 W1 里那个「像素化」的区别：那个是「BOX 降采样 + 最近邻放大 + 中位切分
+    量化」三板斧，网格不对齐（AI 图的像素块常在 37.3px 这种非整格上），
+    边界会被切在色块中间混成脏斑。这个走完整的**网格检测 → 吸附 → 每格单色**
+    流程，输出的是「每格一色、边界对齐」的真正像素画。
+
+    参数：
+      target        目标原生像素尺寸（如 128×128）；不给就用检测到的网格
+      grid_size     手动指定网格（跳过检测）；动画序列后续帧用它锁定首帧的网格
+      grid_snap     关掉就退化成普通降采样
+      sample_method 每格取色：median（默认，最稳）/ majority / center
+      colors        共享色板色数；0 = 不量化（只做网格对齐）
+      transparent_bg 把纯色背景转成透明
+      snap_to       网格边长吸附到这个数的整数倍（16 = 精灵常用尺寸）；
+                    None = 保留检测到的原始值
+
+    输出是**原生像素尺寸**（如 128×128），不预放大——放大交给渲染端
+    （前端用 image-rendering: pixelated），这样以后想换 4 倍/16 倍不用重算。
+    """
+    src = Image.open(init_image).convert("RGBA")
+    res = pxf.refine_batch([src], grid_snap=grid_snap,
+                           grid_size=grid_size, target_size=target,
+                           sample_method=sample_method, colors=colors,
+                           transparent_bg=transparent_bg, snap_to=snap_to)
+    item = res["items"][0]
+    out = item["image"]
+    meta = item["meta"]
+    if colors:
+        meta["palette"] = [list(c) for c in res["palette"]]
+    meta.update({
+        "workflow": "wpx", "scope": scope or "default",
+        "init_image": str(init_image),
+        "target": list(target) if target else None,
+        "grid_size": list(grid_size) if grid_size else None,
+        "grid_snap": bool(grid_snap), "sample_method": sample_method,
+        "colors_requested": int(colors),
+        "transparent_bg": bool(transparent_bg),
+        "snap_to": snap_to,
+    })
+    return _save(out, _stamp(tag), "pixelify", meta, scope=scope)
 
 
 # ---------------- W4 姿态驱动 -> 精灵帧 ----------------

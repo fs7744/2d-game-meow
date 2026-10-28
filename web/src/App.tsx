@@ -8,7 +8,7 @@ import {
 } from './store/projects'
 import {
   deleteAssets, fetchJob, fetchLoras, fetchModels, health, submitAiRepaint, submitImg2Img,
-  submitInpaint, submitMatte, submitTxt2Img, uploadImage,
+  submitInpaint, submitMatte, submitPixelify, submitTxt2Img, uploadImage,
 } from './api'
 import ConfirmDialog from './components/ConfirmDialog'
 import Lightbox from './components/Lightbox'
@@ -48,6 +48,13 @@ const DEFAULT_PARAMS: GenParams = {
   rpFeather: 4,         // 贴回羽化 4px
   rpMatchColor: true,   // 接缝带色彩校正
   rpPaletteSnap: false, // 色板吸附：像素素材才需要
+  // 完美像素转换：0 = 自动检测网格；32 色是像素画的常见上限
+  pxTarget: 0,
+  pxColors: 32,
+  pxSample: 'median',
+  pxGridSnap: true,
+  pxTransparentBg: false,
+  pxSnapTo: 16,           // 网格吸附到 16 的整数倍（精灵常用尺寸）
   lora: '',
   loraScale: 0.8,
 }
@@ -266,7 +273,8 @@ export default function App() {
         : type === 'bg' ? 'bg'
           : type === 'inpaint' ? 'inpaint'
             : type === 'airepaint' ? 'airepaint'
-              : 'gen'
+              : type === 'pixelify' ? 'pixelify'
+                : 'gen'
     setNodes((list) => {
       // 原点放多个时阶梯错开，避免完全重叠
       const sameSpot = list.filter((n) => n.x === at.x && n.y === at.y).length
@@ -302,7 +310,8 @@ export default function App() {
         try {
           const up = await uploadImage(f, currentId)
           if (target && (target.kind === 'img2img' || target.kind === 'bg'
-            || target.kind === 'inpaint' || target.kind === 'airepaint')) {
+            || target.kind === 'inpaint' || target.kind === 'airepaint'
+            || target.kind === 'pixelify')) {
             patchNode(target.id, { source: { path: up.path } })
             continue
           }
@@ -326,7 +335,7 @@ export default function App() {
   const onConnect = useCallback((from: string, to: string) => {
     const target = nodesRef.current.find((n) => n.id === to)
     // 能接源的节点：图生图（要底图）、抠图与局部重绘（要源图）；文生图没有「底」这回事
-    if (!target || !['img2img', 'bg', 'inpaint', 'airepaint'].includes(target.kind)) return
+    if (!target || !['img2img', 'bg', 'inpaint', 'airepaint', 'pixelify'].includes(target.kind)) return
     if (target.id === from) return
     patchNode(to, { source: { nodeId: from } })
   }, [patchNode])
@@ -412,7 +421,7 @@ export default function App() {
     if (needPrompt && !node.params.prompt.trim()) return
     let init: string | undefined
     if (node.kind === 'img2img' || node.kind === 'bg' || node.kind === 'inpaint'
-      || node.kind === 'airepaint') {
+      || node.kind === 'airepaint' || node.kind === 'pixelify') {
       init = sourcePathOf(node)
       if (!init) {
         // 没有源图就没法提交，直接在节点上报错，别让用户等一个必然失败的任务
@@ -426,7 +435,11 @@ export default function App() {
     patchNode(id, { job: { id: 'pending', status: 'queued', startedAt: Date.now() } })
     try {
       let jobId: string
-      if (node.kind === 'airepaint') {
+      if (node.kind === 'pixelify') {
+        const r = await submitPixelify(
+          node.params, { model, matteBackend, scope: currentId }, init!)
+        jobId = r.job_id
+      } else if (node.kind === 'airepaint') {
         const r = await submitAiRepaint(
           node.params, { model, matteBackend, scope: currentId }, init!, node.params.maskPath)
         jobId = r.job_id

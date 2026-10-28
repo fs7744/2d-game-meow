@@ -283,6 +283,12 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
 .mask-thumb span { font-size: 9px; color: var(--muted-2); }
 .node-kind.inpaint { color: var(--pink); }
 .node-kind.airepaint { color: var(--green); }
+.node-kind.pixelify { color: var(--yellow); }
+
+/* 像素转换节点 */
+.px-opts { display: flex; flex-direction: column; gap: 4px; }
+.px-opts .strength input[type='number'] { width: 58px; height: 22px; }
+.pixelify-body .preview img { image-rendering: pixelated; }
 
 /* 节点里的「更多设置」折叠区 */
 .adv {

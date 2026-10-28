@@ -11,7 +11,9 @@ type Props = {
   onCreateProject: () => void
   onRenameProject: (id: string, name: string) => void
   onDeleteProject: (id: string) => void
-  onAddNode: (kind?: 'gen' | 'img2img' | 'image' | 'bg' | 'inpaint' | 'airepaint') => void
+  onAddNode: (
+    kind?: 'gen' | 'img2img' | 'image' | 'bg' | 'inpaint' | 'airepaint' | 'pixelify',
+  ) => void
   canApply: boolean
   onApplyFav: (text: string) => void
   onRemoveFav: (id: string) => void
@@ -188,6 +190,21 @@ export default function Sidebar({
               <em>拿已有图改内容 / 改画风</em>
             </span>
             <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('img2img')}>+</button>
+          </div>
+          <div
+            className="rail-item"
+            draggable
+            onDragStart={(e) => {
+              e.dataTransfer.setData('application/x-node-type', 'pixelify')
+              e.dataTransfer.effectAllowed = 'copy'
+            }}
+            title="完美像素转换：任意图 → 每格一色、边界对齐的像素画"
+          >
+            <span className="rail-item-main">
+              <b>像素转换</b>
+              <em>网格对齐 · 每格一色</em>
+            </span>
+            <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('pixelify')}>+</button>
           </div>
           <div
             className="rail-item"
