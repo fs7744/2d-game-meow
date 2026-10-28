@@ -430,7 +430,7 @@ start.bat                   # Windows 双击或命令行
 cd web && npm ci && npm run build     # 构建
 cd .. && python app.py                # FastAPI 同时托管 dist 与 API → http://127.0.0.1:8000
 cd web && npm run dev                 # 或开发模式（:5173，代理到 8000）
-npm run smoke                         # 无浏览器渲染冒烟（jsdom，108 项断言）
+npm run smoke                         # 无浏览器渲染冒烟（jsdom，118 项断言）
 ```
 
 > `start.bat` 刻意保持**纯 ASCII**：cmd.exe 按 OEM 代码页解析 .bat，中文注释会切断命令行
@@ -467,6 +467,26 @@ npm run smoke                         # 无浏览器渲染冒烟（jsdom，108 �
 | 训练入口 | 顶栏「训练 LoRA」浮层面板，有进度条/loss/显存 | 不用切命令行 |
 | **提示词语言** | 节点内固定提示「SD1.5 只支持英文」；输入含中日韩字符时实时转红警告 | 实测中文被拆成字节级乱 token（'背剑侠客' → `è ĥ Į å ī`），模型只会瞎猜甚至把乱码当文字画出来 |
 | **提示词收藏** | 提示词框右上角 ☆ 收藏，左栏「提示词收藏」列出，点条目填入选中节点 | 常用提示词不必反复输入；按文本去重、可删除、localStorage 持久化 |
+
+### 删除：确认框 + 真删
+
+删节点不再是一按就消失。点 ✕ 或按 `Delete` 会弹确认框，三个出口：
+
+| 出口 | 行为 |
+|---|---|
+| 取消 | 什么都不做 |
+| 仅移除节点 | 只从画布拿掉，**磁盘文件留着**（后悔了还能在 assets 里找回） |
+| 真删（含文件） | 调 `DELETE /assets`，把产物、sidecar、raw 一起删掉，**不可恢复** |
+
+几个细节：
+
+- **被引用时禁掉真删**：如果这些文件还被别的节点当源图，弹窗会说明「还有 N 个节点
+  把它当源图」，并把真删按钮置灰——否则会默默把下游图生图节点变成「没有源的节点」。
+- **删除会断开连线**：删掉的节点如果被别的节点连着，那些节点的源会被清空（不悬空）。
+- **索引同步清理**：真删会把 `assets/index.jsonl` 里对应的条目摘掉，`/assets` 不会
+  再列出已经不存在的文件。
+- **路径穿越被拒**：后端只允许删 `assets/` 目录内的文件，`../` 一律跳过（返回
+  `skipped`，前端能看到「哪几条没删掉」）。
 
 ### 图片节点、拖本地图、连线
 
@@ -578,9 +598,9 @@ python tools/video.py i2v assets/cat.png "the same character walking" -o assets/
 ## 测试
 
 ```bash
-python -m pytest tests -q        # 171 个用例，约 180s（含 SDXL 慢用例）
+python -m pytest tests -q        # 174 个用例，约 180s（含 SDXL 慢用例）
 # 全套超过 2 分钟会被超时杀掉，分批跑：
-#   pytest tests --ignore=tests/test_models.py   # 160 个，约 110s
+#   pytest tests --ignore=tests/test_models.py   # 163 个，约 115s
 #   pytest tests/test_models.py                  # 11 个，约 60s
 ```
 
@@ -589,7 +609,7 @@ python -m pytest tests -q        # 171 个用例，约 180s（含 SDXL 慢用例
 | `tests/test_postprocess.py` | 锚点、逐帧对齐、打包几何、色板上限、alpha 二值化、裁边、**像素块单色性**、**前景块计数** | 11 |
 | `tests/test_generate.py` | 同 seed 逐像素一致、不同 seed 相异、色板生效、**重绘选区外不变**、序列帧数、**闸门重提与批量挑帧**、**clip_skip 生效与 meta 记录**、主体数上报、**图生图后处理与 raw 留存**、显存回收、缺权重报错 | 16 |
 | `tests/test_controlnet.py` | Canny conditioning 生效、Tile 放大结构相关性 > 0.5、像素块均匀性 | 3 |
-| `tests/test_api.py` | 全部端点、队列串行性、**w2 队列往返（含 raw 留存）**、**上传端点（坏文件/空文件/文件名清洗）**、路径穿越防护、400/404 | 16 |
+| `tests/test_api.py` | 全部端点、队列串行性、**w2 队列往返（含 raw 留存）**、**上传端点（坏文件/空文件/文件名清洗）**、**真删（连带 sidecar/raw、索引清理、路径穿越防护、索引不可删）**、400/404 | 19 |
 | `tests/test_pose.py` | 检测器切换、18 点完整性、关节在画面内且头高于髋、骨架渲染、双后端一致性、引擎内的姿态提取器单例、精灵图切片 CLI | 7 |
 | `tests/test_quality.py` | 前景占比/质心/漂移、**贴边检测**（含未抠图时整体失效）、无模型时「无法判定」、关节数影响排序与闸门 | 11 |
 | `tests/test_io_paths.py` | 视频抽帧、GIF、精灵图切片（含空格子）、CLI 错误码、非 8 倍数尺寸重绘、cols 夹取、环境自检 JSON、LoRA 空接口 | 11 |
@@ -696,6 +716,16 @@ curl -X POST "http://127.0.0.1:8000/upload?name=hero.png" \
 # -> {"path": "D:/.../assets/uploads/ab12cd34ef_hero.png",
 #     "url": "/files/uploads/ab12cd34ef_hero.png", "w": 512, "h": 512, "format": "PNG"}
 ```
+
+真删（连 sidecar 与 raw 一起删，并把索引里的条目摘掉）：
+
+```bash
+curl -X DELETE http://127.0.0.1:8000/assets -H "Content-Type: application/json" \
+     -d '{"paths": ["D:/.../assets/w1_20261028_090000_0000.png"]}'
+# -> {"deleted": [...], "skipped": [...], "not_found": [...], "count": 3}
+```
+
+`assets/` 之外的路径会被跳过（`skipped`），`index.jsonl` 不可删。
 
 拿到 `path` 就能当图生图的源：`{"workflow": "w2", "params": {"init_image": "<path>", ...}}`。
 校验：体积 ≤20MB、真能解码（坏文件 400）、格式白名单（PNG/JPEG/WEBP/BMP/GIF）、

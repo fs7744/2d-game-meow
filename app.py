@@ -10,6 +10,7 @@
   GET  /assets            资产清单（读 assets/index.jsonl）
   GET  /files/{path}      取产物
   POST /upload            上传本机图片（原始字节）→ 磁盘路径 + 展示 URL
+  DELETE /assets          真删：删磁盘产物 + 清索引
 """
 from __future__ import annotations
 
@@ -55,6 +56,12 @@ _trains: Dict[str, Dict[str, Any]] = {}
 class Job(BaseModel):
     workflow: str = Field(..., description="w1|w2|w3|w4")
     params: Dict[str, Any] = Field(default_factory=dict)
+
+
+class DeleteReq(BaseModel):
+    """真删请求。paths 里可以是绝对路径，也可以是相对 assets 的路径。"""
+
+    paths: list[str] = Field(default_factory=list)
 
 
 class TrainReq(BaseModel):
@@ -248,6 +255,91 @@ def assets(limit: int = 50) -> Dict[str, Any]:
         return {"count": 0, "items": []}
     lines = idx.read_text("utf-8").strip().splitlines()[-limit:]
     return {"count": len(lines), "items": [json.loads(x) for x in reversed(lines)]}
+
+
+def _safe_asset_path(p: str) -> Optional[Path]:
+    """把用户给的路径解析成 assets 内的真实文件；不在 assets 内一律拒绝。
+
+    这是删除接口唯一的防线：路径穿越（../）能把 assets 外的文件删掉。
+    """
+    try:
+        t = Path(p)
+        if not t.is_absolute():
+            # 相对路径有两种习惯：相对 assets、相对项目根。先试存在的那个
+            cand_a = ASSETS / t
+            cand_r = ROOT / t
+            t = cand_a if cand_a.exists() else (cand_r if cand_r.exists() else cand_a)
+        t = t.resolve()
+    except (OSError, ValueError):
+        return None
+    root = ASSETS.resolve()
+    if not str(t).startswith(str(root)):
+        return None
+    if t.name in ("index.jsonl", "uploads"):     # 索引与目录不能删
+        return None
+    return t
+
+
+@app.delete("/assets")
+def delete_assets(req: DeleteReq) -> Dict[str, Any]:
+    """真删：删磁盘上的产物（含 sidecar 与 raw），并把索引里的条目摘掉。
+
+    删一个 PNG 会连带删：
+      - `<name>.png`        成品
+      - `<name>.png.json`   sidecar
+      - `<name>_raw.png`    后处理之前的原图（如果存在）
+    上传的图片（assets/uploads/）同样能删。
+
+    返回逐条结果：删掉的、被拒绝的、没找到的——前端要能告诉用户「哪几条没删掉」。
+    """
+    deleted: list[str] = []
+    skipped: list[str] = []
+    gone: list[str] = []
+    targets: set[Path] = set()
+    for raw in req.paths:
+        t = _safe_asset_path(raw)
+        if t is None:
+            skipped.append(raw)
+            continue
+        targets.add(t)
+        if t.suffix == ".png":                  # 连带 sidecar 与 raw
+            targets.add(t.with_suffix(t.suffix + ".json"))
+            targets.add(t.with_name(t.stem + "_raw" + t.suffix))
+
+    for t in sorted(targets):
+        try:
+            if t.exists():
+                t.unlink()
+                deleted.append(str(t))
+            else:
+                gone.append(str(t))
+        except OSError as exc:
+            skipped.append(f"{t}: {exc}")
+
+    # 索引里对应的条目也要摘掉，否则 /assets 还会列出已经不存在的文件
+    idx = ASSETS / "index.jsonl"
+    if idx.exists() and deleted:
+        try:
+            kept = []
+            for line in idx.read_text("utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    kept.append(line)
+                    continue
+                paths = {str(item.get("file") or ""), str(item.get("raw") or ""),
+                         str(item.get("sheet") or "")}
+                if paths & set(deleted):
+                    continue
+                kept.append(line)
+            idx.write_text("\n".join(kept) + ("\n" if kept else ""), "utf-8")
+        except OSError:
+            pass
+
+    return {"deleted": deleted, "skipped": skipped, "not_found": gone,
+            "count": len(deleted)}
 
 
 @app.post("/upload")

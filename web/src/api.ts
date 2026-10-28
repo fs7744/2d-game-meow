@@ -35,6 +35,28 @@ export async function uploadImage(file: File): Promise<UploadedImage> {
   return r.json() as Promise<UploadedImage>
 }
 
+export type DeleteResult = {
+  deleted: string[]
+  skipped: string[]
+  not_found: string[]
+  count: number
+}
+
+/**
+ * 真删：把产物从磁盘上删掉（连带 sidecar 与 raw），并清掉资产索引里的条目。
+ * 后端会拒绝 assets 目录之外的路径。
+ */
+export async function deleteAssets(paths: string[]): Promise<DeleteResult> {
+  if (paths.length === 0) return { deleted: [], skipped: [], not_found: [], count: 0 }
+  const r = await fetch(`${base}/assets`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ paths }),
+  })
+  if (!r.ok) throw new Error(`删除失败：HTTP ${r.status}`)
+  return r.json() as Promise<DeleteResult>
+}
+
 export type SubmitOpts = { model?: string; matteBackend?: string }
 
 /** 两个工作流共用的参数。w2 不接受 width/height（尺寸由源图决定）。 */

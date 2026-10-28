@@ -1,6 +1,7 @@
 """服务层：端点契约、队列、路径穿越防护。"""
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
@@ -142,6 +143,54 @@ def test_upload_rejects_garbage(client):
 
 def test_upload_rejects_empty_body(client):
     assert client.post("/upload", content=b"").status_code == 400
+
+
+def test_delete_assets_removes_file_sidecar_and_raw(client):
+    """真删：删一个 PNG 要连带删掉 sidecar 与 raw，并把索引里的条目摘掉。"""
+    assets = Path(__file__).resolve().parents[1] / "assets"
+    png = assets / "_del_api_test.png"
+    png.write_bytes(b"x")
+    (assets / "_del_api_test.png.json").write_text("{}", encoding="utf-8")
+    (assets / "_del_api_test_raw.png").write_bytes(b"x")
+
+    idx = assets / "index.jsonl"
+    before = idx.read_text("utf-8") if idx.exists() else ""
+    if before and not before.endswith("\n"):
+        before += "\n"
+    idx.write_text(before + json.dumps({"file": str(png), "tag": "t"}) + "\n", encoding="utf-8")
+
+    r = client.request("DELETE", "/assets", json={"paths": [str(png)]})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["count"] >= 1
+    assert not png.exists()
+    assert not (assets / "_del_api_test.png.json").exists()
+    assert not (assets / "_del_api_test_raw.png").exists()
+    # 索引里那条也没了
+    assert "_del_api_test" not in idx.read_text("utf-8")
+
+
+def test_delete_assets_blocks_path_traversal(client):
+    """路径穿越必须被拒：否则 ../ 能把 assets 之外的文件删掉。"""
+    outside = Path(__file__).resolve().parents[1] / "_del_outside.txt"
+    outside.write_text("keep me", encoding="utf-8")
+    try:
+        r = client.request("DELETE", "/assets", json={"paths": [str(outside), "../outside.txt"]})
+        assert r.status_code == 200
+        assert r.json()["count"] == 0
+        assert r.json()["skipped"]
+        assert outside.exists(), "assets 外的文件不能被删"
+    finally:
+        outside.unlink(missing_ok=True)
+
+
+def test_delete_assets_protects_index(client):
+    """索引文件不能被删（删了资产清单就废了）。"""
+    idx = Path(__file__).resolve().parents[1] / "assets" / "index.jsonl"
+    r = client.request("DELETE", "/assets", json={"paths": ["index.jsonl", str(idx)]})
+    assert r.status_code == 200
+    assert r.json()["count"] == 0
+    assert idx.exists()
 
 
 def test_assets_lists_generated(client):

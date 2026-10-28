@@ -4,8 +4,10 @@ import Sidebar from './components/Sidebar'
 import TrainPanel from './components/TrainPanel'
 import { hasPrompt, loadPrompts, removePrompt, savePrompts, togglePrompt } from './store/prompts'
 import {
-  fetchJob, fetchLoras, fetchModels, health, submitImg2Img, submitTxt2Img, uploadImage,
+  deleteAssets, fetchJob, fetchLoras, fetchModels, health, submitImg2Img, submitTxt2Img,
+  uploadImage,
 } from './api'
+import ConfirmDialog from './components/ConfirmDialog'
 import type {
   FavoritePrompt, GenNode, GenParams, LoraInfo, NodeImage, NodeKind, NodeSource, Viewport,
 } from './types'
@@ -107,6 +109,7 @@ export default function App() {
   const [model, setModel] = useState<string>('sd15')
   const [matteBackend, setMatteBackend] = useState('auto')
   const [uploadMsg, setUploadMsg] = useState('')
+  const [pendingDelete, setPendingDelete] = useState<GenNode | null>(null)
   const pickFiles = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => savePrompts(favs), [favs])
@@ -237,10 +240,45 @@ export default function App() {
     })
   }, [])
 
-  const deleteNode = useCallback((id: string) => {
-    setNodes((list) => list.filter((n) => n.id !== id))
-    setSelectedId((cur) => (cur === id ? null : cur))
+  /** 删除前先弹确认框：删节点 ≠ 删文件，两件事分开。 */
+  const requestDelete = useCallback((id: string) => {
+    const n = nodesRef.current.find((x) => x.id === id)
+    if (!n) return
+    setPendingDelete(n)
   }, [])
+
+  /** 待删节点的文件清单 + 还被谁引用。 */
+  const deleteInfo = useCallback((n: GenNode) => {
+    const files = [n.job?.path, n.job?.raw, n.image?.path]
+      .filter((x): x is string => !!x)
+      .map((path) => ({ path, name: path.split(/[\\/]/).pop() || path }))
+    const refs = nodesRef.current.filter(
+      (o) => o.id !== n.id && o.source?.nodeId === n.id,
+    ).length
+    return { files, refs }
+  }, [])
+
+  const finishDelete = useCallback(async (hard: boolean) => {
+    const n = pendingDelete
+    setPendingDelete(null)
+    if (!n) return
+    if (hard) {
+      const { files } = deleteInfo(n)
+      try {
+        await deleteAssets(files.map((f) => f.path))
+      } catch (e) {
+        setUploadMsg(`删除失败：${e instanceof Error ? e.message : '未知错误'}`)
+        window.setTimeout(() => setUploadMsg(''), 5000)
+      }
+    }
+    // 从画布移除，并断开指向它的连线（否则下游图生图节点会悬空）
+    setNodes((list) =>
+      list
+        .filter((x) => x.id !== n.id)
+        .map((x) => (x.source?.nodeId === n.id ? { ...x, source: undefined } : x)),
+    )
+    setSelectedId((cur) => (cur === n.id ? null : cur))
+  }, [pendingDelete, deleteInfo])
 
   /**
    * 图生图的源图绝对路径。优先用上游节点后处理**之前**的原图（raw）：
@@ -325,7 +363,7 @@ export default function App() {
       if (!selectedId) return
       if ((e.key === 'Delete' || e.key === 'Backspace') && !typing) {
         e.preventDefault()
-        deleteNode(selectedId)
+        requestDelete(selectedId)
       }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'd') {
         e.preventDefault()
@@ -334,7 +372,7 @@ export default function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [selectedId, deleteNode, duplicateNode])
+  }, [selectedId, requestDelete, duplicateNode])
 
   const fit = useCallback(() => {
     const list = nodesRef.current
@@ -436,7 +474,7 @@ export default function App() {
           onPatch={patchNode}
           onGenerate={generate}
           onDuplicate={duplicateNode}
-          onDelete={deleteNode}
+          onDelete={requestDelete}
           isFavorite={isFavorite}
           onToggleFavorite={toggleFavorite}
           loras={loras}
@@ -464,6 +502,35 @@ export default function App() {
       />
 
       {uploadMsg && <div className="toast">{uploadMsg}</div>}
+
+      {pendingDelete && (() => {
+        const { files, refs } = deleteInfo(pendingDelete)
+        const kindLabel =
+          pendingDelete.kind === 'image' ? '图片' : pendingDelete.kind === 'img2img' ? '图生图' : '图生成'
+        const summary = `${kindLabel}节点${pendingDelete.params.prompt
+          ? `：「${pendingDelete.params.prompt.slice(0, 28)}」`
+          : ''}`
+        return (
+          <ConfirmDialog
+            title="删除这个节点？"
+            summary={summary}
+            files={files}
+            note={
+              files.length
+                ? '「真删」会连磁盘上的产物（PNG / sidecar / raw）一起删掉，不可恢复。'
+                : '这个节点还没有产出文件，删掉只是从画布上移除。'
+            }
+            blockReason={
+              refs > 0
+                ? `还有 ${refs} 个节点把它当源图，删了文件那些节点就没有源了——先断开连线或只移除节点。`
+                : undefined
+            }
+            onCancel={() => setPendingDelete(null)}
+            onRemove={() => void finishDelete(false)}
+            onDelete={() => void finishDelete(true)}
+          />
+        )
+      })()}
 
       {trainOpen && (
         <TrainPanel onClose={() => setTrainOpen(false)} onTrained={reloadLoras} />

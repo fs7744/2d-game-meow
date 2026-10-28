@@ -17,6 +17,12 @@ function makeFetch() {
     if (String(url).endsWith('/health')) {
       return { ok: true, json: async () => ({ ok: true, engine: { device: 'Fake GPU 24GB' } }) }
     }
+    if (String(url).endsWith('/assets') && (init.method || 'GET') === 'DELETE') {
+      return {
+        ok: true,
+        json: async () => ({ deleted: ['D:////x////out.png'], skipped: [], not_found: [], count: 1 }),
+      }
+    }
     if (String(url).includes('/upload')) {
       return {
         ok: true,
@@ -197,16 +203,30 @@ function check(name, cond, extra = '') {
   const delBtn = [...doc.querySelectorAll('.icon-btn')].find((b) => b.textContent === '✕')
   delBtn?.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
   await new Promise((r) => setTimeout(r, 60))
-  check('删除后 2 个节点', doc.querySelectorAll('.node').length === 2,
+  check('删除先弹确认框', !!doc.querySelector('.modal-mask'))
+  check('确认框有三个出口', doc.querySelectorAll('.modal-actions button').length === 3,
+        String(doc.querySelectorAll('.modal-actions button').length))
+  // 「仅移除节点」：只从画布拿掉，不动磁盘
+  const onlyRemove = [...doc.querySelectorAll('.modal-actions button')]
+    .find((b) => (b.textContent || '').includes('仅移除'))
+  onlyRemove?.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 60))
+  check('仅移除后 2 个节点', doc.querySelectorAll('.node').length === 2,
         String(doc.querySelectorAll('.node').length))
+  check('仅移除不调用删除接口', !calls.some((c) => c.method === 'DELETE'))
 
-  // 键盘删除：先选中一个节点，再按 Delete
+  // 键盘删除：先选中一个节点，再按 Delete -> 也弹确认框
   const node = doc.querySelector('.node')
   node?.dispatchEvent(new dom.window.Event('pointerdown', { bubbles: true }))
   await new Promise((r) => setTimeout(r, 40))
   dom.window.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Delete', bubbles: true }))
   await new Promise((r) => setTimeout(r, 60))
-  check('Delete 键删除节点', doc.querySelectorAll('.node').length === 1,
+  check('Delete 键也弹确认框', !!doc.querySelector('.modal-mask'))
+  const cancel = [...doc.querySelectorAll('.modal-actions button')]
+    .find((b) => (b.textContent || '').includes('取消'))
+  cancel?.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 60))
+  check('取消后节点还在', doc.querySelectorAll('.node').length === 2,
         String(doc.querySelectorAll('.node').length))
 
   check('交互场景无脚本错误', errors.length === 0, errors[0] || '')
@@ -736,6 +756,40 @@ function check(name, cond, extra = '') {
     String(doc.querySelectorAll('svg.links path.link').length))
 
   check('连线场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 15) 真删：确认框里选「真删」-> 调 DELETE /assets，节点消失
+{
+  calls.length = 0
+  const { dom, errors } = await boot('?demo=gen')
+  const doc = dom.window.document
+  const win = dom.window
+  await new Promise((r) => setTimeout(r, 1400))
+
+  const delBtn = [...doc.querySelectorAll('.icon-btn')].find((b) => b.textContent === '✕')
+  delBtn?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 80))
+  check('出图节点删除也弹确认框', !!doc.querySelector('.modal-mask'))
+  const files = [...doc.querySelectorAll('.modal-files li')].map((li) => li.textContent)
+  check('确认框列出要删的文件', files.length > 0, JSON.stringify(files))
+
+  const hard = [...doc.querySelectorAll('.modal-actions button')]
+    .find((b) => (b.textContent || '').includes('真删'))
+  hard?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 200))
+
+  const del = calls.find((c) => c.method === 'DELETE' && c.url.endsWith('/assets'))
+  check('调用了 DELETE /assets', !!del)
+  if (del) {
+    const body = JSON.parse(del.body)
+    check('提交了要删的路径', Array.isArray(body.paths) && body.paths.length > 0,
+        JSON.stringify(body.paths))
+  }
+  check('真删后节点消失', doc.querySelectorAll('.node').length === 0,
+        String(doc.querySelectorAll('.node').length))
+
+  check('真删场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 
