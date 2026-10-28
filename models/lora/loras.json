@@ -11,12 +11,13 @@
   },
   "px_illustrious": {
     "label": "像素游戏素材 Pixel Art（推荐）",
-    "trigger": "pixelart",
+    "trigger": "",
     "scale": 0.75,
     "preset": "pixel",
+    "matte": true,
     "size_mb": 36.1,
     "source": "civitai:?@121559",
-    "note": "实测最佳像素风：512×576 + pixel=4 + palette=24 + 抠图，出红蓝骑士级别干净精灵。务必用 preset=pixel（不要再写 pixel art）。Civitai 下载 55382 / 赞 5357。",
+    "note": "实测最佳像素风：768² + pixel=6 + palette=24 + 抠图。务必用 preset=pixel（不要再写 pixel art）。Civitai 下载 55382 / 赞 5357。注意：触发词实测有害——加 pixelart 后 3 个种子全部多主体（2~5 个），不加是 3/3 单主体，所以这里留空。背景一定会画彩色/纹理底，必须开抠图。",
     "base": "sd15"
   },
   "px_toolkit": {

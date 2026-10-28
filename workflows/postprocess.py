@@ -19,12 +19,18 @@ from PIL import Image
 
 # ---------------- 像素化 / 调色板 ----------------
 
-def pixelate(img: Image.Image, block: int) -> Image.Image:
-    """按 block 像素栅格吸附：先降采样再最近邻放大回原尺寸。"""
+def pixelate(img: Image.Image, block: int, resample=Image.BOX) -> Image.Image:
+    """按 block 像素栅格吸附：先降采样再最近邻放大回原尺寸。
+
+    降采样用 BOX（面积平均）而不是 LANCZOS：LANCZOS 有负瓣，会在色块交界处
+    振铃出「过冲色」（深色线旁边冒一圈更亮的边），像素化之后再量化，这些过冲色
+    会变成额外的脏色阶。BOX 是纯平均，不造假色。实测同一张图的唯一色数下降、
+    锐度上升（见 tools/ab_quality.py）。
+    """
     if block <= 1:
         return img
     w, h = img.size
-    small = img.resize((max(1, w // block), max(1, h // block)), Image.LANCZOS)
+    small = img.resize((max(1, w // block), max(1, h // block)), resample)
     return small.resize((w, h), Image.NEAREST)
 
 
@@ -98,6 +104,21 @@ def clean_isolated(img: Image.Image, passes: int = 1) -> Image.Image:
             arr[1:-1, 1:-1, :3][no_up] = arr[1:-1, :-2, :3][no_up]
 
     return Image.fromarray(arr, "RGBA")
+
+
+def foreground_blobs(img: Image.Image, min_px: int = 400) -> int:
+    """抠图后前景连通域个数（只数面积 >= min_px 的块）。
+
+    >1 通常意味着「画面里挤了多个主体」：SD1.5 画小体型怪物（史莱姆、小动物）时
+    很爱复制一份，负向词压不住。数出来写进 meta，产线可以据此退图，而不是等
+    打包成精灵图之后才用肉眼发现。只在抠图后有意义（未抠图时全图是一个域）。
+    """
+    alpha = np.asarray(img.convert("RGBA").getchannel("A"))
+    if alpha.min() == 255:
+        return 1
+    fg = (alpha > 127).astype(np.uint8)
+    n, _, stats, _ = cv2.connectedComponentsWithStats(fg, connectivity=8)
+    return int(sum(1 for a in stats[1:, cv2.CC_STAT_AREA] if a >= min_px))
 
 
 def trim_alpha(img: Image.Image, pad: int = 0) -> Image.Image:

@@ -23,6 +23,10 @@ _DEFAULT: Dict[str, Any] = {
     "preset": None,
     "note": "",
     "source": "",
+    # 选了这个 LoRA 后节点该跟着改的开关。实测像素 LoRA 都会在背景上画
+    # 彩色/纹理底，不抠图就没法用，所以允许注册表声明「必须抠图」。
+    "matte": None,        # None=不改动用户的勾选；True/False=强制
+    "clip_skip": None,    # None=用节点当前值；2=多数动漫/像素 LoRA 的训练设置
 }
 
 

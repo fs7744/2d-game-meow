@@ -41,6 +41,16 @@ def test_txt2img_model_echoed(eng):
     assert r["meta"]["model"] == "sd15"
 
 
+def test_clip_skip_ignored_on_sdxl(eng):
+    """SDXL 走两个文本编码器，clip_skip 不生效；要记成 1 而不是假装生效。"""
+    if "sdxl" not in eng.available_models():
+        pytest.skip("未下载 SDXL 底模")
+    r = g.txt2img(eng, prompt="blue slime", width=256, height=256, steps=4, seed=1,
+                  preset="none", model="sdxl", clip_skip=2, tag="cs_xl")
+    assert r["meta"]["clip_skip"] == 1
+    assert r["meta"]["model"] == "sdxl"
+
+
 @pytest.mark.slow
 def test_w3_sdxl_uses_base_weights(eng, assets, root):
     """W3 也支持 SDXL：直接用 base 权重跑 StableDiffusionXLInpaintPipeline。

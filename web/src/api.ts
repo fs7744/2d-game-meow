@@ -36,6 +36,7 @@ export async function submitTxt2Img(
         pixel: params.pixel,
         palette: params.palette,
         matte: params.matte,
+        clip_skip: params.clipSkip,
         // 底模与抠图后端是全局设置，不在节点参数里
         model: opts.model || 'sd15',
         matte_backend: opts.matteBackend || 'auto',
@@ -71,6 +72,8 @@ export async function fetchJob(jobId: string): Promise<JobState> {
     seconds: typeof meta.seconds === 'number' ? (meta.seconds as number) : undefined,
     peakVram:
       typeof meta.peak_vram_gb === 'number' ? (meta.peak_vram_gb as number) : undefined,
+    subjects:
+      typeof meta.subjects === 'number' ? (meta.subjects as number) : undefined,
   }
 }
 

@@ -84,3 +84,30 @@ def test_fetch_pick_include_and_exclude():
     rules = {"include": ["openpose", "canny"], "exclude": ["canny"]}
     names = [p for p, _ in pick(files, rules)]
     assert names == ["control_v11p_sd15_openpose.pth"]
+
+
+def test_long_prompt_keeps_suffix():
+    """用户主体描述写超了要截主体，绝不能把契约后缀丢掉。
+
+    老实现是 prompt + suffix 直接交给 CLIP，超出 77 token 时被静默丢弃的恰好是
+    后缀（扁平背景 / 硬描边），画出来背景就脏了 —— 这正是「提示词越长越难看」
+    的真实原因。
+    """
+    long_prompt = ", ".join(["a very detailed knight with flame patterns"] * 8)
+    pos, _ = presets.build(long_prompt, None, "sprite")
+    assert pos.endswith(presets.SPRITE_SUFFIX)
+    assert presets.rough_tokens(pos) <= 77
+
+
+def test_fit_never_returns_empty_for_comma_free_text():
+    """整段没有逗号且超预算时，按词截断，不能返回空串（等于没有负向词）。"""
+    text = " ".join(["ugly"] * 200)
+    out = presets.fit(text, budget=20)
+    assert out and out.startswith("ugly")
+    assert presets.rough_tokens(out) <= 20
+
+
+def test_fit_drops_tail_sections():
+    text = ", ".join(f"word{i}" for i in range(40))
+    out = presets.fit(text, budget=20)
+    assert "word0" in out and "word39" not in out

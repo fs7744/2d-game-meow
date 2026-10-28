@@ -12,6 +12,7 @@ export type GenParams = {
   pixel: number
   palette: number
   matte: boolean
+  clipSkip: number        // 1=最后一层（默认）；2=跳过最后一层（多数动漫/像素 LoRA 的训练设置）
   lora: string            // LoRA 名（后端解析成路径）；空串表示不挂
   loraScale: number
 }
@@ -23,6 +24,8 @@ export type LoraInfo = {
   trigger: string
   scale: number
   preset: Preset | null
+  matte?: boolean | null  // 选中时联动勾选「抠图」；null/缺失表示不改
+  clip_skip?: number | null
   base?: string          // 适配的底模；缺失按 sd15 处理
   note?: string
   source?: string
@@ -40,6 +43,7 @@ export type JobState = {
   seed?: number
   seconds?: number
   peakVram?: number
+  subjects?: number      // 抠图后的前景块数；>1 说明画了多个主体
   startedAt?: number
 }
 

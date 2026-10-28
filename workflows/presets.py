@@ -80,12 +80,29 @@ def rough_tokens(text: str) -> int:
     return int(words * 1.35 + cjk * 1.6)
 
 
+def _cut_words(text: str, budget: int) -> str:
+    """整段都塞不下时按词截断。没有逗号的超长提示词不能直接丢成空串。"""
+    keep: list[str] = []
+    used = 0
+    for w in text.split():
+        cost = rough_tokens(w) + 1
+        if used + cost > budget:
+            break
+        keep.append(w)
+        used += cost
+    return " ".join(keep)
+
+
 def fit(text: str, budget: int = 77) -> str:
     """按逗号段截断到 token 预算内。
 
     为什么不靠模型自己截：SD1.5 超出 77 token 是**静默丢弃**，不会报错。负向词
     往往写很长（实测武侠契约写到 113），末尾那几条等于没写。这里显式按段累加，
     保证「排在前面的重要词」一定进得去，并把被砍掉的部分暴露出来。
+
+    两个边界情况必须处理，否则「截断」会比不截断更糟：
+    - 只有一段却没有逗号（用户直接粘了一长串）→ 按词截，不能返回空串；
+    - 第一段就超预算 → 同上，至少要留下开头那几个词。
     """
     if rough_tokens(text) <= budget:
         return text
@@ -96,16 +113,33 @@ def fit(text: str, budget: int = 77) -> str:
             continue
         cost = rough_tokens(part) + 1                      # 逗号
         if total + cost > budget:
+            if not out:                                    # 一句都没进去：退化成按词截
+                tail = _cut_words(part, budget)
+                if tail:
+                    out.append(tail)
             break
         out.append(part)
         total += cost
     return ", ".join(out)
 
 
-def build(prompt: str, negative: str | None, preset: str = "sprite") -> tuple[str, str]:
+def build(prompt: str, negative: str | None, preset: str = "sprite",
+          budget: int = 77) -> tuple[str, str]:
+    """用户描述 + 契约后缀，两侧都在 77 token 预算内。
+
+    **预算先留给后缀**：后缀（扁平背景 / 硬描边 / 全身）才是产线契约，用户主体
+    描述写超了应该截主体，而不是把契约末尾丢掉——老实现是直接 `prompt + suffix`
+    交给 CLIP，超长时被静默丢弃的恰好是后缀，画出来背景就脏了。
+    """
     if preset not in PRESETS:
         raise ValueError(f"未知 preset: {preset}（可选 {', '.join(PRESETS)}）")
     suffix, neg = PRESETS[preset]
-    pos = f"{prompt.strip()}, {suffix}" if suffix else prompt
+    user = (prompt or "").strip().strip(",")
+    if suffix:
+        room = max(8, budget - rough_tokens(suffix) - 1)
+        user = fit(user, room)
+        pos = f"{user}, {suffix}" if user else suffix
+    else:
+        pos = fit(user, budget)
     negs = ", ".join(x for x in (neg, (negative or "").strip()) if x)
-    return pos, fit(negs)
+    return pos, fit(negs, budget)

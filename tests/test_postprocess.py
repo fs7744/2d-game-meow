@@ -95,3 +95,30 @@ def test_trim_alpha_crops_to_bbox():
     ImageDraw.Draw(im).rectangle([30, 20, 69, 79], fill=(255, 0, 0, 255))
     t = pp.trim_alpha(im, pad=2)
     assert t.size == (44, 64)                 # 40x60 + 2px 边
+
+
+def test_pixelate_keeps_blocks_single_color():
+    """像素化后每个 block×block 格子必须是单色，否则放大看就是脏点。
+
+    BOX（面积平均）不会像 LANCZOS 那样在色块交界处振铃出过冲色；振铃色再被量化，
+    就变成额外的脏色阶（实测同一张图 32 色 vs 30 色）。
+    """
+    import numpy as np
+
+    im = Image.new("RGB", (64, 64), (250, 250, 250))
+    ImageDraw.Draw(im).rectangle([16, 16, 47, 47], fill=(30, 60, 200))
+    out = np.asarray(pp.pixelate(im, 8).convert("RGB"))
+    cells = out.reshape(8, 8, 8, 8, 3).transpose(0, 2, 1, 3, 4).reshape(-1, 64, 3)
+    assert (cells == cells[:, :1, :]).all()
+
+
+def test_foreground_blobs_counts_separated_subjects():
+    one = _frame(40)
+    assert pp.foreground_blobs(one) == 1
+    two = one.copy()
+    ImageDraw.Draw(two).rectangle([90, 40, 120, 110], fill=(60, 200, 60, 255))
+    assert pp.foreground_blobs(two) == 2
+    # 小块不算主体，避免把噪点当成第二个角色（两块分别 3360px / 2201px）
+    assert pp.foreground_blobs(two, min_px=2500) == 1
+    # 没抠图时全图是一个域
+    assert pp.foreground_blobs(Image.new("RGB", (64, 64), (1, 2, 3))) == 1

@@ -6,6 +6,7 @@ W1 txt2img / W2 img2img / W3 inpaint / W4 poseswap(+sprite sheet)。
 """
 from __future__ import annotations
 
+import itertools
 import json
 import time
 from pathlib import Path
@@ -15,6 +16,7 @@ import torch
 from PIL import Image
 
 from . import anim as anim_mod
+from . import clip as clip_mod
 from . import matte as matte_mod
 from . import postprocess as pp
 from . import presets
@@ -30,8 +32,17 @@ NEG_DEFAULT = (
 )
 
 
+_seq = itertools.count()
+
+
 def _stamp(tag: str) -> str:
-    return f"{tag}_{time.strftime('%Y%m%d_%H%M%S')}"
+    """产物文件名：`<tag>_<时间>_<序号>`。
+
+    秒级时间戳不够：同一秒内连跑两次（队列很快、测试同 seed 对照）会得到同名文件，
+    后一次直接把前一次的 PNG 覆盖掉——两路结果指向同一个文件，对照实验全废。
+    序号不追求跨进程唯一，只要同进程内单调即可。
+    """
+    return f"{tag}_{time.strftime('%Y%m%d_%H%M%S')}_{next(_seq) % 10000:04d}"
 
 
 def _save(img: Image.Image, name: str, tags: str, meta: dict) -> Dict[str, Any]:
@@ -48,6 +59,20 @@ def _save(img: Image.Image, name: str, tags: str, meta: dict) -> Dict[str, Any]:
 def _timer():
     t0 = time.perf_counter()
     return lambda: round(time.perf_counter() - t0, 2)
+
+
+def _skip_embeds(pipe, prompt: str, negative: str, clip_skip: int, model: str):
+    """clip_skip>1 时返回 (正向 embeds, 负向 embeds)，否则 None。
+
+    只有 SD1.5 走这条路：SDXL 的两个文本编码器 + pooled embeds 要一起改，
+    收益远小于 SD1.5（而且 SDXL 模型页基本不写 clip skip）。
+    """
+    if not clip_skip or clip_skip <= 1:
+        return None
+    if model != "sd15":
+        print(f"[warn] clip_skip={clip_skip} 只对 SD1.5 生效，{model} 已忽略")
+        return None
+    return clip_mod.embeds(pipe, prompt, negative, clip_skip)
 
 
 # 质量档位（实测，RTX 4090，fp16，DPM++ 2M Karras）：
@@ -70,7 +95,8 @@ def txt2img(eng: Engine, *, prompt: str, negative: Optional[str] = None,
             seed: int = -1, lora: Optional[str] = None, lora_scale: float = 0.8,
             pixel: int = 0, palette: int = 0, preset: str = "sprite",
             matte: bool = False, matte_backend: str = "auto", denoise: int = 1,
-            clean_iso: int = 1, model: str = "sd15", tag: str = "w1") -> Dict[str, Any]:
+            clean_iso: int = 1, model: str = "sd15", clip_skip: int = 1,
+            tag: str = "w1") -> Dict[str, Any]:
     prompt, negative = presets.build(prompt, negative, preset)
     ntok = presets.rough_tokens(prompt)
     if ntok > 77:
@@ -79,11 +105,16 @@ def txt2img(eng: Engine, *, prompt: str, negative: Optional[str] = None,
     eng.apply_lora(pipe, lora, lora_scale)
     if seed < 0:
         seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
+    neg = negative or NEG_DEFAULT
     gen = torch.Generator("cuda").manual_seed(seed)
+    kw: Dict[str, Any] = dict(prompt=prompt, negative_prompt=neg)
+    emb = _skip_embeds(pipe, prompt, neg, clip_skip, model)
+    if emb is not None:
+        kw = dict(prompt_embeds=emb[0], negative_prompt_embeds=emb[1])
     torch.cuda.reset_peak_memory_stats()
     dt = _timer()
-    img = pipe(prompt=prompt, negative_prompt=negative or NEG_DEFAULT, width=width, height=height,
-               num_inference_steps=steps, guidance_scale=cfg, generator=gen).images[0]
+    img = pipe(width=width, height=height, num_inference_steps=steps,
+               guidance_scale=cfg, generator=gen, **kw).images[0]
     seconds = dt()
     # 贴边检测要在抠图之后、像素化之前做（像素化会改变 alpha 边缘像素）
     edge: list[str] = []
@@ -95,6 +126,10 @@ def txt2img(eng: Engine, *, prompt: str, negative: Optional[str] = None,
             matte_mod.matte_auto(img.convert("RGBA"), matte_backend, eng.matte_dir),
             denoise_iters=denoise)
         edge = matte_mod.edge_touch(img)
+        # 多主体是 SD1.5 画小怪物的通病（史莱姆尤甚），负向词压不住，只能量出来
+        subjects = pp.foreground_blobs(img)
+    else:
+        subjects = None
     if pixel > 1:
         img = pp.pixelate(img, pixel)
     if palette:
@@ -109,6 +144,8 @@ def txt2img(eng: Engine, *, prompt: str, negative: Optional[str] = None,
         "pixel_block": pixel, "palette": palette, "matte": matte,
         "matte_backend": matte_backend, "denoise": denoise, "clean_iso": clean_iso,
         "edge_touch": edge, "model": model,
+        "clip_skip": clip_skip if emb is not None else 1,
+        "subjects": subjects,
         "seconds": seconds, "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
     })
 
@@ -118,21 +155,28 @@ def txt2img(eng: Engine, *, prompt: str, negative: Optional[str] = None,
 def img2img(eng: Engine, *, init_image: str | Path, prompt: str,
             negative: Optional[str] = None, strength: float = 0.55, steps: int = 25,
             cfg: float = 7.0, seed: int = -1, lora: Optional[str] = None,
-            lora_scale: float = 0.8, model: str = "sd15", tag: str = "w2") -> Dict[str, Any]:
+            lora_scale: float = 0.8, model: str = "sd15", clip_skip: int = 1,
+            tag: str = "w2") -> Dict[str, Any]:
     pipe = eng.img2img_pipe(model)
     eng.apply_lora(pipe, lora, lora_scale)
     ref = Image.open(init_image).convert("RGB")
     if seed < 0:
         seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
+    neg = negative or NEG_DEFAULT
+    kw: Dict[str, Any] = dict(prompt=prompt, negative_prompt=neg)
+    emb = _skip_embeds(pipe, prompt, neg, clip_skip, model)
+    if emb is not None:
+        kw = dict(prompt_embeds=emb[0], negative_prompt_embeds=emb[1])
     torch.cuda.reset_peak_memory_stats()
     dt = _timer()
-    img = pipe(prompt=prompt, negative_prompt=negative or NEG_DEFAULT, image=ref,
-               strength=strength, num_inference_steps=steps, guidance_scale=cfg,
-               generator=torch.Generator("cuda").manual_seed(seed)).images[0]
+    img = pipe(image=ref, strength=strength, num_inference_steps=steps,
+               guidance_scale=cfg, generator=torch.Generator("cuda").manual_seed(seed),
+               **kw).images[0]
     seconds = dt()
     return _save(img, _stamp(tag), "img2img", {
         "workflow": "w2", "prompt": prompt, "init_image": str(init_image),
         "strength": strength, "steps": steps, "cfg": cfg, "seed": seed, "lora": lora,
+        "clip_skip": clip_skip if emb is not None else 1,
         "seconds": seconds, "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
     })
 
@@ -204,6 +248,7 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
              model: str = "sd15",
              candidates: int = 1, gate: bool = True, gate_min_points: int = 8,
              gate_retries: int = 2, gate_seed_step: int = 1000,
+             clip_skip: int = 1,
              anim_name: str = "walk", fps: int = 10, tag: str = "w4") -> Dict[str, Any]:
     """逐帧生成 -> 锚点对齐 -> 打包 sprite sheet。固定 seed 是跨帧一致的前提。
 
@@ -240,16 +285,22 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
     # 闸门不可用时不留补提额度：没有判据的重提等于烧显卡
     retries = max(0, int(gate_retries)) if extractor is not None else 0
     attempts_max = candidates + retries
+    # clip skip 的 embeds 每帧都一样，算一次就够
+    emb = _skip_embeds(pipe, prompt, negative, clip_skip, model)
 
     def _one_frame(pose: Image.Image, frame_seed: int):
         dt = _timer()
         kwargs: Dict[str, Any] = dict(
-            prompt=prompt, negative_prompt=negative, image=pose,
+            image=pose,
             num_inference_steps=steps, guidance_scale=cfg,
             controlnet_conditioning_scale=cn_scale,
             generator=torch.Generator("cuda").manual_seed(frame_seed),
             width=width, height=height,
         )
+        if emb is None:
+            kwargs.update(prompt=prompt, negative_prompt=negative)
+        else:
+            kwargs.update(prompt_embeds=emb[0], negative_prompt_embeds=emb[1])
         if ref is not None:
             kwargs["ip_adapter_image"] = ref
         out = pipe(**kwargs).images[0]
@@ -302,6 +353,7 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
         "ipa_scale": ipa_scale if ref else None, "cn_scale": cn_scale,
         "steps": steps, "cfg": cfg, "seed": seed, "frames": len(frames), "matte": matte,
         "model": model,
+        "clip_skip": clip_skip if emb is not None else 1,
         "candidates": candidates, "gate": bool(gate and extractor is not None),
         "gate_min_points": gate_min_points,
         "gate_retries": retries,

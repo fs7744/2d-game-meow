@@ -4,6 +4,7 @@ import GenNodeCard, { NODE_W, type NodePatch } from '../nodes/GenNodeCard'
 
 type Props = {
   nodes: GenNode[]
+  model: string
   selectedId: string | null
   viewport: Viewport
   setViewport: (v: Viewport | ((prev: Viewport) => Viewport)) => void
@@ -34,6 +35,7 @@ export default function Canvas({
   isFavorite,
   onToggleFavorite,
   loras,
+  model,
   onDropType,
 }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null)
@@ -169,6 +171,7 @@ export default function Canvas({
             favorited={isFavorite(n.params.prompt)}
             onToggleFavorite={() => onToggleFavorite(n.id)}
             loras={loras}
+            model={model}
           />
         ))}
       </div>

@@ -23,6 +23,7 @@ const DEFAULT_PARAMS: GenParams = {
   pixel: 6,
   palette: 32,
   matte: false,
+  clipSkip: 1,
   lora: '',
   loraScale: 0.8,
 }
@@ -323,6 +324,7 @@ export default function App() {
         />
         <Canvas
           nodes={nodes}
+          model={model}
           selectedId={selectedId}
           viewport={viewport}
           setViewport={setViewport}

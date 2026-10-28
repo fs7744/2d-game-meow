@@ -251,6 +251,61 @@ g.poseswap(eng, pose_images=poses, prompt="...", matte=True,
 第 2 帧前 3 个候选都没过（关节断掉/贴边），第 4 次才拿到合格帧——这正是以前
 会被人眼退掉、但自动管线照单全收的废帧。
 
+## 画质：一轮代码 review 改了什么
+
+不是「调参玄学」，每条都有对照实验（`python tools/ab_quality.py`，同 seed 只改一个变量）。
+
+**① 正向后缀被静默丢弃（真 bug）**
+`presets.build` 原来只对**负向词**做 77 token 截断，正向是 `用户描述 + 后缀` 直接丢给
+CLIP。用户主体描述一写长，被丢掉的恰好是后缀（`flat plain background` / `hard outline`），
+于是背景变脏、边缘变糊——这就是「提示词越长越难看」的真实原因。现在先给后缀留预算，
+超长的部分截主体。
+
+**② 没有逗号的长文本会让负向词变成空串（真 bug）**
+`fit` 按逗号分段累加，第一段就超预算时 `break` 得只剩空列表，返回 `""`——
+用户粘贴一整串空格分隔的负向词，等于什么都没写。现在退化成按词截断。
+
+**③ 像素化降采样：LANCZOS → BOX**
+LANCZOS 有负瓣，色块交界处会振铃出「过冲色」（黑线旁边冒一圈更亮的边），这些假色
+再被量化，就成了多出来的脏色阶。实测同一张图：LANCZOS 用满 32 色且边缘发毛，
+BOX 只用到 30 色，格子单色率 1.0（有测试钉住）。
+
+**④ clip_skip 自实现（上游参数在本机会崩）**
+diffusers 0.41 的 `clip_skip=` 分支写死 `text_encoder.text_model.final_layer_norm`，
+本机 transformers 5.21 把 `CLIPTextModel` 摊平了（没有 `text_model` 这层）——
+一传就 `AttributeError`。`workflows/clip.py` 自己算 embeds 再喂管道：
+`clip_skip=1` 与管道默认**逐元素一致**（有测试），`2` 跳过最后一层（与默认的
+余弦相似度 0.79，是实打实另一个向量）。节点「更多设置 → 跳过层」可选，
+LoRA 注册表也能声明推荐值。
+
+视觉上（`docs/img/clip_skip_ab.jpg`）：`cs1` 偏光泽渐变（高档 3D 感，但渐变多、
+量化后杂色多），`cs2` 偏平涂 + 硬描边（更适合转像素）。代价是 `cs2` 下多主体
+略多（2/3 vs 3/3），所以**默认仍是 1**，需要时手动开。
+
+**⑤ 触发词实测有害（改数据，不是改代码）**
+`px_illustrious` 注册的触发词是 `pixelart`，UI 上有「+ 填入」按钮。三个种子实测：
+
+| 用法 | 主体数 | 单主体率 |
+|---|---|---|
+| 不加触发词 | 1 / 1 / 1 | **3/3** |
+| 加 `pixelart` | 5 / 3 / 2 | **0/3** |
+
+加了触发词反而把画面变成一整个「史莱姆图案墙」。注册表已把触发词清空并写明原因。
+同一个 LoRA 一定会画彩色/纹理底，所以注册表新增 `matte: true`——选中它时节点自动
+勾上抠图（以前默认不勾，出来就是蓝底图，没法直接用）。
+
+同一 seed 的成品对照（上排旧用法：加触发词、不抠图；下排新默认）：
+
+![旧用法 vs 新默认](docs/img/quality_before_after.jpg)
+
+左列 seed 7、右列 seed 8。旧用法整幅变成「史莱姆图案墙」，新默认是单只、透明底、
+像素块干净的成品。`meta.subjects` 也印证：旧用法数不出主体（没抠图），新默认 1 个。
+
+**⑥ 多主体写进产物 meta**
+SD1.5 画小体型角色（史莱姆尤甚）爱复制一份，负向词压不住，于是不猜、直接量：
+抠图后 `foreground_blobs` 数面积 ≥400px 的前景块，写进 `meta.subjects`；节点里
+`subjects > 1` 直接黄字提示换种子。同理 W4 侧有质量闸门（见上一节）。
+
 ## LoRA：装什么、怎么用
 
 `models/lora/*.safetensors` + 同目录 `loras.json`（标签 / 触发词 / 推荐强度）。
@@ -458,22 +513,23 @@ python tools/video.py i2v assets/cat.png "the same character walking" -o assets/
 ## 测试
 
 ```bash
-python -m pytest tests -q        # 148 个用例，约 440s（含几个慢用例）
+python -m pytest tests -q        # 160 个用例，约 170s（含 SDXL 慢用例）
 # 全套超过 2 分钟会被超时杀掉，分批跑：
-#   pytest tests --ignore=tests/test_models.py   # 138 个，约 117s
-#   pytest tests/test_models.py                  # 10 个，约 320s
+#   pytest tests --ignore=tests/test_models.py   # 149 个，约 110s
+#   pytest tests/test_models.py                  # 11 个，约 60s
 ```
 
 | 文件 | 覆盖 | 用例数 |
 |---|---|---|
-| `tests/test_postprocess.py` | 锚点、逐帧对齐、打包几何、色板上限、alpha 二值化、裁边 | 9 |
-| `tests/test_generate.py` | 同 seed 逐像素一致、不同 seed 相异、色板生效、**重绘选区外不变**、序列帧数、**闸门重提与批量挑帧**、显存回收、缺权重报错 | 11 |
+| `tests/test_postprocess.py` | 锚点、逐帧对齐、打包几何、色板上限、alpha 二值化、裁边、**像素块单色性**、**前景块计数** | 11 |
+| `tests/test_generate.py` | 同 seed 逐像素一致、不同 seed 相异、色板生效、**重绘选区外不变**、序列帧数、**闸门重提与批量挑帧**、**clip_skip 生效与 meta 记录**、主体数上报、显存回收、缺权重报错 | 13 |
 | `tests/test_controlnet.py` | Canny conditioning 生效、Tile 放大结构相关性 > 0.5、像素块均匀性 | 3 |
 | `tests/test_api.py` | 全部端点、队列串行性、路径穿越防护、400/404 | 9 |
 | `tests/test_pose.py` | 检测器切换、18 点完整性、关节在画面内且头高于髋、骨架渲染、双后端一致性、引擎内的姿态提取器单例、精灵图切片 CLI | 7 |
 | `tests/test_quality.py` | 前景占比/质心/漂移、**贴边检测**（含未抠图时整体失效）、无模型时「无法判定」、关节数影响排序与闸门 | 11 |
 | `tests/test_io_paths.py` | 视频抽帧、GIF、精灵图切片（含空格子）、CLI 错误码、非 8 倍数尺寸重绘、cols 夹取、环境自检 JSON、LoRA 空接口 | 11 |
-| `tests/test_presets.py` | 契约拼接与优先级、77 token 预算、中文 token 估算、下载器过滤（safety_checker/bin/ckpt/fp16 优先） | 9 |
+| `tests/test_presets.py` | 契约拼接与优先级、77 token 预算、**长提示词不丢后缀**、**无逗号文本不截成空串**、中文 token 估算、下载器过滤 | 12 |
+| `tests/test_clip.py` | **clip_skip=1 与管道默认逐元素一致**、cs2 换向量、越界值夹取、无 text_encoder 时报错 | 4 |
 | `tests/test_fetch.py` | Range 分块拼接、断点续传、**拒绝非 206 响应**（防 429 错误体污染）、超长残留文件重置 | 5 |
 | `tests/test_stability.py` | 连续 20 次推理显存不涨、`free()` 释放 pipeline 与 ControlNet、跨进程同 seed 一致、PNG 结构、sidecar 一致 | 5 |
 | `tests/test_matte.py` | 背景估计、连通域不误抠内部同色区、去白边生效、alpha 二值、容差方向、裁边、真实生成图抠图 | 9 |
@@ -481,7 +537,7 @@ python -m pytest tests -q        # 148 个用例，约 440s（含几个慢用例
 | `tests/test_video.py` | numpy/PIL 帧兼容、mp4 落地、模型路径校验、Wan 真实生成（`RUN_WAN=1`） | 6 |
 | `tests/test_lora.py` | 注册表扫描/元数据/坏 JSON 容错、名称解析、去碎屑、贴边占比判定、武侠契约预算 | 13 |
 | `tests/test_train.py` | 数据集读取与兜底、步数规划、**端到端 6 步真训练**（导出的体积上限、可被 scan/apply_lora 认出）、`/train` 全流程 | 9 |
-| `tests/test_models.py` | `/models` 只列出本机已装的、未知底模报错、**W3+SDXL 走 base 权重且选区外不变**、SDXL 真实生成、**W4+SDXL 端到端**、SDXL 版 IPA 与三条 ControlNet | 10 |
+| `tests/test_models.py` | `/models` 只列出本机已装的、未知底模报错、**W3+SDXL 走 base 权重且选区外不变**、**SDXL 忽略 clip_skip**、SDXL 真实生成、**W4+SDXL 端到端**、SDXL 版 IPA 与三条 ControlNet | 11 |
 | `tests/test_denoise.py` | `strip_fringe` 剥白边/迭代/不误伤主体、`clean_isolated` 内部改色/外挂删除/**斜向轮廓不被吃** | 9 |
 
 已知限制：骨架质量决定成败——实测 8 帧序列里有 2 帧只提取到 8/18 个关节（手臂与身体重叠），
@@ -501,6 +557,7 @@ W4 侧对应的兜底是上面那套**质量闸门**（生成后再检一遍，�
 │   ├── engine.py           pipeline 懒加载、显存守卫、LoRA 热切换
 │   ├── generate.py         w1/w2/w3/w4 四个工作流
 │   ├── quality.py          帧质量评分（关节数 / 占比 / 贴边 / 漂移）——挑帧与闸门
+│   ├── clip.py             自实现 clip skip（上游参数在 transformers 5.x 下会崩）
 │   └── postprocess.py      像素化、调色板量化、锚点对齐、精灵图打包
 ├── tools/
 │   ├── fetch_weights.py    权重下载（走 hf-mirror）
@@ -510,6 +567,7 @@ W4 侧对应的兜底是上面那套**质量闸门**（生成后再检一遍，�
 │   ├── video.py            文生视频 / 图生视频 CLI
 │   ├── fetch_ranged.py     按 Range 分块下载（抗限流断流）
 │   ├── bench.py            稳态基准
+│   ├── ab_quality.py       画质 A/B（采样档 / 后处理档 / 背景干净度，同 seed 单变量）
 │   └── check_env.py        环境自检
 ├── models/                 权重（checkpoints / controlnet / ipadapter / loras / ...）
 └── assets/                 产物 + sidecar(.json) + index.jsonl

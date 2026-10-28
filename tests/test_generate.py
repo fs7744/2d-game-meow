@@ -79,6 +79,33 @@ def test_poseswap_produces_frames_and_sheet(eng, pose_frames):
     assert len(list(Path(r["frames_dir"]).glob("frame_*.png"))) == 3
 
 
+def test_clip_skip_changes_result_and_is_recorded(eng):
+    """clip_skip=2 必须真的改变画面，并把生效值记进 meta（否则没法复现）。"""
+    kw = dict(prompt="blue slime monster", width=256, height=256, steps=8, seed=4321,
+              preset="none", tag="cs")
+    a = g.txt2img(eng, **kw)
+    b = g.txt2img(eng, clip_skip=2, **kw)
+    assert a["meta"]["clip_skip"] == 1
+    assert b["meta"]["clip_skip"] == 2
+    assert _arr(a["file"]).tolist() != _arr(b["file"]).tolist()
+
+
+def test_subjects_reported_when_matted(eng):
+    """抠图后才谈得上数主体：不抠图必须是 None，抠图则要给出整数。
+
+    这里不苛求 >=1——草稿档（8 步/256²）出的图连主体都没有，逼着它「数出 1 个」
+    等于测生成质量而不是测这段逻辑。真正「两块前景数成 2」的可控用例在
+    test_postprocess.test_foreground_blobs_counts_separated_subjects。
+    """
+    off = g.txt2img(eng, prompt="blue slime monster", width=256, height=256, steps=8,
+                    seed=99, preset="none", tag="subj_off")
+    assert off["meta"]["subjects"] is None
+
+    on = g.txt2img(eng, prompt="blue slime monster", width=256, height=256, steps=8,
+                   seed=99, preset="none", matte=True, tag="subj_on")
+    assert isinstance(on["meta"]["subjects"], int) and on["meta"]["subjects"] >= 0
+
+
 def test_poseswap_gate_off_keeps_single_attempt(eng, pose_frames, monkeypatch):
     """关掉闸门就只生成 candidates 个候选，不再补提。"""
     monkeypatch.setattr(eng, "_pose", _FakePose(1), raising=False)

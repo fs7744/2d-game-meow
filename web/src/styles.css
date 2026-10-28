@@ -273,6 +273,11 @@ button { cursor: pointer; }
 
 .err { font-size: 11px; color: var(--pink); line-height: 1.5; }
 .meta { font-family: var(--mono); font-size: 10.5px; color: var(--muted-2); }
+.warn {
+  font-size: 10.5px; line-height: 1.5; color: #ffcf7a;
+  border-left: 2px solid #ffcf7a; padding-left: 6px;
+  background: rgba(255, 207, 122, 0.08);
+}
 
 /* 只展示为图模式 */
 .node.image-mode { background: var(--bg); }

@@ -18,6 +18,7 @@ type Props = {
   favorited: boolean
   onToggleFavorite: () => void
   loras: LoraInfo[]
+  model: string
 }
 
 const PRESETS: { v: Preset; label: string }[] = [
@@ -39,6 +40,7 @@ export default function GenNodeCard({
   favorited,
   onToggleFavorite,
   loras,
+  model,
 }: Props) {
   const dragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null)
   const p = node.params
@@ -93,6 +95,10 @@ export default function GenNodeCard({
     if (info) {
       next.loraScale = info.scale
       if (info.preset && p.preset === 'sprite') next.preset = info.preset
+      // 注册表声明的「必须抠图 / 推荐 clip skip」一起带过来：像素 LoRA 都会画彩色底，
+      // 不勾抠图就没法用；这两项用户基本不会自己想到要改
+      if (typeof info.matte === 'boolean') next.matte = info.matte
+      if (typeof info.clip_skip === 'number') next.clipSkip = info.clip_skip
     }
     onPatch({ params: next })
   }
@@ -343,6 +349,17 @@ export default function GenNodeCard({
                     onChange={(e) => setParam('palette', Number(e.target.value) || 0)}
                   />
                 </label>
+                <label title="1=最后一层（默认）；2=跳过最后一层，多数动漫/像素 LoRA 的训练设置">
+                  跳过层
+                  <input
+                    type="number"
+                    min={1}
+                    max={4}
+                    value={p.clipSkip}
+                    disabled={model === 'sdxl'}
+                    onChange={(e) => setParam('clipSkip', Number(e.target.value) || 1)}
+                  />
+                </label>
               </div>
               <label className="check">
                 <input
@@ -371,6 +388,13 @@ export default function GenNodeCard({
               种子 {job.seed ?? p.seed}
               {typeof job.seconds === 'number' ? ` · ${job.seconds}s` : ''}
               {typeof job.peakVram === 'number' ? ` · ${job.peakVram}GB` : ''}
+            </div>
+          )}
+          {/* SD1.5 画小体型角色时爱复制一份，负向词压不住；抠图后能量出来就报出来 */}
+          {typeof job?.subjects === 'number' && job.subjects > 1 && (
+            <div className="warn">
+              ⚠ 画面里有 {job.subjects} 个主体（精灵只要一个）：换种子，或把「single character」
+              提到提示词最前面
             </div>
           )}
         </div>
