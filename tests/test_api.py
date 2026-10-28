@@ -568,3 +568,109 @@ def test_generate_with_lora_name_roundtrip(client):
     assert meta["lora"].endswith("wuxia_v2.safetensors")
     assert meta["lora_scale"] == 0.8
     assert isinstance(meta["edge_touch"], list)
+
+
+def test_generate_wss_roundtrip(client, tmp_path):
+    """序列帧角色替换（wss）走同一条队列。
+
+    用换皮模式：不跑模型，秒回，且验证网格参数与产物结构。
+    """
+    from PIL import Image, ImageDraw
+
+    def frame():
+        im = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+        d = ImageDraw.Draw(im)
+        d.rectangle([25, 30, 38, 48], fill=(120, 30, 40, 255))
+        d.rectangle([27, 18, 36, 30], fill=(235, 200, 160, 255))
+        return im
+
+    sheet = tmp_path / "sheet.png"
+    im = Image.new("RGBA", (64 * 4, 64), (0, 0, 0, 0))
+    for i in range(4):
+        im.paste(frame(), (i * 64, 0))
+    im.save(sheet)
+
+    char = tmp_path / "char.png"
+    cim = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    ImageDraw.Draw(cim).ellipse([10, 20, 54, 58], fill=(70, 190, 90, 255))
+    cim.save(char)
+
+    r = client.post("/generate", json={"workflow": "wss", "params": {
+        "sheet_image": str(sheet), "char_image": str(char),
+        "cols": 4, "rows": 1, "mode": "recolor", "palette": 8,
+        "tag": "apiwss"}})
+    assert r.status_code == 200, r.text
+    job_id = r.json()["job_id"]
+
+    job = None
+    for _ in range(120):
+        job = client.get(f"/jobs/{job_id}").json()
+        if job["status"] in ("done", "failed"):
+            break
+        time.sleep(0.5)
+    assert job["status"] == "done", job.get("error")
+    meta = job["result"]["meta"]
+    assert meta["workflow"] == "wss"
+    assert meta["mode"] == "recolor"
+    assert meta["frames"] == 4
+    assert meta["grid"] == [4, 1]
+    assert Path(job["result"]["file"]).exists()
+
+
+def test_generate_rejects_unknown_workflow(client):
+    """未知工作流必须被拒（别让它进队列再失败）。"""
+    r = client.post("/generate", json={"workflow": "wzz", "params": {}})
+    assert r.status_code == 400
+
+
+def test_generate_wss_roundtrip(client, tmp_path):
+    """序列帧角色替换（wss）走同一条队列。
+
+    用换皮模式：不跑模型，秒回，且验证网格参数与产物结构。
+    """
+    from PIL import Image, ImageDraw
+
+    def frame():
+        im = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+        d = ImageDraw.Draw(im)
+        d.rectangle([25, 30, 38, 48], fill=(120, 30, 40, 255))
+        d.rectangle([27, 18, 36, 30], fill=(235, 200, 160, 255))
+        return im
+
+    sheet = tmp_path / "sheet.png"
+    im = Image.new("RGBA", (64 * 4, 64), (0, 0, 0, 0))
+    for i in range(4):
+        im.paste(frame(), (i * 64, 0))
+    im.save(sheet)
+
+    char = tmp_path / "char.png"
+    cim = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    ImageDraw.Draw(cim).ellipse([10, 20, 54, 58], fill=(70, 190, 90, 255))
+    cim.save(char)
+
+    r = client.post("/generate", json={"workflow": "wss", "params": {
+        "sheet_image": str(sheet), "char_image": str(char),
+        "cols": 4, "rows": 1, "mode": "recolor", "palette": 8,
+        "tag": "apiwss"}})
+    assert r.status_code == 200, r.text
+    job_id = r.json()["job_id"]
+
+    job = None
+    for _ in range(120):
+        job = client.get(f"/jobs/{job_id}").json()
+        if job["status"] in ("done", "failed"):
+            break
+        time.sleep(0.5)
+    assert job["status"] == "done", job.get("error")
+    meta = job["result"]["meta"]
+    assert meta["workflow"] == "wss"
+    assert meta["mode"] == "recolor"
+    assert meta["frames"] == 4
+    assert meta["grid"] == [4, 1]
+    assert Path(job["result"]["file"]).exists()
+
+
+def test_generate_rejects_unknown_workflow(client):
+    """未知工作流必须被拒（别让它进队列再失败）。"""
+    r = client.post("/generate", json={"workflow": "wzz", "params": {}})
+    assert r.status_code == 400

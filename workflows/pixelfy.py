@@ -274,6 +274,51 @@ def clean_specks(rgb: np.ndarray, max_diff: int = 40) -> np.ndarray:
     return np.where(fill[..., None], best_color, rgb)
 
 
+def recolor_by_luma(img: Image.Image, palette: Sequence[RGB],
+                    keep_alpha: bool = True) -> Image.Image:
+    """把图按**明度**重映射到给定色板（换皮）。
+
+    像素游戏里的「换皮」：同一套动作、同一套形状，只把角色换成另一个配色。
+    这条路**不跑模型**——纯确定性、毫秒级、帧间零漂移，是序列帧换角色
+    最稳的一条。
+
+    **为什么按明度映射而不是按最近色**：最近色会把不同材质（金属 vs 布料）
+    混成同一色，明度映射能保住光照结构（高光/阴影/描边），这正是换皮要
+    保留的信息。
+
+    参数:
+        palette     目标色板（RGB 元组序列）
+        keep_alpha  保留原图的 alpha（True=只换色不换形）
+    """
+    if not palette:
+        return img.convert("RGBA" if keep_alpha else "RGB")
+    rgba = img.convert("RGBA")
+    arr = np.asarray(rgba).astype(np.float32)
+    pal = np.asarray(palette, dtype=np.float32)
+    # 明度排序，让「明度最接近的颜色」可以用 searchsorted 直接找
+    luma_pal = pal @ np.array([0.299, 0.587, 0.114], dtype=np.float32)
+    order = np.argsort(luma_pal)
+    pal_sorted = pal[order]
+    luma_sorted = luma_pal[order]
+
+    rgb = arr[..., :3]
+    alpha = arr[..., 3]
+    fg = alpha > 127
+    out = arr.copy()
+    if fg.any():
+        luma = rgb @ np.array([0.299, 0.587, 0.114], dtype=np.float32)
+        # |luma - luma_sorted| 的最小值 → searchsorted 在有序数组上二分
+        pos = np.searchsorted(luma_sorted, luma[fg])
+        pos = np.clip(pos, 1, len(luma_sorted) - 1)
+        left = np.abs(luma_sorted[pos - 1] - luma[fg])
+        right = np.abs(luma_sorted[pos] - luma[fg])
+        pick = np.where(left <= right, pos - 1, pos)
+        out[..., :3][fg] = pal_sorted[pick]
+    if not keep_alpha:
+        out[..., 3] = 255
+    return Image.fromarray(out.astype(np.uint8), "RGBA")
+
+
 # --------------------------------------------------------------------------- #
 # 主流程
 # --------------------------------------------------------------------------- #

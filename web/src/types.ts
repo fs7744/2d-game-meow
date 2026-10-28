@@ -3,7 +3,13 @@ export type Preset = 'sprite' | 'portrait' | 'wuxia' | 'pixel' | 'none'
 /** 节点类型：图生成（w1）/ 图生图（w2）/ 图片 / 抠图换背景（wbg）/ 局部重绘（w3）/ 局部 AI 重绘（w5） */
 export type NodeKind =
   | 'gen' | 'img2img' | 'image' | 'bg' | 'inpaint' | 'airepaint' | 'pixelify'
-  | 'poseclone'
+  | 'poseclone' | 'spriteswap'
+
+/** 角色迁移 / 序列帧替换：动作参考图的解释方式 */
+export type RefMode = 'auto' | 'pose' | 'outline'
+
+/** 序列帧替换：怎么处理角色 */
+export type SwapMode = 'generate' | 'recolor'
 
 /** 完美像素转换的每格取色方式 */
 export type PixelSample = 'median' | 'majority' | 'center'
@@ -63,6 +69,14 @@ export type GenParams = {
   pcCnScale: number       // 角色迁移：ControlNet 姿态强度（越大越贴参考动作）
   pcIpaScale: number      // 角色迁移：IP-Adapter 身份强度（越大越像角色图）
   pcFill: number          // 角色迁移：人物在画布里占的高度比例
+  pcRefMode: RefMode      // 角色迁移：动作参考图的解释方式（骨架/轮廓/自动）
+  ssCols: number          // 序列帧替换：精灵图列数（0 = 自动检测）
+  ssRows: number          // 序列帧替换：精灵图行数（0 = 自动检测）
+  ssMode: SwapMode        // 序列帧替换：AI 重绘 还是 确定性换皮
+  ssRefMode: RefMode      // 序列帧替换：动作参考图的解释方式
+  ssCnScale: number       // 序列帧替换：动作强度
+  ssIpaScale: number      // 序列帧替换：身份强度
+  ssPalette: number       // 序列帧替换：共享色板色数
   lora: string            // LoRA 名（后端解析成路径）；空串表示不挂
   loraScale: number
 }

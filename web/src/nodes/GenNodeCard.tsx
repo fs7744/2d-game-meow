@@ -90,6 +90,7 @@ export default function GenNodeCard({
   const isAiRepaint = node.kind === 'airepaint'
   const isPixelify = node.kind === 'pixelify'
   const isPoseClone = node.kind === 'poseclone'
+  const isSpriteSwap = node.kind === 'spriteswap'
   const [maskOpen, setMaskOpen] = useState(false)
   // 源图可以是上游节点的产物、图片节点的本地图，也可以是节点上直接记的绝对路径
   const hasSource = !!(
@@ -288,12 +289,13 @@ export default function GenNodeCard({
             isBg ? ' bg' : ''
           }${isInpaint ? ' inpaint' : ''}${isAiRepaint ? ' airepaint' : ''}${
             isPixelify ? ' pixelify' : ''
-          }${isPoseClone ? ' poseclone' : ''}`}
+          }${isPoseClone ? ' poseclone' : ''}${isSpriteSwap ? ' spriteswap' : ''}`}
         >
           {isImg ? '图片' : isBg ? '抠图' : isPixelify ? '像素转换'
             : isPoseClone ? '角色迁移'
-              : isAiRepaint ? '局部AI重绘'
-                : isInpaint ? '局部重绘' : isI2I ? '图生图' : '图生成'}
+              : isSpriteSwap ? '序列帧替换'
+                : isAiRepaint ? '局部AI重绘'
+                  : isInpaint ? '局部重绘' : isI2I ? '图生图' : '图生成'}
         </span>
         {job && <span className={`node-state s-${job.status}`}>{statusLabel(job.status)}</span>}
         <span className="spacer" />
@@ -352,7 +354,170 @@ export default function GenNodeCard({
         />
       </div>
 
-      {isPoseClone ? (
+      {isSpriteSwap ? (
+        <div className="node-body poseclone-body">
+          {sourceBox}
+          <div className="src-box char-box">
+            <div className="src-thumb" title="角色图（身份来源）">
+              {charThumb ? (
+                <img src={charThumb} alt="角色" draggable={false} />
+              ) : (
+                <span>无角色</span>
+              )}
+            </div>
+            <div className="src-side">
+              <select
+                value={node.charSource?.nodeId ?? ''}
+                onChange={(e) =>
+                  onPatch({
+                    charSource: e.target.value
+                      ? { nodeId: e.target.value }
+                      : undefined,
+                  })
+                }
+              >
+                <option value="">（选角色图）</option>
+                {sourceOptions.map((o) => (
+                  <option key={o.id} value={o.id}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+              <div className="src-note">
+                {charThumb ? '这个角色的外观会套到每一帧上' : '缺角色图'}
+              </div>
+            </div>
+          </div>
+          <label className="bg-mode">
+            方式
+            <select
+              value={p.ssMode}
+              onChange={(e) => setParam('ssMode', e.target.value as typeof p.ssMode)}
+            >
+              <option value="generate">AI 重绘（可换体型）</option>
+              <option value="recolor">换皮（只换配色，不跑模型）</option>
+            </select>
+          </label>
+          {p.ssMode === 'generate' && (
+            <div className="prompt-wrap">
+              <textarea
+                className="prompt"
+                rows={2}
+                placeholder="角色描述？e.g. a blue slime monster with big eyes"
+                value={p.prompt}
+                onChange={(e) => setParam('prompt', e.target.value)}
+              />
+            </div>
+          )}
+          <details className="adv">
+            <summary>更多设置</summary>
+            <label className="strength">
+              <span>列</span>
+              <input
+                type="number"
+                min={0}
+                max={32}
+                value={p.ssCols}
+                onChange={(e) => setParam('ssCols', Number(e.target.value) || 0)}
+              />
+              <b>{p.ssCols > 0 ? '列' : '自动'}</b>
+            </label>
+            <label className="strength">
+              <span>行</span>
+              <input
+                type="number"
+                min={0}
+                max={32}
+                value={p.ssRows}
+                onChange={(e) => setParam('ssRows', Number(e.target.value) || 0)}
+              />
+              <b>{p.ssRows > 0 ? '行' : '自动'}</b>
+            </label>
+            {p.ssMode === 'generate' && (
+              <>
+                <label className="bg-mode">
+                  参考
+                  <select
+                    value={p.ssRefMode}
+                    onChange={(e) => setParam('ssRefMode', e.target.value as typeof p.ssRefMode)}
+                  >
+                    <option value="outline">轮廓（游戏素材）</option>
+                    <option value="auto">自动（骨架→轮廓）</option>
+                    <option value="pose">骨架（真人照片）</option>
+                  </select>
+                </label>
+                <label className="strength">
+                  <span>动作</span>
+                  <input
+                    type="range"
+                    min={0.2}
+                    max={1.5}
+                    step={0.05}
+                    value={p.ssCnScale}
+                    onChange={(e) => setParam('ssCnScale', Number(e.target.value))}
+                  />
+                  <b>{p.ssCnScale.toFixed(2)}</b>
+                </label>
+                <label className="strength">
+                  <span>身份</span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={1.5}
+                    step={0.05}
+                    value={p.ssIpaScale}
+                    onChange={(e) => setParam('ssIpaScale', Number(e.target.value))}
+                  />
+                  <b>{p.ssIpaScale.toFixed(2)}</b>
+                </label>
+              </>
+            )}
+            <label className="strength">
+              <span>色板</span>
+              <input
+                type="number"
+                min={0}
+                max={64}
+                value={p.ssPalette}
+                onChange={(e) => setParam('ssPalette', Number(e.target.value) || 0)}
+              />
+              <b>{p.ssPalette > 0 ? '色' : '关'}</b>
+            </label>
+            <div className="src-note">
+              源图是精灵图：横向排了几帧就填几列，纵向排了几帧就填几行；
+              填 0 由后端自动检测。
+            </div>
+          </details>
+          {hasImage && (
+            <div
+              className="preview"
+              onClick={(e) => {
+                e.stopPropagation()
+                onPreview?.(job!.url!, previewName)
+              }}
+              title="点击全屏预览"
+            >
+              <img src={job!.url} alt="序列帧替换结果" draggable={false} />
+            </div>
+          )}
+          <button
+            className="gen-btn"
+            disabled={
+              busy || !hasSource || !charThumb ||
+              (p.ssMode === 'generate' && !p.prompt.trim())
+            }
+            onClick={onGenerate}
+            title={
+              !hasSource ? '先接一张动作序列帧（精灵图）'
+                : !charThumb ? '再选一张角色图'
+                  : p.ssMode === 'generate' && !p.prompt.trim()
+                    ? '写上角色长什么样' : undefined
+            }
+          >
+            {busy ? '替换中…' : '替换序列帧'}
+          </button>
+        </div>
+      ) : isPoseClone ? (
         <div className="node-body poseclone-body">
           {sourceBox}
           <div className="src-box char-box">
@@ -433,8 +598,19 @@ export default function GenNodeCard({
               />
               <b>{p.pcFill.toFixed(2)}</b>
             </label>
+            <label className="bg-mode">
+              参考
+              <select
+                value={p.pcRefMode}
+                onChange={(e) => setParam('pcRefMode', e.target.value as typeof p.pcRefMode)}
+              >
+                <option value="auto">自动（骨架→轮廓）</option>
+                <option value="pose">骨架（真人照片）</option>
+                <option value="outline">轮廓（游戏素材）</option>
+              </select>
+            </label>
             <div className="src-note">
-              动作参考图要是**能识别人体的真人照片**——姿态模型认不出插画/像素画
+              参考模式「自动」会先试骨架，认不出人体就改用轮廓——游戏像素素材也能用
             </div>
           </details>
           {hasImage && (

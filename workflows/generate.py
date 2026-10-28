@@ -21,9 +21,11 @@ from . import clip as clip_mod
 from . import matte as matte_mod
 from . import pixelfy as pxf
 from . import postprocess as pp
+from . import refcond
 from . import repaint as rp
 from . import presets
 from . import quality
+from . import sheet as sheet_mod
 from .engine import Engine
 
 ASSETS = Path(__file__).resolve().parent.parent / "assets"
@@ -608,6 +610,7 @@ def pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | Path,
                 steps: int = 25, cfg: float = 7.0, seed: int = -1,
                 cn_scale: float = 1.0, ipa_scale: float = 0.8,
                 fill: float = 0.8, thr: float = 0.25,
+                ref_mode: str = "auto",
                 lora: Optional[str] = None, lora_scale: float = 0.8,
                 clip_skip: int = 1, preset: Optional[str] = None,
                 pixel: int = 0, palette: int = 0, matte: bool = False,
@@ -616,9 +619,17 @@ def pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | Path,
     """角色迁移：把**动作参考图**的姿态套到**角色图**上，生成角色做出该动作的图。
 
     三件套各管一件事：
-      - **ControlNet openpose** ← 动作参考图的骨架：定姿态（硬约束）
+      - **ControlNet 条件图** ← 动作参考图：定姿态（硬约束）
       - **IP-Adapter**        ← 角色图：定身份/外观（软约束）
       - **LoRA**              ← 定画风（可选）
+
+    **参考模式**（ref_mode）决定「动作参考图」怎么变成条件图：
+      - ``pose``    真人照片 → 人体检测 → RTMPose → OpenPose 骨架。
+                    姿态语义最强：只保留关节位置，参考角色的衣服体型全丢掉。
+      - ``outline`` 任意素材 → 抠主体 → 剪影边缘 → canny 条件图。
+                    **游戏素材走这条路**：像素角色、怪物、机甲、非人形生物
+                    都能当动作参考（真人检测器认不出它们，实测 0 个框）。
+      - ``auto``    先试 pose，检测不到人体就自动降级到 outline（默认）。
 
     **为什么骨架要归一化**：ControlNet OpenPose 是空间敏感的——条件图里人物站在
     哪、占多大，生成的人就站在哪、占多大。参考图里的人物可能缩在角落，直接用
@@ -626,32 +637,25 @@ def pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | Path,
     占画面 fill 比例），再渲染骨架图。
 
     **为什么不直接用 W4**：W4 是「骨架序列 → 精灵帧」，没有角色参考图；这里
-    多了 IP-Adapter 这一路，是单帧的身份迁移。
+    多了 IP-Adapter 这一路，是单帧的身份迁移。多帧批量请用 WSS（sprite_swap）。
     """
     if preset is not None:
         prompt, negative = presets.build(prompt, negative, preset)
-    extractor = eng.pose_extractor()
-    if extractor is None:
-        raise ValueError("姿态模型缺失或 onnxruntime 没装：无法从动作参考图提取骨架")
 
-    ref_pose = Image.open(pose_image).convert("RGB")
-    # 1) 动作参考图 → 归一化骨架图
-    kps = extractor.normalized_points(ref_pose, thr=thr, fill=fill)
-    if len(kps) < 8:
-        raise ValueError(
-            f"动作参考图里只识别出 {len(kps)} 个关节（至少要 8 个）："
-            "参考图里的人物可能太小、被遮挡或不是人体")
-    import sys
-    from pathlib import Path as _P
-    root = _P(__file__).resolve().parent.parent
-    if str(root) not in sys.path:
-        sys.path.insert(0, str(root))
-    from tools.make_pose import render
-    pose_map = render(kps, size=(width, height))
+    ref = Image.open(pose_image).convert("RGB")
+    # 1) 动作参考图 → 条件图（骨架或轮廓）
+    extractor = eng.pose_extractor()
+    cond, used_mode, cond_info = refcond.build_condition(
+        ref, mode=ref_mode, size=max(width, height), extractor=extractor,
+        thr=thr, fill=fill, matte_dir=eng.matte_dir)
+    if used_mode == "pose":
+        pipe_cn = "openpose"
+    else:
+        pipe_cn = "canny"
 
     # 2) 角色图 → IP-Adapter 参考
     char = Image.open(char_image).convert("RGB").resize((width, height))
-    pipe = eng.pose_pipe(controlnet="openpose", with_ipadapter=True, model="sd15")
+    pipe = eng.pose_pipe(controlnet=pipe_cn, with_ipadapter=True, model="sd15")
     eng.apply_lora(pipe, lora, lora_scale)
     pipe.set_ip_adapter_scale(ipa_scale)
     if seed < 0:
@@ -663,8 +667,8 @@ def pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | Path,
         kw = dict(prompt_embeds=emb[0], negative_prompt_embeds=emb[1])
     torch.cuda.reset_peak_memory_stats()
     dt = _timer()
-    out = pipe(image=pose_map, num_inference_steps=steps, guidance_scale=cfg,
-               controlnet_conditioning_scale=cn_scale,
+    out = pipe(image=cond.resize((width, height)), num_inference_steps=steps,
+               guidance_scale=cfg, controlnet_conditioning_scale=cn_scale,
                ip_adapter_image=char,
                generator=torch.Generator("cuda").manual_seed(seed),
                width=width, height=height, **kw).images[0]
@@ -678,7 +682,10 @@ def pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | Path,
         "workflow": "wpc", "scope": scope or "default",
         "prompt": prompt, "negative": neg,
         "pose_image": str(pose_image), "char_image": str(char_image),
-        "joints": len(kps), "fill": fill,
+        "ref_mode": ref_mode, "ref_mode_used": used_mode,
+        "ref_fallback_from": cond_info.get("fallback_from"),
+        "ref_fallback_reason": cond_info.get("fallback_reason"),
+        "joints": cond_info.get("joints"), "fill": fill,
         "width": width, "height": height,
         "steps": steps, "cfg": cfg, "seed": seed,
         "cn_scale": cn_scale, "ipa_scale": ipa_scale,
@@ -691,6 +698,254 @@ def pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | Path,
         "seconds": seconds,
         "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
     }, raw=raw, scope=scope)
+
+
+# ---------------- WSS 序列帧角色替换 ----------------
+
+def sprite_swap(eng: Engine, *, sheet_image: str | Path, char_image: str | Path,
+                prompt: str = "", negative: Optional[str] = None,
+                cols: int = 0, rows: int = 0,
+                width: int = 768, height: int = 768,
+                steps: int = 25, cfg: float = 7.0, seed: int = -1,
+                cn_scale: float = 1.0, ipa_scale: float = 0.8,
+                ref_mode: str = "outline", mode: str = "generate",
+                lora: Optional[str] = None, lora_scale: float = 0.8,
+                clip_skip: int = 1, preset: Optional[str] = None,
+                matte: bool = True, matte_backend: str = "auto",
+                denoise: int = 1, clean_iso: int = 1,
+                palette: int = 32, keep_alpha: bool = False,
+                scope: str = "", tag: str = "wss") -> Dict[str, Any]:
+    """序列帧角色替换：把一段游戏动画里的角色换成目标角色，逐帧对齐后重新打包。
+
+    这是用户最常见的产线场景：手上有一张**游戏动画序列帧**（精灵图），
+    想把里面的角色换成自己的角色，但动作必须一模一样。
+
+    流程：
+      1. 切帧：自动检测精灵图网格（或用 cols/rows 指定），逐格切出
+      2. 每帧生成：轮廓条件（动作）+ IP-Adapter（身份）→ 新角色帧
+      3. 对齐：按脚底锚点把每帧拉回同一落脚点，抑制模型自构图带来的漂移
+      4. 缩回原格子尺寸 + 共享色板量化（整段动画共用一套颜色）
+      5. 按原网格重新打包成精灵图
+
+    **为什么输出要缩回原格子尺寸**：序列帧是要塞回游戏里的，尺寸必须
+    和原帧一致（通常 32~128px）。在 768² 生成后缩回去，比在小尺寸上
+    生成靠谱得多——SD1.5 在 64² 上出图是糊的。
+
+    **共享色板**：逐帧各自量化会导致相邻帧颜色打架（第一帧的主色占满色位）。
+    这里整段动画共用一块色板，见 pixelfy.refine_batch。
+
+    **keep_alpha**：直接复用参考帧的 alpha（形状逐像素精确、帧间零漂移），
+    只换 RGB。适合「同体型换配色」的换皮；代价是参考角色的体型特征
+    （帽子、翅膀、武器）也会被保留。
+
+    **mode**：
+      - ``generate``（默认）跑模型：轮廓条件（动作）+ IP-Adapter（身份），
+        换成**体型不同**的角色。
+      - ``recolor``  不跑模型：纯确定性的明度重映射换皮，**帧间零漂移**、
+        毫秒级，保留原角色的一切体型特征只换配色。同体型换色首选。
+    """
+    if preset is not None:
+        prompt, negative = presets.build(prompt, negative, preset)
+
+    sheet = Image.open(sheet_image).convert("RGBA")
+    if cols <= 0 or rows <= 0:
+        detected = sheet_mod.detect_grid(sheet)
+        if detected is None:
+            raise ValueError(
+                "认不出精灵图的网格：请手动指定列数和行数"
+                "（列数 = 横向排了几帧，行数 = 纵向排了几帧）")
+        cols, rows = detected
+    frames = sheet_mod.split_sheet(sheet, cols, rows)
+    if not frames:
+        raise ValueError("精灵图里没有有效帧（整张是空的？）")
+
+    if mode == "recolor":
+        return _sprite_recolor(frames, char_image, cols, rows, palette=palette,
+                               scope=scope, tag=tag, prompt=prompt)
+
+    extractor = eng.pose_extractor()
+    pipe_cn = "openpose" if ref_mode == "pose" else "canny"
+    pipe = eng.pose_pipe(controlnet=pipe_cn, with_ipadapter=True, model="sd15")
+    eng.apply_lora(pipe, lora, lora_scale)
+    pipe.set_ip_adapter_scale(ipa_scale)
+    if seed < 0:
+        seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
+    neg = negative or NEG_DEFAULT
+    emb = _skip_embeds(pipe, prompt, neg, clip_skip, "sd15")
+    kw: Dict[str, Any] = dict(prompt=prompt, negative_prompt=neg)
+    if emb is not None:
+        kw = dict(prompt_embeds=emb[0], negative_prompt_embeds=emb[1])
+
+    char = Image.open(char_image).convert("RGB").resize((width, height))
+    torch.cuda.reset_peak_memory_stats()
+    total = _timer()
+
+    generated: List[Image.Image] = []
+    per_frame: List[float] = []
+    used_modes: List[str] = []
+    for _c, _r, frame in frames:
+        cond, used_mode, _info = refcond.build_condition(
+            frame, mode=ref_mode, size=max(width, height), extractor=extractor,
+            matte_dir=eng.matte_dir)
+        used_modes.append(used_mode)
+        dt = _timer()
+        out = pipe(image=cond.resize((width, height)),
+                   num_inference_steps=steps, guidance_scale=cfg,
+                   controlnet_conditioning_scale=cn_scale,
+                   ip_adapter_image=char,
+                   generator=torch.Generator("cuda").manual_seed(seed),
+                   width=width, height=height, **kw).images[0]
+        per_frame.append(dt())
+        generated.append(out)
+
+    matte_info: Dict[str, Any] = {}
+    if matte:
+        cut: List[Image.Image] = []
+        for g in generated:
+            cut.append(matte_mod.matte_auto(
+                g.convert("RGB"), matte_backend, eng.matte_dir, info=matte_info))
+            cut[-1] = matte_mod.despeckle(cut[-1], denoise_iters=denoise)
+    else:
+        cut = [g.convert("RGBA") for g in generated]
+
+    if keep_alpha:
+        # 用参考帧的 alpha 覆盖：形状逐像素精确，帧间零漂移
+        for i, (_c, _r, frame) in enumerate(frames):
+            cut[i].putalpha(frame.getchannel("A"))
+
+    # 缩回原格子尺寸：序列帧要塞回游戏，尺寸必须和原帧一致
+    cell_w = max(f.width for _c, _r, f in frames)
+    cell_h = max(f.height for _c, _r, f in frames)
+    small = [f.convert("RGB").resize((cell_w, cell_h), Image.BOX) for f in cut]
+
+    # 整段动画共享一套色板
+    refined = pxf.refine_batch(small, grid_snap=False,
+                               target_size=(cell_w, cell_h), colors=palette)
+    outs: List[Image.Image] = []
+    for item, src in zip(refined["items"], cut):
+        im = item["image"]
+        if src.mode == "RGBA":
+            im = im.convert("RGBA")
+            # alpha 要跟着缩到格子尺寸（src 还是生成时的 768²）
+            a = src.getchannel("A").resize((cell_w, cell_h), Image.BILINEAR)
+            im.putalpha(a)
+            im = pxf.binarize_alpha(im)
+        outs.append(im)
+
+    # 帧间对齐：按脚底锚点拉回同一落脚点
+    aligned = pp.align_sequence(outs)
+
+    # 按原网格重新打包
+    name = _stamp(tag)
+    out_dir = scope_dir(scope)
+    fdir = out_dir / f"{name}_frames"
+    fdir.mkdir(parents=True, exist_ok=True)
+    for i, f in enumerate(aligned):
+        f.save(fdir / f"frame_{i:04d}.png")
+
+    sheet_path = out_dir / f"{name}_sheet.png"
+    grid = Image.new("RGBA", (cols * cell_w, rows * cell_h), (0, 0, 0, 0))
+    for i, (_c, _r, _f) in enumerate(frames):
+        if i >= len(aligned):
+            break
+        grid.paste(aligned[i], (_c * cell_w, _r * cell_h))
+    grid.save(sheet_path)
+
+    meta = {
+        "workflow": "wss", "scope": scope or "default",
+        "mode": "generate",
+        "prompt": prompt, "negative": neg,
+        "sheet_image": str(sheet_image), "char_image": str(char_image),
+        "grid": [cols, rows], "frames": len(aligned),
+        "cell": [cell_w, cell_h],
+        "ref_mode": ref_mode,
+        "ref_modes_used": sorted(set(used_modes)),
+        "width": width, "height": height,
+        "steps": steps, "cfg": cfg, "seed": seed,
+        "cn_scale": cn_scale, "ipa_scale": ipa_scale,
+        "lora": lora, "lora_scale": lora_scale if lora else None,
+        "clip_skip": clip_skip if emb is not None else 1,
+        "matte": matte, "matte_used": matte_info.get("backend"),
+        "matte_fallback": matte_info.get("fallback"),
+        "keep_alpha": keep_alpha,
+        "palette": palette,
+        "palette_size": len(refined["palette"]) if palette else 0,
+        "per_frame_seconds": [round(s, 2) for s in per_frame],
+        "seconds_total": round(sum(per_frame), 2),
+        "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
+    }
+    Path(str(sheet_path) + ".json").write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2), "utf-8")
+    with (ASSETS / "index.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"sheet": str(sheet_path), **meta}, ensure_ascii=False) + "\n")
+    return {
+        "file": str(sheet_path),
+        "url": f"/files/{sheet_path.relative_to(ASSETS).as_posix()}",
+        "frames_dir": str(fdir),
+        "sheet": str(sheet_path),
+        "meta": meta,
+    }
+
+
+def _sprite_recolor(frames: Sequence[tuple], char_image: str | Path,
+                    cols: int, rows: int, palette: int = 32,
+                    scope: str = "", tag: str = "wss",
+                    prompt: str = "") -> Dict[str, Any]:
+    """确定性换皮：不跑模型，把序列帧的配色换成角色图的配色。
+
+    逐帧按明度重映射到角色色板，alpha 原样保留 —— 于是
+    **形状逐像素精确、帧间零漂移**，这是 AI 路线做不到的。
+
+    适用：同体型换配色（把敌人换成我方配色、把骑士换成法师配色）。
+    不适用：换体型（那要用 generate 模式）。
+    """
+    char = Image.open(char_image).convert("RGBA")
+    pal = pxf.extract_palette([char], palette or 16)
+
+    outs: List[Image.Image] = []
+    for _c, _r, frame in frames:
+        outs.append(pxf.recolor_by_luma(frame, pal, keep_alpha=True))
+
+    cell_w = max(f.width for _c, _r, f in frames)
+    cell_h = max(f.height for _c, _r, f in frames)
+    aligned = pp.align_sequence(outs)
+
+    name = _stamp(tag)
+    out_dir = scope_dir(scope)
+    fdir = out_dir / f"{name}_frames"
+    fdir.mkdir(parents=True, exist_ok=True)
+    for i, f in enumerate(aligned):
+        f.save(fdir / f"frame_{i:04d}.png")
+
+    sheet_path = out_dir / f"{name}_sheet.png"
+    grid = Image.new("RGBA", (cols * cell_w, rows * cell_h), (0, 0, 0, 0))
+    for i, (_c, _r, _f) in enumerate(frames):
+        if i >= len(aligned):
+            break
+        grid.paste(aligned[i], (_c * cell_w, _r * cell_h))
+    grid.save(sheet_path)
+
+    meta = {
+        "workflow": "wss", "scope": scope or "default",
+        "mode": "recolor", "prompt": prompt,
+        "char_image": str(char_image),
+        "grid": [cols, rows], "frames": len(aligned), "cell": [cell_w, cell_h],
+        "palette": palette, "palette_size": len(pal),
+        "palette_colors": [list(c) for c in pal],
+        "seconds_total": 0.0,
+        "deterministic": True,
+    }
+    Path(str(sheet_path) + ".json").write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2), "utf-8")
+    with (ASSETS / "index.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"sheet": str(sheet_path), **meta}, ensure_ascii=False) + "\n")
+    return {
+        "file": str(sheet_path),
+        "url": f"/files/{sheet_path.relative_to(ASSETS).as_posix()}",
+        "frames_dir": str(fdir),
+        "sheet": str(sheet_path),
+        "meta": meta,
+    }
 
 
 # ---------------- W4 姿态驱动 -> 精灵帧 ----------------

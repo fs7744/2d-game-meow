@@ -8,7 +8,8 @@ import {
 } from './store/projects'
 import {
   deleteAssets, fetchJob, fetchLoras, fetchModels, health, submitAiRepaint, submitImg2Img,
-  submitInpaint, submitMatte, submitPixelify, submitPoseClone, submitTxt2Img, uploadImage,
+  submitInpaint, submitMatte, submitPixelify, submitPoseClone, submitSpriteSwap, submitTxt2Img,
+  uploadImage,
 } from './api'
 import ConfirmDialog from './components/ConfirmDialog'
 import Lightbox from './components/Lightbox'
@@ -59,6 +60,16 @@ const DEFAULT_PARAMS: GenParams = {
   pcCnScale: 1.0,
   pcIpaScale: 0.8,
   pcFill: 0.8,
+  // 参考模式默认 auto：先试骨架，认不出人体自动降级到轮廓（游戏素材走这条路）
+  pcRefMode: 'auto',
+  // 序列帧替换：0 = 自动检测精灵图网格
+  ssCols: 0,
+  ssRows: 0,
+  ssMode: 'generate',
+  ssRefMode: 'outline',
+  ssCnScale: 1.0,
+  ssIpaScale: 0.85,
+  ssPalette: 32,
   lora: '',
   loraScale: 0.8,
 }
@@ -279,7 +290,8 @@ export default function App() {
             : type === 'airepaint' ? 'airepaint'
               : type === 'pixelify' ? 'pixelify'
                 : type === 'poseclone' ? 'poseclone'
-                  : 'gen'
+                  : type === 'spriteswap' ? 'spriteswap'
+                    : 'gen'
     setNodes((list) => {
       // 原点放多个时阶梯错开，避免完全重叠
       const sameSpot = list.filter((n) => n.x === at.x && n.y === at.y).length
@@ -316,7 +328,8 @@ export default function App() {
           const up = await uploadImage(f, currentId)
           if (target && (target.kind === 'img2img' || target.kind === 'bg'
             || target.kind === 'inpaint' || target.kind === 'airepaint'
-            || target.kind === 'pixelify' || target.kind === 'poseclone')) {
+            || target.kind === 'pixelify' || target.kind === 'poseclone'
+            || target.kind === 'spriteswap')) {
             patchNode(target.id, { source: { path: up.path } })
             continue
           }
@@ -340,8 +353,8 @@ export default function App() {
   const onConnect = useCallback((from: string, to: string) => {
     const target = nodesRef.current.find((n) => n.id === to)
     // 能接源的节点：图生图（要底图）、抠图与局部重绘（要源图）；文生图没有「底」这回事
-    if (!target || !['img2img', 'bg', 'inpaint', 'airepaint', 'pixelify', 'poseclone']
-      .includes(target.kind)) return
+    if (!target || !['img2img', 'bg', 'inpaint', 'airepaint', 'pixelify', 'poseclone',
+      'spriteswap'].includes(target.kind)) return
     if (target.id === from) return
     patchNode(to, { source: { nodeId: from } })
   }, [patchNode])
@@ -439,7 +452,8 @@ export default function App() {
     if (needPrompt && !node.params.prompt.trim()) return
     let init: string | undefined
     if (node.kind === 'img2img' || node.kind === 'bg' || node.kind === 'inpaint'
-      || node.kind === 'airepaint' || node.kind === 'pixelify' || node.kind === 'poseclone') {
+      || node.kind === 'airepaint' || node.kind === 'pixelify' || node.kind === 'poseclone'
+      || node.kind === 'spriteswap') {
       init = sourcePathOf(node)
       if (!init) {
         // 没有源图就没法提交，直接在节点上报错，别让用户等一个必然失败的任务
@@ -467,6 +481,21 @@ export default function App() {
         }
         const r = await submitPoseClone(
           node.params, { model, matteBackend, scope: currentId }, posePath, charPath)
+        jobId = r.job_id
+      } else if (node.kind === 'spriteswap') {
+        const sheetPath = sourcePathOf(node)
+        const charPath = charPathOf(node)
+        if (!sheetPath || !charPath) {
+          patchNode(id, {
+            job: { id: 'error', status: 'failed',
+              error: !sheetPath
+                ? '缺动作序列帧：连线接一张精灵图，或直接把本地图拖到这个节点上'
+                : '缺角色图：在下面「角色图」里选一个' },
+          })
+          return
+        }
+        const r = await submitSpriteSwap(
+          node.params, { model, matteBackend, scope: currentId }, sheetPath, charPath)
         jobId = r.job_id
       } else if (node.kind === 'pixelify') {
         const r = await submitPixelify(

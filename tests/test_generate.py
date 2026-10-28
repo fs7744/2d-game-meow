@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 from pathlib import Path
 from PIL import Image, ImageDraw
 
@@ -369,20 +370,21 @@ def test_pose_clone_records_both_sources(eng, assets):
 
 
 def test_pose_clone_rejects_image_without_person(eng, assets):
-    """参考图里检测不到人体时必须报错，而不是静默出一张没姿态的图。
+    """显式要求骨架模式时，检测不到人体必须报错，而不是静默出一张没姿态的图。
 
     注意：以前这里会「成功」——检测器 fallback 成整图框，姿态回归在整张图上
     乱跑，输出一堆坐标离谱的关节，看起来像识别成功了，其实完全没用。
+
+    （默认的 auto 模式是另一回事：它会降级到轮廓路线，见下面那条用例。）
     """
     _, char = _pose_clone_inputs(assets)
     blank = assets / "_pc_blank.png"
     Image.new("RGB", (256, 256), (250, 250, 250)).save(blank)
-    import pytest
 
     with pytest.raises(ValueError, match="没检测到人物"):
         g.pose_clone(eng, pose_image=blank, char_image=char,
                      prompt="x", steps=4, preset="none", width=256, height=256,
-                     tag="pc_bad")
+                     ref_mode="pose", tag="pc_bad")
 
 
 def test_clip_skip_changes_result_and_is_recorded(eng):
@@ -477,3 +479,138 @@ def test_missing_weights_raise_clear_error(root):
         assert "权重缺失" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("缺权重时必须抛 FileNotFoundError")
+
+
+# ---------------- WSS 序列帧角色替换 ----------------
+
+def _sprite_sheet(assets, cols=4, rows=1, cell=64) -> Path:
+    """造一张游戏序列帧（像素骑士走路，透明底）。
+
+    刻意做成**人体检测器认不出来**的像素画：这是这条链路的真正场景。
+    """
+    def frame(i):
+        im = Image.new("RGBA", (cell, cell), (0, 0, 0, 0))
+        d = ImageDraw.Draw(im)
+        d.rectangle([26, 48, 30, 58], fill=(40, 40, 60, 255))
+        d.rectangle([33, 48, 37, 58], fill=(40, 40, 60, 255))
+        d.rectangle([25, 30, 38, 48], fill=(120, 30, 40, 255))
+        d.rectangle([27, 18, 36, 30], fill=(235, 200, 160, 255))
+        d.rectangle([26, 16, 37, 21], fill=(160, 165, 175, 255))
+        d.rectangle([21, 31, 25, 42], fill=(120, 30, 40, 255))
+        d.rectangle([38, 31, 42, 42], fill=(120, 30, 40, 255))
+        d.rectangle([44, 20, 46, 40], fill=(200, 200, 210, 255))
+        return im
+
+    sheet = Image.new("RGBA", (cols * cell, rows * cell), (0, 0, 0, 0))
+    n = 0
+    for r in range(rows):
+        for c in range(cols):
+            sheet.paste(frame(n), (c * cell, r * cell))
+            n += 1
+    p = assets / "_wss_sheet.png"
+    sheet.save(p)
+    return p
+
+
+def _slime_char(assets) -> Path:
+    p = assets / "_wss_char.png"
+    im = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    d.ellipse([10, 20, 54, 58], fill=(70, 190, 90, 255))
+    d.ellipse([14, 24, 50, 54], fill=(110, 225, 120, 255))
+    im.save(p)
+    return p
+
+
+def test_sprite_swap_recolor_is_deterministic_and_keeps_shape(eng, assets):
+    """换皮模式：不跑模型、结果确定、形状与参考帧逐像素一致。
+
+    这是「同体型换配色」的最稳路线：alpha 原样保留，所以帧间零漂移。
+    """
+    from workflows import sheet as sheet_mod
+
+    sheet = _sprite_sheet(assets)
+    char = _slime_char(assets)
+    frames = sheet_mod.split_sheet(Image.open(sheet).convert("RGBA"), 4, 1)
+    ref_alpha = [np.asarray(f.getchannel("A")) for _c, _r, f in frames]
+
+    a = g.sprite_swap(eng, sheet_image=sheet, char_image=char, prompt="",
+                      cols=4, rows=1, mode="recolor", palette=8, tag="wss_rc_a")
+    b = g.sprite_swap(eng, sheet_image=sheet, char_image=char, prompt="",
+                      cols=4, rows=1, mode="recolor", palette=8, tag="wss_rc_b")
+
+    assert a["meta"]["mode"] == "recolor"
+    assert a["meta"]["deterministic"] is True
+    assert a["meta"]["frames"] == 4
+    assert a["meta"]["grid"] == [4, 1]
+    assert a["meta"]["seconds_total"] == 0.0, "换皮不该花显卡时间"
+
+    # 两次跑出来的图必须逐像素一致
+    assert (_arr(a["file"]).tolist() == _arr(b["file"]).tolist()), "换皮必须确定性"
+
+    # 形状（alpha）必须与参考帧一致
+    out_frames = sorted(Path(a["frames_dir"]).glob("frame_*.png"))
+    assert len(out_frames) == 4
+    for i, p in enumerate(out_frames):
+        alpha = np.asarray(Image.open(p).convert("RGBA").getchannel("A"))
+        assert alpha.shape == ref_alpha[i].shape
+        assert (alpha == ref_alpha[i]).all(), f"第 {i} 帧形状变了"
+
+
+def test_sprite_swap_generate_keeps_frames_and_palette(eng, assets):
+    """AI 重绘模式：帧数不减、格子尺寸回到原帧大小、整段共享色板。
+
+    这条链路跑真模型（SD1.5 + canny ControlNet + IP-Adapter），
+    步数压到最低，只验结构不验画质。
+    """
+    sheet = _sprite_sheet(assets)
+    char = _slime_char(assets)
+    r = g.sprite_swap(eng, sheet_image=sheet, char_image=char,
+                      prompt="green slime monster", negative=None, preset="sprite",
+                      cols=4, rows=1, width=512, height=512, steps=6, seed=7,
+                      cn_scale=1.0, ipa_scale=0.8, palette=8, matte=True,
+                      tag="wss_gen")
+    m = r["meta"]
+    assert m["workflow"] == "wss"
+    assert m["mode"] == "generate"
+    assert m["frames"] == 4
+    assert m["cell"] == [64, 64], "格子尺寸必须回到原帧大小（序列帧要塞回游戏）"
+    assert m["grid"] == [4, 1]
+    assert m["ref_modes_used"] == ["outline"], "像素画应当走轮廓模式"
+    assert len(r["frames_dir"]) > 0
+    frames = sorted(Path(r["frames_dir"]).glob("frame_*.png"))
+    assert len(frames) == 4
+    for p in frames:
+        assert Image.open(p).size == (64, 64)
+    # 精灵图尺寸 = 列数 × 格子宽
+    assert Image.open(r["sheet"]).size == (4 * 64, 64)
+
+
+def test_sprite_swap_rejects_unrecognizable_grid(eng, assets):
+    """单帧（认不出网格）时必须报错要求手填，不能默默当成 1×1 悄悄丢掉内容。"""
+    single = assets / "_wss_single.png"
+    Image.new("RGBA", (64, 64), (0, 0, 0, 0)).save(single)
+    char = _slime_char(assets)
+    with pytest.raises(ValueError, match="认不出精灵图的网格"):
+        g.sprite_swap(eng, sheet_image=single, char_image=char, prompt="x",
+                      cols=0, rows=0, tag="wss_bad")
+
+
+def test_pose_clone_auto_falls_back_on_pixel_art(eng, assets):
+    """角色迁移的 auto 模式：像素画参考要走轮廓，不能报错。
+
+    这是「不止真人」的核心承诺——真人走骨架（更准），
+    游戏素材走轮廓（能用）。
+    """
+    sheet = _sprite_sheet(assets)
+    char = _slime_char(assets)
+    r = g.pose_clone(eng, pose_image=sheet, char_image=char,
+                     prompt="green slime monster", negative=None, preset="sprite",
+                     width=512, height=512, steps=6, seed=7, ref_mode="auto",
+                     matte=True, tag="pc_auto")
+    m = r["meta"]
+    assert m["ref_mode"] == "auto"
+    assert m["ref_mode_used"] == "outline"
+    assert m["ref_fallback_from"] == "pose"
+    assert m["ref_fallback_reason"]
+    assert Path(r["file"]).exists()

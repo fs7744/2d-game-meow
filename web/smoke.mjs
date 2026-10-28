@@ -152,8 +152,8 @@ function check(name, cond, extra = '') {
   const doc = dom.window.document
   check('渲染出顶栏品牌', doc.querySelector('.brand .title')?.textContent?.includes('喵叫'))
   check('空状态引导可见', !!doc.querySelector('.canvas-empty .empty-card'))
-  check('侧栏存在（节点 8 项：图生成 / 图生图 / 局部重绘 / 局部AI重绘 / 角色迁移 / 像素转换 / 抠图 / 图片）',
-    section(doc, '节点')?.querySelectorAll('.rail-item').length === 8,
+  check('侧栏存在（节点 9 项：图生成 / 图生图 / 局部重绘 / 局部AI重绘 / 角色迁移 / 序列帧替换 / 像素转换 / 抠图 / 图片）',
+    section(doc, '节点')?.querySelectorAll('.rail-item').length === 9,
     String(section(doc, '节点')?.querySelectorAll('.rail-item').length))
   check('有「项目」分组（独立画布）', !!section(doc, '项目'))
   check('缩放显示 100%', doc.querySelector('.zoom-val')?.textContent === '100%')
@@ -1297,6 +1297,98 @@ function check(name, cond, extra = '') {
     JSON.stringify({ cn: body.params.cn_scale, ipa: body.params.ipa_scale }))
 
   check('角色迁移场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 24) 序列帧替换节点：精灵图 + 角色图 → 提交 wss
+{
+  const { dom, errors } = await boot('')
+  const doc = dom.window.document
+  const win = dom.window
+
+  const nodeItems = [...section(doc, '节点').querySelectorAll('.rail-item')]
+  const ssItem = nodeItems.find((it) => (it.querySelector('b')?.textContent || '') === '序列帧替换')
+  check('侧栏有「序列帧替换」节点类型', !!ssItem)
+  ssItem?.querySelector('.rail-add').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 150))
+
+  const node = doc.querySelector('.node')
+  check('新建出序列帧替换节点',
+    (node?.querySelector('.node-kind')?.textContent || '') === '序列帧替换',
+    node?.querySelector('.node-kind')?.textContent)
+  check('有序列帧源区与角色图区',
+    !!node?.querySelector('.src-box') && !!node?.querySelector('.char-box'))
+  check('没有源图时不能提交', node?.querySelector('.gen-btn')?.disabled === true)
+  // 方式选择：AI 重绘 / 换皮
+  const modeSel = [...node.querySelectorAll('select')].find((s) =>
+    [...s.options].some((o) => o.textContent.includes('换皮')))
+  check('有 AI重绘/换皮 方式选择', !!modeSel)
+
+  // 拖一个本地图进来 -> 序列帧源
+  const viewport = doc.querySelector('.canvas-viewport')
+  const file = new win.File([new Uint8Array([1])], 'sheet.png', { type: 'image/png' })
+  const ev = new win.Event('drop', { bubbles: true })
+  Object.defineProperties(ev, {
+    clientX: { value: 300 }, clientY: { value: 200 },
+    dataTransfer: { value: { types: ['Files'], files: [file], getData: () => '' } },
+  })
+  viewport.dispatchEvent(ev)
+  await new Promise((r) => setTimeout(r, 400))
+  const imgNode = [...doc.querySelectorAll('.node')].find(
+    (n) => (n.querySelector('.node-kind')?.textContent || '') === '图片')
+  const ssNode = [...doc.querySelectorAll('.node')].find(
+    (n) => (n.querySelector('.node-kind')?.textContent || '') === '序列帧替换')
+
+  // 连线 -> 序列帧源
+  imgNode?.querySelector('.conn.out')
+    .dispatchEvent(new win.PointerEvent('pointerdown', { bubbles: true, button: 0 }))
+  await new Promise((r) => setTimeout(r, 60))
+  ssNode.dispatchEvent(new win.PointerEvent('pointerover', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 60))
+  win.dispatchEvent(new win.PointerEvent('pointerup', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 150))
+  check('连线后接上了序列帧源', !!ssNode.querySelector('.src-box select')?.value)
+
+  // 角色图
+  const charSel = ssNode.querySelectorAll('.src-box select')[1]
+  const charSet = Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value').set
+  charSet.call(charSel, imgNode.getAttribute('data-node-id') || '')
+  charSel.dispatchEvent(new win.Event('change', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 150))
+
+  // 填提示词（generate 模式需要）
+  const ta = ssNode.querySelector('textarea.prompt')
+  const setTa = (el, v) => {
+    const s2 = Object.getOwnPropertyDescriptor(win.HTMLTextAreaElement.prototype, 'value').set
+    s2.call(el, v)
+    el.dispatchEvent(new win.Event('input', { bubbles: true }))
+  }
+  setTa(ta, 'a blue slime monster')
+  await new Promise((r) => setTimeout(r, 80))
+
+  ssNode.querySelector('.gen-btn').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 250))
+  const sub = calls.filter((c) => c.url.endsWith('/generate')).pop()
+  const body = JSON.parse(sub.body)
+  check('提交 workflow=wss', body.workflow === 'wss', body.workflow)
+  check('带上了序列帧与角色图两个路径',
+    typeof body.params.sheet_image === 'string' && body.params.sheet_image.length > 0 &&
+    typeof body.params.char_image === 'string' && body.params.char_image.length > 0,
+    JSON.stringify({ s: body.params.sheet_image, c: body.params.char_image }))
+  check('带上了网格（0=自动）与替换方式',
+    body.params.cols === undefined && body.params.rows === undefined &&
+    typeof body.params.mode === 'string',
+    JSON.stringify({ cols: body.params.cols, mode: body.params.mode }))
+
+  // 切到换皮模式后不需要提示词
+  const modeSet = Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value').set
+  modeSet.call(modeSel, 'recolor')
+  modeSel.dispatchEvent(new win.Event('change', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 150))
+  check('换皮模式下不需要提示词也能提交',
+    ssNode.querySelector('.gen-btn')?.disabled === false)
+
+  check('序列帧替换场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 

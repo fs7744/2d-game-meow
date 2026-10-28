@@ -13,7 +13,7 @@ type Props = {
   onDeleteProject: (id: string) => void
   onAddNode: (
     kind?: 'gen' | 'img2img' | 'image' | 'bg' | 'inpaint' | 'airepaint' | 'pixelify'
-    | 'poseclone',
+    | 'poseclone' | 'spriteswap',
   ) => void
   canApply: boolean
   onApplyFav: (text: string) => void
@@ -206,6 +206,21 @@ export default function Sidebar({
               <em>参考动作 · 换角色</em>
             </span>
             <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('poseclone')}>+</button>
+          </div>
+          <div
+            className="rail-item"
+            draggable
+            onDragStart={(e) => {
+              e.dataTransfer.setData('application/x-node-type', 'spriteswap')
+              e.dataTransfer.effectAllowed = 'copy'
+            }}
+            title="序列帧替换：把一段游戏动画（精灵图）里的角色换成目标角色，动作保持不变"
+          >
+            <span className="rail-item-main">
+              <b>序列帧替换</b>
+              <em>精灵图 · 逐帧换角色</em>
+            </span>
+            <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('spriteswap')}>+</button>
           </div>
           <div
             className="rail-item"

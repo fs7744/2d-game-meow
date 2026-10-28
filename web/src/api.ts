@@ -117,7 +117,7 @@ function common(params: GenParams, opts: SubmitOpts) {
 }
 
 async function post(
-  workflow: 'w1' | 'w2' | 'w3' | 'w5' | 'wbg' | 'wpx' | 'wpc',
+  workflow: 'w1' | 'w2' | 'w3' | 'w5' | 'wbg' | 'wpx' | 'wpc' | 'wss',
   params: Record<string, unknown>,
 ) {
   const r = await fetch(`${base}/generate`, {
@@ -257,6 +257,47 @@ export function submitPoseClone(
     cn_scale: params.pcCnScale,
     ipa_scale: params.pcIpaScale,
     fill: params.pcFill,
+    // 参考模式：auto=先试骨架，认不出人自动降级到轮廓
+    ref_mode: params.pcRefMode,
+  })
+}
+
+/**
+ * 序列帧角色替换（wss）。把一段游戏动画（精灵图）里的角色换成目标角色。
+ *
+ * mode=recolor 走确定性换皮（不跑模型，帧间零漂移）；
+ * mode=generate 跑模型（轮廓条件 + IP-Adapter），能换体型。
+ */
+export function submitSpriteSwap(
+  params: GenParams,
+  opts: SubmitOpts,
+  sheetImage: string,
+  charImage: string,
+) {
+  return post('wss', {
+    sheet_image: sheetImage,
+    char_image: charImage,
+    prompt: params.prompt,
+    negative: params.negative || undefined,
+    preset: params.preset,
+    lora: params.lora || undefined,
+    lora_scale: params.loraScale,
+    model: opts.model || 'sd15',
+    scope: opts.scope || undefined,
+    // 0 = 后端自动检测精灵图网格
+    cols: params.ssCols > 0 ? params.ssCols : undefined,
+    rows: params.ssRows > 0 ? params.ssRows : undefined,
+    mode: params.ssMode,
+    ref_mode: params.ssRefMode,
+    cn_scale: params.ssCnScale,
+    ipa_scale: params.ssIpaScale,
+    palette: params.ssPalette,
+    width: params.width,
+    height: params.height,
+    steps: params.steps,
+    cfg: params.cfg,
+    seed: params.seed,
+    clip_skip: params.clipSkip,
   })
 }
 
@@ -298,7 +339,8 @@ export async function fetchJob(jobId: string): Promise<JobState> {
     error: j.error,
     url: file ? fileUrl(file) : undefined,
     seed: typeof meta.seed === 'number' ? (meta.seed as number) : undefined,
-    seconds: typeof meta.seconds === 'number' ? (meta.seconds as number) : undefined,
+    seconds: typeof meta.seconds === 'number' ? (meta.seconds as number)
+      : typeof meta.seconds_total === 'number' ? (meta.seconds_total as number) : undefined,
     peakVram:
       typeof meta.peak_vram_gb === 'number' ? (meta.peak_vram_gb as number) : undefined,
     subjects:
