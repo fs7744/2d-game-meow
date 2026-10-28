@@ -131,3 +131,53 @@ def test_release_encoder_handles_missing(eng):
     class Fake:
         pass
     assert vramopt.release_ipa_encoder(Fake()) is False
+
+
+# ---------------- W4 候选的显存规划 ----------------
+
+def test_estimate_pose_gb_grows_with_size():
+    from workflows import vramopt as V
+
+    a = V.estimate_pose_gb("sdxl", 768, 1)
+    b = V.estimate_pose_gb("sdxl", 1024, 1)
+    assert 14.0 < a < 17.0, a          # 实测 15.33GB
+    assert b > a * 1.1                 # 面积翻 1.78 倍，激活跟着涨
+
+
+def test_estimate_pose_gb_grows_with_candidates():
+    from workflows import vramopt as V
+
+    one = V.estimate_pose_gb("sdxl", 1024, 1)
+    two = V.estimate_pose_gb("sdxl", 1024, 2)
+    # 实测 18.45 → 23.98，不能严重低估（低估就会放行并触发性能崩塌）
+    assert abs(two - 23.98) < 2.0, two
+    assert two > one
+
+
+def test_plan_candidates_allows_when_plenty():
+    from workflows import vramopt as V
+
+    k, note = V.plan_candidates("sd15", 768, 3, free_gb=18.0)
+    assert k == 3 and note == ""
+
+
+def test_plan_candidates_caps_when_tight():
+    """sdxl 1024² 批量 2 实测 23.98GB/24GB 且耗时崩到 17.5s，必须被拦住。"""
+    from workflows import vramopt as V
+
+    k, note = V.plan_candidates("sdxl", 1024, 3, free_gb=7.0)   # 加载后只剩 7GB
+    assert k == 1, k
+    assert "候选" in note
+
+
+def test_plan_candidates_rejects_when_single_does_not_fit():
+    from workflows import vramopt as V
+
+    k, note = V.plan_candidates("sdxl", 1024, 2, free_gb=1.0)
+    assert k == 0 and "装不下" in note
+
+
+def test_plan_candidates_no_gpu_info_passthrough():
+    from workflows import vramopt as V
+
+    assert V.plan_candidates("sdxl", 768, 4, free_gb=0.0)[0] == 4

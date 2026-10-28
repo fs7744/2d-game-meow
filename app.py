@@ -246,8 +246,15 @@ def engine_stats() -> Dict[str, Any]:
 
 @app.get("/models")
 def models() -> Dict[str, Any]:
-    """可用底模。前端下拉用它；没有对应权重就不显示，避免选了却跑不动。"""
-    return {"current": engine.DEFAULT_MODEL, "available": engine.available_models()}
+    """可用底模 + 每个底模在精灵管线上的**推荐参数**。
+
+    前端选中模型时应当把 `recommend` 带出来的值填进表单——实测 SDXL 在 1024²
+    反而更差（角色占比大、更易顶边，可交付率 92% → 75%），如果前端默认按
+    "SDXL 就该 1024"来填，用户会稳定拿到更差的结果。
+    """
+    have = engine.available_models()
+    return {"current": engine.DEFAULT_MODEL, "available": have,
+            "recommend": {m: engine.recommend(m) for m in have}}
 
 
 @app.get("/loras")

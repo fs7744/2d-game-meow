@@ -949,6 +949,18 @@ def sprite_swap(eng: Engine, *, sheet_image: str | Path, char_image: str | Path,
                                        eng.matte_dir, info=matte_info)
         return matte_mod.despeckle(cut_img, denoise_iters=denoise)
 
+    # 显存守卫：整段序列共用一个候选数，所以在循环外算一次
+    cand_note = ""
+    if candidates > 1:
+        from . import vramopt
+        k, cand_note = vramopt.plan_candidates(eng.arch(model), max(width, height),
+                                               candidates, eng.free_gb())
+        if k == 0:
+            raise ValueError(cand_note)
+        if k < candidates:
+            print(f"[warn] {cand_note}")
+            candidates = k
+
     for _c, _r, frame in frames:
         cond, used_mode, _info = refcond.build_condition(
             frame, mode=ref_mode, size=max(width, height), extractor=extractor,
@@ -1059,6 +1071,7 @@ def sprite_swap(eng: Engine, *, sheet_image: str | Path, char_image: str | Path,
         "palette_size": len(refined["palette"]) if palette else 0,
         # 逐帧评分（多候选择优的依据）
         "candidates": max(1, candidates),
+        "candidates_note": cand_note or None,
         "gate_retries": gate_retries,
         "attempts": attempts_used,
         "frame_scores": frame_scores,
@@ -1426,6 +1439,21 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
         if extractor is None:
             print("[warn] 质量闸门不可用（姿态模型或 onnxruntime 缺失），本次只按分数挑帧")
     candidates = max(1, int(candidates))
+    # **显存守卫**：显存打满时不会报 OOM，但耗时能翻 3 倍（实测 sdxl 1024² 批量 2：
+    # 23.98GB，5.0s → 17.47s）。所以宁可提前把候选数降下来——候选只影响成品率，
+    # 不影响能不能跑，是显存不足时第一个该让步的东西。
+    cand_note = ""
+    if candidates > 1:
+        from . import vramopt
+        k, cand_note = vramopt.plan_candidates(eng.arch(model), max(width, height),
+                                               candidates, eng.free_gb())
+        if k == 0:
+            raise ValueError(cand_note)
+        if k < candidates:
+            print(f"[warn] {cand_note}")
+            candidates = k
+        else:
+            cand_note = ""
     # 闸门不可用时不留补提额度：没有判据的重提等于烧显卡
     retries = max(0, int(gate_retries)) if extractor is not None else 0
     attempts_max = candidates + retries
@@ -1530,7 +1558,8 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
         "matte_used": matte_info.get("backend"), "matte_fallback": matte_info.get("fallback"),
         "model": model, "distill": distill or None,
         "clip_skip": clip_used,
-        "candidates": candidates, "gate": bool(gate and extractor is not None),
+        "candidates": candidates, "candidates_note": cand_note or None,
+        "gate": bool(gate and extractor is not None),
         "gate_min_points": gate_min_points,
         "gate_retries": retries,
         "attempts": attempts_used,

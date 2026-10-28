@@ -1502,6 +1502,14 @@ python tools/ab_base.py --rebuild --out assets/_ab_base
 之前我报过 0.8s——那是拿**已像素化的成品**当输入，命中了网格对齐检测（refine_one），
 而产线真实输入色数成千上万，0.5ms 内就回退了。这个测量偏差已修正。
 
+### 这些结论已经进代码
+
+- `Engine.recommend(model)` 给出每个底模在精灵管线上的推荐参数，`GET /models`
+  的 `recommend` 字段直接带出来（SDXL 推荐 768×768 / 24 步，不是 1024）。
+- `vramopt.plan_candidates()` 在 W4 出候选前按显存余量封顶：装不下就降候选数，
+  单帧都装不下才报错。被降级的情况会写进 meta 的 `candidates_note`，
+  不会静默改变行为。实测拦的就是 sdxl 1024² 批量 2（23.98GB / 耗时 17.5s）。
+
 ### 结论
 
 - **要精灵产线的单位成本最低：SDXL@768 + 单候选**（2.01s/可用帧，10.95GB）。

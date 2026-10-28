@@ -743,6 +743,24 @@ class Engine:
 
     # ---------- 显存管理 ----------
 
+    # 精灵管线的推荐参数。**SDXL 推荐 768 而不是 1024**：
+    # 实测 1024² 下角色占比更大、更容易顶边，可交付率从 92% 掉到 75%，
+    # 加上生成慢一倍，每可用帧贵 2.3 倍（见 tools/bench_sprite.py）。
+    RECOMMEND = {
+        "sd15": {"width": 768, "height": 768, "steps": 30, "cfg": 7.0,
+                 "pixel": 6, "palette": 32},
+        "sdxl": {"width": 768, "height": 768, "steps": 24, "cfg": 6.5,
+                 "pixel": 6, "palette": 32},
+    }
+
+    def recommend(self, model: str = DEFAULT_MODEL) -> Dict[str, Any]:
+        """这个底模在**精灵管线**上的推荐参数（尺寸/步数/像素格/色数）。"""
+        return dict(self.RECOMMEND.get(self.arch(model), self.RECOMMEND["sd15"]))
+
+    def free_gb(self) -> float:
+        """当前还能给新工作负载用的显存（GB），扣掉 PyTorch 已保留的块。"""
+        return self._free_gb()
+
     def _free_gb(self) -> float:
         if not torch.cuda.is_available():
             return 0.0

@@ -34,6 +34,14 @@ def test_models_endpoint(client, eng):
     for m in body["available"]:
         assert (eng.root / "checkpoints" / m / "model_index.json").exists(), m
 
+    # 每个底模都要带推荐参数：SDXL 推荐 768 而不是 1024。
+    # 实测 1024² 反而更差（角色占比大 → 更易顶边，可交付率 92%→75%），
+    # 前端若按"SDXL 就该 1024"填表单，用户会稳定拿到更差的结果。
+    rec = body["recommend"]
+    for m in body["available"]:
+        assert rec[m]["width"] == 768 and rec[m]["height"] == 768, rec[m]
+        assert rec[m]["pixel"] > 1 and rec[m]["palette"] > 1
+
 
 def test_txt2img_model_echoed(eng):
     r = g.txt2img(eng, prompt="blue slime", width=256, height=256, steps=6,

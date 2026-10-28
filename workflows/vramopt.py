@@ -190,6 +190,61 @@ def _gpu_mem() -> Tuple[float, float]:
     return free / 2**30, total / 2**30
 
 
+# ---------------- W4 候选批量的显存规划 ----------------
+
+# 实测（RTX 4090，fp16，pose 管线的**保留峰值**，不是 allocated）：
+#   sd15 768² 单帧 6.62GB
+#   sdxl 768² 单帧 15.33GB / 批量2 18.16 / 批量3 21.76
+#   sdxl 1024² 单帧 18.45GB / 批量2 23.98（且耗时从 5.0s 崩到 17.5s）
+#
+# 模型：峰值 = 权重 + 激活(∝ 面积) + 每多一帧的增量(∝ 面积)
+# 权重按架构固定，激活与增量都随边长平方缩放。
+_W4_SHAPE = {
+    #        权重GB  768²激活GB  768²每帧增量GB
+    "sd15": (4.0, 2.6, 1.7),
+    "sdxl": (12.0, 3.3, 2.8),
+}
+
+
+def estimate_pose_gb(arch: str, size: int, candidates: int = 1) -> float:
+    """估 W4（ControlNet + IP-Adapter）的保留峰值。"""
+    w, act, per = _W4_SHAPE.get(arch, _W4_SHAPE["sd15"])
+    k = (max(256, int(size)) / 768.0) ** 2
+    return w + act * k + per * k * max(0, candidates - 1)
+
+
+def plan_candidates(arch: str, size: int, want: int, free_gb: float,
+                    *, single_resident: bool = True,
+                    safety: float = 0.9) -> Tuple[int, str]:
+    """按当前空闲显存决定**能批量出几个候选**。返回 (候选数, 说明)。
+
+    为什么要管这件事：显存打满时**不报 OOM，但耗时能翻 3 倍**（实测 sdxl 1024²
+    批量 2：23.98GB，单帧 5.0s → 17.47s）。这种劣化没有任何报错，用户只会觉得
+    "SDXL 太慢"，然后去调错方向。宁可提前把候选数降下来。
+
+    候选数是"多出几张让闸门挑"的额度，降它只影响成品率，不影响能不能跑；
+    所以它是显存不足时**第一个**该让步的东西（比降分辨率温和）。
+    """
+    want = max(1, int(want))
+    if free_gb <= 0:
+        return want, ""                     # 没有 GPU 信息就不要瞎猜
+    # 调用时机通常是"管线已加载"，此时单帧峰值已从 free 里扣掉；
+    # 判断 k 个候选能否装下要把这份加回来，否则会算出偏小的 k。
+    single = estimate_pose_gb(arch, size, 1)
+    budget = (free_gb + (single if single_resident else 0.0)) * safety
+    if single > budget:
+        return 0, (f"单帧就装不下：{arch} {size}² 预计 {single:.1f}GB "
+                   f"> 可用 {budget / safety:.1f}GB。把边长降到 768 或先释放其它管线")
+    k = 1
+    while k < want and estimate_pose_gb(arch, size, k + 1) <= budget:
+        k += 1
+    if k < want:
+        return k, (f"显存只够 {k} 个候选（要 {want}）：预计 "
+                   f"{estimate_pose_gb(arch, size, k):.1f}GB / 可用 {free_gb:.1f}GB")
+    return k, ""
+
+
+
 def _estimate_gb(n_frames: int, size: int) -> float:
     """估算峰值显存（GB）。
 
