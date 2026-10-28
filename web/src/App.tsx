@@ -83,6 +83,7 @@ const DEFAULT_PARAMS: GenParams = {
   psDir: '',
   lora: '',
   loraScale: 0.8,
+  extraLoras: [],
 }
 
 let seq = 0

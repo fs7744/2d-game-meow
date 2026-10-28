@@ -109,8 +109,7 @@ function common(params: GenParams, opts: SubmitOpts) {
     model: opts.model || 'sd15',
     matte_backend: opts.matteBackend || 'auto',
     // 空串表示不挂 LoRA；后端会把名字解析成绝对路径
-    lora: params.lora || undefined,
-    lora_scale: params.loraScale,
+    ...loraPayload(params),
     // 项目作用域：产物写进 assets/projects/<scope>/，项目之间互不可见
     scope: opts.scope || undefined,
   }
@@ -127,6 +126,24 @@ async function post(
   })
   if (!r.ok) throw new Error(`提交失败：HTTP ${r.status}`)
   return r.json() as Promise<SubmitResult>
+}
+
+/**
+ * LoRA 提交参数。多个时传**数组**：`lora=[a, b]`、`lora_scale=[0.8, 0.5]`。
+ *
+ * 只挂一个是常态，所以空的时候发 undefined（后端照旧走"不挂"分支）；
+ * 挂了就一律发数组——单个也发数组，避免前端分两条路径写代码。
+ */
+function loraPayload(params: GenParams) {
+  const items = [
+    ...(params.lora ? [{ name: params.lora, scale: params.loraScale }] : []),
+    ...(params.extraLoras || []).filter((x) => x.name),
+  ]
+  if (!items.length) return { lora: undefined, lora_scale: undefined }
+  return {
+    lora: items.map((x) => x.name),
+    lora_scale: items.map((x) => Number.isFinite(x.scale) ? x.scale : 0.8),
+  }
 }
 
 export function submitTxt2Img(params: GenParams, opts: SubmitOpts = {}) {
@@ -165,8 +182,7 @@ export function submitInpaint(
     cfg: params.cfg,
     seed: params.seed,
     preset: params.preset,
-    lora: params.lora || undefined,
-    lora_scale: params.loraScale,
+    ...loraPayload(params),
     model: opts.model || 'sd15',
     scope: opts.scope || undefined,
   })
@@ -193,8 +209,7 @@ export function submitAiRepaint(
     seed: params.seed,
     preset: params.preset,
     clip_skip: params.clipSkip,
-    lora: params.lora || undefined,
-    lora_scale: params.loraScale,
+    ...loraPayload(params),
     model: opts.model || 'sd15',
     scope: opts.scope || undefined,
     context: params.rpContext,
@@ -250,8 +265,7 @@ export function submitPoseClone(
     seed: params.seed,
     preset: params.preset,
     clip_skip: params.clipSkip,
-    lora: params.lora || undefined,
-    lora_scale: params.loraScale,
+    ...loraPayload(params),
     model: opts.model || 'sd15',
     scope: opts.scope || undefined,
     cn_scale: params.pcCnScale,
@@ -289,8 +303,7 @@ export function submitPoseSeq(
     prompt: params.prompt,
     negative: params.negative || undefined,
     preset: params.preset,
-    lora: params.lora || undefined,
-    lora_scale: params.loraScale,
+    ...loraPayload(params),
     model: opts.model || 'sd15',
     scope: opts.scope || undefined,
     width: params.width,
@@ -329,8 +342,7 @@ export function submitSpriteSwap(
     prompt: params.prompt,
     negative: params.negative || undefined,
     preset: params.preset,
-    lora: params.lora || undefined,
-    lora_scale: params.loraScale,
+    ...loraPayload(params),
     model: opts.model || 'sd15',
     scope: opts.scope || undefined,
     // 0 = 后端自动检测精灵图网格

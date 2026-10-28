@@ -430,8 +430,26 @@ export default function GenNodeCard({
    * 选 LoRA：同时把「推荐强度」和「匹配的提示词契约」一起带过来。
    * 不这么做的话，挂着武侠 LoRA 却仍在用像素契约，两边打架、两头不到位。
    */
-  const chooseLora = (name: string) => {
+  const extras = p.extraLoras || []
+  const setExtras = (next: { name: string; scale: number }[]) =>
+    onPatch({ params: { ...p, extraLoras: next } })
+
+  /**
+   * 选 LoRA：同时把「推荐强度」和「匹配的提示词契约」一起带过来。
+   * 不这么做的话，挂着武侠 LoRA 却仍在用像素契约，两边打架、两头不到位。
+   *
+   * `slot` 指定是主槽（-1）还是叠加的第几个。副槽只带强度，不改
+   * preset / 抠图 / clip skip —— 那几项是"这个 LoRA 的训练约定"，
+   * 让第二个 LoRA 覆盖第一个的约定只会更乱。
+   */
+  const chooseLora = (name: string, slot = -1) => {
     const info = loras.find((l) => l.name === name)
+    if (slot >= 0) {
+      const next = extras.map((x, i) => (i === slot
+        ? { name, scale: info?.scale ?? x.scale } : x))
+      setExtras(next)
+      return
+    }
     const next = { ...p, lora: name }
     if (info) {
       next.loraScale = info.scale
@@ -443,6 +461,15 @@ export default function GenNodeCard({
     }
     onPatch({ params: next })
   }
+
+  /** 叠加一个 LoRA。上限 4 个：再多效果互相抵消，而且显存里堆叠的副本也变多。 */
+  const addExtra = () => {
+    if (extras.length >= 4) return
+    setExtras([...extras, { name: '', scale: 0.8 }])
+  }
+  const removeExtra = (i: number) => setExtras(extras.filter((_, k) => k !== i))
+  const setExtraScale = (i: number, v: number) =>
+    setExtras(extras.map((x, k) => (k === i ? { ...x, scale: v } : x)))
 
   /** 触发词缺了等于白装 LoRA，所以给个一键补入，已包含则不重复加。 */
   const addTrigger = () => {
@@ -1807,6 +1834,58 @@ export default function GenNodeCard({
                   {loraInfo.note && <p className="lora-note">{loraInfo.note}</p>}
                 </div>
               )}
+              {/* 叠加多个 LoRA：效果线性叠加（A1111 的 <lora:a:0.8> <lora:b:0.5>）。
+                  常见组合是「风格 + 角色」——单个 LoRA 很难同时给两样。 */}
+              <div className="lora-stack">
+                <div className="stack-head">
+                  <span>叠加 LoRA</span>
+                  <button
+                    className="mini"
+                    onClick={addExtra}
+                    disabled={!loras.length || extras.length >= 4}
+                    title="再加一个 LoRA（与主 LoRA 线性叠加）"
+                  >
+                    + 叠加
+                  </button>
+                </div>
+                {extras.map((it, i) => (
+                  <div className="stack-row" key={i}>
+                    <select
+                      value={it.name}
+                      onChange={(e) => chooseLora(e.target.value, i)}
+                      title="选择要叠加的 LoRA（必须与主 LoRA 同架构）"
+                    >
+                      <option value="">（选一个）</option>
+                      {loras.map((l) => (
+                        <option key={l.name} value={l.name}>{l.label}</option>
+                      ))}
+                    </select>
+                    <input
+                      type="number"
+                      step={0.05}
+                      min={0}
+                      max={1.5}
+                      value={it.scale}
+                      disabled={!it.name}
+                      onChange={(e) => setExtraScale(i, Number(e.target.value))}
+                      title="这个 LoRA 的强度"
+                    />
+                    <button
+                      className="mini"
+                      onClick={() => removeExtra(i)}
+                      title="移除这一层"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+                {!!extras.length && (
+                  <p className="stack-note">
+                    强度各自独立；总强度过高会过拟合（构图僵、出伪影），
+                    叠两层时建议都在 0.5~0.8。
+                  </p>
+                )}
+              </div>
               <div className="row">
                 <label title={hint('LoRA 强度')}>
                   LoRA 强度

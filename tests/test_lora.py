@@ -281,13 +281,17 @@ class _Mod:
 
     def __init__(self) -> None:
         self._params: dict = {}
+        self._seq = 0
 
     def named_parameters(self):
         return iter(list(self._params.items()))
 
     def add_lora(self, n: int = 1) -> None:
-        for i in range(n):
-            self._params[f"blk{i}.lora_A.weight"] = object()
+        # 键名必须每次不同：固定键名的话第二次调用不会增加参数个数，
+        # 于是"逐个校验注入"会误判成空挂（假管线自己的 bug 伪装成产品 bug）
+        for _ in range(n):
+            self._seq += 1
+            self._params[f"blk{self._seq}.lora_A.weight"] = object()
 
 
 class _FakePipe:
@@ -360,3 +364,101 @@ def test_apply_lora_accepts_real_injection(tmp_path):
 
     eng.apply_lora(pipe, lora, 0.8)
     assert eng._pool["lora"] and eng._pool["lora"].startswith("ok.safetensors")
+
+
+# ---------------- 多个 LoRA 叠加 ----------------
+
+class _StackPipe:
+    """按文件名决定行为：`good` 真注入，`bad` 静默空挂（什么都不做）。
+
+    用来验证"叠加时逐个校验"——只看总数会漏：一个空挂、另一个正常，
+    总数照样上涨，但空挂那个永远不会生效。
+    """
+
+    def __init__(self) -> None:
+        self.unet = _Mod()
+        self.text_encoder = None
+        self.text_encoder_2 = None
+        self.transformer = None
+        self.adapters: tuple[list[str], list[float]] = ([], [])
+        self.unloaded = 0
+
+    def load_lora_weights(self, path, adapter_name=None):
+        if 'bad' not in str(path):
+            self.unet.add_lora(2)
+
+    def unload_lora_weights(self):
+        self.unloaded += 1
+        self.unet._params.clear()
+
+    def set_adapters(self, names, adapter_weights=None):
+        self.adapters = (list(names), list(adapter_weights or []))
+
+    def get_active_adapters(self):
+        return []
+
+
+def _mk(tmp_path, *names):
+    out = []
+    for n in names:
+        p = tmp_path / f'{n}.safetensors'
+        p.write_bytes(b'\0' * 16)
+        out.append(p)
+    return out
+
+
+def test_apply_lora_stacks_two_with_own_scales(tmp_path):
+    """两个 LoRA 各自一个 adapter，各自一个强度。"""
+    eng = _make_engine(tmp_path)
+    a, b = _mk(tmp_path, 'good_a', 'good_b')
+    pipe = _StackPipe()
+
+    eng.apply_lora(pipe, [a, b], [0.75, 0.5])
+    names, weights = pipe.adapters
+    assert names == ['lora0', 'lora1']
+    assert weights == [0.75, 0.5]
+    assert 'good_a' in eng._pool['lora'] and 'good_b' in eng._pool['lora']
+
+
+def test_apply_lora_single_scale_applies_to_all(tmp_path):
+    """强度给单个数值时所有 LoRA 共用。"""
+    eng = _make_engine(tmp_path)
+    paths = _mk(tmp_path, 'good_a', 'good_b')
+    pipe = _StackPipe()
+
+    eng.apply_lora(pipe, paths, 0.6)
+    assert pipe.adapters[1] == [0.6, 0.6]
+
+
+def test_apply_lora_pads_short_scale_list(tmp_path):
+    """强度列表不够长时按 0.8 补齐——LoRA 是增强项，不该让整个任务失败。"""
+    eng = _make_engine(tmp_path)
+    paths = _mk(tmp_path, 'good_a', 'good_b')
+    pipe = _StackPipe()
+
+    eng.apply_lora(pipe, paths, [0.4])
+    assert pipe.adapters[1] == [0.4, 0.8]
+
+
+def test_apply_lora_names_the_silent_one_in_a_stack(tmp_path):
+    """叠加时逐个校验：空挂的那个要被点名，而不是让另一个把它盖过去。"""
+    eng = _make_engine(tmp_path)
+    good, bad = _mk(tmp_path, 'good_a', 'bad_b')
+    pipe = _StackPipe()
+
+    with pytest.raises(ValueError) as exc:
+        eng.apply_lora(pipe, [good, bad], [0.8, 0.8])
+    assert '没起作用' in str(exc.value)
+    assert 'bad_b' in str(exc.value)
+    assert eng._pool['lora'] is None, '失败后不能留脏状态'
+    assert pipe.unloaded >= 1
+
+
+def test_apply_lora_single_still_uses_one_adapter(tmp_path):
+    """单个路径是常态，行为必须与改动前一致。"""
+    eng = _make_engine(tmp_path)
+    (a,) = _mk(tmp_path, 'good_a')
+    pipe = _StackPipe()
+
+    eng.apply_lora(pipe, a, 0.8)
+    assert pipe.adapters == (['lora0'], [0.8])

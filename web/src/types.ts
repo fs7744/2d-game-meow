@@ -117,6 +117,12 @@ export type GenParams = {
   ssVramProfile: VramProfile // 序列帧替换：显存档位（auto 自动降分辨率）
   lora: string            // LoRA 名（后端解析成路径）；空串表示不挂
   loraScale: number
+  /**
+   * 叠加的额外 LoRA（在 lora 之上）。多个 LoRA 会**线性叠加**，
+   * 这是 A1111 里 `<lora:a:0.8> <lora:b:0.5>` 的等价物。
+   * 常见组合：风格 LoRA（像素）+ 角色 LoRA。
+   */
+  extraLoras?: { name: string; scale: number }[]
 }
 
 /** 后端 /loras 返回的条目 */

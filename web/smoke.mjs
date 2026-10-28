@@ -480,8 +480,10 @@ function check(name, cond, extra = '') {
   await new Promise((r) => setTimeout(r, 200))
   const sub = calls.filter((c) => c.url.endsWith('/generate')).pop()
   const body = JSON.parse(sub.body)
-  check('提交带 lora 与强度',
-    body.params.lora === 'wuxia_v2' && body.params.lora_scale === 0.8,
+  // 现在一律发数组：单个也发数组，避免前端为"1 个 / 多个"写两条路径
+  check('提交带 lora 与强度（数组形式）',
+    JSON.stringify(body.params.lora) === JSON.stringify(['wuxia_v2'])
+      && JSON.stringify(body.params.lora_scale) === JSON.stringify([0.8]),
     JSON.stringify({ l: body.params.lora, s: body.params.lora_scale }))
   check('提交带 wuxia 契约', body.params.preset === 'wuxia', body.params.preset)
 
@@ -1769,6 +1771,62 @@ function check(name, cond, extra = '') {
     doc.querySelector('.toast')?.textContent)
 
   check('LoRA 扫描场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 29) 多个 LoRA 叠加：+ 叠加 → 选第二个 → 提交带 2 个名字与 2 个强度
+{
+  const { dom, errors } = await boot('?demo=1')
+  const doc = dom.window.document
+  const win = dom.window
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms))
+  await wait(500)
+  doc.querySelector('details.fold').open = true
+  await wait(80)
+
+  const setSelect = (el, v) => {
+    const setter = Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value').set
+    setter.call(el, v)
+    el.dispatchEvent(new win.Event('change', { bubbles: true }))
+  }
+  const selByPrefix = (prefix) => [...doc.querySelectorAll('select')]
+    .find((s) => (s.parentElement?.textContent || '').startsWith(prefix))
+
+  setSelect(selByPrefix('LoRA'), 'wuxia_v2')
+  await wait(100)
+
+  const addBtn = [...doc.querySelectorAll('.lora-stack .mini')]
+    .find((b) => (b.textContent || '').includes('叠加'))
+  check('有「+ 叠加」按钮', !!addBtn)
+  addBtn.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await wait(120)
+
+  const rowSel = doc.querySelector('.stack-row select')
+  check('叠加后出现一层 LoRA 行', !!rowSel)
+  // 模拟数据里只有 wuxia_v2 与 guofeng 可见
+  setSelect(rowSel, 'guofeng')
+  await wait(120)
+
+  doc.querySelector('.gen-btn').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await wait(250)
+  const body = JSON.parse(calls.filter((c) => c.url.endsWith('/generate')).pop().body)
+  check('提交 2 个 LoRA',
+    JSON.stringify(body.params.lora) === JSON.stringify(['wuxia_v2', 'guofeng']),
+    JSON.stringify(body.params.lora))
+  check('两个 LoRA 各自带强度（各自的推荐值 0.8 / 0.7）',
+    JSON.stringify(body.params.lora_scale) === JSON.stringify([0.8, 0.7]),
+    JSON.stringify(body.params.lora_scale))
+  // 副槽不改契约：那是"主 LoRA 的训练约定"，被第二个覆盖只会更乱
+  check('副槽不改提示词契约', body.params.preset === 'wuxia', body.params.preset)
+
+  // 移除后回到单个
+  const del = [...doc.querySelectorAll('.stack-row .mini')]
+    .find((b) => (b.textContent || '').trim() === '×')
+  del.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await wait(120)
+  check('移除后叠加行消失', !doc.querySelector('.stack-row select'))
+
+  check('多 LoRA 场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 

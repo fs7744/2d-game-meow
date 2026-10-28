@@ -111,19 +111,43 @@ class TrainReq(BaseModel):
 def _resolve_lora(params: Dict[str, Any]) -> Dict[str, Any]:
     """params.lora 允许填「名字」或「相对/绝对路径」，统一解析成绝对路径。
 
+    **多个 LoRA 叠加**时传列表：`lora=[名字A, 名字B]`、`lora_scale=[0.8, 0.5]`；
+    `lora_scale` 给单个数值表示所有 LoRA 共用该强度。
+
     名字不存在时清空而不是报错：LoRA 是增强项，不该因为它让整个任务失败，
     但要留痕到 job 里以便排查。
     """
     name = params.get("lora")
     if not name:
         return params
-    path = lora_reg.resolve(ROOT / "models", str(name))
     params = dict(params)
-    if path is None:
-        params["lora"] = None
-        params["lora_missing"] = str(name)
+
+    names = ([str(x) for x in name if x] if isinstance(name, (list, tuple))
+             else [str(name)])
+    raw = params.get("lora_scale") or []
+    scales = list(raw) if isinstance(raw, (list, tuple)) else [raw or 0.8]
+
+    paths: List[str] = []
+    weights: List[float] = []
+    missing: List[str] = []
+    for i, n in enumerate(names):
+        path = lora_reg.resolve(ROOT / "models", n)
+        if path is None:
+            missing.append(n)
+            continue
+        paths.append(path)
+        weights.append(float(scales[i]) if i < len(scales) and scales[i] else 0.8)
+
+    if missing:
+        params["lora_missing"] = ", ".join(missing)
+    # **单个时仍发标量**：只挂一个是常态，保持与历史 payload 完全一致
+    # （meta 记录、CLI、既有测试都按标量读）。只有叠加时才升级成列表。
+    if len(paths) == 1:
+        params["lora"] = paths[0]
+        params["lora_scale"] = weights[0]
     else:
-        params["lora"] = path
+        params["lora"] = paths or None
+        params["lora_scale"] = weights or None
     return params
 
 
