@@ -836,8 +836,12 @@ class Engine:
     RECOMMEND = {
         "sd15": {"width": 768, "height": 768, "steps": 30, "cfg": 7.0,
                  "pixel": 6, "palette": 32},
+        # 色数 64 是实测选出来的：同一张 SDXL 产物按 16/32/64 量化对比，
+        # 64 色最干净（披风与甲片的亮/中/暗层次分明、杂色最少），
+        # 16 色会糊成一块、32 色局部有杂色拼接。SD1.5 画面本身更脏，
+        # 仍用 32 免得把噪点也放大成色阶。
         "sdxl": {"width": 768, "height": 768, "steps": 24, "cfg": 6.5,
-                 "pixel": 6, "palette": 32},
+                 "pixel": 6, "palette": 64},
     }
 
     def recommend(self, model: str = DEFAULT_MODEL) -> Dict[str, Any]:
