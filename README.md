@@ -1104,11 +1104,24 @@ python tools/video.py i2v assets/cat.png "the same character walking" -o assets/
 ## 测试
 
 ```bash
-python -m pytest tests -q        # 312 个用例，约 280s（含 SDXL 慢用例）
-# 全套超过 2 分钟会被超时杀掉，分批跑：
-#   pytest tests --ignore=tests/test_models.py   # 301 个，约 220s
-#   pytest tests/test_models.py                  # 11 个，约 60s
+python -m pytest tests -q        # 349 个用例，约 240s（含 SDXL 慢用例）
 ```
+
+**按改动选测试，不要每次都跑全量**（全量 4 分钟，只在合并/发版前跑一次）：
+
+| 改了什么 | 跑这些 | 约 |
+|---|---|---|
+| `workflows/engine.py` | test_review_fixes test_lora test_vramopt | 25s |
+| `workflows/generate.py` | test_review_p1 test_denoise | 40s |
+| `workflows/presets.py` / `clip.py` | test_presets test_quality | 10s |
+| `workflows/matte.py` / `refprep.py` | test_matte test_refprep | 20s |
+| `workflows/postprocess.py` / `pixelfy.py` | test_postprocess test_pixelfy test_sheet | 15s |
+| `app.py` / `workflows/assetdb.py` | test_api test_review_p2 | 35s |
+| `tools/*` `docs/*` `README` | 不跑（工具靠自身输出验证） | — |
+| 合并 / 发版前 | 全量 | 240s |
+
+纯 CPU 的子集（presets / postprocess / matte / repaint / assetdb）都在 1 分钟内，
+改文档或工具时完全不必要动 GPU 用例。
 
 | 文件 | 覆盖 | 用例数 |
 |---|---|---|
