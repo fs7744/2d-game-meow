@@ -722,6 +722,16 @@ class Engine:
             # 用户根本看不懂。这里翻成人话并把权重卸干净，别让脏状态留在管道里。
             setattr(target, LORA_ATTR, None)
             self._pool["lora"] = None
+            msg = str(exc)
+            # **先分辨"拿错基座"和"权重格式不支持"**：两者的处置完全不同。
+            # SD1.5 的 LoRA 装进 SDXL 会报 size mismatch（640 vs 1280），
+            # 旧实现一律归因为 LoKr/LoHa，用户会去换 LoRA——但换多少个都没用。
+            if "size mismatch" in msg or "shape" in msg:
+                raise ValueError(
+                    f"LoRA 与当前底模不匹配: {Path(lora_path).name}\n"
+                    "这个 LoRA 是用另一个架构训的（SD1.5 的 LoRA 不能用于 SDXL，反之亦然）。\n"
+                    f"详情: {msg[:300]}"
+                ) from exc
             raise ValueError(
                 f"LoRA 加载失败: {Path(lora_path).name} —— {exc}\n"
                 "大概率不是标准 LoRA（LoKr/LoHa/LyCORIS 变体暂不支持），"

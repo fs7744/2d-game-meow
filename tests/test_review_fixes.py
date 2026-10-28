@@ -286,3 +286,28 @@ def test_discovery_skips_inpaint_checkpoints(fresh_engine):
     (ok / "unet" / "config.json").write_text(json.dumps({"in_channels": 4}), "utf-8")
     fresh_engine._discover_bases()
     assert "community_sd15" in fresh_engine.available_models()
+
+
+def test_lora_base_mismatch_reports_cause_not_variant(fresh_engine, tmp_path):
+    """SD1.5 的 LoRA 挂到 SDXL 上报的是 size mismatch（640 vs 1280）。
+
+    旧实现把它归因为"LoKr/LoHa 变体不支持"，用户会去换 LoRA——但换多少个都没用，
+    真正的原因是拿错了基座。这里钉住诊断文案。
+    """
+    lora = tmp_path / "px.safetensors"
+    lora.write_bytes(b"\0" * 16)
+
+    class BadPipe(_FakePipe):
+        def load_lora_weights(self, path, adapter_name=None):
+            raise RuntimeError(
+                "size mismatch for up_blocks.1.attn2.to_v.lora_B.char.weight: "
+                "copying a param with shape torch.Size([1280, 32]) from checkpoint, "
+                "the shape in current model is torch.Size([640, 32]).")
+
+    with pytest.raises(ValueError) as exc:
+        fresh_engine.apply_lora(BadPipe(), lora, 0.75)
+    msg = str(exc.value)
+    assert "不匹配" in msg or "另一个架构" in msg
+    assert "LoKr" not in msg, "别把基座不匹配说成 LoKr 变体"
+    # 失败后不能留下脏状态
+    assert fresh_engine._pool["lora"] is None

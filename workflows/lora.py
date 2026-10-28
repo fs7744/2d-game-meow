@@ -27,6 +27,10 @@ _DEFAULT: Dict[str, Any] = {
     # 彩色/纹理底，不抠图就没法用，所以允许注册表声明「必须抠图」。
     "matte": None,        # None=不改动用户的勾选；True/False=强制
     "clip_skip": None,    # None=用节点当前值；2=多数动漫/像素 LoRA 的训练设置
+    # 这个 LoRA 是给哪个架构训的（sd15 / sdxl）。SD1.5 的 LoRA 装进 SDXL 会
+    # 因维度不同（640 vs 1280）报 size mismatch——那不是"权重坏了"，
+    # 是拿错了基座。声明了就能在选之前拦住。
+    "base": "",
 }
 
 

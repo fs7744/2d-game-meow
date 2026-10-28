@@ -84,6 +84,16 @@ DEFAULT_STEPS = {"sd15": 20, "sdxl": 24}
 DEFAULT_SIZE = {"sd15": 512, "sdxl": 1024}
 
 
+def deliverable(row: dict) -> bool:
+    """这一张能不能直接进产线（精灵管线的三条硬约束同时满足）。
+
+    为什么合成一个布尔：分开看容易自我安慰——"只是脚被裁了"在静态图上不致命，
+    但精灵帧要对齐脚底锚点，被裁的帧一进序列就跳。合起来看才是真实废片率。
+    """
+    return (row["subjects"] == 1 and row["edges"] == 0
+            and 0.05 <= row["fg"] <= 0.60)
+
+
 def _block_for(size: int) -> int:
     """与产线一致：有效像素固定在 128（512÷4、768÷6、1024÷8）。"""
     return max(2, size // 128)
@@ -112,9 +122,10 @@ def _white_ratio(raw: Image.Image, band: int = 24, tol: int = 18) -> float:
 
 def run_one(eng: Engine, model: str, spec: dict, seed: int, *,
             size: int, steps: int, cfg: float, lora: str | None,
-            lora_scale: float, palette: int = 32) -> dict:
+            lora_scale: float, palette: int = 32,
+            extra_neg: str = "", hires: float = 0.0) -> dict:
     """按**产线同一套后处理**跑一张，返回产物与指标。"""
-    prompt, negative = presets.build(spec["text"], None, spec["preset"],
+    prompt, negative = presets.build(spec["text"], extra_neg or None, spec["preset"],
                                      max_tokens=presets.CHUNK_BUDGET)
     pipe = eng.txt2img_pipe(model)
     eng.apply_lora(pipe, lora, lora_scale)
@@ -127,6 +138,12 @@ def run_one(eng: Engine, model: str, spec: dict, seed: int, *,
                                    **kw), label=f"ab:{model}").images[0]
     secs = time.time() - t0
 
+    if hires and hires > 1.0:
+        # 两段式：先在底座分辨率出结构，再低幅度放大补细节（见 generate._hires_fix）
+        raw = g._hires_fix(eng, raw, scale=hires, strength=0.35,
+                           steps=max(8, steps // 2), cfg=cfg, kw=kw, model=model,
+                           seed=seed, lora=lora, lora_scale=lora_scale)
+        size = raw.width
     block = _block_for(size)
     info: dict = {}
     out, edge, subjects = g._postprocess(
@@ -214,8 +231,8 @@ def contact_sheet(rows: list[dict], models: list[str], prompt_id: str,
             bg.alpha_composite(tile, ((cell - tile.width) // 2, (cell - tile.height) // 2))
             canvas.paste(bg.convert("RGB"), (x, y))
             d.text((x + 6, y + cell + 3),
-                   f"s{s} subj{hit['subjects']} edge{hit['edges']} "
-                   f"fg{hit['fg']:.2f} uni{hit['uniform']}",
+                   f"s{s} {'OK' if deliverable(hit) else 'NG'} subj{hit['subjects']} "
+                   f"edge{hit['edges']} fg{hit['fg']:.2f}",
                    fill=(150, 180, 210))
     path = OUT / f"sheet_{prompt_id}.png"
     canvas.save(path)
@@ -234,6 +251,7 @@ def summarize(rows: list[dict], models: list[str]) -> tuple[str, list[dict]]:
         human = [r for r in rs if r["points"] is not None]
         agg = {
             "model": m, "n": n,
+            "可交付率": round(sum(1 for r in rs if deliverable(r)) / n, 3),
             "多主体率": round(sum(1 for r in rs if r["subjects"] > 1) / n, 3),
             "贴边率": round(sum(1 for r in rs if r["edges"] > 0) / n, 3),
             "背景脏率": round(sum(1 for r in rs if r["white"] < 0.5) / n, 3),
@@ -245,12 +263,12 @@ def summarize(rows: list[dict], models: list[str]) -> tuple[str, list[dict]]:
         }
         table.append(agg)
 
-    lines.append("| 基座 | 样本 | 多主体率↓ | 贴边率↓ | 背景脏率↓ | 块单色率↑ | 前景占比 | 人均关节↑ | 均耗时 |")
-    lines.append("|---|---|---|---|---|---|---|---|---|")
+    lines.append("| 基座 | 样本 | 可交付率↑ | 多主体率↓ | 贴边率↓ | 背景脏率↓ | 块单色率↑ | 前景占比 | 人均关节↑ | 均耗时 |")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|")
     for a in table:
         pts = "—" if a["人均关节"] is None else f"{a['人均关节']:.1f}"
         lines.append(
-            f"| {a['model']} | {a['n']} | {a['多主体率']:.0%} | {a['贴边率']:.0%} | "
+            f"| {a['model']} | {a['n']} | {a['可交付率']:.0%} | {a['多主体率']:.0%} | {a['贴边率']:.0%} | "
             f"{a['背景脏率']:.0%} | {a['块单色率']:.3f} | {a['前景占比']:.2f} | "
             f"{pts} | {a['均耗时s']:.2f}s |")
 
@@ -289,6 +307,8 @@ def write_report(rows: list[dict], models: list[str], specs: list[dict],
         "# 基座 A/B 报告", "",
         f"- 底模：{', '.join(models)}",
         f"- LoRA：{args.lora or '无'}（scale {args.lora_scale}）",
+        f"- 额外负向词：{args.extra_neg or '无'}",
+        (f"- 两段式：底分辨率 ×{args.hires}（hires fix）" if args.hires > 1 else ""),
         f"- 采样：cfg {args.cfg}，" + (
             f"**统一 {args.size}² / {args.steps} 步**（口径一致，可直接比权重）"
             if args.size and args.steps else
@@ -299,6 +319,7 @@ def write_report(rows: list[dict], models: list[str], specs: list[dict],
         "## 汇总（↑ 越高越好 / ↓ 越低越好）", "",
         md, "",
         "## 判读提醒", "",
+        "- **可交付率**是唯一的总指标：单主体 + 无贴边 + 前景占比 5%~60% 同时满足。",
         "- **多主体率**是硬门槛：>0 的基座在精灵管线里会持续产出废片，除非改提示词/加负向词。",
         "- **块单色率**低于 0.98 说明像素化被后续步骤搅浑（或该基座画得太碎）。",
         "- **人均关节**只看类人形 prompt；怪物/道具恒 0，横向比会误伤。",
@@ -326,6 +347,10 @@ def main() -> None:
     ap.add_argument("--palette", type=int, default=32)
     ap.add_argument("--lora", default="", help="LoRA 名字或路径（如 px_illustrious）")
     ap.add_argument("--lora-scale", type=float, default=0.75)
+    ap.add_argument("--extra-neg", default="",
+                    help="额外负向词（测某个词能否压住某类问题）")
+    ap.add_argument("--hires", type=float, default=0.0,
+                    help=">1 时走两段式：底分辨率出结构 → 放大补细节")
     ap.add_argument("--limit", type=int, default=0, help="只跑前 N 个 prompt（冒烟用）")
     ap.add_argument("--out", default="", help="输出目录（默认 assets/_ab_base）")
     ap.add_argument("--rebuild", action="store_true",
@@ -362,6 +387,19 @@ def main() -> None:
     lora = lora_reg.resolve(ROOT / "models", args.lora) if args.lora else None
     if args.lora and lora is None:
         raise SystemExit(f"LoRA 找不到：{args.lora}")
+    if lora:
+        # 注册表里声明了 base 就直接按它过滤：SD1.5 的 LoRA 不能用于 SDXL，
+        # 硬跑只会在加载时报一堆 size mismatch。
+        entry = next((x for x in lora_reg.scan(ROOT / "models")
+                      if x["path"].endswith(Path(lora).name)), {}) or {}
+        want = (entry.get("base") or "").strip()
+        if want:
+            keep = [m for m in models if eng.arch(m) == want]
+            skipped = [m for m in models if m not in keep]
+            if skipped:
+                print(f"[skip] {', '.join(skipped)}：LoRA {Path(lora).name} 是给 "
+                      f"{want} 训的，不能跨架构")
+            models = keep or models
 
     set_out(args.out)
     seeds = [1000 + i * 7919 for i in range(max(1, args.seeds))]
@@ -374,7 +412,8 @@ def main() -> None:
         for spec in specs:
             for seed in seeds:
                 r = run_one(eng, m, spec, seed, size=size, steps=steps, cfg=args.cfg,
-                            lora=lora, lora_scale=args.lora_scale, palette=args.palette)
+                            lora=lora, lora_scale=args.lora_scale, palette=args.palette,
+                            extra_neg=args.extra_neg, hires=args.hires)
                 tag = f"{m}__{spec['id']}__s{seed}"
                 r["out"].save(OUT / f"{tag}.png")
                 side = {k: v for k, v in r.items() if k not in ("raw", "out")}
