@@ -430,7 +430,7 @@ start.bat                   # Windows 双击或命令行
 cd web && npm ci && npm run build     # 构建
 cd .. && python app.py                # FastAPI 同时托管 dist 与 API → http://127.0.0.1:8000
 cd web && npm run dev                 # 或开发模式（:5173，代理到 8000）
-npm run smoke                         # 无浏览器渲染冒烟（jsdom，162 项断言）
+npm run smoke                         # 无浏览器渲染冒烟（jsdom，175 项断言）
 ```
 
 > `start.bat` 刻意保持**纯 ASCII**：cmd.exe 按 OEM 代码页解析 .bat，中文注释会切断命令行
@@ -547,6 +547,35 @@ curl -X POST http://127.0.0.1:8000/generate -H "Content-Type: application/json" 
   "params": {"init_image": "D:/.../assets/projects/p1/xxx.png", "bg_color": "#204080"}
 }'
 ```
+
+### 局部重绘节点（w3）
+
+左栏「节点」组里的**局部重绘**（粉色标题）：源图 + 笔刷选区 + 提示词，
+只重画涂出来的区域，**选区外像素逐点不变**（后端羽化蒙版向内收缩后贴回，
+这条承诺有测试钉着）。
+
+**源图**：连线接过来，或把本机图片直接拖到节点上。
+**蒙版**：点「✎ 绘制蒙版」打开全屏笔刷，涂出要重绘的区域（白色 = 重绘区）。
+
+笔刷是照着 pixelforge 的 MaskEditor 移植的，那边已经踩过一轮坑，几个关键经验：
+
+| 做法 | 为什么 |
+|---|---|
+| **三层画布**：图 / 蒙版 / 覆盖 | 覆盖层是半透明红（给眼睛看），擦除时用 `destination-out` 只擦自己，下面的图不动 |
+| **撤销用「操作列表 + 全量重放」**，不存 ImageData 快照 | 1024² 的快照是 4MB/步，撤 20 步就是 80MB；操作列表每步几十字节，重放一张图几毫秒 |
+| **笔刷一律硬边** | 柔和边界交给后端的羽化（那边按像素算、可复现）；画布上做软笔刷只会得到不稳定的半透明，「选区外不变」也没法验证 |
+| **覆盖层用不透明色 + CSS opacity** | 直接画 `rgba(0.4)` 的话，同一笔拖动时相邻线段会互相叠加（0.4→0.64→0.78…），看起来像「有的地方没涂上」 |
+| 蒙版颜色/透明度记 localStorage | 换过一次颜色的人不希望每次重开又要再挑一遍 |
+| **H 键临时隐藏蒙版** | 用原图核对「到底涂到哪了」 |
+
+操作：画笔 / 橡皮 / 矩形框选，笔刷大小滑杆，滚轮缩放、空格拖动平移，
+`Ctrl+Z` 撤销、`Ctrl+Shift+Z` 重做，「✕ 清空」重来。
+
+蒙版存在**项目目录的 `masks/` 下、同名覆盖**（每个节点一份）——所以反复涂抹
+不会攒出一堆垃圾文件。节点里只记路径与缩略图 URL。
+
+后端对应 `POST /generate` 的 `workflow: "w3"`（`image` + `mask` 两个路径），
+蒙版另有一个 `POST /mask` 端点负责存 PNG。
 
 ### 全屏预览与下载
 
@@ -693,9 +722,9 @@ python tools/video.py i2v assets/cat.png "the same character walking" -o assets/
 ## 测试
 
 ```bash
-python -m pytest tests -q        # 183 个用例，约 180s（含 SDXL 慢用例）
+python -m pytest tests -q        # 185 个用例，约 180s（含 SDXL 慢用例）
 # 全套超过 2 分钟会被超时杀掉，分批跑：
-#   pytest tests --ignore=tests/test_models.py   # 172 个，约 110s
+#   pytest tests --ignore=tests/test_models.py   # 174 个，约 105s
 #   pytest tests/test_models.py                  # 11 个，约 60s
 ```
 
@@ -704,7 +733,7 @@ python -m pytest tests -q        # 183 个用例，约 180s（含 SDXL 慢用例
 | `tests/test_postprocess.py` | 锚点、逐帧对齐、打包几何、色板上限、alpha 二值化、裁边、**像素块单色性**、**前景块计数** | 11 |
 | `tests/test_generate.py` | **抠图三种模式（透明/纯色/换背景图）**、同 seed 逐像素一致、不同 seed 相异、色板生效、**重绘选区外不变**、序列帧数、**闸门重提与批量挑帧**、**clip_skip 生效与 meta 记录**、主体数上报、**图生图后处理与 raw 留存**、**项目隔离（产物分目录 + 跨项目引用被拒）**、显存回收、缺权重报错 | 18 |
 | `tests/test_controlnet.py` | Canny conditioning 生效、Tile 放大结构相关性 > 0.5、像素块均匀性 | 3 |
-| `tests/test_api.py` | **wbg 队列往返**、全部端点、队列串行性、**w2 队列往返（含 raw 留存）**、**上传端点（坏文件/空文件/文件名清洗/进项目目录）**、**真删（连带 sidecar/raw、索引清理、路径穿越防护、索引不可删）**、**资产按项目过滤**、**下载的 Content-Disposition**、400/404 | 22 |
+| `tests/test_api.py` | **wbg 队列往返**、**蒙版端点（同名覆盖/拒绝非 PNG）**、全部端点、队列串行性、**w2 队列往返（含 raw 留存）**、**上传端点（坏文件/空文件/文件名清洗/进项目目录）**、**真删（连带 sidecar/raw、索引清理、路径穿越防护、索引不可删）**、**资产按项目过滤**、**下载的 Content-Disposition**、400/404 | 22 |
 | `tests/test_pose.py` | 检测器切换、18 点完整性、关节在画面内且头高于髋、骨架渲染、双后端一致性、引擎内的姿态提取器单例、精灵图切片 CLI | 7 |
 | `tests/test_quality.py` | 前景占比/质心/漂移、**贴边检测**（含未抠图时整体失效）、无模型时「无法判定」、关节数影响排序与闸门 | 11 |
 | `tests/test_io_paths.py` | 视频抽帧、GIF、精灵图切片（含空格子）、CLI 错误码、非 8 倍数尺寸重绘、cols 夹取、环境自检 JSON、LoRA 空接口 | 11 |

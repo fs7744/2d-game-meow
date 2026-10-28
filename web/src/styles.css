@@ -236,6 +236,53 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
 .img-tools input { width: 64px; height: 24px; }
 .img-empty { padding: 18px 6px; text-align: center; font-size: 11px; color: var(--muted-2); }
 
+/* 蒙版笔刷（局部重绘） */
+.mask-editor {
+  position: fixed; inset: 0; z-index: 80; background: #0a0a0c;
+  display: flex; flex-direction: column;
+}
+.mask-bar {
+  display: flex; align-items: center; gap: 6px; padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.mask-title { font-family: var(--chip); font-size: 12px; color: var(--green); }
+.mask-tools {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 6px 12px; border-bottom: 1px solid var(--line);
+}
+.mask-size { display: flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--muted); }
+.mask-size input[type='range'] { width: 88px; accent-color: var(--pink); }
+.mask-size b { font-family: var(--mono); font-size: 10px; font-weight: 400; }
+.mask-swatches { display: flex; gap: 3px; }
+.mask-swatches .swatch {
+  width: 16px; height: 16px; border: 1px solid var(--line-strong); cursor: pointer; padding: 0;
+}
+.mask-swatches .swatch.on { outline: 2px solid var(--white); }
+.mask-hint { font-size: 10px; color: var(--muted-2); margin-left: auto; }
+.mask-stage {
+  flex: 1; overflow: hidden; position: relative; display: grid; place-items: center;
+  background: #141418;
+}
+.mask-wrap { position: relative; transform-origin: 0 0; cursor: crosshair; }
+.mask-wrap .layer { position: absolute; left: 0; top: 0; image-rendering: pixelated; }
+.mask-wrap .overlay { pointer-events: none; }
+.mini.on { border-color: var(--green); color: var(--green); }
+.mini.primary { border-color: var(--green); color: var(--green); }
+.mini.primary:disabled { opacity: 0.5; }
+
+/* 局部重绘节点里的蒙版缩略图 */
+.mask-box {
+  display: grid; grid-template-columns: 64px 1fr; gap: 7px;
+  border: 1px solid var(--line); border-left: 2px solid var(--pink); padding: 6px;
+}
+.mask-thumb {
+  width: 64px; height: 64px; display: grid; place-items: center;
+  background: #141418; border: 1px solid var(--line); overflow: hidden;
+}
+.mask-thumb img { width: 100%; height: 100%; object-fit: contain; image-rendering: pixelated; }
+.mask-thumb span { font-size: 9px; color: var(--muted-2); }
+.node-kind.inpaint { color: var(--pink); }
+
 /* 全屏预览（灯箱） */
 .lightbox {
   position: fixed; inset: 0; z-index: 70;

@@ -174,6 +174,38 @@ def test_assets_filtered_by_project(client):
         Path(up["path"]).unlink(missing_ok=True)
 
 
+def test_save_mask_endpoint(client):
+    """蒙版端点：PNG 原始字节 → 项目目录的 masks/ 下同名覆盖。"""
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("L", (64, 48), 255).save(buf, "PNG")
+    r = client.post("/mask?name=node1&project=projM", content=buf.getvalue(),
+                    headers={"Content-Type": "image/png"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "projects/projM/masks/node1.png" in body["path"].replace("\\", "/"), body["path"]
+    assert body["width"] == 64 and body["height"] == 48
+    assert body["coverage"] == 1.0
+    assert client.get(body["url"]).status_code == 200
+
+    # 同名再存一次：覆盖而不是堆积
+    buf2 = io.BytesIO()
+    Image.new("L", (64, 48), 0).save(buf2, "PNG")
+    r2 = client.post("/mask?name=node1&project=projM", content=buf2.getvalue(),
+                     headers={"Content-Type": "image/png"})
+    assert r2.json()["path"] == body["path"]
+    assert r2.json()["coverage"] == 0.0
+
+
+def test_mask_endpoint_rejects_non_png(client):
+    r = client.post("/mask?name=x", content=b"not png at all",
+                    headers={"Content-Type": "image/png"})
+    assert r.status_code == 400
+
+
 def test_upload_rejects_garbage(client):
     """坏文件必须被拒：不能什么字节都往 assets 里塞。"""
     r = client.post("/upload", content=b"not an image at all",

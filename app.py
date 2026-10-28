@@ -10,6 +10,7 @@
   GET  /assets            资产清单（读 assets/index.jsonl）
   GET  /files/{path}      取产物（?download=1 带 Content-Disposition 直接下载）
   POST /upload            上传本机图片（原始字节）→ 磁盘路径 + 展示 URL
+  POST /mask              保存局部重绘的蒙版（PNG，项目目录 masks/ 下同名覆盖）
   DELETE /assets          真删：删磁盘产物 + 清索引
 """
 from __future__ import annotations
@@ -18,6 +19,8 @@ import io
 import json
 import os
 import shutil
+
+import numpy as np
 import queue
 import threading
 import time
@@ -373,6 +376,44 @@ def delete_assets(req: DeleteReq) -> Dict[str, Any]:
 
     return {"deleted": deleted, "skipped": skipped, "not_found": gone,
             "count": len(deleted)}
+
+
+@app.post("/mask")
+async def save_mask(request: Request, name: str = "mask",
+                    project: str = "") -> Dict[str, Any]:
+    """保存局部重绘用的蒙版（PNG 原始字节），放在项目目录的 masks/ 下，同名覆盖。
+
+    为什么单独一个端点而不是走 /upload：蒙版是**每个节点一份**的草稿，
+    反复涂抹会覆盖同一个文件；走 /upload 每次都生成新文件，很快就会攒一堆垃圾。
+    """
+    data = await request.body()
+    if not data:
+        raise HTTPException(400, "空蒙版")
+    if len(data) > MAX_UPLOAD:
+        raise HTTPException(413, f"蒙版太大（上限 {MAX_UPLOAD // 2**20}MB）")
+    try:
+        im = Image.open(io.BytesIO(data))
+        im.load()
+        fmt = (im.format or "").upper()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, f"不是有效的图片：{exc}") from exc
+    if fmt != "PNG":
+        raise HTTPException(400, f"蒙版必须是 PNG（收到 {fmt}）")
+    safe = "".join(
+        ch for ch in (name or "mask") if ch.isascii() and (ch.isalnum() or ch in "-_")
+    )[:64] or "mask"
+    scope = "".join(
+        ch for ch in (project or "") if ch.isascii() and (ch.isalnum() or ch in "-_")
+    )[:64] or "default"
+    d = PROJECTS_DIR / scope / "masks"
+    d.mkdir(parents=True, exist_ok=True)
+    out = d / f"{safe}.png"
+    out.write_bytes(data)
+    arr = np.asarray(im.convert("L"))
+    coverage = float((arr > 127).mean())
+    return {"path": str(out), "url": f"/files/{out.relative_to(ASSETS).as_posix()}",
+            "width": im.width, "height": im.height,
+            "coverage": round(coverage, 4)}
 
 
 @app.post("/upload")

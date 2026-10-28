@@ -7,8 +7,8 @@ import {
   loadStore, makeProject, metaOf, saveStore, type Project, type ProjectMeta,
 } from './store/projects'
 import {
-  deleteAssets, fetchJob, fetchLoras, fetchModels, health, submitImg2Img, submitMatte,
-  submitTxt2Img, uploadImage,
+  deleteAssets, fetchJob, fetchLoras, fetchModels, health, submitImg2Img, submitInpaint,
+  submitMatte, submitTxt2Img, uploadImage,
 } from './api'
 import ConfirmDialog from './components/ConfirmDialog'
 import Lightbox from './components/Lightbox'
@@ -38,6 +38,10 @@ const DEFAULT_PARAMS: GenParams = {
   bgMode: 'alpha',
   bgColor: '#ffffff',
   bgNodeId: '',
+  // 局部重绘的蒙版（笔刷画完上传到项目目录，节点只记路径）
+  maskPath: '',
+  maskUrl: '',
+  maskCoverage: 0,
   lora: '',
   loraScale: 0.8,
 }
@@ -244,7 +248,10 @@ export default function App() {
       return
     }
     const kind: NodeKind =
-      type === 'img2img' ? 'img2img' : type === 'bg' ? 'bg' : 'gen'
+      type === 'img2img' ? 'img2img'
+        : type === 'bg' ? 'bg'
+          : type === 'inpaint' ? 'inpaint'
+            : 'gen'
     setNodes((list) => {
       // 原点放多个时阶梯错开，避免完全重叠
       const sameSpot = list.filter((n) => n.x === at.x && n.y === at.y).length
@@ -279,7 +286,8 @@ export default function App() {
       for (const f of imgs) {
         try {
           const up = await uploadImage(f, currentId)
-          if (target && (target.kind === 'img2img' || target.kind === 'bg')) {
+          if (target && (target.kind === 'img2img' || target.kind === 'bg'
+            || target.kind === 'inpaint')) {
             patchNode(target.id, { source: { path: up.path } })
             continue
           }
@@ -302,8 +310,8 @@ export default function App() {
   /** 连线：把 from 接到 to（图生图节点）上。 */
   const onConnect = useCallback((from: string, to: string) => {
     const target = nodesRef.current.find((n) => n.id === to)
-    // 能接源的节点：图生图（要底图）与抠图（要源图）；文生图没有「底」这回事
-    if (!target || (target.kind !== 'img2img' && target.kind !== 'bg')) return
+    // 能接源的节点：图生图（要底图）、抠图与局部重绘（要源图）；文生图没有「底」这回事
+    if (!target || !['img2img', 'bg', 'inpaint'].includes(target.kind)) return
     if (target.id === from) return
     patchNode(to, { source: { nodeId: from } })
   }, [patchNode])
@@ -384,10 +392,10 @@ export default function App() {
     const node = nodesRef.current.find((n) => n.id === id)
     if (!node) return
     // 抠图节点不需要提示词（纯图像处理）；文生图/图生图需要
-    const needPrompt = node.kind === 'gen' || node.kind === 'img2img'
+    const needPrompt = node.kind === 'gen' || node.kind === 'img2img' || node.kind === 'inpaint'
     if (needPrompt && !node.params.prompt.trim()) return
     let init: string | undefined
-    if (node.kind === 'img2img' || node.kind === 'bg') {
+    if (node.kind === 'img2img' || node.kind === 'bg' || node.kind === 'inpaint') {
       init = sourcePathOf(node)
       if (!init) {
         // 没有源图就没法提交，直接在节点上报错，别让用户等一个必然失败的任务
@@ -401,7 +409,11 @@ export default function App() {
     patchNode(id, { job: { id: 'pending', status: 'queued', startedAt: Date.now() } })
     try {
       let jobId: string
-      if (node.kind === 'bg') {
+      if (node.kind === 'inpaint') {
+        const r = await submitInpaint(
+          node.params, { model, matteBackend, scope: currentId }, init!, node.params.maskPath)
+        jobId = r.job_id
+      } else if (node.kind === 'bg') {
         // 换背景：背景图来自另一个图片节点
         const bgNode = node.params.bgMode === 'image'
           ? nodesRef.current.find((n) => n.id === node.params.bgNodeId)
@@ -599,6 +611,7 @@ export default function App() {
           onDropFiles={(files, world, targetId) => void handleFiles(files, world, targetId)}
           onConnect={onConnect}
           onPreview={(url, name) => setPreview({ url, name })}
+          projectId={currentId}
         />
         <div className="badge-count">{nodes.length} 个节点</div>
       </main>

@@ -11,7 +11,7 @@ type Props = {
   onCreateProject: () => void
   onRenameProject: (id: string, name: string) => void
   onDeleteProject: (id: string) => void
-  onAddNode: (kind?: 'gen' | 'img2img' | 'image' | 'bg') => void
+  onAddNode: (kind?: 'gen' | 'img2img' | 'image' | 'bg' | 'inpaint') => void
   canApply: boolean
   onApplyFav: (text: string) => void
   onRemoveFav: (id: string) => void
@@ -188,6 +188,21 @@ export default function Sidebar({
               <em>拿已有图改内容 / 改画风</em>
             </span>
             <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('img2img')}>+</button>
+          </div>
+          <div
+            className="rail-item"
+            draggable
+            onDragStart={(e) => {
+              e.dataTransfer.setData('application/x-node-type', 'inpaint')
+              e.dataTransfer.effectAllowed = 'copy'
+            }}
+            title="局部重绘：用笔刷涂出要重绘的区域，只改选区"
+          >
+            <span className="rail-item-main">
+              <b>局部重绘</b>
+              <em>笔刷选区 · 选区外不变</em>
+            </span>
+            <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('inpaint')}>+</button>
           </div>
           <div
             className="rail-item"

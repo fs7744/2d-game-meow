@@ -68,6 +68,30 @@ export async function deleteAssets(paths: string[]): Promise<DeleteResult> {
 
 export type SubmitOpts = { model?: string; matteBackend?: string; scope?: string }
 
+export type MaskInfo = {
+  path: string
+  url: string
+  width: number
+  height: number
+  coverage: number
+}
+
+/** 保存局部重绘的蒙版（PNG 原始字节），同名覆盖，后端放在项目目录的 masks/ 下。 */
+export async function saveMask(
+  blob: Blob,
+  name: string,
+  project?: string,
+): Promise<MaskInfo> {
+  const q = `?name=${encodeURIComponent(name)}${project ? `&project=${encodeURIComponent(project)}` : ''}`
+  const r = await fetch(`${base}/mask${q}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'image/png' },
+    body: blob,
+  })
+  if (!r.ok) throw new Error(`蒙版保存失败：HTTP ${r.status}`)
+  return r.json() as Promise<MaskInfo>
+}
+
 /** 两个工作流共用的参数。w2 不接受 width/height（尺寸由源图决定）。 */
 function common(params: GenParams, opts: SubmitOpts) {
   return {
@@ -92,7 +116,7 @@ function common(params: GenParams, opts: SubmitOpts) {
   }
 }
 
-async function post(workflow: 'w1' | 'w2' | 'wbg', params: Record<string, unknown>) {
+async function post(workflow: 'w1' | 'w2' | 'w3' | 'wbg', params: Record<string, unknown>) {
   const r = await fetch(`${base}/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -115,6 +139,33 @@ export function submitImg2Img(params: GenParams, opts: SubmitOpts, initImage: st
     ...common(params, opts),
     init_image: initImage,
     strength: params.strength,
+  })
+}
+
+/**
+ * 局部重绘（w3）。后端 inpaint() 只认这几个参数，别的别塞——多传一个就 TypeError。
+ * 源图与蒙版都是磁盘路径：蒙版是笔刷画完上传到项目目录的那张 PNG。
+ */
+export function submitInpaint(
+  params: GenParams,
+  opts: SubmitOpts,
+  image: string,
+  mask: string,
+) {
+  return post('w3', {
+    image,
+    mask,
+    prompt: params.prompt,
+    negative: params.negative || undefined,
+    strength: params.strength,
+    steps: params.steps,
+    cfg: params.cfg,
+    seed: params.seed,
+    preset: params.preset,
+    lora: params.lora || undefined,
+    lora_scale: params.loraScale,
+    model: opts.model || 'sd15',
+    scope: opts.scope || undefined,
   })
 }
 

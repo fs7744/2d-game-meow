@@ -21,6 +21,7 @@ type Props = {
   onDropFiles: (files: File[], world: { x: number; y: number }, targetId?: string) => void
   onConnect: (from: string, to: string) => void
   onPreview: (url: string, name: string) => void
+  projectId: string
 }
 
 const MIN_Z = 0.2
@@ -45,6 +46,7 @@ export default function Canvas({
   onDropFiles,
   onConnect,
   onPreview,
+  projectId,
 }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null)
   const [panning, setPanning] = useState(false)
@@ -302,6 +304,7 @@ export default function Canvas({
             onDragOverNode={onDragOverNode}
             linkTarget={hoverId === n.id}
             onPreview={onPreview}
+            projectId={projectId}
           />
         ))}
       </div>

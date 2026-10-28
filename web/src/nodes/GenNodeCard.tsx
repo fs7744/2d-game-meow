@@ -1,5 +1,6 @@
-import { useRef } from 'react'
+import { useRef, useState } from 'react'
 import { hasCJK } from '../store/prompts'
+import MaskEditor from '../components/MaskEditor'
 import type { GenNode, LoraInfo, Preset } from '../types'
 
 export const NODE_W = 300
@@ -37,6 +38,8 @@ type Props = {
   linkTarget?: boolean
   /** 全屏预览（灯箱） */
   onPreview?: (url: string, name: string) => void
+  /** 当前项目 id（蒙版要存进项目目录） */
+  projectId?: string
 }
 
 const PRESETS: { v: Preset; label: string }[] = [
@@ -68,6 +71,7 @@ export default function GenNodeCard({
   onDragOverNode,
   linkTarget,
   onPreview,
+  projectId,
 }: Props) {
   const dragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null)
   const p = node.params
@@ -79,6 +83,8 @@ export default function GenNodeCard({
   const isI2I = node.kind === 'img2img'
   const isImg = node.kind === 'image'
   const isBg = node.kind === 'bg'
+  const isInpaint = node.kind === 'inpaint'
+  const [maskOpen, setMaskOpen] = useState(false)
   // 源图可以是上游节点的产物、图片节点的本地图，也可以是节点上直接记的绝对路径
   const hasSource = !!(
     sourceNode?.job?.raw ||
@@ -269,8 +275,12 @@ export default function GenNodeCard({
         onPointerUp={endDrag}
         onPointerCancel={endDrag}
       >
-        <span className={`node-kind${isI2I ? ' i2i' : ''}${isImg ? ' img' : ''}${isBg ? ' bg' : ''}`}>
-          {isImg ? '图片' : isBg ? '抠图' : isI2I ? '图生图' : '图生成'}
+        <span
+          className={`node-kind${isI2I ? ' i2i' : ''}${isImg ? ' img' : ''}${
+            isBg ? ' bg' : ''
+          }${isInpaint ? ' inpaint' : ''}`}
+        >
+          {isImg ? '图片' : isBg ? '抠图' : isInpaint ? '局部重绘' : isI2I ? '图生图' : '图生成'}
         </span>
         {job && <span className={`node-state s-${job.status}`}>{statusLabel(job.status)}</span>}
         <span className="spacer" />
@@ -329,7 +339,112 @@ export default function GenNodeCard({
         />
       </div>
 
-      {isBg ? (
+      {isInpaint ? (
+        <div className="node-body inpaint-body">
+          {sourceBox}
+          <div className="mask-box">
+            <div className="mask-thumb">
+              {p.maskUrl ? (
+                <img src={p.maskUrl} alt="蒙版" draggable={false} />
+              ) : (
+                <span>无蒙版</span>
+              )}
+            </div>
+            <div className="src-side">
+              <button
+                className="mini wide"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  setMaskOpen(true)
+                }}
+                disabled={!sourceThumb}
+                title={sourceThumb ? '画笔涂抹要重绘的区域' : '先接一张源图'}
+              >
+                ✎ {p.maskUrl ? '重画蒙版' : '绘制蒙版'}
+              </button>
+              <div className="src-note">
+                {p.maskUrl
+                  ? `已涂 ${(p.maskCoverage * 100).toFixed(1)}% · 白=重绘区`
+                  : '用画笔涂出要重绘的区域（白色部分会被重画）'}
+              </div>
+            </div>
+          </div>
+          <div className="prompt-wrap">
+            <textarea
+              className="prompt"
+              rows={2}
+              placeholder="要改成什么？e.g. give the knight a golden helmet"
+              value={p.prompt}
+              onChange={(e) => setParam('prompt', e.target.value)}
+            />
+          </div>
+          <label className="strength">
+            <span>重绘</span>
+            <input
+              type="range"
+              min={0.1}
+              max={1}
+              step={0.05}
+              value={p.strength}
+              onChange={(e) => setParam('strength', Number(e.target.value))}
+            />
+            <b>{p.strength.toFixed(2)}</b>
+          </label>
+          {hasImage && (
+            <div
+              className="preview"
+              onClick={(e) => {
+                e.stopPropagation()
+                onPreview?.(job!.url!, previewName)
+              }}
+              title="点击全屏预览"
+            >
+              <img src={job!.url} alt="重绘结果" draggable={false} />
+            </div>
+          )}
+          <button
+            className="gen-btn"
+            disabled={busy || !hasSource || !p.maskPath || !p.prompt.trim()}
+            onClick={onGenerate}
+            title={
+              !hasSource ? '先接一张源图' : !p.maskPath ? '先绘制蒙版' : !p.prompt.trim() ? '写上要改成什么' : undefined
+            }
+          >
+            {busy ? '重绘中…' : '局部重绘'}
+          </button>
+          {hasImage && (
+            <button
+              className="mini wide"
+              onClick={(e) => {
+                e.stopPropagation()
+                onSpawnImg2Img()
+              }}
+              title="以这张为源新建图生图节点"
+            >
+              ↳ 图生图
+            </button>
+          )}
+          <MaskEditor
+            open={maskOpen}
+            srcUrl={sourceThumb || ''}
+            initialMaskUrl={p.maskUrl || null}
+            title="局部重绘 · 涂出要重绘的区域"
+            name={`mask_${node.id}`}
+            project={projectId}
+            onClose={() => setMaskOpen(false)}
+            onSaved={(m) =>
+              onPatch({
+                params: {
+                  ...p,
+                  maskPath: m.path,
+                  maskUrl: m.url,
+                  maskCoverage: m.coverage,
+                },
+              })
+            }
+          />
+        </div>
+      ) : isBg ? (
         <div className="node-body bg-body">
           {sourceBox}
           <div className="bg-opts">
