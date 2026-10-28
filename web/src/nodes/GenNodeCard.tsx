@@ -308,6 +308,18 @@ export default function GenNodeCard({
   const isBg = node.kind === 'bg'
   const isInpaint = node.kind === 'inpaint'
   const isAiRepaint = node.kind === 'airepaint'
+  /**
+   * 像素化之后**还剩多少有效像素**：边长 / 像素块。
+   *
+   * 必须显示出来：这个字段很容易被理解成"想要的成品尺寸"（比如填 64 想要 64px 的
+   * 像素画），实际它是"每个色块多少像素"——512 配 64 得到的是 **8×8**，
+   * 细节必然全没。只靠 tooltip 拦不住这种误用。
+   */
+  const effPx = p.pixel > 1
+    ? Math.max(1, Math.round(Math.max(p.width, p.height) / p.pixel))
+    : Math.max(p.width, p.height)
+  // 参考图那种像素角色大约 128px；低到 64px 以下细节就必然糊掉
+  const pxWarn = p.pixel > 1 && (effPx < 64 || (p.palette > 0 && p.palette < 8))
   // 候选数上限：后端按"本机总显存"给（SDXL@768 是 3、@1024 只有 1）。
   // 用户填超了就夹住——不是不让他填，是那个配置会让耗时崩掉且不报错。
   const candCap = Math.max(1, Math.min(6, maxCandidates ?? 6))
@@ -1915,8 +1927,12 @@ export default function GenNodeCard({
                     min={0}
                     max={16}
                     value={p.pixel}
-                    onChange={(e) => setParam('pixel', Number(e.target.value) || 0)}
+                    // max 挡不住手输，所以 onChange 也要夹一下：曾经手输 64，
+                    // 512/64 = 8px 有效像素，出图细节全被抹平
+                    onChange={(e) => setParam('pixel',
+                      Math.min(16, Math.max(0, Number(e.target.value) || 0)))}
                   />
+                  <b>{effPx}px</b>
                 </label>
                 <label title={hint('色数')}>
                   色数
@@ -1925,7 +1941,8 @@ export default function GenNodeCard({
                     min={0}
                     max={64}
                     value={p.palette}
-                    onChange={(e) => setParam('palette', Number(e.target.value) || 0)}
+                    onChange={(e) => setParam('palette',
+                      Math.min(64, Math.max(0, Number(e.target.value) || 0)))}
                   />
                 </label>
                 <label title="1=最后一层（默认）；2=跳过最后一层，多数动漫/像素 LoRA 的训练设置">
@@ -1945,6 +1962,15 @@ export default function GenNodeCard({
                   />
                 </label>
               </div>
+              {/* 极端值直接说后果：这类设置不会报错，只是出图"看着不对"，
+                  而用户会归因为模型不行（实测有人填了 64/4 → 8px 有效像素）。 */}
+              {pxWarn && (
+                <p className="warn" style={{ margin: '4px 0 0' }}>
+                  ⚠ 现在是 {effPx}px 有效像素{p.palette > 0 ? ` / ${p.palette} 色` : ''}——
+                  细节会被抹平。要像参考图那样的像素角色，用 768² 配像素块 6
+                  （→128px）、色数 32。
+                </p>
+              )}
               <label className="check" title={hint('抠图')}>
                 <input
                   type="checkbox"

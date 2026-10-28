@@ -1830,6 +1830,46 @@ function check(name, cond, extra = '') {
   dom.window.close()
 }
 
+// 30) 像素块要显示有效像素，并在极端值时告警
+{
+  const { dom, errors } = await boot('?demo=1')
+  const doc = dom.window.document
+  const win = dom.window
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms))
+  await wait(500)
+  doc.querySelector('details.fold').open = true
+  await wait(120)
+
+  const setNum = (el, v) => {
+    const setter = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value').set
+    setter.call(el, String(v))
+    el.dispatchEvent(new win.Event('input', { bubbles: true }))
+  }
+  const lab = (name) => [...doc.querySelectorAll('label')]
+    .find((l) => (l.textContent || '').trim().startsWith(name))
+
+  // 768² 配像素块 6 → 128px 有效像素（参考图那种密度）
+  setNum(lab('像素块').querySelector('input'), 6)
+  await wait(120)
+  check('显示有效像素（768/6 = 128px）',
+    (lab('像素块').textContent || '').includes('128px'),
+    lab('像素块').textContent)
+  check('正常密度不告警', !doc.querySelector('.node .warn'), doc.querySelector('.warn')?.textContent)
+
+  // 手输 64 会被夹到 16（max 挡不住手输），且给出告警
+  setNum(lab('像素块').querySelector('input'), 64)
+  await wait(120)
+  check('手输超过上限时被夹住（64 → 16）',
+    lab('像素块').querySelector('input').value === '16',
+    lab('像素块').querySelector('input').value)
+  check('极端密度给出告警并说明后果',
+    (doc.querySelector('.node .warn')?.textContent || '').includes('有效像素'),
+    doc.querySelector('.node .warn')?.textContent)
+
+  check('像素块告警场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
 const failed = results.filter((r) => !r.ok)
 console.log(`\n${results.length - failed.length}/${results.length} 通过`)
 process.exit(failed.length ? 1 : 0)
