@@ -12,9 +12,16 @@
 from __future__ import annotations
 
 # 正向后缀：约 28 token，留足余量给主体描述
+# 留白词：**效果没有被证明，保留是因为没有可观测的副作用**。
+# 两次各 6 张的对照里，贴边率是 50% 与 67%（基线 67%）——差异落在噪声范围内。
+# 同期也试过 "feet visible, standing"（WUXIA 注释里记过它会让人物缩到中间），
+# 贴边仍是 67%、多主体反而升到 33%，同样无效。
+# 也就是说：**SD1.5 base 的裁切不是提示词能救的**，方向在换基座和候选+闸门。
+FRAMING = "small figure in frame, ample empty space around, margin at top and bottom"
+
 SPRITE_SUFFIX = (
     "single character, full body, centered, flat plain background, "
-    "16-bit pixel art, hard outline, flat colors"
+    f"16-bit pixel art, hard outline, flat colors, {FRAMING}"
 )
 
 # 负向词：按「污染程度」排序，前面被保留的概率最高
@@ -61,7 +68,10 @@ WUXIA_NEG = (
 # 像素 LoRA 专用：**不要**再写 "pixel art"——LoRA 已经给了风格，重复要求会让画面
 # 在「插画」和「像素」之间打架（实测 px_illustrious 套 sprite 契约会出彩色怪物）。
 # 这里只约束构图与背景，像素化交给后处理（pixel=4 + palette=24）。
-PIXEL_SUFFIX = "full body, standing, centered, plain white background, single character"
+PIXEL_SUFFIX = (
+    f"full body, standing, centered, plain white background, single character, "
+    f"{FRAMING}"
+)
 PIXEL_NEG = (
     "multiple characters, background scenery, grid, frame, border, text, watermark, "
     "photo, blurry, deformed, cropped"

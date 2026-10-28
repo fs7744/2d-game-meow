@@ -5,6 +5,9 @@
    ========================================================================== */
 
 :root {
+  /* 让浏览器把**自己绘制**的部分也画成深色：下拉弹出的面板、滚动条、数字框的
+     上下箭头。只靠 CSS 设 background 管不到这些——它们由 UA 绘制。 */
+  color-scheme: dark;
   --bg: #0a0a0a;
   --bg-1: #0e0e10;
   --bg-2: #121216;
@@ -40,6 +43,34 @@ body {
 }
 button, input, textarea, select { font-family: inherit; color: inherit; }
 button { cursor: pointer; }
+
+/* ---------------- 原生控件的深色基线 ----------------
+   上面那条 `color: inherit` 让控件文字跟着变白，但控件**背景**一直没设：
+   Windows 上 select / input 默认是浅灰乃至白底，浅色字压在浅底上等于看不见。
+
+   这里给所有原生控件一个深色底 + 亮字，并显式指定下拉面板（option）的配色。
+   **option 必须连 color 一起设**：只设 background 会得到「深底 + 黑字」——
+   因为 option 不在上面那条 color:inherit 的选择器里，文字色是浏览器默认的黑。
+   侧栏那条 `.rail select option` 就是这样，点开下拉一片黑。
+
+   铺底色的规则只作用于"能显示文字"的控件：range / checkbox / radio / file /
+   color 铺底色会毁掉它们自身的外观（滑块轨道、勾选标记、色块）。 */
+input, textarea, select {
+  background-color: var(--bg-1);
+  color: var(--white);
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+}
+input::placeholder, textarea::placeholder { color: var(--muted-2); }
+select option, select optgroup { background: #14141c; color: var(--white); }
+input[type='range'], input[type='checkbox'], input[type='radio'],
+input[type='file'], input[type='color'] {
+  background: none; border: none; border-radius: 0;
+}
+input[type='checkbox'], input[type='radio'] { accent-color: var(--green); }
+input[type='range'] { accent-color: var(--cyan); }
+input:focus, textarea:focus, select:focus { outline: none; border-color: var(--green); }
+input:disabled, select:disabled, textarea:disabled { opacity: 0.45; cursor: not-allowed; }
 
 .app { display: flex; flex-direction: column; height: 100%; }
 
@@ -176,29 +207,8 @@ button { cursor: pointer; }
 }
 .node.gen { border-color: rgba(0, 255, 136, 0.5); }
 
-/* 节点内的原生控件：全局那条 `color: inherit` 让控件文字继承了白色，但这些控件
-   从没设过背景——Windows 上默认是浅灰/白底，浅字压在浅底上基本看不清。
-   这里统一成深底亮字，并声明 color-scheme 让下拉面板也画成深色
-   （否则点开 select 弹出一整块白底，比看不清更刺眼）。 */
-.node select,
-.node input[type='number'],
-.node input[type='text'] {
-  background: var(--bg-1);
-  border: 1px solid var(--line-strong);
-  color: var(--white);
-  color-scheme: dark;
-  border-radius: 3px;
-}
-.node select:focus,
-.node input[type='number']:focus,
-.node input[type='text']:focus {
-  outline: none;
-  border-color: var(--green);
-}
-.node select option { background: #14141c; color: var(--white); }
-.node input[type='checkbox'],
-.node input[type='radio'] { accent-color: var(--green); }
-.node input:disabled, .node select:disabled { opacity: 0.45; cursor: not-allowed; }
+/* 节点内的原生控件沿用上面的全局深色基线，这里不再重复声明——
+   两处都写必然分叉（改一处忘一处），所以只保留节点特有的尺寸微调。 */
 .node.selected { box-shadow: var(--shadow-hard), 0 0 0 2px rgba(0, 255, 136, 0.55); }
 
 /* 右边缘拖宽手柄：平时几乎看不见，hover 才显形——不抢视觉，但要拖得到 */
@@ -644,6 +654,20 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
 .lora-note {
   margin: 0; font-size: 10px; line-height: 1.6; color: var(--muted-2);
 }
+
+/* 叠加 LoRA：一行一个（下拉 + 强度 + 移除），默认只留一个「+ 叠加」按钮，
+   不占地方——多数时候只用得到一层。 */
+.lora-stack { display: flex; flex-direction: column; gap: 4px; }
+.stack-head {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 10px; color: var(--muted-2);
+}
+.stack-head .mini { height: 20px; width: auto; padding: 0 6px; font-size: 9.5px; }
+.stack-row { display: flex; align-items: center; gap: 4px; }
+.stack-row select { flex: 1; min-width: 0; height: 22px; font-size: 10.5px; }
+.stack-row input[type='number'] { width: 52px; height: 22px; font-size: 10.5px; }
+.stack-row .mini { height: 22px; width: 22px; font-size: 12px; line-height: 1; }
+.stack-note { margin: 0; font-size: 9.5px; line-height: 1.5; color: var(--muted-2); }
 
 /* ---------------- LoRA 训练面板 ---------------- */
 .train-btn {
