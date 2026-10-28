@@ -7,8 +7,8 @@ import {
   loadStore, makeProject, metaOf, saveStore, type Project, type ProjectMeta,
 } from './store/projects'
 import {
-  deleteAssets, fetchJob, fetchLoras, fetchModels, health, submitImg2Img, submitTxt2Img,
-  uploadImage,
+  deleteAssets, fetchJob, fetchLoras, fetchModels, health, submitImg2Img, submitMatte,
+  submitTxt2Img, uploadImage,
 } from './api'
 import ConfirmDialog from './components/ConfirmDialog'
 import Lightbox from './components/Lightbox'
@@ -34,6 +34,10 @@ const DEFAULT_PARAMS: GenParams = {
   clipSkip: 1,
   // 图生图默认幅度：0.55 能明显改内容又不丢构图；低于 0.35 基本只是磨皮
   strength: 0.55,
+  // 抠图节点默认：透明底（纯去背景）
+  bgMode: 'alpha',
+  bgColor: '#ffffff',
+  bgNodeId: '',
   lora: '',
   loraScale: 0.8,
 }
@@ -239,7 +243,8 @@ export default function App() {
       pickFiles.current?.click()
       return
     }
-    const kind: NodeKind = type === 'img2img' ? 'img2img' : 'gen'
+    const kind: NodeKind =
+      type === 'img2img' ? 'img2img' : type === 'bg' ? 'bg' : 'gen'
     setNodes((list) => {
       // 原点放多个时阶梯错开，避免完全重叠
       const sameSpot = list.filter((n) => n.x === at.x && n.y === at.y).length
@@ -274,7 +279,7 @@ export default function App() {
       for (const f of imgs) {
         try {
           const up = await uploadImage(f, currentId)
-          if (target && target.kind === 'img2img') {
+          if (target && (target.kind === 'img2img' || target.kind === 'bg')) {
             patchNode(target.id, { source: { path: up.path } })
             continue
           }
@@ -297,7 +302,9 @@ export default function App() {
   /** 连线：把 from 接到 to（图生图节点）上。 */
   const onConnect = useCallback((from: string, to: string) => {
     const target = nodesRef.current.find((n) => n.id === to)
-    if (!target || target.kind !== 'img2img' || target.id === from) return
+    // 能接源的节点：图生图（要底图）与抠图（要源图）；文生图没有「底」这回事
+    if (!target || (target.kind !== 'img2img' && target.kind !== 'bg')) return
+    if (target.id === from) return
     patchNode(to, { source: { nodeId: from } })
   }, [patchNode])
 
@@ -375,25 +382,43 @@ export default function App() {
 
   const generate = useCallback(async (id: string) => {
     const node = nodesRef.current.find((n) => n.id === id)
-    if (!node || !node.params.prompt.trim()) return
+    if (!node) return
+    // 抠图节点不需要提示词（纯图像处理）；文生图/图生图需要
+    const needPrompt = node.kind === 'gen' || node.kind === 'img2img'
+    if (needPrompt && !node.params.prompt.trim()) return
     let init: string | undefined
-    if (node.kind === 'img2img') {
+    if (node.kind === 'img2img' || node.kind === 'bg') {
       init = sourcePathOf(node)
       if (!init) {
         // 没有源图就没法提交，直接在节点上报错，别让用户等一个必然失败的任务
         patchNode(id, {
           job: { id: 'error', status: 'failed',
-            error: '还没有源图：先生成一张，或点生成节点下方的「↳ 图生图」' },
+            error: '还没有源图：把别的节点连过来，或直接把本地图拖到这个节点上' },
         })
         return
       }
     }
     patchNode(id, { job: { id: 'pending', status: 'queued', startedAt: Date.now() } })
     try {
-      const { job_id } = init
-        ? await submitImg2Img(node.params, { model, matteBackend, scope: currentId }, init)
-        : await submitTxt2Img(node.params, { model, matteBackend, scope: currentId })
-      patchNode(id, { job: { id: job_id, status: 'queued', startedAt: Date.now() } })
+      let jobId: string
+      if (node.kind === 'bg') {
+        // 换背景：背景图来自另一个图片节点
+        const bgNode = node.params.bgMode === 'image'
+          ? nodesRef.current.find((n) => n.id === node.params.bgNodeId)
+          : undefined
+        const bgPath = bgNode?.image?.path || bgNode?.job?.path
+        const r = await submitMatte(
+          node.params, { model, matteBackend, scope: currentId }, init!,
+          bgPath, node.params.bgMode === 'color' ? node.params.bgColor : undefined)
+        jobId = r.job_id
+      } else if (init) {
+        const r = await submitImg2Img(node.params, { model, matteBackend, scope: currentId }, init)
+        jobId = r.job_id
+      } else {
+        const r = await submitTxt2Img(node.params, { model, matteBackend, scope: currentId })
+        jobId = r.job_id
+      }
+      patchNode(id, { job: { id: jobId, status: 'queued', startedAt: Date.now() } })
     } catch (e) {
       patchNode(id, {
         job: { id: 'error', status: 'failed', error: e instanceof Error ? e.message : '提交失败' },

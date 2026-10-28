@@ -430,7 +430,7 @@ start.bat                   # Windows 双击或命令行
 cd web && npm ci && npm run build     # 构建
 cd .. && python app.py                # FastAPI 同时托管 dist 与 API → http://127.0.0.1:8000
 cd web && npm run dev                 # 或开发模式（:5173，代理到 8000）
-npm run smoke                         # 无浏览器渲染冒烟（jsdom，150 项断言）
+npm run smoke                         # 无浏览器渲染冒烟（jsdom，162 项断言）
 ```
 
 > `start.bat` 刻意保持**纯 ASCII**：cmd.exe 按 OEM 代码页解析 .bat，中文注释会切断命令行
@@ -514,6 +514,39 @@ assets/
 
 > 历史文件（项目功能之前生成的，还在 `assets/` 根目录）仍可访问，也能当图生图的源，
 > 它们属于「公共区」；但它们不会被任何项目的新产物覆盖或混进去。
+
+### 抠图节点：去背景 / 换背景
+
+左栏「节点」组多了一个**抠图**（紫色标题）。它**不用模型**——纯图像处理，
+所以不占显存、瞬间出结果。
+
+**源图两种来法**（都支持）：
+
+1. **连线**：从任意节点（生成节点 / 图片节点 / 另一个抠图节点）的 ⤢ 拉一条线过来；
+2. **直接加图**：把本机图片**拖到这个节点上**，它就成为源（不用先建图片节点）。
+
+**三种背景方式**：
+
+| 方式 | 结果 |
+|---|---|
+| 透明（去背景） | 产物是带 alpha 的 PNG，背景全没了 |
+| 纯色 | 前景叠到指定颜色上（带取色器） |
+| 换背景图 | 前景叠到**另一张图**上（背景图从画布上的图片节点里选，cover 裁切不拉伸） |
+
+指定了背景时会**额外**存一份 `<name>_cut.png`（透明底前景），回头想换别的背景
+直接拿它再走一次就行。
+
+抠图节点的产物也是一张图，可以：点开全屏预览 / 下载 / 当别的节点的源（再接一个
+图生图继续改）/ 继续连线给下一个抠图节点。
+
+后端对应 `POST /generate` 的 `workflow: "wbg"`：
+
+```bash
+curl -X POST http://127.0.0.1:8000/generate -H "Content-Type: application/json" -d '{
+  "workflow": "wbg",
+  "params": {"init_image": "D:/.../assets/projects/p1/xxx.png", "bg_color": "#204080"}
+}'
+```
 
 ### 全屏预览与下载
 
@@ -660,18 +693,18 @@ python tools/video.py i2v assets/cat.png "the same character walking" -o assets/
 ## 测试
 
 ```bash
-python -m pytest tests -q        # 179 个用例，约 180s（含 SDXL 慢用例）
+python -m pytest tests -q        # 183 个用例，约 180s（含 SDXL 慢用例）
 # 全套超过 2 分钟会被超时杀掉，分批跑：
-#   pytest tests --ignore=tests/test_models.py   # 168 个，约 110s
+#   pytest tests --ignore=tests/test_models.py   # 172 个，约 110s
 #   pytest tests/test_models.py                  # 11 个，约 60s
 ```
 
 | 文件 | 覆盖 | 用例数 |
 |---|---|---|
 | `tests/test_postprocess.py` | 锚点、逐帧对齐、打包几何、色板上限、alpha 二值化、裁边、**像素块单色性**、**前景块计数** | 11 |
-| `tests/test_generate.py` | 同 seed 逐像素一致、不同 seed 相异、色板生效、**重绘选区外不变**、序列帧数、**闸门重提与批量挑帧**、**clip_skip 生效与 meta 记录**、主体数上报、**图生图后处理与 raw 留存**、**项目隔离（产物分目录 + 跨项目引用被拒）**、显存回收、缺权重报错 | 18 |
+| `tests/test_generate.py` | **抠图三种模式（透明/纯色/换背景图）**、同 seed 逐像素一致、不同 seed 相异、色板生效、**重绘选区外不变**、序列帧数、**闸门重提与批量挑帧**、**clip_skip 生效与 meta 记录**、主体数上报、**图生图后处理与 raw 留存**、**项目隔离（产物分目录 + 跨项目引用被拒）**、显存回收、缺权重报错 | 18 |
 | `tests/test_controlnet.py` | Canny conditioning 生效、Tile 放大结构相关性 > 0.5、像素块均匀性 | 3 |
-| `tests/test_api.py` | 全部端点、队列串行性、**w2 队列往返（含 raw 留存）**、**上传端点（坏文件/空文件/文件名清洗/进项目目录）**、**真删（连带 sidecar/raw、索引清理、路径穿越防护、索引不可删）**、**资产按项目过滤**、**下载的 Content-Disposition**、400/404 | 22 |
+| `tests/test_api.py` | **wbg 队列往返**、全部端点、队列串行性、**w2 队列往返（含 raw 留存）**、**上传端点（坏文件/空文件/文件名清洗/进项目目录）**、**真删（连带 sidecar/raw、索引清理、路径穿越防护、索引不可删）**、**资产按项目过滤**、**下载的 Content-Disposition**、400/404 | 22 |
 | `tests/test_pose.py` | 检测器切换、18 点完整性、关节在画面内且头高于髋、骨架渲染、双后端一致性、引擎内的姿态提取器单例、精灵图切片 CLI | 7 |
 | `tests/test_quality.py` | 前景占比/质心/漂移、**贴边检测**（含未抠图时整体失效）、无模型时「无法判定」、关节数影响排序与闸门 | 11 |
 | `tests/test_io_paths.py` | 视频抽帧、GIF、精灵图切片（含空格子）、CLI 错误码、非 8 倍数尺寸重绘、cols 夹取、环境自检 JSON、LoRA 空接口 | 11 |

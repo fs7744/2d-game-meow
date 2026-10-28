@@ -234,6 +234,58 @@ def test_delete_assets_protects_index(client):
     assert idx.exists()
 
 
+def test_generate_wbg_roundtrip(client, tmp_path):
+    """抠图工作流也走同一条队列（wbg）。"""
+    from PIL import Image, ImageDraw
+
+    src = tmp_path / "bg_src.png"
+    im = Image.new("RGB", (128, 128), (255, 255, 255))
+    ImageDraw.Draw(im).rectangle([30, 20, 98, 108], fill=(200, 40, 40))
+    im.save(src)
+
+    r = client.post("/generate", json={"workflow": "wbg", "params": {
+        "init_image": str(src), "bg_color": "#204080", "tag": "apiwbg"}})
+    assert r.status_code == 200, r.text
+    job_id = r.json()["job_id"]
+
+    job = None
+    for _ in range(120):
+        job = client.get(f"/jobs/{job_id}").json()
+        if job["status"] in ("done", "failed"):
+            break
+        time.sleep(0.5)
+    assert job["status"] == "done", job.get("error")
+    meta = job["result"]["meta"]
+    assert meta["workflow"] == "wbg" and meta["bg_mode"] == "color"
+    assert Path(job["result"]["file"]).exists()
+
+
+def test_generate_wbg_roundtrip(client, tmp_path):
+    """抠图工作流也走同一条队列（wbg）。"""
+    from PIL import Image, ImageDraw
+
+    src = tmp_path / "bg_src.png"
+    im = Image.new("RGB", (128, 128), (255, 255, 255))
+    ImageDraw.Draw(im).rectangle([30, 20, 98, 108], fill=(200, 40, 40))
+    im.save(src)
+
+    r = client.post("/generate", json={"workflow": "wbg", "params": {
+        "init_image": str(src), "bg_color": "#204080", "tag": "apiwbg"}})
+    assert r.status_code == 200, r.text
+    job_id = r.json()["job_id"]
+
+    job = None
+    for _ in range(120):
+        job = client.get(f"/jobs/{job_id}").json()
+        if job["status"] in ("done", "failed"):
+            break
+        time.sleep(0.5)
+    assert job["status"] == "done", job.get("error")
+    meta = job["result"]["meta"]
+    assert meta["workflow"] == "wbg" and meta["bg_mode"] == "color"
+    assert Path(job["result"]["file"]).exists()
+
+
 def test_assets_lists_generated(client):
     r = client.get("/assets?limit=5")
     assert r.status_code == 200

@@ -1,7 +1,10 @@
 export type Preset = 'sprite' | 'portrait' | 'wuxia' | 'pixel' | 'none'
 
-/** 节点类型：图生成（w1）/ 图生图（w2）/ 图片（拖进来的本地图） */
-export type NodeKind = 'gen' | 'img2img' | 'image'
+/** 节点类型：图生成（w1）/ 图生图（w2）/ 图片（拖进来的本地图）/ 抠图换背景（wbg） */
+export type NodeKind = 'gen' | 'img2img' | 'image' | 'bg'
+
+/** 抠图节点的背景方式 */
+export type BgMode = 'alpha' | 'color' | 'image'
 
 /** 图片节点挂着的图 */
 export type NodeImage = {
@@ -28,6 +31,9 @@ export type GenParams = {
   matte: boolean
   clipSkip: number        // 1=最后一层（默认）；2=跳过最后一层（多数动漫/像素 LoRA 的训练设置）
   strength: number        // 图生图的重绘幅度；文生图忽略
+  bgMode: BgMode          // 抠图节点：透明 / 纯色 / 换背景图
+  bgColor: string         // 抠图节点：纯色背景（#rrggbb）
+  bgNodeId: string        // 抠图节点：当背景用的那个图片节点 id
   lora: string            // LoRA 名（后端解析成路径）；空串表示不挂
   loraScale: number
 }

@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
+import numpy as np
 import torch
 from PIL import Image
 
@@ -311,6 +312,86 @@ def composite(src: Image.Image, gen: Image.Image, mask: Image.Image, feather: in
     out = src.convert("RGBA").copy()
     out.paste(gen.convert("RGBA"), (0, 0), m)
     return out.convert("RGB")
+
+
+# ---------------- WBG 抠图去背景 / 换背景 ----------------
+
+def matte_bg(eng: Engine, *, init_image: str | Path,
+             background: str | Path | None = None,
+             bg_color: str | Sequence[int] | None = None,
+             matte_backend: str = "auto", denoise: int = 1,
+             scope: str = "", tag: str = "wbg") -> Dict[str, Any]:
+    """抠图去背景 / 换背景。**不需要模型**，纯图像处理，所以不占显存、瞬间出。
+
+    三种输出：
+      background=None + bg_color=None → 透明底前景（纯去背景，PNG 带 alpha）
+      bg_color="#rrggbb"                 → 纯色背景
+      background=<另一张图>              → 换背景（前景叠到那张图上）
+
+    指定了背景时，会**额外**存一份 `<name>_cut.png`（透明底前景），
+    方便回头再换别的背景。
+    """
+    src = Image.open(init_image).convert("RGBA")
+    # 抠图：与其它工作流共用同一套（含 u2net 抠空自动回退的保护）
+    cut = matte_mod.despeckle(
+        matte_mod.matte_auto(src, matte_backend, eng.matte_dir), denoise_iters=denoise)
+    fg = float((np.asarray(cut)[..., 3] > 127).mean())
+
+    out = cut
+    mode = "alpha"
+    bg_path = None
+    if background is not None:
+        bg = Image.open(background).convert("RGBA")
+        # 背景铺满前景尺寸：cover 裁切，不拉伸变形
+        w, h = cut.size
+        scale = max(w / bg.width, h / bg.height)
+        bg = bg.resize((max(1, int(bg.width * scale)), max(1, int(bg.height * scale))),
+                       Image.LANCZOS)
+        left = (bg.width - w) // 2
+        top = (bg.height - h) // 2
+        bg = bg.crop((left, top, left + w, top + h))
+        canvas = bg.copy()
+        canvas.alpha_composite(cut)
+        out = canvas
+        mode = "image"
+        bg_path = str(background)
+    elif bg_color:
+        mode = "color"
+        col = _parse_color(bg_color)
+        out = Image.new("RGBA", cut.size, (col[0], col[1], col[2], 255))
+        out.alpha_composite(cut)
+
+    name = _stamp(tag)
+    meta = {
+        "workflow": "wbg", "scope": scope or "default",
+        "init_image": str(init_image), "background": bg_path,
+        "bg_mode": mode, "bg_color": str(bg_color) if mode == "color" else None,
+        "matte_backend": matte_backend, "fg_ratio": round(fg, 4),
+        "width": out.width, "height": out.height,
+    }
+    res = _save(out, name, "matte_bg", meta, scope=scope)
+    if mode != "alpha":
+        # 透明底那份也留着（换背景后还能回头换）
+        cut_path = scope_dir(scope) / f"{name}_cut.png"
+        cut.save(cut_path)
+        res["meta"]["cut"] = str(cut_path)
+        res["meta"]["cut_url"] = f"/files/{cut_path.relative_to(ASSETS).as_posix()}"
+    return res
+
+
+def _parse_color(c: str | Sequence[int]) -> tuple[int, int, int]:
+    """把 "#rrggbb" / "rgb(r,g,b)" / (r,g,b) 统一成 RGB 三元组。"""
+    if isinstance(c, (tuple, list)):
+        return (int(c[0]), int(c[1]), int(c[2]))
+    s = str(c).strip()
+    if s.startswith("#"):
+        s = s[1:]
+    if len(s) == 3:
+        s = "".join(ch * 2 for ch in s)
+    try:
+        return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16))
+    except ValueError:
+        return (255, 255, 255)
 
 
 # ---------------- W4 姿态驱动 -> 精灵帧 ----------------

@@ -11,7 +11,7 @@ type Props = {
   onCreateProject: () => void
   onRenameProject: (id: string, name: string) => void
   onDeleteProject: (id: string) => void
-  onAddNode: (kind?: 'gen' | 'img2img' | 'image') => void
+  onAddNode: (kind?: 'gen' | 'img2img' | 'image' | 'bg') => void
   canApply: boolean
   onApplyFav: (text: string) => void
   onRemoveFav: (id: string) => void
@@ -188,6 +188,21 @@ export default function Sidebar({
               <em>拿已有图改内容 / 改画风</em>
             </span>
             <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('img2img')}>+</button>
+          </div>
+          <div
+            className="rail-item"
+            draggable
+            onDragStart={(e) => {
+              e.dataTransfer.setData('application/x-node-type', 'bg')
+              e.dataTransfer.effectAllowed = 'copy'
+            }}
+            title="抠图去背景 / 换背景；源图用连线接过来，或直接拖图片上去"
+          >
+            <span className="rail-item-main">
+              <b>抠图</b>
+              <em>去背景 / 换背景 · 不用模型</em>
+            </span>
+            <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('bg')}>+</button>
           </div>
           <div
             className="rail-item"

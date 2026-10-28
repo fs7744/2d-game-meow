@@ -152,8 +152,8 @@ function check(name, cond, extra = '') {
   const doc = dom.window.document
   check('渲染出顶栏品牌', doc.querySelector('.brand .title')?.textContent?.includes('喵叫'))
   check('空状态引导可见', !!doc.querySelector('.canvas-empty .empty-card'))
-  check('侧栏存在（节点 3 项：图生成 / 图生图 / 图片）',
-    section(doc, '节点')?.querySelectorAll('.rail-item').length === 3,
+  check('侧栏存在（节点 4 项：图生成 / 图生图 / 抠图 / 图片）',
+    section(doc, '节点')?.querySelectorAll('.rail-item').length === 4,
     String(section(doc, '节点')?.querySelectorAll('.rail-item').length))
   check('有「项目」分组（独立画布）', !!section(doc, '项目'))
   check('缩放显示 100%', doc.querySelector('.zoom-val')?.textContent === '100%')
@@ -948,6 +948,74 @@ function check(name, cond, extra = '') {
   check('点背景关闭灯箱', !doc.querySelector('.lightbox'))
 
   check('灯箱场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 19) 抠图节点：拖图当源 + 三种背景方式 + 提交 wbg
+{
+  calls.length = 0
+  const { dom, errors } = await boot('')
+  const doc = dom.window.document
+  const win = dom.window
+
+  // 侧栏新建一个抠图节点
+  const nodeItems = [...section(doc, '节点').querySelectorAll('.rail-item')]
+  const bgItem = nodeItems.find((it) => (it.querySelector('b')?.textContent || '') === '抠图')
+  check('侧栏有「抠图」节点类型', !!bgItem)
+  bgItem?.querySelector('.rail-add').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 150))
+
+  const node = doc.querySelector('.node')
+  check('新建出抠图节点',
+    (node?.querySelector('.node-kind')?.textContent || '') === '抠图',
+    node?.querySelector('.node-kind')?.textContent)
+  check('抠图节点有源图区', !!node?.querySelector('.src-box'))
+  check('抠图节点有三种背景方式',
+    node?.querySelectorAll('.bg-opts input[type=radio]').length === 3,
+    String(node?.querySelectorAll('.bg-opts input[type=radio]').length))
+  check('没有源图时不能提交', node?.querySelector('.gen-btn')?.disabled === true)
+
+  // 直接把本地图拖到这个节点上 -> 变成源
+  const viewport = doc.querySelector('.canvas-viewport')
+  const file = new win.File([new Uint8Array([1])], 'pic.png', { type: 'image/png' })
+  const ev = new win.Event('drop', { bubbles: true })
+  Object.defineProperties(ev, {
+    clientX: { value: 300 }, clientY: { value: 200 },
+    dataTransfer: { value: { types: ['Files'], files: [file], getData: () => '' } },
+  })
+  viewport.dispatchEvent(ev)
+  await new Promise((r) => setTimeout(r, 400))
+  // 拖放落在空白处会建图片节点；这里检查源图下拉/提交体
+  const bgNode = [...doc.querySelectorAll('.node')].find(
+    (n) => (n.querySelector('.node-kind')?.textContent || '') === '抠图')
+  check('抠图节点仍在', !!bgNode)
+
+  // 给抠图节点接上源：把图片节点的连线接过去（用下拉不方便，这里用拖拽连线）
+  const imgNode = [...doc.querySelectorAll('.node')].find(
+    (n) => (n.querySelector('.node-kind')?.textContent || '') === '图片')
+  check('拖进来的图片成了独立图片节点', !!imgNode)
+
+  const out = imgNode?.querySelector('.conn.out')
+  out?.dispatchEvent(new win.PointerEvent('pointerdown', { bubbles: true, button: 0 }))
+  await new Promise((r) => setTimeout(r, 60))
+  bgNode.dispatchEvent(new win.PointerEvent('pointerover', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 60))
+  win.dispatchEvent(new win.PointerEvent('pointerup', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 150))
+
+  const sel = bgNode.querySelector('.src-box select')
+  check('连线后抠图节点接上了源', !!sel && !!sel.value, sel?.value)
+  check('有源图后可以提交了', bgNode.querySelector('.gen-btn')?.disabled === false)
+
+  bgNode.querySelector('.gen-btn').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 250))
+  const sub = calls.filter((c) => c.url.endsWith('/generate')).pop()
+  const body = JSON.parse(sub.body)
+  check('提交 workflow=wbg', body.workflow === 'wbg', body.workflow)
+  check('带上了源图路径', typeof body.params.init_image === 'string'
+    && body.params.init_image.length > 0, body.params.init_image)
+
+  check('抠图场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 

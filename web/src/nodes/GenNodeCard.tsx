@@ -26,6 +26,8 @@ type Props = {
   sourceNode?: GenNode
   /** 可以作为源图的节点列表 */
   sourceOptions: { id: string; label: string }[]
+  /** 可以当新背景用的图片节点 */
+  bgOptions: { id: string; label: string }[]
   /** 从本节点的输出点拉一条连线 */
   onStartLink?: () => void
   /** 连线时鼠标进入/离开某个节点（用来判断连线落在哪） */
@@ -60,6 +62,7 @@ export default function GenNodeCard({
   onSpawnImg2Img,
   sourceNode,
   sourceOptions,
+  bgOptions,
   onStartLink,
   onHover,
   onDragOverNode,
@@ -75,6 +78,7 @@ export default function GenNodeCard({
   const imageMode = node.view === 'image' && hasImage
   const isI2I = node.kind === 'img2img'
   const isImg = node.kind === 'image'
+  const isBg = node.kind === 'bg'
   // 源图可以是上游节点的产物、图片节点的本地图，也可以是节点上直接记的绝对路径
   const hasSource = !!(
     sourceNode?.job?.raw ||
@@ -182,6 +186,57 @@ export default function GenNodeCard({
     setParam('prompt', `${missing.join(', ')}, ${p.prompt}`.replace(/^, /, ''))
   }
 
+  /** 源图区：图生图与抠图节点共用（连线接上来的源，或直接拖一张图） */
+  const sourceBox = (
+    <div className="src-box">
+      <div className="src-thumb" title={sourceNode ? '源图' : '还没有选源图'}>
+        {sourceThumb ? (
+          <img src={sourceThumb} alt="源图" draggable={false} />
+        ) : (
+          <span>无源图</span>
+        )}
+      </div>
+      <div className="src-side">
+        <select
+          value={node.source?.nodeId ?? ''}
+          onChange={(e) =>
+            onPatch({ source: e.target.value ? { nodeId: e.target.value } : undefined })
+          }
+        >
+          <option value="">（未选择源图）</option>
+          {sourceOptions.map((o) => (
+            <option key={o.id} value={o.id}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+        {isI2I && (
+          <label className="strength">
+            <span>重绘</span>
+            <input
+              type="range"
+              min={0.15}
+              max={0.9}
+              step={0.05}
+              value={p.strength}
+              onChange={(e) => setParam('strength', Number(e.target.value))}
+            />
+            <b>{p.strength.toFixed(2)}</b>
+          </label>
+        )}
+        <div className="src-note">
+          {sourceNode?.kind === 'image'
+            ? '用这张本地图'
+            : sourceNode?.job?.raw
+              ? '用原图（未像素化），保留细节'
+              : hasSource
+                ? '用成品，像素块会被重新糊开'
+                : '把别的节点连过来，或直接把本地图拖到这个节点上'}
+        </div>
+      </div>
+    </div>
+  )
+
   return (
     <div
       className={`node gen${selected ? ' selected' : ''}${imageMode ? ' image-mode' : ''}${
@@ -214,8 +269,8 @@ export default function GenNodeCard({
         onPointerUp={endDrag}
         onPointerCancel={endDrag}
       >
-        <span className={`node-kind${isI2I ? ' i2i' : ''}${isImg ? ' img' : ''}`}>
-          {isImg ? '图片' : isI2I ? '图生图' : '图生成'}
+        <span className={`node-kind${isI2I ? ' i2i' : ''}${isImg ? ' img' : ''}${isBg ? ' bg' : ''}`}>
+          {isImg ? '图片' : isBg ? '抠图' : isI2I ? '图生图' : '图生成'}
         </span>
         {job && <span className={`node-state s-${job.status}`}>{statusLabel(job.status)}</span>}
         <span className="spacer" />
@@ -274,7 +329,87 @@ export default function GenNodeCard({
         />
       </div>
 
-      {isImg ? (
+      {isBg ? (
+        <div className="node-body bg-body">
+          {sourceBox}
+          <div className="bg-opts">
+            <label className="bg-mode">
+              <input
+                type="radio"
+                checked={p.bgMode === 'alpha'}
+                onChange={() => setParam('bgMode', 'alpha')}
+              />
+              透明（去背景）
+            </label>
+            <label className="bg-mode">
+              <input
+                type="radio"
+                checked={p.bgMode === 'color'}
+                onChange={() => setParam('bgMode', 'color')}
+              />
+              纯色
+              <input
+                type="color"
+                value={p.bgColor}
+                disabled={p.bgMode !== 'color'}
+                onChange={(e) => setParam('bgColor', e.target.value)}
+              />
+            </label>
+            <label className="bg-mode">
+              <input
+                type="radio"
+                checked={p.bgMode === 'image'}
+                onChange={() => setParam('bgMode', 'image')}
+              />
+              换背景图
+              <select
+                value={p.bgNodeId}
+                disabled={p.bgMode !== 'image'}
+                onChange={(e) => setParam('bgNodeId', e.target.value)}
+              >
+                <option value="">（选一个图片节点）</option>
+                {bgOptions.map((o) => (
+                  <option key={o.id} value={o.id}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          {hasImage && (
+            <div
+              className="preview"
+              onClick={(e) => {
+                e.stopPropagation()
+                onPreview?.(job!.url!, previewName)
+              }}
+              title="点击全屏预览"
+            >
+              <img src={job!.url} alt="抠图结果" draggable={false} />
+            </div>
+          )}
+          <button
+            className="gen-btn"
+            disabled={busy || !hasSource}
+            onClick={onGenerate}
+            title={hasSource ? undefined : '先接一张源图（连线或直接拖图）'}
+          >
+            {busy ? '处理中…' : p.bgMode === 'alpha' ? '去背景' : '换背景'}
+          </button>
+          {hasImage && (
+            <button
+              className="mini wide"
+              onClick={(e) => {
+                e.stopPropagation()
+                onSpawnImg2Img()
+              }}
+              title="以这张为源新建图生图节点"
+            >
+              ↳ 图生图
+            </button>
+          )}
+        </div>
+      ) : isImg ? (
         <div className="node-body img-body">
           {node.image ? (
             <>
@@ -367,53 +502,7 @@ export default function GenNodeCard({
               : 'SD1.5 只支持英文提示词；逗号分隔，主体 + 特征 + 视角'}
           </div>
 
-          {isI2I && (
-            <div className="src-box">
-              <div className="src-thumb" title={sourceNode ? '源图' : '还没有选源图'}>
-                {sourceThumb ? (
-                  <img src={sourceThumb} alt="源图" draggable={false} />
-                ) : (
-                  <span>无源图</span>
-                )}
-              </div>
-              <div className="src-side">
-                <select
-                  value={node.source?.nodeId ?? ''}
-                  onChange={(e) =>
-                    onPatch({ source: e.target.value ? { nodeId: e.target.value } : undefined })
-                  }
-                >
-                  <option value="">（未选择源图）</option>
-                  {sourceOptions.map((o) => (
-                    <option key={o.id} value={o.id}>
-                      {o.label}
-                    </option>
-                  ))}
-                </select>
-                <label className="strength">
-                  <span>重绘</span>
-                  <input
-                    type="range"
-                    min={0.15}
-                    max={0.9}
-                    step={0.05}
-                    value={p.strength}
-                    onChange={(e) => setParam('strength', Number(e.target.value))}
-                  />
-                  <b>{p.strength.toFixed(2)}</b>
-                </label>
-                <div className="src-note">
-                  {sourceNode?.kind === 'image'
-                    ? '用这张本地图'
-                    : sourceNode?.job?.raw
-                      ? '用原图（未像素化），保留细节'
-                      : hasSource
-                        ? '用成品，像素块会被重新糊开'
-                        : '点生成节点下方的「↳ 图生图」自动接上'}
-                </div>
-              </div>
-            </div>
-          )}
+          {(isI2I || isBg) && sourceBox}
 
           <div className="row">
             {!isI2I && (

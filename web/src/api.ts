@@ -92,7 +92,7 @@ function common(params: GenParams, opts: SubmitOpts) {
   }
 }
 
-async function post(workflow: 'w1' | 'w2', params: Record<string, unknown>) {
+async function post(workflow: 'w1' | 'w2' | 'wbg', params: Record<string, unknown>) {
   const r = await fetch(`${base}/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -115,6 +115,25 @@ export function submitImg2Img(params: GenParams, opts: SubmitOpts, initImage: st
     ...common(params, opts),
     init_image: initImage,
     strength: params.strength,
+  })
+}
+
+/**
+ * 抠图去背景 / 换背景。纯图像处理，不占显存。
+ * background 为空 = 透明底（去背景）；给了路径 = 换背景（前景叠上去）。
+ */
+export function submitMatte(
+  _params: GenParams,
+  opts: SubmitOpts,
+  initImage: string,
+  background?: string,
+  bgColor?: string,
+) {
+  return post('wbg', {
+    init_image: initImage,
+    background: background || undefined,
+    bg_color: bgColor || undefined,
+    scope: opts.scope || undefined,
   })
 }
 

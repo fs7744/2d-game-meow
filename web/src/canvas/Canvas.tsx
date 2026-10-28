@@ -212,6 +212,19 @@ export default function Canvas({
     })
     .filter((e): e is { id: string; d: string } => e !== null)
 
+  // 可以当新背景用的节点：图片节点（拖进来的本地图）或任何已出图的节点
+  const bgOptions = nodes
+    .filter((n) => n.kind === 'image' || n.job?.path)
+    .map((n) => ({
+      id: n.id,
+      label:
+        n.kind === 'image'
+          ? `图片 · ${n.image?.path.split(/[\\/]/).pop() || n.id}`
+          : `${n.kind === 'bg' ? '抠图' : n.kind === 'img2img' ? '图生图' : '图生成'} · ${
+              n.params.prompt.slice(0, 16) || n.id
+            }`,
+    }))
+
   const gridStyle: React.CSSProperties = {
     backgroundPosition: `${viewport.x}px ${viewport.y}px, ${viewport.x}px ${viewport.y}px`,
     backgroundSize: `${24 * viewport.z}px ${24 * viewport.z}px, ${120 * viewport.z}px ${120 * viewport.z}px, ${120 * viewport.z}px ${120 * viewport.z}px`,
@@ -283,6 +296,7 @@ export default function Canvas({
             onSpawnImg2Img={() => onSpawnImg2Img(n.id)}
             sourceNode={nodes.find((x) => x.id === n.source?.nodeId)}
             sourceOptions={sourceOptions}
+            bgOptions={bgOptions}
             onStartLink={() => startLink(n.id)}
             onHover={setHover}
             onDragOverNode={onDragOverNode}

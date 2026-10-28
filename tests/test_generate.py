@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import numpy as np
+from pathlib import Path
 from PIL import Image, ImageDraw
 
 from workflows import generate as g
@@ -153,6 +154,49 @@ def test_cross_project_source_is_blocked(eng):
     ok = g.img2img(eng, init_image=a["file"], prompt="blue slime", steps=4,
                    scope="projA", tag="iso_ok")
     assert "/projects/projA/" in ok["file"].replace("\\", "/")
+
+
+def _bg_src(assets) -> str:
+    """一张白底红方块的图，当抠图源。"""
+    p = assets / "_test_bg_src.png"
+    im = Image.new("RGB", (128, 128), (255, 255, 255))
+    ImageDraw.Draw(im).rectangle([30, 20, 98, 108], fill=(200, 40, 40))
+    im.save(p)
+    return str(p)
+
+
+def test_matte_bg_alpha(eng, assets):
+    """去背景：产物是透明底 PNG，背景被抠掉。"""
+    src = _bg_src(assets)
+    r = g.matte_bg(eng, init_image=src, tag="bg_alpha")
+    im = Image.open(r["file"]).convert("RGBA")
+    a = np.asarray(im)[..., 3]
+    assert r["meta"]["bg_mode"] == "alpha"
+    assert (a == 0).mean() > 0.2, "白底应该被抠掉"
+    assert (a == 255).mean() > 0.1, "主体应该留下"
+    assert r["meta"]["fg_ratio"] > 0.1
+
+
+def test_matte_bg_color(eng, assets):
+    """纯色背景：角落是那个颜色，并且额外存一份透明底。"""
+    src = _bg_src(assets)
+    r = g.matte_bg(eng, init_image=src, bg_color="#3355ff", tag="bg_color")
+    im = Image.open(r["file"]).convert("RGBA")
+    assert r["meta"]["bg_mode"] == "color"
+    assert im.getpixel((1, 1))[:3] == (51, 85, 255), im.getpixel((1, 1))
+    assert r["meta"]["cut"] and Path(r["meta"]["cut"]).exists()
+
+
+def test_matte_bg_with_background_image(eng, assets):
+    """换背景：前景叠到另一张图上，尺寸与前景一致。"""
+    src = _bg_src(assets)
+    bgp = assets / "_test_bg_bg.png"
+    Image.new("RGB", (256, 256), (20, 160, 60)).save(bgp)
+    r = g.matte_bg(eng, init_image=src, background=str(bgp), tag="bg_image")
+    im = Image.open(r["file"]).convert("RGBA")
+    assert r["meta"]["bg_mode"] == "image"
+    assert im.size == (128, 128)
+    assert im.getpixel((1, 1))[:3] == (20, 160, 60)
 
 
 def test_clip_skip_changes_result_and_is_recorded(eng):

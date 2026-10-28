@@ -188,6 +188,19 @@ button { cursor: pointer; }
 /* 图生图用另一种颜色，一眼分清两类节点 */
 .node-kind.i2i { color: var(--cyan); }
 .node-kind.img { color: var(--yellow); }
+.node-kind.bg { color: var(--purple, #5b57eb); }
+
+/* 抠图节点：背景方式 */
+.bg-opts { display: flex; flex-direction: column; gap: 4px; }
+.bg-mode {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 10.5px; color: var(--muted);
+}
+.bg-mode input[type='color'] {
+  width: 26px; height: 20px; padding: 0; border: 1px solid var(--line-strong);
+  background: transparent; cursor: pointer;
+}
+.bg-mode select { flex: 1; min-width: 0; height: 22px; font-size: 10.5px; }
 
 /* 连线：SVG 铺在 world 层，坐标就是世界坐标 */
 svg.links {
