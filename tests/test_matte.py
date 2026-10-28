@@ -94,3 +94,58 @@ def test_matte_on_generated_frame(eng):
     assert (a == 0).mean() > 0.08, f"透明区域太少，抠图没生效: {(a == 0).mean():.2f}"
     assert (a == 0).mean() < 0.95, "几乎全透明，抠过头了"
     assert set(np.unique(a).tolist()) <= {0, 255}
+
+
+# ---------------- matte_auto 的后端选择与回退 ----------------
+
+def test_auto_without_model_uses_color(tmp_path):
+    info = {}
+    out = M.matte_auto(_sprite(), "auto", tmp_path, info=info)
+    assert info == {"backend": "color", "fallback": False}
+    assert out.getchannel("A").getbbox() is not None
+
+
+def test_auto_falls_back_when_u2net_blanks(monkeypatch, tmp_path):
+    """u2net 交出一张几乎全透明的图时必须回退色键。
+
+    实测草稿档（256²/8 步）出图会让 isnet 只留下 0.44% 前景——抠图「成功」，
+    下游贴边检测/主体计数/像素化全拿到空数据，最后产出一张空精灵，而且不报错。
+    """
+    (tmp_path / M.AI_MODEL).write_bytes(b"stub")          # 让 ai_available 为真
+    blank = Image.new("RGBA", (128, 128), (0, 0, 0, 0))
+
+    monkeypatch.setattr(M, "_AI_SESSIONS", {})
+    monkeypatch.setattr(M, "matte_ai", lambda img, d, **kw: blank.copy())
+
+    info = {}
+    out = M.matte_auto(_sprite(), "auto", tmp_path, info=info)
+    assert info == {"backend": "color", "fallback": True}
+    assert M.fg_ratio(out) > 0.05, "回退后必须真的抠出东西"
+
+
+def test_auto_keeps_u2net_when_sane(monkeypatch, tmp_path):
+    """u2net 结果合理时不要多此一举（结果对象应原样返回）。"""
+    (tmp_path / M.AI_MODEL).write_bytes(b"stub")
+    ok = M.matte(_sprite())
+
+    monkeypatch.setattr(M, "_AI_SESSIONS", {})
+    monkeypatch.setattr(M, "matte_ai", lambda img, d, **kw: ok)
+
+    info = {}
+    out = M.matte_auto(_sprite(), "auto", tmp_path, info=info)
+    assert out is ok
+    assert info == {"backend": "u2net", "fallback": False}
+
+
+def test_forced_backends_do_not_fall_back(monkeypatch, tmp_path):
+    """强制 u2net（用户显式选择）不该被偷偷换掉，否则调参结果没法复现。"""
+    (tmp_path / M.AI_MODEL).write_bytes(b"stub")
+    blank = Image.new("RGBA", (128, 128), (0, 0, 0, 0))
+
+    monkeypatch.setattr(M, "_AI_SESSIONS", {})
+    monkeypatch.setattr(M, "matte_ai", lambda img, d, **kw: blank)
+
+    info = {}
+    out = M.matte_auto(_sprite(), "u2net", tmp_path, info=info)
+    assert info == {"backend": "u2net", "fallback": False}
+    assert M.fg_ratio(out) == 0.0

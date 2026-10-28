@@ -20,7 +20,7 @@
 | 后处理（像素化 / 16 色量化 / 锚点对齐 / 打包） | 已完成并自测（28px 漂移 → 0） |
 | IP-Adapter 角色身份锁定 | 已接通，效果待调（见「实测」） |
 | FastAPI 服务（单卡串行队列 + 资产索引） | 已完成 |
-| 抠图 / 去白边（纯色连通域 + 迭代去白边） | 已完成，实测通过 |
+| 抠图 / 去白边（纯色连通域 + u2net 语义分割 + 抠空自动回退） | 已完成，实测通过 |
 | 游戏动效导出（GIF/APNG + Godot 4 + 通用 JSON） | 已完成，实测通过 |
 | **底模自选（SD1.5 / SDXL 1.0）** | 已完成，实测通过 |
 | LoRA 选装（Civitai 精选 + 注册表 + 节点下拉） | 已完成，实测通过 |
@@ -304,7 +304,16 @@ LoRA 注册表也能声明推荐值。
 **⑥ 多主体写进产物 meta**
 SD1.5 画小体型角色（史莱姆尤甚）爱复制一份，负向词压不住，于是不猜、直接量：
 抠图后 `foreground_blobs` 数面积 ≥400px 的前景块，写进 `meta.subjects`；节点里
-`subjects > 1` 直接黄字提示换种子。同理 W4 侧有质量闸门（见上一节）。
+`subjects > 1` 直接黄字提示换种子。这是**下界**（u2net 只分割显著主体，一整墙
+史莱姆可能只剩 1 块），所以 1 不代表干净，但 >1 基本确实脏。
+
+**⑦ 抠图后端：量过了，默认不动，补了防呆**
+原本怀疑「像素画该用色键，因为 u2net 边缘软」。四个样本量下来两个结论：
+alpha **都是二值**（中间 alpha 占比 0，边缘硬度假设不成立）；色键在像素 LoRA 的
+彩色底上几乎抠不动（前景 0.90~0.98），在白袍角色上会把袍子抠碎（3 块）。所以
+`auto` 继续走 u2net。真正该修的是另一件事：u2net 会**静默抠空**（草稿档只剩
+0.44% 前景 → 交出一张空精灵），现在按前景占比做合理性检查并回退色键，
+`matte_used` / `matte_fallback` 记进 meta。
 
 ## LoRA：装什么、怎么用
 
@@ -479,6 +488,28 @@ r = poseswap(eng, pose_images=poses, prompt="blue robot",
 同一张武侠图对比：`color` 把背后的圆形水墨装饰整个留下、底部黑块也在；
 `u2net` 只留人，脸、剑、衣摆全在。**武侠 / 立绘类一律走 u2net。**
 
+像素画也一样——这条是量过的（`python tools/ab_matte.py`，768² 四个样本）：
+
+| 样本 | `color` 前景占比 / 连通块 | `u2net` 前景占比 / 连通块 | IoU |
+|---|---|---|---|
+| 像素 LoRA 史莱姆（彩色纹理底） | 0.98 / 1（几乎没抠） | **0.12 / 1**（只留主体） | 0.13 |
+| 像素 LoRA 白猫骑士（灰底） | 0.91 / 1（脸被当背景抠没） | **0.41 / 1** | 0.33 |
+| 武侠白袍（白底） | 0.35 / **3**（袍子被抠碎） | **0.42 / 1** | 0.63 |
+| W4 姿态帧（灰底） | 0.195 / 1 | 0.191 / 1 | **0.97** |
+
+![抠图后端对照](docs/img/matte_ab.jpg)
+
+每行三联：原图 / `color` / `u2net`。第二行最能说明问题——`color` 把白猫的**脸和身体
+当背景抠掉**（只剩红披风），`u2net` 完整保留。
+
+两个后端的 alpha **都是二值**（中间 alpha 占比 0）——所以「u2net 边缘软、不适合
+像素画」的假设不成立，`auto` 继续默认 u2net 是对的。
+
+但 u2net 会**整张抠空**：草稿档（256²/8 步）实测只剩 0.44% 前景，下游贴边检测 /
+主体计数 / 像素化全拿到空数据，最后交出一张空精灵且不报错。现在 `matte_auto`
+会检查前景占比，落在 1%~95% 之外就回退色键并取更合理的那份，同时把
+`matte_used` / `matte_fallback` 写进产物 meta。
+
 抠图三个要点：
 
 1. 只抠**与画面边界连通**的同色区域——否则白猫肚子贴着白底会被一起吃掉。
@@ -513,9 +544,9 @@ python tools/video.py i2v assets/cat.png "the same character walking" -o assets/
 ## 测试
 
 ```bash
-python -m pytest tests -q        # 160 个用例，约 170s（含 SDXL 慢用例）
+python -m pytest tests -q        # 164 个用例，约 175s（含 SDXL 慢用例）
 # 全套超过 2 分钟会被超时杀掉，分批跑：
-#   pytest tests --ignore=tests/test_models.py   # 149 个，约 110s
+#   pytest tests --ignore=tests/test_models.py   # 153 个，约 105s
 #   pytest tests/test_models.py                  # 11 个，约 60s
 ```
 
@@ -532,7 +563,7 @@ python -m pytest tests -q        # 160 个用例，约 170s（含 SDXL 慢用例
 | `tests/test_clip.py` | **clip_skip=1 与管道默认逐元素一致**、cs2 换向量、越界值夹取、无 text_encoder 时报错 | 4 |
 | `tests/test_fetch.py` | Range 分块拼接、断点续传、**拒绝非 206 响应**（防 429 错误体污染）、超长残留文件重置 | 5 |
 | `tests/test_stability.py` | 连续 20 次推理显存不涨、`free()` 释放 pipeline 与 ControlNet、跨进程同 seed 一致、PNG 结构、sidecar 一致 | 5 |
-| `tests/test_matte.py` | 背景估计、连通域不误抠内部同色区、去白边生效、alpha 二值、容差方向、裁边、真实生成图抠图 | 9 |
+| `tests/test_matte.py` | 背景估计、连通域不误抠内部同色区、去白边生效、alpha 二值、容差方向、裁边、真实生成图抠图、**u2net 抠空自动回退**、**强制后端不回退** | 13 |
 | `tests/test_anim.py` | GIF/APNG 帧数、索引几何、Godot tres 分区序列、tscn 像素设置（最近邻/autoplay/脚底偏移）、导出确定性 | 9 |
 | `tests/test_video.py` | numpy/PIL 帧兼容、mp4 落地、模型路径校验、Wan 真实生成（`RUN_WAN=1`） | 6 |
 | `tests/test_lora.py` | 注册表扫描/元数据/坏 JSON 容错、名称解析、去碎屑、贴边占比判定、武侠契约预算 | 13 |
@@ -568,6 +599,7 @@ W4 侧对应的兜底是上面那套**质量闸门**（生成后再检一遍，�
 │   ├── fetch_ranged.py     按 Range 分块下载（抗限流断流）
 │   ├── bench.py            稳态基准
 │   ├── ab_quality.py       画质 A/B（采样档 / 后处理档 / 背景干净度，同 seed 单变量）
+│   ├── ab_matte.py         抠图后端 A/B（色键 vs u2net：占比/白边/连通块/IoU）
 │   └── check_env.py        环境自检
 ├── models/                 权重（checkpoints / controlnet / ipadapter / loras / ...）
 └── assets/                 产物 + sidecar(.json) + index.jsonl

@@ -120,10 +120,12 @@ def txt2img(eng: Engine, *, prompt: str, negative: Optional[str] = None,
     edge: list[str] = []
     # 顺序很重要：先抠图（按原始颜色的连通域判断更准），再像素化与量化。
     # 反过来做会把背景噪点量化成格纹，抠图也会因为色阶被压而失效。
+    matte_info: Dict[str, Any] = {}
     if matte:
         # 保留 alpha：转回 RGB 会把透明区域压成黑色，等于白抠
         img = matte_mod.despeckle(
-            matte_mod.matte_auto(img.convert("RGBA"), matte_backend, eng.matte_dir),
+            matte_mod.matte_auto(img.convert("RGBA"), matte_backend, eng.matte_dir,
+                                 info=matte_info),
             denoise_iters=denoise)
         edge = matte_mod.edge_touch(img)
         # 多主体是 SD1.5 画小怪物的通病（史莱姆尤甚），负向词压不住，只能量出来
@@ -143,6 +145,7 @@ def txt2img(eng: Engine, *, prompt: str, negative: Optional[str] = None,
         "lora": lora, "lora_scale": lora_scale if lora else None,
         "pixel_block": pixel, "palette": palette, "matte": matte,
         "matte_backend": matte_backend, "denoise": denoise, "clean_iso": clean_iso,
+        "matte_used": matte_info.get("backend"), "matte_fallback": matte_info.get("fallback"),
         "edge_touch": edge, "model": model,
         "clip_skip": clip_skip if emb is not None else 1,
         "subjects": subjects,
@@ -307,7 +310,8 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
         secs = dt()
         if matte:
             out = matte_mod.despeckle(
-                matte_mod.matte_auto(out.convert("RGBA"), matte_backend, eng.matte_dir),
+                matte_mod.matte_auto(out.convert("RGBA"), matte_backend, eng.matte_dir,
+                                     info=matte_info),
                 denoise_iters=denoise)
         if pixel > 1:
             out = pp.pixelate(out, pixel)
@@ -317,6 +321,7 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
             out = pp.clean_isolated(out, passes=clean_iso)
         return out.convert("RGBA"), secs
 
+    matte_info: Dict[str, Any] = {}
     frames: List[Image.Image] = []
     per_frame: List[float] = []
     frame_scores: List[Dict[str, Any]] = []
@@ -352,6 +357,7 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
         "ref_image": str(ref_image) if ref_image else None, "lora": lora,
         "ipa_scale": ipa_scale if ref else None, "cn_scale": cn_scale,
         "steps": steps, "cfg": cfg, "seed": seed, "frames": len(frames), "matte": matte,
+        "matte_used": matte_info.get("backend"), "matte_fallback": matte_info.get("fallback"),
         "model": model,
         "clip_skip": clip_skip if emb is not None else 1,
         "candidates": candidates, "gate": bool(gate and extractor is not None),

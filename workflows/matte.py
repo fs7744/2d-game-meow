@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Dict, Iterable, Optional
 
 import cv2
 import numpy as np
@@ -259,18 +259,54 @@ def ai_available(model_dir: Optional[str | Path]) -> bool:
     return bool(model_dir) and (Path(str(model_dir)) / AI_MODEL).exists()
 
 
+def fg_ratio(rgba: Image.Image) -> float:
+    """前景（alpha>127）占比。用来判断一次抠图是不是「抠出个寂寞」。"""
+    a = np.asarray(rgba.convert("RGBA").getchannel("A"))
+    return float((a > 127).mean())
+
+
+# 一次抠图的合理占比区间。低于 LO 基本等于什么都没剩下（主体被吃光 / 模型没认出主体），
+# 高于 HI 说明背景大面积留着（色键把背景当成了主体）。
+FG_LO, FG_HI = 0.01, 0.95
+
+
+def _sane(rgba: Image.Image) -> bool:
+    return FG_LO <= fg_ratio(rgba) <= FG_HI
+
+
 def matte_auto(img: Image.Image, backend: str = "auto",
-               model_dir: Optional[str | Path] = None, **kw: Any) -> Image.Image:
+               model_dir: Optional[str | Path] = None,
+               info: Optional[Dict[str, Any]] = None, **kw: Any) -> Image.Image:
     """统一入口。
 
     backend:
-      auto  — 有分割模型就用 u2net，否则 color（推荐）
+      auto  — 有分割模型就用 u2net，**抠空了自动回退色键**（推荐）
       color — 强制纯色键控（快，但白袍角色会误伤）
-      u2net — 强制语义分割
+      u2net — 强制语义分割（不判断、不回退，出了问题自己认）
     未知值退回 color：不该因为拼错就整单失败。
+
+    为什么要回退：实测草稿档（256²/8 步）出的图，u2net 只留下 **0.44%** 的前景
+    ——模型没认出那是主体，于是「抠图成功」地交出一张几乎全透明的图，下游的
+    贴边检测、主体计数、像素化全部拿到空数据，最后产出一张空精灵。这种失败是
+    静默的，比报错难查得多。占比不合理时换成色键再比一次，取占比更合理的那个。
     """
-    use_ai = backend in ("u2net", "ai", "isnet") or (
-        backend == "auto" and ai_available(model_dir))
-    if use_ai and ai_available(model_dir):
+    info = info if info is not None else {}
+    want_ai = backend in ("u2net", "ai", "isnet")
+    if backend == "auto":
+        if not ai_available(model_dir):
+            info.update(backend="color", fallback=False)
+            return matte(img, **kw)
+        cut = matte_ai(img, model_dir, **kw)
+        if _sane(cut):
+            info.update(backend="u2net", fallback=False)
+            return cut
+        alt = matte(img, **kw)
+        pick_alt = _sane(alt) or fg_ratio(alt) > fg_ratio(cut)
+        info.update(backend="color" if pick_alt else "u2net", fallback=True)
+        return alt if pick_alt else cut
+
+    if want_ai and ai_available(model_dir):
+        info.update(backend="u2net", fallback=False)
         return matte_ai(img, model_dir, **kw)
+    info.update(backend="color", fallback=False)
     return matte(img, **kw)

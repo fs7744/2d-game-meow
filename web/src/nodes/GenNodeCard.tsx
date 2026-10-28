@@ -393,8 +393,8 @@ export default function GenNodeCard({
           {/* SD1.5 画小体型角色时爱复制一份，负向词压不住；抠图后能量出来就报出来 */}
           {typeof job?.subjects === 'number' && job.subjects > 1 && (
             <div className="warn">
-              ⚠ 画面里有 {job.subjects} 个主体（精灵只要一个）：换种子，或把「single character」
-              提到提示词最前面
+              ⚠ 抠图后还剩 {job.subjects} 块前景（精灵只要一个）：换种子，或把「single
+              character」提到提示词最前面
             </div>
           )}
         </div>
