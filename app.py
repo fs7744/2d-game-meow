@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import shutil
 import queue
 import threading
 import time
@@ -39,6 +41,7 @@ from workflows.engine import Engine
 ROOT = Path(__file__).resolve().parent
 ASSETS = ROOT / "assets"
 UPLOAD_DIR = ASSETS / "uploads"
+PROJECTS_DIR = ASSETS / "projects"
 MAX_UPLOAD = 20 * 1024 * 1024
 UPLOAD_FORMATS = {"PNG": ".png", "JPEG": ".jpg", "WEBP": ".webp",
                   "BMP": ".bmp", "GIF": ".gif"}
@@ -249,12 +252,29 @@ def list_jobs(limit: int = 20) -> Dict[str, Any]:
 
 
 @app.get("/assets")
-def assets(limit: int = 50) -> Dict[str, Any]:
+def assets(limit: int = 50, project: str = "") -> Dict[str, Any]:
+    """资产清单。带 project 时只返回该项目的产物（项目之间相互隔离）。"""
     idx = ASSETS / "index.jsonl"
     if not idx.exists():
         return {"count": 0, "items": []}
-    lines = idx.read_text("utf-8").strip().splitlines()[-limit:]
-    return {"count": len(lines), "items": [json.loads(x) for x in reversed(lines)]}
+    lines = idx.read_text("utf-8").strip().splitlines()
+    items = []
+    for x in reversed(lines):
+        if not x.strip():
+            continue
+        try:
+            item = json.loads(x)
+        except json.JSONDecodeError:
+            continue
+        if project and item.get("scope", "default") != project:
+            continue
+        # 陈旧条目（文件已被手工删掉）不再列出来，否则前端会拿到 404 的链接
+        target = item.get("file")
+        if target and not Path(str(target)).exists():
+            continue
+        items.append(item)
+    items = items[:limit]
+    return {"count": len(items), "items": items}
 
 
 def _safe_asset_path(p: str) -> Optional[Path]:
@@ -275,8 +295,12 @@ def _safe_asset_path(p: str) -> Optional[Path]:
     root = ASSETS.resolve()
     if not str(t).startswith(str(root)):
         return None
-    if t.name in ("index.jsonl", "uploads"):     # 索引与目录不能删
+    if t.name in ("index.jsonl", "uploads"):     # 索引与旧上传目录不能删
         return None
+    if t.is_dir():
+        # 只允许删项目目录（assets/projects/<某个项目>/），不能删 assets 或 projects 根
+        if t == PROJECTS_DIR.resolve() or t == root:
+            return None
     return t
 
 
@@ -308,7 +332,11 @@ def delete_assets(req: DeleteReq) -> Dict[str, Any]:
 
     for t in sorted(targets):
         try:
-            if t.exists():
+            if t.is_dir():
+                # 项目目录：整个删掉（真删项目）
+                shutil.rmtree(t, ignore_errors=True)
+                deleted.append(str(t))
+            elif t.exists():
                 t.unlink()
                 deleted.append(str(t))
             else:
@@ -333,6 +361,10 @@ def delete_assets(req: DeleteReq) -> Dict[str, Any]:
                          str(item.get("sheet") or "")}
                 if paths & set(deleted):
                     continue
+                # 目录被整体删掉时，目录下的条目也要摘
+                if any(path and any(path.startswith(d + os.sep) for d in deleted)
+                       for path in paths):
+                    continue
                 kept.append(line)
             idx.write_text("\n".join(kept) + ("\n" if kept else ""), "utf-8")
         except OSError:
@@ -343,7 +375,8 @@ def delete_assets(req: DeleteReq) -> Dict[str, Any]:
 
 
 @app.post("/upload")
-async def upload_image(request: Request, name: str = "") -> Dict[str, Any]:
+async def upload_image(request: Request, name: str = "",
+                       project: str = "") -> Dict[str, Any]:
     """接收一张本地图（请求体是**原始字节**，不是 multipart）。
 
     为什么不用 multipart：多一个依赖（python-multipart），而浏览器端
@@ -372,10 +405,17 @@ async def upload_image(request: Request, name: str = "") -> Dict[str, Any]:
     stem = "".join(
         ch for ch in Path(name).stem if ch.isascii() and (ch.isalnum() or ch in "-_")
     )[:40] or "image"
-    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    out = UPLOAD_DIR / f"{uuid.uuid4().hex[:10]}_{stem}{ext}"
+    # 项目隔离：上传的文件放进**本项目**的目录，别的项目拿不到
+    if project:
+        out_dir = PROJECTS_DIR / ("".join(
+            ch for ch in project if ch.isascii() and (ch.isalnum() or ch in "-_"))[:64]
+        ) / "uploads"
+    else:
+        out_dir = UPLOAD_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / f"{uuid.uuid4().hex[:10]}_{stem}{ext}"
     out.write_bytes(data)
-    return {"path": str(out), "url": f"/files/uploads/{out.name}",
+    return {"path": str(out), "url": f"/files/{out.relative_to(ASSETS).as_posix()}",
             "name": Path(name).name or out.name,
             "w": size[0], "h": size[1], "format": fmt, "bytes": len(data)}
 

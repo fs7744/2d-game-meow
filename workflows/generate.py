@@ -24,6 +24,7 @@ from . import quality
 from .engine import Engine
 
 ASSETS = Path(__file__).resolve().parent.parent / "assets"
+PROJECTS_DIR = ASSETS / "projects"
 
 NEG_DEFAULT = (
     "photo, photorealistic, 3d render, blurry, jpeg artifacts, gradient background, "
@@ -33,6 +34,21 @@ NEG_DEFAULT = (
 
 
 _seq = itertools.count()
+
+
+def scope_dir(scope: str = "") -> Path:
+    """项目产物目录：assets/projects/<scope>/。
+
+    scope 是前端的项目 id（p…），只保留 ASCII 字母数字与 -_，空则用 default。
+    每个项目的 PNG / sidecar / raw / 帧序列 / 精灵图都在自己的目录里，
+    项目之间互不可见（后端还有一层校验，见 img2img 的源图检查）。
+    """
+    safe = "".join(
+        ch for ch in (scope or "") if ch.isascii() and (ch.isalnum() or ch in "-_")
+    )[:64] or "default"
+    d = PROJECTS_DIR / safe
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 def _stamp(tag: str) -> str:
@@ -46,25 +62,29 @@ def _stamp(tag: str) -> str:
 
 
 def _save(img: Image.Image, name: str, tags: str, meta: dict,
-          raw: Image.Image | None = None) -> Dict[str, Any]:
+          raw: Image.Image | None = None, scope: str = "") -> Dict[str, Any]:
     """落盘 PNG + sidecar + 索引。
 
     raw 非空时额外存一份 `<name>_raw.png`（后处理**之前**的原图）。图生图的源图
     必须用这张：已经像素化到 128 有效像素的成品再喂回 img2img，模型只会把色块
     重新糊成插画，重绘幅度稍大就丢掉像素感。
     """
-    ASSETS.mkdir(parents=True, exist_ok=True)
-    out = ASSETS / f"{name}.png"
+    out_dir = scope_dir(scope)
+    out = out_dir / f"{name}.png"
     img.save(out)
-    side = {"file": str(out), "tags": tags, "created": time.strftime("%Y-%m-%dT%H:%M:%S"), **meta}
+    side = {"file": str(out), "tags": tags, "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "scope": scope or "default", **meta}
     if raw is not None:
-        raw_path = ASSETS / f"{name}_raw.png"
+        raw_path = out_dir / f"{name}_raw.png"
         raw.save(raw_path)
         side["raw"] = str(raw_path)
     Path(str(out) + ".json").write_text(json.dumps(side, ensure_ascii=False, indent=2), "utf-8")
     with (ASSETS / "index.jsonl").open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(side, ensure_ascii=False) + "\n")
-    return {"file": str(out), "sidecar": str(out) + ".json", "meta": side}
+    # url 是相对 assets 的路径：产物现在在 projects/<id>/ 子目录里，只取 basename 会 404
+    rel = out.relative_to(ASSETS).as_posix()
+    return {"file": str(out), "url": f"/files/{rel}", "sidecar": str(out) + ".json",
+            "meta": side}
 
 
 def _timer():
@@ -137,7 +157,7 @@ def txt2img(eng: Engine, *, prompt: str, negative: Optional[str] = None,
             pixel: int = 0, palette: int = 0, preset: str = "sprite",
             matte: bool = False, matte_backend: str = "auto", denoise: int = 1,
             clean_iso: int = 1, model: str = "sd15", clip_skip: int = 1,
-            tag: str = "w1") -> Dict[str, Any]:
+            scope: str = "", tag: str = "w1") -> Dict[str, Any]:
     prompt, negative = presets.build(prompt, negative, preset)
     ntok = presets.rough_tokens(prompt)
     if ntok > 77:
@@ -174,7 +194,7 @@ def txt2img(eng: Engine, *, prompt: str, negative: Optional[str] = None,
         "clip_skip": clip_skip if emb is not None else 1,
         "subjects": subjects,
         "seconds": seconds, "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
-    }, raw=raw)
+    }, raw=raw, scope=scope)
 
 
 # ---------------- W2 图生图 ----------------
@@ -185,7 +205,7 @@ def img2img(eng: Engine, *, init_image: str | Path, prompt: str,
             lora_scale: float = 0.8, model: str = "sd15", clip_skip: int = 1,
             preset: Optional[str] = None, pixel: int = 0, palette: int = 0,
             matte: bool = False, matte_backend: str = "auto", denoise: int = 1,
-            clean_iso: int = 1, tag: str = "w2") -> Dict[str, Any]:
+            clean_iso: int = 1, scope: str = "", tag: str = "w2") -> Dict[str, Any]:
     """在图生图里重画原图的**内容**（改姿势细节、换配色、加装饰），构图与轮廓保持。
 
     与 W1 的区别在于「底」是已有图，所以：
@@ -196,6 +216,15 @@ def img2img(eng: Engine, *, init_image: str | Path, prompt: str,
     """
     if preset is not None:
         prompt, negative = presets.build(prompt, negative, preset)
+    # 项目隔离：源图必须在本项目目录里。别的项目的产物（assets/projects/<别的>/…）
+    # 一律拒绝——项目之间互不可见。历史公共区（assets 根目录下的老文件）仍然可用。
+    if scope:
+        src_path = Path(init_image).resolve()
+        own = scope_dir(scope).resolve()
+        root = PROJECTS_DIR.resolve()
+        if str(src_path).startswith(str(root)) and not str(src_path).startswith(str(own)):
+            raise ValueError(
+                f"源图不属于当前项目：{src_path.name} 在别的项目目录里（项目之间相互隔离）")
     pipe = eng.img2img_pipe(model)
     eng.apply_lora(pipe, lora, lora_scale)
     ref = Image.open(init_image).convert("RGB")
@@ -228,14 +257,14 @@ def img2img(eng: Engine, *, init_image: str | Path, prompt: str,
         "edge_touch": edge, "subjects": subjects, "model": model,
         "clip_skip": clip_skip if emb is not None else 1,
         "seconds": seconds, "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
-    }, raw=raw)
+    }, raw=raw, scope=scope)
 
 
 # ---------------- W3 局部重绘 ----------------
 
 def inpaint(eng: Engine, *, image: str | Path, mask: str | Path, prompt: str,
             negative: Optional[str] = None, strength: float = 0.9, steps: int = 25,
-            cfg: float = 7.5, seed: int = -1, model: str = "sd15",
+            cfg: float = 7.5, seed: int = -1, model: str = "sd15", scope: str = "",
             tag: str = "w3") -> Dict[str, Any]:
     """只重画 mask 区域，并把结果按羽化蒙版贴回——选区外像素逐点不变。"""
     pipe = eng.inpaint_pipe(model)
@@ -263,7 +292,7 @@ def inpaint(eng: Engine, *, image: str | Path, mask: str | Path, prompt: str,
         "strength": strength, "steps": steps, "cfg": cfg, "seed": seed, "model": model,
         "raw": None,
         "seconds": seconds, "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
-    })
+    }, scope=scope)
 
 
 def composite(src: Image.Image, gen: Image.Image, mask: Image.Image, feather: int = 3) -> Image.Image:
@@ -298,7 +327,7 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
              model: str = "sd15",
              candidates: int = 1, gate: bool = True, gate_min_points: int = 8,
              gate_retries: int = 2, gate_seed_step: int = 1000,
-             clip_skip: int = 1,
+             clip_skip: int = 1, scope: str = "",
              anim_name: str = "walk", fps: int = 10, tag: str = "w4") -> Dict[str, Any]:
     """逐帧生成 -> 锚点对齐 -> 打包 sprite sheet。固定 seed 是跨帧一致的前提。
 
@@ -392,7 +421,7 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
     aligned = pp.align_sequence(frames)
     passed = sum(1 for s in frame_scores if s["passed"])
     meta = {
-        "workflow": "w4", "prompt": prompt, "negative": negative or NEG_DEFAULT,
+        "workflow": "w4", "scope": scope or "default", "prompt": prompt, "negative": negative or NEG_DEFAULT,
         "ref_image": str(ref_image) if ref_image else None, "lora": lora,
         "ipa_scale": ipa_scale if ref else None, "cn_scale": cn_scale,
         "steps": steps, "cfg": cfg, "seed": seed, "frames": len(frames), "matte": matte,
@@ -410,14 +439,17 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
         "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
     }
     name = _stamp(tag)
-    fdir = ASSETS / f"{name}_frames"
+    out_dir = scope_dir(scope)
+    fdir = out_dir / f"{name}_frames"
     fdir.mkdir(parents=True, exist_ok=True)
     for i, f in enumerate(aligned):
         f.save(fdir / f"frame_{i:04d}.png")
-    info = pp.pack_sheet(aligned, ASSETS / f"{name}_sheet.png", cols=cols, sidecar=meta)
+    sheet_path = out_dir / f"{name}_sheet.png"
+    info = pp.pack_sheet(aligned, sheet_path, cols=cols, sidecar=meta)
     info.update(meta)
+    info["url"] = f"/files/{sheet_path.relative_to(ASSETS).as_posix()}"
     info["frames_dir"] = str(fdir)
-    Path(ASSETS / f"{name}_sheet.png.json").write_text(
+    Path(out_dir / f"{name}_sheet.png.json").write_text(
         json.dumps(info, ensure_ascii=False, indent=2), "utf-8")
     if export:
         info["export"] = anim_mod.export_godot(

@@ -133,6 +133,47 @@ def test_upload_image(client):
     assert client.get(body["url"]).status_code == 200
 
 
+def test_upload_goes_into_project_dir(client):
+    """上传带 project 时，文件落在该项目目录里（别的项目拿不到）。"""
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (16, 16), (9, 9, 9)).save(buf, "PNG")
+    r = client.post("/upload?name=pic.png&project=projX", content=buf.getvalue(),
+                    headers={"Content-Type": "image/png"})
+    assert r.status_code == 200
+    body = r.json()
+    assert "projects/projX" in body["path"].replace("\\", "/"), body["path"]
+    assert body["url"].startswith("/files/projects/projX/")
+    assert client.get(body["url"]).status_code == 200
+
+
+def test_assets_filtered_by_project(client):
+    """资产清单能按项目过滤：只列本项目的产物。"""
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (16, 16), (9, 9, 9)).save(buf, "PNG")
+    up = client.post("/upload?name=p.png&project=projY", content=buf.getvalue(),
+                     headers={"Content-Type": "image/png"}).json()
+    with open(up["path"], "rb") as fh:
+        data = fh.read()
+    idx = Path(__file__).resolve().parents[1] / "assets" / "index.jsonl"
+    with idx.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"file": up["path"], "scope": "projY", "tag": "t"}) + "\n")
+    try:
+        r = client.get("/assets?project=projY&limit=50")
+        assert r.status_code == 200
+        scopes = {i.get("scope") for i in r.json()["items"]}
+        assert scopes == {"projY"}, scopes
+    finally:
+        Path(up["path"]).unlink(missing_ok=True)
+
+
 def test_upload_rejects_garbage(client):
     """坏文件必须被拒：不能什么字节都往 assets 里塞。"""
     r = client.post("/upload", content=b"not an image at all",
@@ -202,11 +243,23 @@ def test_assets_lists_generated(client):
 
 
 def test_files_serves_asset(client):
-    name = client.get("/assets?limit=1").json()["items"][0].get("file")
-    assert name
-    r = client.get(f"/files/{Path(name).name}")
-    assert r.status_code == 200
-    assert len(r.content) > 0
+    """产物现在在 projects/<id>/ 子目录里，取文件必须带相对路径（只取 basename 会 404）。"""
+    import shutil
+
+    assets = Path(__file__).resolve().parents[1] / "assets"
+    d = assets / "projects" / "_serve_test_proj"
+    d.mkdir(parents=True, exist_ok=True)
+    png = d / "x.png"
+    png.write_bytes(b"x")
+    try:
+        rel = png.resolve().relative_to(assets.resolve()).as_posix()
+        r = client.get(f"/files/{rel}")
+        assert r.status_code == 200
+        assert len(r.content) > 0
+        # 只给 basename 取不到（项目子目录里的文件）——这正是要防的坑
+        assert client.get(f"/files/{png.name}").status_code == 404
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def test_files_blocks_path_traversal(client):

@@ -127,6 +127,34 @@ def test_poseswap_produces_frames_and_sheet(eng, pose_frames):
     assert len(list(Path(r["frames_dir"]).glob("frame_*.png"))) == 3
 
 
+def test_scope_isolates_output_dirs(eng):
+    """项目隔离：产物写进 assets/projects/<scope>/，两个项目各写各的。"""
+    a = g.txt2img(eng, prompt="blue slime", width=256, height=256, steps=6, seed=1,
+                  preset="none", scope="projA", tag="iso_a")
+    b = g.txt2img(eng, prompt="red blob", width=256, height=256, steps=6, seed=2,
+                  preset="none", scope="projB", tag="iso_b")
+    na = a["file"].replace("\\", "/")
+    nb = b["file"].replace("\\", "/")
+    assert "/projects/projA/" in na, na
+    assert "/projects/projB/" in nb, nb
+    assert a["url"].startswith("/files/projects/projA/")
+
+
+def test_cross_project_source_is_blocked(eng):
+    """拿别的项目的图当图生图的源，必须被拒（项目之间相互隔离）。"""
+    a = g.txt2img(eng, prompt="blue slime", width=256, height=256, steps=6, seed=1,
+                  preset="none", scope="projA", tag="iso_c")
+    import pytest
+
+    with pytest.raises(ValueError, match="不属于当前项目"):
+        g.img2img(eng, init_image=a["file"], prompt="red blob", steps=4,
+                  scope="projB", tag="iso_x")
+    # 同项目内引用不受影响
+    ok = g.img2img(eng, init_image=a["file"], prompt="blue slime", steps=4,
+                   scope="projA", tag="iso_ok")
+    assert "/projects/projA/" in ok["file"].replace("\\", "/")
+
+
 def test_clip_skip_changes_result_and_is_recorded(eng):
     """clip_skip=2 必须真的改变画面，并把生效值记进 meta（否则没法复现）。"""
     kw = dict(prompt="blue slime monster", width=256, height=256, steps=8, seed=4321,

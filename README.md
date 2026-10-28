@@ -430,7 +430,7 @@ start.bat                   # Windows 双击或命令行
 cd web && npm ci && npm run build     # 构建
 cd .. && python app.py                # FastAPI 同时托管 dist 与 API → http://127.0.0.1:8000
 cd web && npm run dev                 # 或开发模式（:5173，代理到 8000）
-npm run smoke                         # 无浏览器渲染冒烟（jsdom，138 项断言）
+npm run smoke                         # 无浏览器渲染冒烟（jsdom，141 项断言）
 ```
 
 > `start.bat` 刻意保持**纯 ASCII**：cmd.exe 按 OEM 代码页解析 .bat，中文注释会切断命令行
@@ -487,8 +487,33 @@ npm run smoke                         # 无浏览器渲染冒烟（jsdom，138 �
 不会出现「切了一半」的中间态）。老存档 `meow.canvas.v1`（只有一份 nodes+viewport
 的时代）会自动迁移成第一个项目「我的项目」，不丢用户已有的画布。
 
-项目之间**共享产物库**（`assets/`）：A 项目生成的图，B 项目也能拿来当图生图的源，
-因为源图引用的是磁盘路径而不是项目内的东西。
+**产物也隔离**：每个项目的文件都在自己的目录里：
+
+```
+assets/
+├── index.jsonl                  全局索引（每条带 scope 字段）
+├── projects/
+│   ├── p1a2b3/                  项目 A 的产物
+│   │   ├── w1_..._0000.png      成品
+│   │   ├── w1_..._0000.png.json sidecar
+│   │   ├── w1_..._0000_raw.png  后处理之前的原图
+│   │   └── uploads/             本项目拖进来的本地图
+│   └── p4d5e6/                  项目 B 的产物
+└── uploads/                     历史遗留（项目功能之前上传的）
+```
+
+- 生成时前端带上 `scope`（项目 id），后端把产物写进 `assets/projects/<scope>/`。
+- **跨项目引用会被后端拒绝**：拿 A 项目的图去 B 项目做图生图，直接报
+  「源图不属于当前项目」。同项目内引用不受影响。
+- 上传（拖进来的本地图）也进本项目目录：`/upload?project=<id>`。
+- 资产清单可按项目过滤：`GET /assets?project=<id>`。
+- **真删项目 = 删整个目录**（`DELETE /assets` 传 `projects/<id>`），产物、上传、
+  帧序列一起清掉，索引里的条目同步摘掉。
+- 产物在子目录里之后，`/files/<basename>` 取不到了——后端在结果里直接给
+  `url`（相对 assets 的路径），前端用它显示。
+
+> 历史文件（项目功能之前生成的，还在 `assets/` 根目录）仍可访问，也能当图生图的源，
+> 它们属于「公共区」；但它们不会被任何项目的新产物覆盖或混进去。
 
 ### 删除：确认框 + 真删
 
@@ -620,18 +645,18 @@ python tools/video.py i2v assets/cat.png "the same character walking" -o assets/
 ## 测试
 
 ```bash
-python -m pytest tests -q        # 174 个用例，约 180s（含 SDXL 慢用例）
+python -m pytest tests -q        # 178 个用例，约 185s（含 SDXL 慢用例）
 # 全套超过 2 分钟会被超时杀掉，分批跑：
-#   pytest tests --ignore=tests/test_models.py   # 163 个，约 115s
+#   pytest tests --ignore=tests/test_models.py   # 167 个，约 116s
 #   pytest tests/test_models.py                  # 11 个，约 60s
 ```
 
 | 文件 | 覆盖 | 用例数 |
 |---|---|---|
 | `tests/test_postprocess.py` | 锚点、逐帧对齐、打包几何、色板上限、alpha 二值化、裁边、**像素块单色性**、**前景块计数** | 11 |
-| `tests/test_generate.py` | 同 seed 逐像素一致、不同 seed 相异、色板生效、**重绘选区外不变**、序列帧数、**闸门重提与批量挑帧**、**clip_skip 生效与 meta 记录**、主体数上报、**图生图后处理与 raw 留存**、显存回收、缺权重报错 | 16 |
+| `tests/test_generate.py` | 同 seed 逐像素一致、不同 seed 相异、色板生效、**重绘选区外不变**、序列帧数、**闸门重提与批量挑帧**、**clip_skip 生效与 meta 记录**、主体数上报、**图生图后处理与 raw 留存**、**项目隔离（产物分目录 + 跨项目引用被拒）**、显存回收、缺权重报错 | 18 |
 | `tests/test_controlnet.py` | Canny conditioning 生效、Tile 放大结构相关性 > 0.5、像素块均匀性 | 3 |
-| `tests/test_api.py` | 全部端点、队列串行性、**w2 队列往返（含 raw 留存）**、**上传端点（坏文件/空文件/文件名清洗）**、**真删（连带 sidecar/raw、索引清理、路径穿越防护、索引不可删）**、400/404 | 19 |
+| `tests/test_api.py` | 全部端点、队列串行性、**w2 队列往返（含 raw 留存）**、**上传端点（坏文件/空文件/文件名清洗/进项目目录）**、**真删（连带 sidecar/raw、索引清理、路径穿越防护、索引不可删）**、**资产按项目过滤**、400/404 | 21 |
 | `tests/test_pose.py` | 检测器切换、18 点完整性、关节在画面内且头高于髋、骨架渲染、双后端一致性、引擎内的姿态提取器单例、精灵图切片 CLI | 7 |
 | `tests/test_quality.py` | 前景占比/质心/漂移、**贴边检测**（含未抠图时整体失效）、无模型时「无法判定」、关节数影响排序与闸门 | 11 |
 | `tests/test_io_paths.py` | 视频抽帧、GIF、精灵图切片（含空格子）、CLI 错误码、非 8 倍数尺寸重绘、cols 夹取、环境自检 JSON、LoRA 空接口 | 11 |

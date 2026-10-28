@@ -7,8 +7,15 @@ function basename(p: string): string {
   return parts[parts.length - 1] || p
 }
 
+/**
+ * 产物 URL。产物现在在 assets/projects/<项目id>/ 子目录里，只取 basename 会 404，
+ * 所以从绝对路径里截出「assets/ 之后」的部分，逐段编码。
+ */
 export function fileUrl(localPath: string): string {
-  return `${base}/files/${encodeURIComponent(basename(localPath))}`
+  const p = localPath.replace(/\\/g, '/')
+  const i = p.lastIndexOf('/assets/')
+  const rel = i >= 0 ? p.slice(i + '/assets/'.length) : basename(localPath)
+  return `${base}/files/${rel.split('/').map(encodeURIComponent).join('/')}`
 }
 
 export type SubmitResult = { job_id: string }
@@ -25,8 +32,10 @@ export type UploadedImage = {
  * 上传一张本地图。请求体是**原始字节**（不是 multipart），后端省掉一个依赖。
  * 返回的 path 是磁盘绝对路径——图生图要拿它当 init_image。
  */
-export async function uploadImage(file: File): Promise<UploadedImage> {
-  const r = await fetch(`${base}/upload?name=${encodeURIComponent(file.name)}`, {
+export async function uploadImage(file: File, project?: string): Promise<UploadedImage> {
+  const q = project ? `?name=${encodeURIComponent(file.name)}&project=${encodeURIComponent(project)}`
+    : `?name=${encodeURIComponent(file.name)}`
+  const r = await fetch(`${base}/upload${q}`, {
     method: 'POST',
     headers: { 'Content-Type': file.type || 'application/octet-stream' },
     body: file,
@@ -57,7 +66,7 @@ export async function deleteAssets(paths: string[]): Promise<DeleteResult> {
   return r.json() as Promise<DeleteResult>
 }
 
-export type SubmitOpts = { model?: string; matteBackend?: string }
+export type SubmitOpts = { model?: string; matteBackend?: string; scope?: string }
 
 /** 两个工作流共用的参数。w2 不接受 width/height（尺寸由源图决定）。 */
 function common(params: GenParams, opts: SubmitOpts) {
@@ -78,6 +87,8 @@ function common(params: GenParams, opts: SubmitOpts) {
     // 空串表示不挂 LoRA；后端会把名字解析成绝对路径
     lora: params.lora || undefined,
     lora_scale: params.loraScale,
+    // 项目作用域：产物写进 assets/projects/<scope>/，项目之间互不可见
+    scope: opts.scope || undefined,
   }
 }
 

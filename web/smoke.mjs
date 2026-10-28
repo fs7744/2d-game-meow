@@ -628,6 +628,9 @@ function check(name, cond, extra = '') {
   check('带 strength', typeof body.params.strength === 'number', String(body.params.strength))
   check('不带 width/height（由源图决定）',
     body.params.width === undefined && body.params.height === undefined)
+  check('提交带上了项目作用域（scope）',
+    typeof body.params.scope === 'string' && body.params.scope.length > 0,
+    String(body.params.scope))
 
   check('图生图场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
@@ -683,6 +686,9 @@ function check(name, cond, extra = '') {
   check('图片节点标题是「图片」',
     (doc.querySelector('.node.is-img .node-kind')?.textContent || '') === '图片')
   check('上传请求已发出', calls.some((c) => c.url.includes('/upload')))
+  check('上传带上了项目作用域',
+    (calls.find((c) => c.url.includes('/upload'))?.url || '').includes('project='),
+    calls.find((c) => c.url.includes('/upload'))?.url)
   check('图片节点渲染了图', !!doc.querySelector('.node.is-img .img-holder img'))
   check('图片节点默认宽度按原图上限', doc.querySelector('.node.is-img')?.style.width === '256px',
     doc.querySelector('.node.is-img')?.style.width)
@@ -721,6 +727,9 @@ function check(name, cond, extra = '') {
   check('提交 workflow=w2 且用本地图当源',
     body.workflow === 'w2' && body.params.init_image.includes('abc_pic.png'),
     JSON.stringify({ w: body.workflow, i: body.params.init_image }))
+  check('提交带上了项目作用域（scope）',
+    typeof body.params.scope === 'string' && body.params.scope.length > 0,
+    String(body.params.scope))
 
   check('图片节点场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()

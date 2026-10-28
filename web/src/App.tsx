@@ -203,16 +203,12 @@ export default function App() {
     const target = projects.find((p) => p.id === id)
     if (!target) return
     if (hard) {
-      const paths = target.nodes
-        .flatMap((n) => [n.job?.path, n.job?.raw, n.image?.path])
-        .filter((x): x is string => !!x)
-      if (paths.length > 0) {
-        try {
-          await deleteAssets(paths)
-        } catch (e) {
-          setUploadMsg(`删除失败：${e instanceof Error ? e.message : '未知错误'}`)
-          window.setTimeout(() => setUploadMsg(''), 5000)
-        }
+      // 整个项目目录删掉：产物、上传、帧序列都在里面
+      try {
+        await deleteAssets([`projects/${id}`])
+      } catch (e) {
+        setUploadMsg(`删除失败：${e instanceof Error ? e.message : '未知错误'}`)
+        window.setTimeout(() => setUploadMsg(''), 5000)
       }
     }
     let next = projects.filter((p) => p.id !== id)
@@ -275,7 +271,7 @@ export default function App() {
       let i = 0
       for (const f of imgs) {
         try {
-          const up = await uploadImage(f)
+          const up = await uploadImage(f, currentId)
           if (target && target.kind === 'img2img') {
             patchNode(target.id, { source: { path: up.path } })
             continue
@@ -293,7 +289,7 @@ export default function App() {
         i += 1
       }
     },
-    [patchNode],
+    [patchNode, currentId],
   )
 
   /** 连线：把 from 接到 to（图生图节点）上。 */
@@ -393,8 +389,8 @@ export default function App() {
     patchNode(id, { job: { id: 'pending', status: 'queued', startedAt: Date.now() } })
     try {
       const { job_id } = init
-        ? await submitImg2Img(node.params, { model, matteBackend }, init)
-        : await submitTxt2Img(node.params, { model, matteBackend })
+        ? await submitImg2Img(node.params, { model, matteBackend, scope: currentId }, init)
+        : await submitTxt2Img(node.params, { model, matteBackend, scope: currentId })
       patchNode(id, { job: { id: job_id, status: 'queued', startedAt: Date.now() } })
     } catch (e) {
       patchNode(id, {
@@ -402,7 +398,7 @@ export default function App() {
       })
     }
     // 底模/抠图后端是全局设置，必须进依赖，否则切了底模还在用旧值提交
-  }, [patchNode, model, matteBackend, sourcePathOf])
+  }, [patchNode, model, matteBackend, sourcePathOf, currentId])
 
   // 截图/联调专用：demo=gen 时自动跑一次生成
   const demoFired = useRef(false)
