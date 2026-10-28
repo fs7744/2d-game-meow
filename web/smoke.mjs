@@ -152,8 +152,8 @@ function check(name, cond, extra = '') {
   const doc = dom.window.document
   check('渲染出顶栏品牌', doc.querySelector('.brand .title')?.textContent?.includes('喵叫'))
   check('空状态引导可见', !!doc.querySelector('.canvas-empty .empty-card'))
-  check('侧栏存在（节点 7 项：图生成 / 图生图 / 局部重绘 / 局部AI重绘 / 像素转换 / 抠图 / 图片）',
-    section(doc, '节点')?.querySelectorAll('.rail-item').length === 7,
+  check('侧栏存在（节点 8 项：图生成 / 图生图 / 局部重绘 / 局部AI重绘 / 角色迁移 / 像素转换 / 抠图 / 图片）',
+    section(doc, '节点')?.querySelectorAll('.rail-item').length === 8,
     String(section(doc, '节点')?.querySelectorAll('.rail-item').length))
   check('有「项目」分组（独立画布）', !!section(doc, '项目'))
   check('缩放显示 100%', doc.querySelector('.zoom-val')?.textContent === '100%')
@@ -1211,6 +1211,92 @@ function check(name, cond, extra = '') {
     JSON.stringify({ c: body.params.colors, s: body.params.sample_method }))
 
   check('像素转换场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 23) 角色迁移节点：两个源 + 提交 wpc
+{
+  const { dom, errors } = await boot('')
+  const doc = dom.window.document
+  const win = dom.window
+
+  const nodeItems = [...section(doc, '节点').querySelectorAll('.rail-item')]
+  const pcItem = nodeItems.find((it) => (it.querySelector('b')?.textContent || '') === '角色迁移')
+  check('侧栏有「角色迁移」节点类型', !!pcItem)
+  pcItem?.querySelector('.rail-add').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 150))
+
+  const node = doc.querySelector('.node')
+  check('新建出角色迁移节点',
+    (node?.querySelector('.node-kind')?.textContent || '') === '角色迁移',
+    node?.querySelector('.node-kind')?.textContent)
+  check('有动作参考图区', !!node?.querySelector('.src-box'))
+  check('有角色图区（第二个源）', !!node?.querySelector('.char-box'))
+  check('两个源各有一个下拉', node?.querySelectorAll('.src-box select').length === 2,
+    String(node?.querySelectorAll('.src-box select').length))
+  check('没有源图时不能提交', node?.querySelector('.gen-btn')?.disabled === true)
+  check('有姿态/身份/占高三档参数',
+    node?.querySelectorAll('.adv .strength input[type=range]').length === 3,
+    String(node?.querySelectorAll('.adv .strength input[type=range]').length))
+
+  // 拖一个本地图进来 -> 动作参考图（第一个源）
+  const viewport = doc.querySelector('.canvas-viewport')
+  const file = new win.File([new Uint8Array([1])], 'pose.png', { type: 'image/png' })
+  const ev = new win.Event('drop', { bubbles: true })
+  Object.defineProperties(ev, {
+    clientX: { value: 300 }, clientY: { value: 200 },
+    dataTransfer: { value: { types: ['Files'], files: [file], getData: () => '' } },
+  })
+  viewport.dispatchEvent(ev)
+  await new Promise((r) => setTimeout(r, 400))
+  const imgNode = [...doc.querySelectorAll('.node')].find(
+    (n) => (n.querySelector('.node-kind')?.textContent || '') === '图片')
+  const pcNode = [...doc.querySelectorAll('.node')].find(
+    (n) => (n.querySelector('.node-kind')?.textContent || '') === '角色迁移')
+  check('拖进来的图片成了独立图片节点', !!imgNode)
+
+  // 连线 -> 动作参考图
+  imgNode?.querySelector('.conn.out')
+    .dispatchEvent(new win.PointerEvent('pointerdown', { bubbles: true, button: 0 }))
+  await new Promise((r) => setTimeout(r, 60))
+  pcNode.dispatchEvent(new win.PointerEvent('pointerover', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 60))
+  win.dispatchEvent(new win.PointerEvent('pointerup', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 150))
+  check('连线后接上了动作参考图',
+    !!pcNode.querySelector('.src-box select')?.value)
+
+  // 角色图：第二个下拉选图片节点
+  const charSel = pcNode.querySelectorAll('.src-box select')[1]
+  const charSet = Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value').set
+  charSet.call(charSel, imgNode.getAttribute('data-node-id') || '')
+  charSel.dispatchEvent(new win.Event('change', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 150))
+
+  // 填提示词
+  const ta = pcNode.querySelector('textarea.prompt')
+  const setTa = (el, v) => {
+    const s2 = Object.getOwnPropertyDescriptor(win.HTMLTextAreaElement.prototype, 'value').set
+    s2.call(el, v)
+    el.dispatchEvent(new win.Event('input', { bubbles: true }))
+  }
+  setTa(ta, 'a blue slime monster')
+  await new Promise((r) => setTimeout(r, 80))
+
+  pcNode.querySelector('.gen-btn').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 250))
+  const sub = calls.filter((c) => c.url.endsWith('/generate')).pop()
+  const body = JSON.parse(sub.body)
+  check('提交 workflow=wpc', body.workflow === 'wpc', body.workflow)
+  check('带上了动作参考图与角色图两个路径',
+    typeof body.params.pose_image === 'string' && body.params.pose_image.length > 0 &&
+    typeof body.params.char_image === 'string' && body.params.char_image.length > 0,
+    JSON.stringify({ p: body.params.pose_image, c: body.params.char_image }))
+  check('带上了姿态/身份强度',
+    typeof body.params.cn_scale === 'number' && typeof body.params.ipa_scale === 'number',
+    JSON.stringify({ cn: body.params.cn_scale, ipa: body.params.ipa_scale }))
+
+  check('角色迁移场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 

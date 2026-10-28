@@ -116,7 +116,10 @@ function common(params: GenParams, opts: SubmitOpts) {
   }
 }
 
-async function post(workflow: 'w1' | 'w2' | 'w3' | 'w5' | 'wbg' | 'wpx', params: Record<string, unknown>) {
+async function post(
+  workflow: 'w1' | 'w2' | 'w3' | 'w5' | 'wbg' | 'wpx' | 'wpc',
+  params: Record<string, unknown>,
+) {
   const r = await fetch(`${base}/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -222,6 +225,38 @@ export function submitPixelify(
     // snap_to=0 表示不吸附，保留检测到的原始网格
     snap_to: params.pxSnapTo > 0 ? params.pxSnapTo : null,
     scope: opts.scope || undefined,
+  })
+}
+
+/**
+ * 角色迁移（wpc）。动作参考图 → 骨架（ControlNet 定姿态）+ 角色图
+ * → IP-Adapter（定身份），生成角色做出参考动作的图。
+ */
+export function submitPoseClone(
+  params: GenParams,
+  opts: SubmitOpts,
+  poseImage: string,
+  charImage: string,
+) {
+  return post('wpc', {
+    pose_image: poseImage,
+    char_image: charImage,
+    prompt: params.prompt,
+    negative: params.negative || undefined,
+    width: params.width,
+    height: params.height,
+    steps: params.steps,
+    cfg: params.cfg,
+    seed: params.seed,
+    preset: params.preset,
+    clip_skip: params.clipSkip,
+    lora: params.lora || undefined,
+    lora_scale: params.loraScale,
+    model: opts.model || 'sd15',
+    scope: opts.scope || undefined,
+    cn_scale: params.pcCnScale,
+    ipa_scale: params.pcIpaScale,
+    fill: params.pcFill,
   })
 }
 

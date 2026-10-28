@@ -3,6 +3,7 @@ export type Preset = 'sprite' | 'portrait' | 'wuxia' | 'pixel' | 'none'
 /** 节点类型：图生成（w1）/ 图生图（w2）/ 图片 / 抠图换背景（wbg）/ 局部重绘（w3）/ 局部 AI 重绘（w5） */
 export type NodeKind =
   | 'gen' | 'img2img' | 'image' | 'bg' | 'inpaint' | 'airepaint' | 'pixelify'
+  | 'poseclone'
 
 /** 完美像素转换的每格取色方式 */
 export type PixelSample = 'median' | 'majority' | 'center'
@@ -20,6 +21,13 @@ export type NodeImage = {
 
 /** 图生图的源：指向画布上另一个节点的产物，或直接给本地绝对路径 */
 export type NodeSource = { nodeId?: string; path?: string }
+
+/**
+ * 角色迁移节点的两个输入：
+ *   source     —— 动作参考图（真人照片，用来提骨架）
+ *   charSource —— 角色图（用来定身份，外观由 IP-Adapter 带过去）
+ */
+export type NodeCharSource = { nodeId?: string; path?: string }
 
 export type GenParams = {
   prompt: string
@@ -52,6 +60,9 @@ export type GenParams = {
   pxGridSnap: boolean     // 像素转换：是否做网格检测/吸附
   pxTransparentBg: boolean// 像素转换：把纯色背景转成透明
   pxSnapTo: number        // 像素转换：网格吸附到这个数的整数倍（0 = 不吸附）
+  pcCnScale: number       // 角色迁移：ControlNet 姿态强度（越大越贴参考动作）
+  pcIpaScale: number      // 角色迁移：IP-Adapter 身份强度（越大越像角色图）
+  pcFill: number          // 角色迁移：人物在画布里占的高度比例
   lora: string            // LoRA 名（后端解析成路径）；空串表示不挂
   loraScale: number
 }
@@ -98,6 +109,8 @@ export type GenNode = {
   params: GenParams
   view: NodeView
   source?: NodeSource
+  /** 角色迁移节点：角色图（身份来源） */
+  charSource?: NodeCharSource
   image?: NodeImage
   job?: JobState
 }

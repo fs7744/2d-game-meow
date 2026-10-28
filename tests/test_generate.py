@@ -330,6 +330,61 @@ def test_pixelify_without_colors_keeps_grid_alignment(eng, assets):
     assert "palette" not in r["meta"]
 
 
+def _pose_clone_inputs(assets):
+    """造「动作参考图 + 角色图」。
+
+    动作参考图**必须是真人照片**——姿态模型只认得出真人，合成简笔人形
+    连人体检测都过不了（FasterRCNN 检不出，检测器直接 fallback 成整图框，
+    姿态回归在整图上乱跑，输出一堆坐标离谱的"关节"）。
+    所以这里用仓库里的固定素材 tests/fixtures/pose_ref_person.png。
+    """
+    fixture = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "pose_ref_person.png"
+    if not fixture.exists():
+        import pytest
+        pytest.skip("缺少真人姿态参考素材 tests/fixtures/pose_ref_person.png")
+    pose = assets / "_pc_pose.png"
+    Image.open(fixture).convert("RGB").save(pose)
+
+    char = assets / "_pc_char.png"
+    cim = Image.new("RGB", (256, 256), (250, 250, 250))
+    ImageDraw.Draw(cim).ellipse([80, 60, 176, 190], fill=(40, 170, 200))
+    cim.save(char)
+    return pose, char
+
+
+def test_pose_clone_records_both_sources(eng, assets):
+    """角色迁移：动作参考图定姿态、角色图定身份，两个源都要记进 meta。"""
+    pose, char = _pose_clone_inputs(assets)
+    r = g.pose_clone(eng, pose_image=pose, char_image=char,
+                      prompt="a blue slime monster", steps=6, seed=3,
+                      preset="none", width=512, height=512, scope="",
+                      tag="pc_test")
+    m = r["meta"]
+    assert m["workflow"] == "wpc"
+    assert Path(m["pose_image"]).name == "_pc_pose.png"
+    assert Path(m["char_image"]).name == "_pc_char.png"
+    assert m["joints"] >= 12, m["joints"]
+    assert m["cn_scale"] == 1.0 and m["ipa_scale"] == 0.8
+    assert Path(r["file"]).exists()
+
+
+def test_pose_clone_rejects_image_without_person(eng, assets):
+    """参考图里检测不到人体时必须报错，而不是静默出一张没姿态的图。
+
+    注意：以前这里会「成功」——检测器 fallback 成整图框，姿态回归在整张图上
+    乱跑，输出一堆坐标离谱的关节，看起来像识别成功了，其实完全没用。
+    """
+    _, char = _pose_clone_inputs(assets)
+    blank = assets / "_pc_blank.png"
+    Image.new("RGB", (256, 256), (250, 250, 250)).save(blank)
+    import pytest
+
+    with pytest.raises(ValueError, match="没检测到人物"):
+        g.pose_clone(eng, pose_image=blank, char_image=char,
+                     prompt="x", steps=4, preset="none", width=256, height=256,
+                     tag="pc_bad")
+
+
 def test_clip_skip_changes_result_and_is_recorded(eng):
     """clip_skip=2 必须真的改变画面，并把生效值记进 meta（否则没法复现）。"""
     kw = dict(prompt="blue slime monster", width=256, height=256, steps=8, seed=4321,

@@ -299,6 +299,13 @@ export default function Canvas({
             sourceNode={nodes.find((x) => x.id === n.source?.nodeId)}
             sourceOptions={sourceOptions}
             bgOptions={bgOptions}
+            charThumbOf={(id) => {
+              if (!id) return undefined
+              const n = nodes.find((x) => x.id === id)
+              if (!n) return undefined
+              if (n.kind === 'image') return n.image?.url
+              return n.job?.url
+            }}
             onStartLink={() => startLink(n.id)}
             onHover={setHover}
             onDragOverNode={onDragOverNode}

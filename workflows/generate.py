@@ -600,6 +600,99 @@ def pixelify(eng: Engine, *, init_image: str | Path,
     return _save(out, _stamp(tag), "pixelify", meta, scope=scope)
 
 
+# ---------------- WPC 角色迁移 ----------------
+
+def pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | Path,
+                prompt: str, negative: Optional[str] = None,
+                width: int = 768, height: int = 768,
+                steps: int = 25, cfg: float = 7.0, seed: int = -1,
+                cn_scale: float = 1.0, ipa_scale: float = 0.8,
+                fill: float = 0.8, thr: float = 0.25,
+                lora: Optional[str] = None, lora_scale: float = 0.8,
+                clip_skip: int = 1, preset: Optional[str] = None,
+                pixel: int = 0, palette: int = 0, matte: bool = False,
+                matte_backend: str = "auto", denoise: int = 1, clean_iso: int = 1,
+                scope: str = "", tag: str = "wpc") -> Dict[str, Any]:
+    """角色迁移：把**动作参考图**的姿态套到**角色图**上，生成角色做出该动作的图。
+
+    三件套各管一件事：
+      - **ControlNet openpose** ← 动作参考图的骨架：定姿态（硬约束）
+      - **IP-Adapter**        ← 角色图：定身份/外观（软约束）
+      - **LoRA**              ← 定画风（可选）
+
+    **为什么骨架要归一化**：ControlNet OpenPose 是空间敏感的——条件图里人物站在
+    哪、占多大，生成的人就站在哪、占多大。参考图里的人物可能缩在角落，直接用
+    原始骨架会画出「角落小人」。所以先按检测到的人物框把关键点归一化（人物居中、
+    占画面 fill 比例），再渲染骨架图。
+
+    **为什么不直接用 W4**：W4 是「骨架序列 → 精灵帧」，没有角色参考图；这里
+    多了 IP-Adapter 这一路，是单帧的身份迁移。
+    """
+    if preset is not None:
+        prompt, negative = presets.build(prompt, negative, preset)
+    extractor = eng.pose_extractor()
+    if extractor is None:
+        raise ValueError("姿态模型缺失或 onnxruntime 没装：无法从动作参考图提取骨架")
+
+    ref_pose = Image.open(pose_image).convert("RGB")
+    # 1) 动作参考图 → 归一化骨架图
+    kps = extractor.normalized_points(ref_pose, thr=thr, fill=fill)
+    if len(kps) < 8:
+        raise ValueError(
+            f"动作参考图里只识别出 {len(kps)} 个关节（至少要 8 个）："
+            "参考图里的人物可能太小、被遮挡或不是人体")
+    import sys
+    from pathlib import Path as _P
+    root = _P(__file__).resolve().parent.parent
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    from tools.make_pose import render
+    pose_map = render(kps, size=(width, height))
+
+    # 2) 角色图 → IP-Adapter 参考
+    char = Image.open(char_image).convert("RGB").resize((width, height))
+    pipe = eng.pose_pipe(controlnet="openpose", with_ipadapter=True, model="sd15")
+    eng.apply_lora(pipe, lora, lora_scale)
+    pipe.set_ip_adapter_scale(ipa_scale)
+    if seed < 0:
+        seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
+    neg = negative or NEG_DEFAULT
+    emb = _skip_embeds(pipe, prompt, neg, clip_skip, "sd15")
+    kw: Dict[str, Any] = dict(prompt=prompt, negative_prompt=neg)
+    if emb is not None:
+        kw = dict(prompt_embeds=emb[0], negative_prompt_embeds=emb[1])
+    torch.cuda.reset_peak_memory_stats()
+    dt = _timer()
+    out = pipe(image=pose_map, num_inference_steps=steps, guidance_scale=cfg,
+               controlnet_conditioning_scale=cn_scale,
+               ip_adapter_image=char,
+               generator=torch.Generator("cuda").manual_seed(seed),
+               width=width, height=height, **kw).images[0]
+    seconds = dt()
+    raw = out.copy() if (matte or pixel > 1 or palette) else None
+    matte_info: Dict[str, Any] = {}
+    out, edge, subjects = _postprocess(
+        out, eng, matte=matte, matte_backend=matte_backend, denoise=denoise,
+        pixel=pixel, palette=palette, clean_iso=clean_iso, info=matte_info)
+    return _save(out, _stamp(tag), "pose_clone", {
+        "workflow": "wpc", "scope": scope or "default",
+        "prompt": prompt, "negative": neg,
+        "pose_image": str(pose_image), "char_image": str(char_image),
+        "joints": len(kps), "fill": fill,
+        "width": width, "height": height,
+        "steps": steps, "cfg": cfg, "seed": seed,
+        "cn_scale": cn_scale, "ipa_scale": ipa_scale,
+        "lora": lora, "lora_scale": lora_scale if lora else None,
+        "clip_skip": clip_skip if emb is not None else 1,
+        "pixel_block": pixel, "palette": palette, "matte": matte,
+        "matte_used": matte_info.get("backend"),
+        "matte_fallback": matte_info.get("fallback"),
+        "edge_touch": edge, "subjects": subjects,
+        "seconds": seconds,
+        "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
+    }, raw=raw, scope=scope)
+
+
 # ---------------- W4 姿态驱动 -> 精灵帧 ----------------
 
 def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,

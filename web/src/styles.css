@@ -284,6 +284,10 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
 .node-kind.inpaint { color: var(--pink); }
 .node-kind.airepaint { color: var(--green); }
 .node-kind.pixelify { color: var(--yellow); }
+.node-kind.poseclone { color: var(--cyan); }
+
+/* 角色迁移：角色图那一栏 */
+.char-box { border-left-color: var(--cyan); }
 
 /* 像素转换节点 */
 .px-opts { display: flex; flex-direction: column; gap: 4px; }

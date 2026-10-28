@@ -6,7 +6,7 @@ import type { GenNode, LoraInfo, Preset } from '../types'
 export const NODE_W = 300
 
 export type NodePatch = Partial<
-  Pick<GenNode, 'x' | 'y' | 'params' | 'view' | 'job' | 'source' | 'image'>
+  Pick<GenNode, 'x' | 'y' | 'params' | 'view' | 'job' | 'source' | 'image' | 'charSource'>
 >
 
 type Props = {
@@ -29,6 +29,8 @@ type Props = {
   sourceOptions: { id: string; label: string }[]
   /** 可以当新背景用的图片节点 */
   bgOptions: { id: string; label: string }[]
+  /** 按节点 id 取缩略图 URL（角色迁移的角色图用） */
+  charThumbOf?: (nodeId?: string) => string | undefined
   /** 从本节点的输出点拉一条连线 */
   onStartLink?: () => void
   /** 连线时鼠标进入/离开某个节点（用来判断连线落在哪） */
@@ -66,6 +68,7 @@ export default function GenNodeCard({
   sourceNode,
   sourceOptions,
   bgOptions,
+  charThumbOf,
   onStartLink,
   onHover,
   onDragOverNode,
@@ -86,6 +89,7 @@ export default function GenNodeCard({
   const isInpaint = node.kind === 'inpaint'
   const isAiRepaint = node.kind === 'airepaint'
   const isPixelify = node.kind === 'pixelify'
+  const isPoseClone = node.kind === 'poseclone'
   const [maskOpen, setMaskOpen] = useState(false)
   // 源图可以是上游节点的产物、图片节点的本地图，也可以是节点上直接记的绝对路径
   const hasSource = !!(
@@ -97,6 +101,8 @@ export default function GenNodeCard({
   // 缩略图：图片节点用自己的图，其它节点用出图结果
   const sourceThumb =
     sourceNode?.kind === 'image' ? sourceNode.image?.url : sourceNode?.job?.url
+  // 角色迁移的角色图缩略图（角色图节点或本地图）
+  const charThumb = charThumbOf?.(node.charSource?.nodeId)
   // 可全屏预览的图（图片节点的本地图 / 生成节点的产物）
   const previewUrl = isImg ? node.image?.url : job?.url
   const previewName = previewUrl
@@ -282,11 +288,12 @@ export default function GenNodeCard({
             isBg ? ' bg' : ''
           }${isInpaint ? ' inpaint' : ''}${isAiRepaint ? ' airepaint' : ''}${
             isPixelify ? ' pixelify' : ''
-          }`}
+          }${isPoseClone ? ' poseclone' : ''}`}
         >
           {isImg ? '图片' : isBg ? '抠图' : isPixelify ? '像素转换'
-            : isAiRepaint ? '局部AI重绘'
-              : isInpaint ? '局部重绘' : isI2I ? '图生图' : '图生成'}
+            : isPoseClone ? '角色迁移'
+              : isAiRepaint ? '局部AI重绘'
+                : isInpaint ? '局部重绘' : isI2I ? '图生图' : '图生成'}
         </span>
         {job && <span className={`node-state s-${job.status}`}>{statusLabel(job.status)}</span>}
         <span className="spacer" />
@@ -345,7 +352,129 @@ export default function GenNodeCard({
         />
       </div>
 
-      {isPixelify ? (
+      {isPoseClone ? (
+        <div className="node-body poseclone-body">
+          {sourceBox}
+          <div className="src-box char-box">
+            <div className="src-thumb" title="角色图（身份来源）">
+              {charThumb ? (
+                <img src={charThumb} alt="角色" draggable={false} />
+              ) : (
+                <span>无角色</span>
+              )}
+            </div>
+            <div className="src-side">
+              <select
+                value={node.charSource?.nodeId ?? ''}
+                onChange={(e) =>
+                  onPatch({
+                    charSource: e.target.value
+                      ? { nodeId: e.target.value }
+                      : undefined,
+                  })
+                }
+              >
+                <option value="">（选角色图）</option>
+                {sourceOptions.map((o) => (
+                  <option key={o.id} value={o.id}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+              <div className="src-note">
+                {charThumb ? '角色外观由这张图决定（IP-Adapter）' : '缺角色图'}
+              </div>
+            </div>
+          </div>
+          <div className="prompt-wrap">
+            <textarea
+              className="prompt"
+              rows={2}
+              placeholder="角色描述？e.g. a blue slime monster with big eyes"
+              value={p.prompt}
+              onChange={(e) => setParam('prompt', e.target.value)}
+            />
+          </div>
+          <details className="adv">
+            <summary>更多设置</summary>
+            <label className="strength">
+              <span>姿态</span>
+              <input
+                type="range"
+                min={0.2}
+                max={1.5}
+                step={0.05}
+                value={p.pcCnScale}
+                onChange={(e) => setParam('pcCnScale', Number(e.target.value))}
+              />
+              <b>{p.pcCnScale.toFixed(2)}</b>
+            </label>
+            <label className="strength">
+              <span>身份</span>
+              <input
+                type="range"
+                min={0}
+                max={1.5}
+                step={0.05}
+                value={p.pcIpaScale}
+                onChange={(e) => setParam('pcIpaScale', Number(e.target.value))}
+              />
+              <b>{p.pcIpaScale.toFixed(2)}</b>
+            </label>
+            <label className="strength">
+              <span>占高</span>
+              <input
+                type="range"
+                min={0.3}
+                max={1}
+                step={0.05}
+                value={p.pcFill}
+                onChange={(e) => setParam('pcFill', Number(e.target.value))}
+              />
+              <b>{p.pcFill.toFixed(2)}</b>
+            </label>
+            <div className="src-note">
+              动作参考图要是**能识别人体的真人照片**——姿态模型认不出插画/像素画
+            </div>
+          </details>
+          {hasImage && (
+            <div
+              className="preview"
+              onClick={(e) => {
+                e.stopPropagation()
+                onPreview?.(job!.url!, previewName)
+              }}
+              title="点击全屏预览"
+            >
+              <img src={job!.url} alt="角色迁移结果" draggable={false} />
+            </div>
+          )}
+          <button
+            className="gen-btn"
+            disabled={busy || !hasSource || !charThumb || !p.prompt.trim()}
+            onClick={onGenerate}
+            title={
+              !hasSource ? '先接一张动作参考图'
+                : !charThumb ? '再选一张角色图'
+                  : !p.prompt.trim() ? '写上角色长什么样' : undefined
+            }
+          >
+            {busy ? '迁移中…' : '迁移角色'}
+          </button>
+          {hasImage && (
+            <button
+              className="mini wide"
+              onClick={(e) => {
+                e.stopPropagation()
+                onSpawnImg2Img()
+              }}
+              title="以这张为源新建图生图节点"
+            >
+              ↳ 图生图
+            </button>
+          )}
+        </div>
+      ) : isPixelify ? (
         <div className="node-body pixelify-body">
           {sourceBox}
           <div className="px-opts">

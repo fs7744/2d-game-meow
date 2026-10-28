@@ -12,7 +12,8 @@ type Props = {
   onRenameProject: (id: string, name: string) => void
   onDeleteProject: (id: string) => void
   onAddNode: (
-    kind?: 'gen' | 'img2img' | 'image' | 'bg' | 'inpaint' | 'airepaint' | 'pixelify',
+    kind?: 'gen' | 'img2img' | 'image' | 'bg' | 'inpaint' | 'airepaint' | 'pixelify'
+    | 'poseclone',
   ) => void
   canApply: boolean
   onApplyFav: (text: string) => void
@@ -190,6 +191,21 @@ export default function Sidebar({
               <em>拿已有图改内容 / 改画风</em>
             </span>
             <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('img2img')}>+</button>
+          </div>
+          <div
+            className="rail-item"
+            draggable
+            onDragStart={(e) => {
+              e.dataTransfer.setData('application/x-node-type', 'poseclone')
+              e.dataTransfer.effectAllowed = 'copy'
+            }}
+            title="角色迁移：动作参考图定姿态 + 角色图定身份"
+          >
+            <span className="rail-item-main">
+              <b>角色迁移</b>
+              <em>参考动作 · 换角色</em>
+            </span>
+            <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('poseclone')}>+</button>
           </div>
           <div
             className="rail-item"

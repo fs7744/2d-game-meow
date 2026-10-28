@@ -8,7 +8,7 @@ import {
 } from './store/projects'
 import {
   deleteAssets, fetchJob, fetchLoras, fetchModels, health, submitAiRepaint, submitImg2Img,
-  submitInpaint, submitMatte, submitPixelify, submitTxt2Img, uploadImage,
+  submitInpaint, submitMatte, submitPixelify, submitPoseClone, submitTxt2Img, uploadImage,
 } from './api'
 import ConfirmDialog from './components/ConfirmDialog'
 import Lightbox from './components/Lightbox'
@@ -55,6 +55,10 @@ const DEFAULT_PARAMS: GenParams = {
   pxGridSnap: true,
   pxTransparentBg: false,
   pxSnapTo: 16,           // 网格吸附到 16 的整数倍（精灵常用尺寸）
+  // 角色迁移：姿态强度 / 身份强度 / 人物占画面高度
+  pcCnScale: 1.0,
+  pcIpaScale: 0.8,
+  pcFill: 0.8,
   lora: '',
   loraScale: 0.8,
 }
@@ -274,7 +278,8 @@ export default function App() {
           : type === 'inpaint' ? 'inpaint'
             : type === 'airepaint' ? 'airepaint'
               : type === 'pixelify' ? 'pixelify'
-                : 'gen'
+                : type === 'poseclone' ? 'poseclone'
+                  : 'gen'
     setNodes((list) => {
       // 原点放多个时阶梯错开，避免完全重叠
       const sameSpot = list.filter((n) => n.x === at.x && n.y === at.y).length
@@ -311,7 +316,7 @@ export default function App() {
           const up = await uploadImage(f, currentId)
           if (target && (target.kind === 'img2img' || target.kind === 'bg'
             || target.kind === 'inpaint' || target.kind === 'airepaint'
-            || target.kind === 'pixelify')) {
+            || target.kind === 'pixelify' || target.kind === 'poseclone')) {
             patchNode(target.id, { source: { path: up.path } })
             continue
           }
@@ -335,7 +340,8 @@ export default function App() {
   const onConnect = useCallback((from: string, to: string) => {
     const target = nodesRef.current.find((n) => n.id === to)
     // 能接源的节点：图生图（要底图）、抠图与局部重绘（要源图）；文生图没有「底」这回事
-    if (!target || !['img2img', 'bg', 'inpaint', 'airepaint', 'pixelify'].includes(target.kind)) return
+    if (!target || !['img2img', 'bg', 'inpaint', 'airepaint', 'pixelify', 'poseclone']
+      .includes(target.kind)) return
     if (target.id === from) return
     patchNode(to, { source: { nodeId: from } })
   }, [patchNode])
@@ -412,6 +418,18 @@ export default function App() {
     return up.job?.raw || up.job?.path
   }, [])
 
+  /** 角色迁移的「角色图」路径（身份来源）。角色图要用**成品**而不是 raw：
+   *  IP-Adapter 学的是外观特征，raw 是未像素化的原图，学不到像素感。 */
+  const charPathOf = useCallback((n: GenNode): string | undefined => {
+    if (n.charSource?.path) return n.charSource.path
+    const up = n.charSource?.nodeId
+      ? nodesRef.current.find((x) => x.id === n.charSource!.nodeId)
+      : undefined
+    if (!up) return undefined
+    if (up.kind === 'image') return up.image?.path
+    return up.job?.path || up.job?.raw
+  }, [])
+
   const generate = useCallback(async (id: string) => {
     const node = nodesRef.current.find((n) => n.id === id)
     if (!node) return
@@ -421,7 +439,7 @@ export default function App() {
     if (needPrompt && !node.params.prompt.trim()) return
     let init: string | undefined
     if (node.kind === 'img2img' || node.kind === 'bg' || node.kind === 'inpaint'
-      || node.kind === 'airepaint' || node.kind === 'pixelify') {
+      || node.kind === 'airepaint' || node.kind === 'pixelify' || node.kind === 'poseclone') {
       init = sourcePathOf(node)
       if (!init) {
         // 没有源图就没法提交，直接在节点上报错，别让用户等一个必然失败的任务
@@ -435,7 +453,22 @@ export default function App() {
     patchNode(id, { job: { id: 'pending', status: 'queued', startedAt: Date.now() } })
     try {
       let jobId: string
-      if (node.kind === 'pixelify') {
+      if (node.kind === 'poseclone') {
+        const posePath = sourcePathOf(node)
+        const charPath = charPathOf(node)
+        if (!posePath || !charPath) {
+          patchNode(id, {
+            job: { id: 'error', status: 'failed',
+              error: !posePath
+                ? '缺动作参考图：连线接一张，或直接把本地图拖到这个节点上'
+                : '缺角色图：在下面「角色图」里选一个' },
+          })
+          return
+        }
+        const r = await submitPoseClone(
+          node.params, { model, matteBackend, scope: currentId }, posePath, charPath)
+        jobId = r.job_id
+      } else if (node.kind === 'pixelify') {
         const r = await submitPixelify(
           node.params, { model, matteBackend, scope: currentId }, init!)
         jobId = r.job_id

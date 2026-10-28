@@ -388,8 +388,49 @@ def test_generate_wpx_roundtrip(client, tmp_path):
     assert Path(job["result"]["file"]).exists()
 
 
+def test_generate_wpc_roundtrip(client, tmp_path):
+    """角色迁移（wpc）走同一条队列。
+
+    动作参考图用仓库里的真人素材——姿态模型只认得出真人，合成简笔人形
+    连人体检测都过不了。
+    """
+    from PIL import Image, ImageDraw
+
+    fixture = (Path(__file__).resolve().parents[1] / "tests" / "fixtures"
+               / "pose_ref_person.png")
+    if not fixture.exists():
+        pytest.skip("缺少真人姿态参考素材")
+    pose = tmp_path / "pc_pose.png"
+    Image.open(fixture).convert("RGB").save(pose)
+    char = tmp_path / "pc_char.png"
+    cim = Image.new("RGB", (256, 256), (250, 250, 250))
+    ImageDraw.Draw(cim).ellipse([80, 60, 176, 190], fill=(40, 170, 200))
+    cim.save(char)
+
+    r = client.post("/generate", json={"workflow": "wpc", "params": {
+        "pose_image": str(pose), "char_image": str(char),
+        "prompt": "a blue slime monster", "steps": 6, "seed": 3,
+        "preset": "none", "width": 512, "height": 512, "tag": "apiwpc"}})
+    assert r.status_code == 200, r.text
+    job_id = r.json()["job_id"]
+
+    job = None
+    for _ in range(120):
+        job = client.get(f"/jobs/{job_id}").json()
+        if job["status"] in ("done", "failed"):
+            break
+        time.sleep(0.5)
+    assert job["status"] == "done", job.get("error")
+    meta = job["result"]["meta"]
+    assert meta["workflow"] == "wpc"
+    assert meta["joints"] >= 12
+    assert Path(job["result"]["file"]).exists()
+
+
 def test_assets_lists_generated(client):
-    r = client.get("/assets?limit=5")
+    # limit 要够大：清单是按时间倒序的，limit=5 时后跑的测试会把这条挤出去
+    # （新增工作流测试后暴露的顺序依赖）
+    r = client.get("/assets?limit=200")
     assert r.status_code == 200
     body = r.json()
     assert body["count"] > 0
