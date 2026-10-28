@@ -1578,6 +1578,10 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
     sheet_path = out_dir / f"{name}_sheet.png"
     info = pp.pack_sheet(aligned, sheet_path, cols=cols, sidecar=meta)
     info.update(meta)
+    # 与 _save / _pack_sprite_frames 保持一致：结果里必须有 meta 嵌套。
+    # 前端 fetchJob 只读 `result.meta`，w4 以前把字段平铺在顶层，于是
+    # 前端拿不到 seed / seconds / candidates——接 w4 节点时就是这样踩空的。
+    info["meta"] = meta
     info["url"] = f"/files/{sheet_path.relative_to(ASSETS).as_posix()}"
     info["frames_dir"] = str(fdir)
     Path(out_dir / f"{name}_sheet.png.json").write_text(

@@ -333,6 +333,11 @@ type ApiJob = {
   result?: { file?: string; meta?: Record<string, unknown> }
 }
 
+/** meta 里的值类型是 unknown；只要数字，别把字符串混进去。 */
+function num(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isFinite(v) ? v : undefined
+}
+
 export async function fetchJob(jobId: string): Promise<JobState> {
   const r = await fetch(`${base}/jobs/${jobId}`)
   if (!r.ok) throw new Error(`查询失败：HTTP ${r.status}`)
@@ -353,6 +358,12 @@ export async function fetchJob(jobId: string): Promise<JobState> {
       typeof meta.subjects === 'number' ? (meta.subjects as number) : undefined,
     path: typeof file === 'string' ? file : undefined,
     raw: typeof meta.raw === 'string' ? (meta.raw as string) : undefined,
+    candidates: num(meta.candidates),
+    candidatesNote: typeof meta.candidates_note === 'string'
+      ? (meta.candidates_note as string) : undefined,
+    attempts: num(meta.attempts),
+    gatePassed: num(meta.gate_passed),
+    frames: num(meta.frames),
   }
 }
 

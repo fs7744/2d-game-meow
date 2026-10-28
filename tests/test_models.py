@@ -41,6 +41,9 @@ def test_models_endpoint(client, eng):
     for m in body["available"]:
         assert rec[m]["width"] == 768 and rec[m]["height"] == 768, rec[m]
         assert rec[m]["pixel"] > 1 and rec[m]["palette"] > 1
+        # 候选上限也要带出来：前端拿它当输入框 max。sdxl@1024 批量 2 会占满
+        # 24GB，不报 OOM 但耗时翻 3.5 倍——这个上限得由后端给，不能让用户猜。
+        assert 1 <= rec[m]["max_candidates"] <= 6, rec[m]
 
 
 def test_txt2img_model_echoed(eng):

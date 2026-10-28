@@ -11,6 +11,9 @@ const here = dirname(fileURLToPath(import.meta.url))
 const dist = resolve(here, 'dist')
 
 const calls = []
+// 用例可临时注入额外的 meta 字段（模拟后端返回的序列帧统计）
+let extraMeta = null
+let jobSeq = 0
 function makeFetch() {
   return async (url, init = {}) => {
     calls.push({ url: String(url), method: init.method || 'GET', body: init.body })
@@ -33,15 +36,22 @@ function makeFetch() {
       }
     }
     if (String(url).endsWith('/generate')) {
-      return { ok: true, json: async () => ({ job_id: 'job-1' }) }
+      // 每次提交给不同的 id：同 id 会让前端以为旧任务还 done 着、
+      // 不再轮询，第二次提交的结果就永远拿不到（这条用例踩过）
+      jobSeq += 1
+      return { ok: true, json: async () => ({ job_id: `job-${jobSeq}` }) }
     }
     if (String(url).includes('/jobs/')) {
       return {
         ok: true,
         json: async () => ({
-          job_id: 'job-1',
+          job_id: `job-${jobSeq}`,
           status: 'done',
-          result: { file: 'D:\\x\\out.png', meta: { seed: 42, seconds: 1.5, peak_vram_gb: 2.6 } },
+          result: {
+            file: 'D:\\x\\out.png',
+            // extraMeta 由用例临时注入，模拟序列帧结果里的候选/闸门统计
+            meta: { seed: 42, seconds: 1.5, peak_vram_gb: 2.6, ...(extraMeta || {}) },
+          },
         }),
       }
     }
@@ -66,8 +76,10 @@ function makeFetch() {
           available: ['sd15', 'sdxl'],
           // 与后端 Engine.RECOMMEND 一致：SDXL 推荐 768/24，不是 1024
           recommend: {
-            sd15: { width: 768, height: 768, steps: 30, cfg: 7.0, pixel: 6, palette: 32 },
-            sdxl: { width: 768, height: 768, steps: 24, cfg: 6.5, pixel: 6, palette: 32 },
+            sd15: { width: 768, height: 768, steps: 30, cfg: 7.0, pixel: 6, palette: 32,
+              max_candidates: 6 },
+            sdxl: { width: 768, height: 768, steps: 24, cfg: 6.5, pixel: 6, palette: 32,
+              max_candidates: 3 },
           },
         }),
       }
@@ -1394,6 +1406,10 @@ function check(name, cond, extra = '') {
   check('换皮模式下不需要提示词也能提交',
     ssNode.querySelector('.gen-btn')?.disabled === false)
 
+  // 结果区要显示「实际候选 / 补提 / 闸门通过」——这几个数决定要不要重跑，
+  // 而且候选数不等于设定值时说明被显存降级了，必须让用户看见。
+  extraMeta = { candidates: 2, attempts: 11, frames: 4, gate_passed: 3,
+                candidates_note: '显存不足：候选从 4 降到 2（预计 23.9GB > 可用 21.6GB）' }
   ssNode.querySelector('.gen-btn').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
   await new Promise((r) => setTimeout(r, 250))
   const sub = calls.filter((c) => c.url.endsWith('/generate')).pop()
@@ -1407,6 +1423,28 @@ function check(name, cond, extra = '') {
     body.params.cols === undefined && body.params.rows === undefined &&
     typeof body.params.mode === 'string',
     JSON.stringify({ cols: body.params.cols, mode: body.params.mode }))
+
+  // 结果区要显示「实际候选 / 补提 / 闸门通过」——这几个数决定要不要重跑，
+  // 而且候选数不等于设定值时说明被显存降级了，必须让用户看见。
+  extraMeta = { candidates: 2, attempts: 11, frames: 4, gate_passed: 3,
+                candidates_note: '显存不足：候选从 4 降到 2（预计 23.9GB > 可用 21.6GB）' }
+  // React 每次重渲染都会换 DOM 节点，必须重新查，不能复用旧引用
+  const ssNow = () => [...doc.querySelectorAll('.node')]
+    .find((n) => (n.querySelector('.node-kind')?.textContent || '') === '序列帧替换')
+  // App 的 job 轮询间隔 700ms，等固定时长会脆；轮询到出现结果为止（最多 4s）
+  for (let i = 0; i < 20; i++) {
+    if (ssNow().querySelector('.meta')) break
+    await new Promise((r) => setTimeout(r, 200))
+  }
+  const metaLine = ssNow().querySelector('.meta')?.textContent || ''
+  check('结果显示候选数（2/帧）', metaLine.includes('候选 2/帧'), metaLine)
+  check('结果显示补提次数（11 - 4×2 = 3）', metaLine.includes('补提 3 次'), metaLine)
+  check('结果显示闸门通过帧数（3/4）', metaLine.includes('闸门 3/4'), metaLine)
+  // 展开视图说明原因；图片视图只给简短提示（见 GenNodeCard 的 img-warn）
+  const warnText = ssNow().querySelector('.warn')?.textContent
+    || ssNow().querySelector('.img-warn')?.getAttribute('title') || ''
+  check('候选被降级时给出原因', warnText.includes('候选从 4 降到 2'), warnText)
+  extraMeta = null
 
   check('序列帧替换场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
@@ -1476,6 +1514,65 @@ function check(name, cond, extra = '') {
     num([...doc.querySelectorAll('.node')][0], '步数'))
 
   check('底模切换场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 23) 候选数上限跟随底模显存（超了要让用户看见，而不是静默变慢）
+{
+  const { dom, errors } = await boot('')
+  const doc = dom.window.document
+  const win = dom.window
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms))
+
+  // 加一个序列帧节点
+  const item = [...section(doc, '节点').querySelectorAll('.rail-item')]
+    .find((it) => (it.querySelector('b')?.textContent || '') === '序列帧替换')
+  item.querySelector('.rail-add').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await wait(150)
+
+  const node = () => doc.querySelector('.node')
+  const candInput = () => {
+    const lab = [...node().querySelectorAll('label')]
+      .find((l) => (l.textContent || '').trim().startsWith('候选'))
+    return lab?.querySelector('input')
+  }
+  const setNum = (el, v) => {
+    const setter = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value').set
+    setter.call(el, String(v))
+    el.dispatchEvent(new win.Event('input', { bubbles: true }))
+  }
+
+  check('SD1.5 下候选上限是 6（后端按总显存算）',
+    candInput()?.getAttribute('max') === '6', candInput()?.getAttribute('max'))
+
+  // 超出上限的输入被夹住
+  setNum(candInput(), 9)
+  await wait(120)
+  check('输入超过上限时被夹到 6，不会提交跑不动的配置',
+    candInput()?.value === '6', candInput()?.value)
+  check('候选旁说明上限来源',
+    (node().textContent || '').includes('由当前底模的显存占用算出'),
+    (node().textContent || '').slice(-60))
+
+  // 切到 SDXL：上限收到 3，已设的 6 要跟着降
+  const modelSel = [...doc.querySelectorAll('select')]
+    .find((s2) => (s2.closest('label')?.textContent || '').includes('底模'))
+  const setSel = (el, v) => {
+    const setter = Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value').set
+    setter.call(el, v)
+    el.dispatchEvent(new win.Event('change', { bubbles: true }))
+  }
+  setSel(modelSel, 'sdxl')
+  await wait(250)
+  check('切 SDXL 后候选上限收到 3',
+    candInput()?.getAttribute('max') === '3', candInput()?.getAttribute('max'))
+  check('已设的 6 张跟着降到 3（界面上不能写着跑不动的值）',
+    candInput()?.value === '3', candInput()?.value)
+  check('toast 说明候选上限',
+    (doc.querySelector('.toast')?.textContent || '').includes('候选上限 3'),
+    doc.querySelector('.toast')?.textContent)
+
+  check('候选上限场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 

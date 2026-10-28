@@ -22,6 +22,8 @@ type Props = {
   onToggleFavorite: () => void
   loras: LoraInfo[]
   model: string
+  /** 当前底模在 W4 上能批量几个候选（后端按总显存算）；缺省不限制 */
+  maxCandidates?: number
   onSpawnImg2Img: () => void
   /** 图生图的上游节点（从 source.nodeId 解析而来） */
   sourceNode?: GenNode
@@ -64,6 +66,7 @@ export default function GenNodeCard({
   onToggleFavorite,
   loras,
   model,
+  maxCandidates,
   onSpawnImg2Img,
   sourceNode,
   sourceOptions,
@@ -88,6 +91,14 @@ export default function GenNodeCard({
   const isBg = node.kind === 'bg'
   const isInpaint = node.kind === 'inpaint'
   const isAiRepaint = node.kind === 'airepaint'
+  // 候选数上限：后端按"本机总显存"给（SDXL@768 是 3、@1024 只有 1）。
+  // 用户填超了就夹住——不是不让他填，是那个配置会让耗时崩掉且不报错。
+  const candCap = Math.max(1, Math.min(6, maxCandidates ?? 6))
+  // 序列帧的三个统计值（可能缺失：单图工作流没有这些字段）
+  const sCand = job?.candidates
+  const sFrames = job?.frames
+  const sAttempts = job?.attempts
+  const sGate = job?.gatePassed
   const isPixelify = node.kind === 'pixelify'
   const isPoseClone = node.kind === 'poseclone'
   const isSpriteSwap = node.kind === 'spriteswap'
@@ -517,9 +528,14 @@ export default function GenNodeCard({
                   <input
                     type="number"
                     min={1}
-                    max={6}
+                    /**
+                     * 上限来自后端（按本机总显存算），不是写死的 6。
+                     * 显存打满时不报 OOM，但耗时能翻 3 倍——那个坑靠用户猜是猜不到的。
+                     */
+                    max={candCap}
                     value={p.ssCandidates}
-                    onChange={(e) => setParam('ssCandidates', Math.max(1, Number(e.target.value) || 1))}
+                    onChange={(e) => setParam('ssCandidates',
+                      Math.min(candCap, Math.max(1, Number(e.target.value) || 1)))}
                   />
                   <b>张/帧</b>
                 </label>
@@ -536,7 +552,8 @@ export default function GenNodeCard({
                 </label>
                 <div className="src-note">
                   候选越多越稳（每帧生成几张按「动作贴合 + 身份贴合」挑一张），
-                  但更慢。
+                  但更慢。上限 {candCap} 张/帧由当前底模的显存占用算出——
+                  超了不会报错，只会静默变慢（显存打满时耗时能翻 3 倍）。
                 </div>
               </>
             )}
@@ -581,6 +598,22 @@ export default function GenNodeCard({
           >
             {busy ? '替换中…' : '替换序列帧'}
           </button>
+          {/* 序列帧节点走的是独立正文分支，通用结果区不会渲染到这里。
+              而这三个数正是"要不要重跑"的判据：候选数不等于设定值 = 被显存降级了。 */}
+          {job?.status === 'done' && (
+            <div className="meta">
+              种子 {job.seed ?? p.seed}
+              {typeof sCand === 'number' ? ` · 候选 ${sCand}/帧` : ''}
+              {typeof sAttempts === 'number' && typeof sFrames === 'number'
+                && typeof sCand === 'number' && sAttempts > sFrames * sCand
+                ? ` · 补提 ${sAttempts - sFrames * sCand} 次` : ''}
+              {typeof sGate === 'number' && typeof sFrames === 'number'
+                ? ` · 闸门 ${sGate}/${sFrames}` : ''}
+            </div>
+          )}
+          {job?.status === 'done' && job.candidatesNote && (
+            <div className="warn">⚠ {job.candidatesNote}</div>
+          )}
         </div>
       ) : isPoseClone ? (
         <div className="node-body poseclone-body">
@@ -1221,7 +1254,18 @@ export default function GenNodeCard({
           <div className="img-badge">
             种子 {job!.seed ?? p.seed}
             {typeof job!.seconds === 'number' ? ` · ${job!.seconds}s` : ''}
+            {/* 图片视图是序列帧生成完最常见的状态，候选/闸门也得在这显示：
+                切到只看图之后才发现"候选被降到 1"已经太晚了。 */}
+            {typeof sCand === 'number' && sCand > 1 ? ` · 候选 ${sCand}/帧` : ''}
+            {typeof sGate === 'number' && typeof sFrames === 'number'
+              ? ` · 闸门 ${sGate}/${sFrames}` : ''}
           </div>
+          {/* 降级原因不能只在展开视图里说：用户看图时就不会展开 */}
+          {job!.candidatesNote && (
+            <div className="img-warn" title={job!.candidatesNote}>
+              ⚠ 候选已降级（{sCand} 张/帧）
+            </div>
+          )}
         </div>
       ) : (
         <div className="node-body">
@@ -1467,7 +1511,19 @@ export default function GenNodeCard({
               种子 {job.seed ?? p.seed}
               {typeof job.seconds === 'number' ? ` · ${job.seconds}s` : ''}
               {typeof job.peakVram === 'number' ? ` · ${job.peakVram}GB` : ''}
+              {/* 序列帧：候选/补提/闸门是这套产线最需要盯的三个数——
+                  候选数不等于设定值就说明被显存降级了（下面的 warn 会说明原因）。 */}
+              {typeof sCand === 'number' ? ` · 候选 ${sCand}/帧` : ''}
+              {typeof sAttempts === 'number' && typeof sFrames === 'number'
+                && typeof sCand === 'number' && sAttempts > sFrames * sCand
+                ? ` · 补提 ${sAttempts - sFrames * sCand} 次` : ''}
+              {typeof sGate === 'number' && typeof sFrames === 'number'
+                ? ` · 闸门 ${sGate}/${sFrames}` : ''}
             </div>
+          )}
+          {/* 候选被降级：不说清楚的话，用户只会觉得"设了 4 张怎么一样" */}
+          {job?.status === 'done' && job.candidatesNote && (
+            <div className="warn">⚠ {job.candidatesNote}</div>
           )}
           {/* SD1.5 画小体型角色时爱复制一份，负向词压不住；抠图后能量出来就报出来 */}
           {typeof job?.subjects === 'number' && job.subjects > 1 && (

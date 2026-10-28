@@ -754,8 +754,38 @@ class Engine:
     }
 
     def recommend(self, model: str = DEFAULT_MODEL) -> Dict[str, Any]:
-        """这个底模在**精灵管线**上的推荐参数（尺寸/步数/像素格/色数）。"""
-        return dict(self.RECOMMEND.get(self.arch(model), self.RECOMMEND["sd15"]))
+        """这个底模在**精灵管线**上的推荐参数（尺寸/步数/像素格/色数）。
+
+        额外带 `max_candidates`：这个底模在推荐尺寸下，W4（ControlNet +
+        IP-Adapter）最多能批量几个候选。前端拿它当输入框上限——
+        实测 sdxl@1024 批量 2 会占满 24GB，**不报 OOM 但耗时从 5.0s 崩到 17.5s**，
+        靠用户自己猜是猜不出来的。
+        """
+        rec = dict(self.RECOMMEND.get(self.arch(model), self.RECOMMEND["sd15"]))
+        rec["max_candidates"] = self.max_candidates(model, rec["width"])
+        return rec
+
+    def max_candidates(self, model: str = DEFAULT_MODEL, size: int | None = None,
+                       total_gb: float = 0.0) -> int:
+        """W4 在 `size` 边长下最多能批量几个候选（按**本机总显存**算）。
+
+        与 `vramopt.plan_candidates` 的区别：那个看**当前空闲**显存（运行时决策），
+        这个看**总显存**（给前端设输入框上限、提前拦住明显跑不动的配置）。
+        两者都要有：前者防止跑着跑着劣化，后者防止用户一开始就设成跑不动的值。
+        """
+        from . import vramopt
+
+        if size is None:
+            size = self.RECOMMEND.get(self.arch(model), self.RECOMMEND["sd15"])["width"]
+        if total_gb <= 0:
+            if not torch.cuda.is_available():
+                return 1                    # 没卡就别鼓励批量
+            total_gb = torch.cuda.get_device_properties(0).total_memory / 2**30
+        budget = total_gb * 0.9             # 与 plan_candidates 的 safety 保持一致
+        k = 1
+        while k < 6 and vramopt.estimate_pose_gb(self.arch(model), int(size), k + 1) <= budget:
+            k += 1
+        return k
 
     def free_gb(self) -> float:
         """当前还能给新工作负载用的显存（GB），扣掉 PyTorch 已保留的块。"""

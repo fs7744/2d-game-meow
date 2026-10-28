@@ -5,6 +5,8 @@ import GenNodeCard, { NODE_W, type NodePatch } from '../nodes/GenNodeCard'
 type Props = {
   nodes: GenNode[]
   model: string
+  /** 当前底模的候选数上限（后端按总显存算），透传给每个节点卡 */
+  maxCandidates?: number
   selectedId: string | null
   viewport: Viewport
   setViewport: (v: Viewport | ((prev: Viewport) => Viewport)) => void
@@ -29,6 +31,8 @@ const MAX_Z = 2.4
 
 export default function Canvas({
   nodes,
+  model,
+  maxCandidates,
   selectedId,
   viewport,
   setViewport,
@@ -40,7 +44,6 @@ export default function Canvas({
   isFavorite,
   onToggleFavorite,
   loras,
-  model,
   onDropType,
   onSpawnImg2Img,
   onDropFiles,
@@ -295,6 +298,7 @@ export default function Canvas({
             onToggleFavorite={() => onToggleFavorite(n.id)}
             loras={loras}
             model={model}
+            maxCandidates={maxCandidates}
             onSpawnImg2Img={() => onSpawnImg2Img(n.id)}
             sourceNode={nodes.find((x) => x.id === n.source?.nodeId)}
             sourceOptions={sourceOptions}

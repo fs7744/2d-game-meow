@@ -55,6 +55,12 @@ export type ModelRecommend = {
   cfg: number
   pixel: number
   palette: number
+  /**
+   * 这个底模在推荐尺寸下，W4（ControlNet + IP-Adapter）最多能批量几个候选。
+   * 由后端按本机总显存算——实测 sdxl@1024 批量 2 会占满 24GB，不报 OOM
+   * 但耗时从 5.0s 崩到 17.5s，靠用户自己猜是猜不出来的。
+   */
+  max_candidates: number
 }
 
 export type GenParams = {
@@ -136,6 +142,15 @@ export type JobState = {
   path?: string          // 产物绝对路径（图生图要拿它当 init_image）
   raw?: string           // 后处理之前的原图路径（优先用它当源图）
   subjects?: number      // 抠图后的前景块数；>1 说明画了多个主体
+  /** 序列帧/姿态序列：每帧**实际**生成了几个候选（显存不足时会被后端降下来） */
+  candidates?: number
+  /** 候选数被降级的原因；为空表示按用户设定执行 */
+  candidatesNote?: string
+  /** 序列帧：一共生成/补提了几次（candidates + 补救次数） */
+  attempts?: number
+  /** 序列帧：过了质量闸门的帧数 / 总帧数 */
+  gatePassed?: number
+  frames?: number
   startedAt?: number
 }
 

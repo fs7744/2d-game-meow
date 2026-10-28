@@ -311,3 +311,24 @@ def test_lora_base_mismatch_reports_cause_not_variant(fresh_engine, tmp_path):
     assert "LoKr" not in msg, "别把基座不匹配说成 LoKr 变体"
     # 失败后不能留下脏状态
     assert fresh_engine._pool["lora"] is None
+
+
+def test_max_candidates_matches_measured_limits(eng):
+    """候选上限按总显存算：sdxl@1024 只能 1 张（实测批量 2 会占满 24GB）。
+
+    显存打满时**不报 OOM**，耗时却从 5.0s 崩到 17.5s——用户会以为"SDXL 太慢"，
+    然后往错的方向调。所以这个上限必须由后端给出，前端拿它当输入框 max。
+    """
+    # 注入总显存，不依赖测试机的卡（arch() 要读真实权重，所以用 eng 而非临时目录）
+    assert eng.max_candidates("sdxl", 1024, total_gb=24.0) == 1
+    assert eng.max_candidates("sdxl", 768, total_gb=24.0) >= 2
+    assert eng.max_candidates("sd15", 768, total_gb=24.0) >= 3
+    # 大显存机器应放开更多（说明不是写死的常量）
+    assert eng.max_candidates("sdxl", 1024, total_gb=80.0) > 1
+
+
+def test_recommend_carries_max_candidates(eng):
+    """/models 的 recommend 必须带 max_candidates，前端才有东西可用。"""
+    for m in eng.available_models():
+        rec = eng.recommend(m)
+        assert 1 <= rec["max_candidates"] <= 6, rec

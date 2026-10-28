@@ -356,12 +356,20 @@ export default function App() {
     const rec = recommend[next]
     setModel(next)
     if (!rec) return
+    const cap = Math.max(1, Math.min(6, rec.max_candidates || 6))
     setNodes((list) => list.map((n) => {
+      // 序列帧：候选数跟着新底模的显存上限走。不夹的话，用户先在 SD1.5
+      // 设了 4 张、切到 SDXL（上限 3）仍会提交 4——运行时守卫会降，
+      // 但界面上写着 4，等于骗人。
+      if (n.kind === 'spriteswap' && n.params.ssCandidates > cap) {
+        return { ...n, params: { ...n.params, ssCandidates: cap } }
+      }
       if ((n.kind ?? 'gen') !== 'gen') return n
       if (oldRec && !matchesRec(n.params, oldRec)) return n
       return { ...n, params: { ...n.params, ...pickRec(rec) } }
     }))
-    setNotice(`已套用 ${next} 推荐参数：${rec.width}×${rec.height} / ${rec.steps} 步`)
+    setNotice(`已套用 ${next} 推荐参数：${rec.width}×${rec.height} / ${rec.steps} 步` +
+      `，候选上限 ${cap} 张/帧`)
   }, [recommend, model])
 
   /** 以某个节点的产物为源，在它右边新建一个图生图节点。 */
@@ -755,6 +763,7 @@ export default function App() {
         <Canvas
           nodes={nodes}
           model={model}
+          maxCandidates={recommend[model]?.max_candidates}
           selectedId={selectedId}
           viewport={viewport}
           setViewport={setViewport}

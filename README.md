@@ -1512,6 +1512,13 @@ python tools/ab_base.py --rebuild --out assets/_ab_base
 - `vramopt.plan_candidates()` 在 W4 出候选前按显存余量封顶：装不下就降候选数，
   单帧都装不下才报错。被降级的情况会写进 meta 的 `candidates_note`，
   不会静默改变行为。实测拦的就是 sdxl 1024² 批量 2（23.98GB / 耗时 17.5s）。
+- `Engine.max_candidates(model, size)` 把上限一路送到界面：`/models` 的 recommend
+  带 `max_candidates`（SDXL@768 是 3、@1024 只有 1），前端拿它当候选输入框的
+  `max`；切换底模时已设的值会跟着夹到新上限。**超上限不会报错，只会静默变慢**，
+  所以不能靠用户自己记。
+- 序列帧结果区显示 `候选 N/帧 · 补提 X 次 · 闸门 M/K`，候选被降级时给出原因。
+  图片视图（看完图最常见的状态）也显示，只是缩成一行 `⚠ 候选已降级`——
+  只在展开视图里说，用户就不会展开。
 
 ### 结论
 

@@ -475,6 +475,14 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
   font-family: var(--mono); font-size: 10px; color: var(--muted);
   background: rgba(0, 0, 0, 0.72); border: 1px solid var(--line); padding: 2px 5px;
 }
+/* 图片视图下的降级提示：候选数被显存压下来时必须看得见，
+   否则用户会以为"设了 4 张"真的跑了 4 张。放右上角，不挡种子信息。 */
+.img-warn {
+  position: absolute; right: 6px; top: 6px; max-width: 70%;
+  font-family: var(--mono); font-size: 10px; color: #ffcf7a;
+  background: rgba(0, 0, 0, 0.78); border: 1px solid rgba(255, 207, 122, 0.45);
+  padding: 2px 5px; cursor: help;
+}
 
 /* ---------------- 提示词收藏 ---------------- */
 .book {
