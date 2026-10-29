@@ -485,3 +485,32 @@ def test_probe_prefers_sdxl_when_both_768_and_2048(tmp_path):
                   {"lora_unet_down_blocks_0_attn2_to_k.lora_down.weight": (4, 768),
                    "lora_unet_down_blocks_0_ff_net_0_proj.lora_down.weight": (4, 2560)})
     assert L.probe(p2)["base"] == "sd15"
+
+
+# ---------------- 触发词：只读配置，不猜 ----------------
+
+def test_trigger_for_reads_config_only(tmp_path):
+    """`trigger_for` 只读 loras.json 的 trigger，不猜、不推断。
+
+    **空值有两种含义，都必须保持"不加"**：
+      · 不知道触发词（没训练元数据）
+      · 知道但**刻意不用**——像素 LoRA 加触发词在本项目实测会让多主体率上升
+        （px_illustrious 是 3/3 全变多主体），所以那条配置里 trigger 就是空的。
+    自动补会把后者那条实测结论抹掉。
+    """
+    d = tmp_path / "lora"
+    d.mkdir(parents=True)
+    (d / "loras.json").write_text(json.dumps({
+        "with_trig": {"trigger": "pixelart"},
+        "no_trig": {"trigger": ""},
+        "blank": {},
+    }, ensure_ascii=False), encoding="utf-8")
+
+    assert L.trigger_for(tmp_path, "with_trig") == "pixelart"
+    assert L.trigger_for(tmp_path, "no_trig") == ""
+    assert L.trigger_for(tmp_path, "blank") == ""
+    assert L.trigger_for(tmp_path, "missing") == ""
+    assert L.trigger_for(tmp_path, "") == ""
+    assert L.trigger_for(tmp_path, None) == ""
+    # 也接受绝对路径（前端/pipeline 有时传的是路径）
+    assert L.trigger_for(tmp_path, "/x/y/with_trig.safetensors") == "pixelart"

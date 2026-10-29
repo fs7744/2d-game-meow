@@ -6,6 +6,8 @@ import GenNodeCard, { NODE_W, type NodePatch } from '../nodes/GenNodeCard'
 type Props = {
   nodes: GenNode[]
   model: string
+  /** 切底模：节点上的产出风格档位可能要求特定底模，透传上去 */
+  onModel?: (m: string, opts?: { keepNodes?: boolean }) => void
   /** 当前底模的候选数上限（后端按总显存算），透传给每个节点卡 */
   maxCandidates?: number
   /** W4 可用的骨架帧目录 */
@@ -37,6 +39,7 @@ const MAX_Z = 2.4
 export default function Canvas({
   nodes,
   model,
+  onModel,
   maxCandidates,
   poseDirs,
   hasRefiner,
@@ -307,6 +310,7 @@ export default function Canvas({
             onToggleFavorite={() => onToggleFavorite(n.id)}
             loras={loras}
             model={model}
+            onModel={onModel}
             maxCandidates={maxCandidates}
             poseDirs={poseDirs}
             hasRefiner={hasRefiner}

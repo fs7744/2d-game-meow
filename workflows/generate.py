@@ -27,6 +27,7 @@ from . import repaint as rp
 from . import presets
 from . import quality
 from . import framescore
+from . import lora as lora_reg
 from . import refprep
 from . import sheet as sheet_mod
 from .engine import Engine
@@ -134,6 +135,27 @@ def _postprocess(img: Image.Image, eng: Engine, *, matte: bool, matte_backend: s
         # 量化之后才去孤立点：量化本身就会把相邻色合并，此时再判「孤立」才准
         img = pp.clean_isolated(img, passes=clean_iso)
     return img, edge, subjects
+
+
+def _lora_trigger(eng: Engine, prompt: str, lora: Any) -> str:
+    """把 LoRA 的触发词前置到提示词。
+
+    **为什么必须自动做**：Pixelizer 的触发词是单 token 的
+    `PixelArt_IL_One_Token_style_M_01`——不写完全不生效，写了但漏一个字符也
+    完全不生效，而且**都不报错**。`pixel_sprites_32` 的 `pixelart` 同理。
+    让用户在界面上手抄三十个字符不是"注意看文档"能解决的。
+
+    只在配置里 trigger 非空时才加：空值是项目刻意留的实测结论
+    （px_illustrious 加触发词会让多主体率上升），不能替用户补。
+    提示词里已经出现过就不重复加。
+    """
+    items = lora if isinstance(lora, (list, tuple)) else [lora]
+    heads: List[str] = []
+    for it in items:
+        t = lora_reg.trigger_for(eng.root, it)
+        if t and t.lower() not in prompt.lower():
+            heads.append(t)
+    return f"{', '.join(heads)}, {prompt}" if heads else prompt
 
 
 def _infer(eng: Engine, pipe, kw: Dict[str, Any], *, shrink: bool = True,
@@ -316,6 +338,7 @@ def txt2img(eng: Engine, *, prompt: str, negative: Optional[str] = None,
             refiner: bool = False, refiner_cfg: float = 6.0,
             refiner_steps: int = 20, refiner_end: float = 0.8,
             scope: str = "", tag: str = "w1") -> Dict[str, Any]:
+    prompt = _lora_trigger(eng, prompt, lora)
     prompt, negative = presets.build(prompt, negative, preset,
                                     max_tokens=presets.CHUNK_BUDGET)
     # 只有真的超过分段上限（77×2）才会丢词，这时才值得告警
@@ -441,6 +464,7 @@ def img2img(eng: Engine, *, init_image: str | Path, prompt: str,
       原图（txt2img 会额外存 `<name>_raw.png`），拿成品精灵回炉会把色块糊掉。
     """
     if preset is not None:
+        prompt = _lora_trigger(eng, prompt, lora)
         prompt, negative = presets.build(prompt, negative, preset,
                                     max_tokens=presets.CHUNK_BUDGET)
     # 项目隔离：源图必须在本项目目录里。别的项目的产物（assets/projects/<别的>/…）
@@ -682,6 +706,7 @@ def ai_repaint(eng: Engine, *, image: str | Path, mask: str | Path, prompt: str,
     代价是接缝需要收：羽化过渡 + 只在边界带做色彩校正 + 可选色板吸附。
     """
     if preset is not None:
+        prompt = _lora_trigger(eng, prompt, lora)
         prompt, negative = presets.build(prompt, negative, preset,
                                     max_tokens=presets.CHUNK_BUDGET)
     src = Image.open(image).convert("RGBA")
@@ -994,6 +1019,7 @@ def pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | Path,
     多了 IP-Adapter 这一路，是单帧的身份迁移。多帧批量请用 WSS（sprite_swap）。
     """
     if preset is not None:
+        prompt = _lora_trigger(eng, prompt, lora)
         prompt, negative = presets.build(prompt, negative, preset,
                                     max_tokens=presets.CHUNK_BUDGET)
 
@@ -1119,6 +1145,7 @@ def sprite_swap(eng: Engine, *, sheet_image: str | Path, char_image: str | Path,
         显存更省（4.5GB vs 13.1GB），但帧间一致性略差。
     """
     if preset is not None:
+        prompt = _lora_trigger(eng, prompt, lora)
         prompt, negative = presets.build(prompt, negative, preset,
                                     max_tokens=presets.CHUNK_BUDGET)
 
@@ -1435,6 +1462,7 @@ def _sprite_animatediff(eng: Engine, frames: Sequence[tuple], char_image: str | 
     所以 meta 里会记录实际用的分辨率和降级原因。
     """
     if preset is not None:
+        prompt = _lora_trigger(eng, prompt, lora)
         prompt, negative = presets.build(prompt, negative, preset,
                                     max_tokens=presets.CHUNK_BUDGET)
     neg = negative or NEG_DEFAULT
@@ -1708,6 +1736,7 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
         cols = min(len(pose_images), 8)
     negative = negative or NEG_DEFAULT
     if preset is not None:
+        prompt = _lora_trigger(eng, prompt, lora)
         prompt, negative = presets.build(prompt, negative, preset,
                                     max_tokens=presets.CHUNK_BUDGET)
     eng.ensure_headroom(need_gb=2.0, keep=("pose",))

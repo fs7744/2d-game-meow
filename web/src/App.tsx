@@ -158,7 +158,7 @@ function makeNode(
 /** 切换底模时会跟着改的参数。只动采样，不动 prompt / lora 这些创作内容。 */
 const REC_KEYS = ['width', 'height', 'steps', 'cfg', 'pixel', 'palette'] as const
 
-function pickRec(rec?: ModelRecommend): Partial<GenParams> {
+function pickRec(rec?: ModelRecommend, lora: string = ''): Partial<GenParams> {
   if (!rec) return {}
   const out: Partial<GenParams> = {
     width: rec.width, height: rec.height, steps: rec.steps,
@@ -172,8 +172,11 @@ function pickRec(rec?: ModelRecommend): Partial<GenParams> {
   // **档位要跟着参数一起改**。只改参数不改 genStyle 的话，切到动漫底模后
   // 参数已经是「动漫立绘」（pixel/palette 归零），下拉却还停在「像素精灵」——
   // 显示与实物不一致，用户会以为下拉坏了（真踩过）。
+  // 反推档位时要带上 LoRA：档位可能自带 LoRA（「像素精灵·Illustrious」），
+  // 只看 preset/pixel/palette 会把它误判成普通像素档
+  const stem = (lora || '').split(/[\\/]/).pop()!.replace(/\.safetensors$/i, '')
   out.genStyle = styleFromParams(
-    out.preset ?? 'sprite', out.pixel ?? 0, out.palette ?? 0)
+    out.preset ?? 'sprite', out.pixel ?? 0, out.palette ?? 0, stem)
   return out
 }
 
@@ -221,6 +224,8 @@ export default function App() {
   const [models, setModels] = useState<string[]>(['sd15'])
   // 每个底模的推荐采样参数，由后端 /models 给出（见 types.ts 的 ModelRecommend）
   const [recommend, setRecommend] = useState<Record<string, ModelRecommend>>({})
+  // 底模名 → 架构：过滤 LoRA 要用架构，不能拿目录名比（sdxl-anime 的架构是 sdxl）
+  const [arch, setArch] = useState<Record<string, string>>({})
   const [model, setModel] = useState<string>('sd15')
   // W4 的输入是"一组骨架帧"，后端扫 assets 给出可选目录，前端只做下拉
   const [poseDirs, setPoseDirs] = useState<PoseDir[]>([])
@@ -238,8 +243,8 @@ export default function App() {
   useEffect(() => savePrompts(favs), [favs])
 
   const reloadLoras = useCallback(() => {
-    fetchLoras(model).then(setLoras).catch(() => setLoras([]))
-  }, [model])
+    fetchLoras(arch[model] || model).then(setLoras).catch(() => setLoras([]))
+  }, [model, arch])
 
   useEffect(() => { reloadLoras() }, [reloadLoras])
 
@@ -275,6 +280,7 @@ export default function App() {
     fetchModels().then((m) => {
       setModels(m.available)
       setRecommend(m.recommend)
+      setArch(m.arch)
       setHasRefiner(m.refiner)
       // **有 SDXL 就默认用它**：精灵场景实测 SDXL@768 可交付率 92% / 贴边 0%，
       // 而 SD1.5@768 是 33% / 67%——差距不在速度（同分辨率只慢约 40%），
@@ -444,7 +450,7 @@ export default function App() {
       const node = makeNode(at.x + sameSpot * 24, at.y + sameSpot * 24, kind)
       // 新节点跟当前底模走：否则选了 SDXL 还是按 SD1.5 的 512/30 步出一张废图
       const rec = recRef.current[modelRef.current]
-      if (rec) node.params = { ...node.params, ...pickRec(rec) }
+      if (rec) node.params = { ...node.params, ...pickRec(rec, node.params.lora) }
       setSelectedId(node.id)
       return [...list, node]
     })
@@ -460,10 +466,17 @@ export default function App() {
    * 为什么需要这件事：后端实测 SDXL 在 1024² 反而更差（可交付率 92%→75%），
    * 前端若按直觉填 1024，用户会稳定拿到更差的结果且没有任何报错。
    */
-  const switchModel = useCallback((next: string) => {
+  const switchModel = useCallback((next: string, opts?: { keepNodes?: boolean }) => {
     const oldRec = recommend[model]
     const rec = recommend[next]
     setModel(next)
+    // 产出风格档位切底模时走这条：档位会自己把参数（尺寸/像素块/LoRA）patch 好。
+    // 如果这里再套一遍推荐参数，两边会抢同一个节点——setNodes 读的是渲染时闭包
+    // 的旧参数，会把刚 patch 的值覆盖掉（实测档位的 LoRA 和尺寸就是这么丢的）。
+    if (opts?.keepNodes) {
+      if (rec) setNotice(`已切到 ${next}，参数由产出风格档位决定`)
+      return
+    }
     if (!rec) return
     const cap = Math.max(1, Math.min(6, rec.max_candidates || 6))
     setNodes((list) => list.map((n) => {
@@ -475,7 +488,7 @@ export default function App() {
       }
       if ((n.kind ?? 'gen') !== 'gen') return n
       if (oldRec && !matchesRec(n.params, oldRec)) return n
-      return { ...n, params: { ...n.params, ...pickRec(rec) } }
+      return { ...n, params: { ...n.params, ...pickRec(rec, n.params.lora) } }
     }))
     setNotice(`已套用 ${next} 推荐参数：${rec.width}×${rec.height} / ${rec.steps} 步` +
       `，候选上限 ${cap} 张/帧`)
@@ -899,6 +912,7 @@ export default function App() {
         <Canvas
           nodes={nodes}
           model={model}
+          onModel={switchModel}
           maxCandidates={recommend[model]?.max_candidates}
           poseDirs={poseDirs}
           hasRefiner={hasRefiner}

@@ -509,6 +509,8 @@ export async function fetchTrain(id: string): Promise<TrainState> {
 export type ModelList = {
   available: string[]
   recommend: Record<string, ModelRecommend>
+  /** 底模名 → 架构（sd15 / sdxl）。LoRA 按架构兼容，不能按底模名比 */
+  arch: Record<string, string>
   /** 本机是否装了 SDXL refiner 权重 */
   refiner: boolean
 }
@@ -516,13 +518,20 @@ export type ModelList = {
 export async function fetchModels(): Promise<ModelList> {
   const r = await fetch(`${base}/models`)
   // 后端不可达时退回 SD1.5 单档：宁可少显示，也不要让下拉是空的
-  if (!r.ok) return { available: ['sd15'], recommend: {}, refiner: false }
+  if (!r.ok) {
+    return { available: ['sd15'], recommend: {}, arch: { sd15: 'sd15' }, refiner: false }
+  }
   const j = await r.json()
   const available: string[] = Array.isArray(j.available) ? j.available : ['sd15']
   const recommend: Record<string, ModelRecommend> =
     j.recommend && typeof j.recommend === 'object' ? j.recommend : {}
+  // 老后端没有 arch 字段：按名字兜底（含 xl 就是 sdxl），至少不比以前差
+  const arch: Record<string, string> = {}
+  for (const m of available) {
+    arch[m] = (j.arch && j.arch[m]) || (/xl/i.test(m) ? 'sdxl' : 'sd15')
+  }
   const refiner = j.refiner === true
-  return { available, recommend, refiner }
+  return { available, recommend, arch, refiner }
 }
 
 /**
@@ -543,8 +552,11 @@ export async function fetchLoras(baseModel?: string): Promise<LoraInfo[]> {
   if (!r.ok) throw new Error(`HTTP ${r.status}`)
   const j = await r.json()
   const items: LoraInfo[] = Array.isArray(j.items) ? j.items : []
-  // SD1.5 的 LoRA 装在 SDXL 上完全无效，会静默出废图 —— 按基座直接过滤掉
-  return items.filter((x) => !x.hidden && (!baseModel || (x.base || 'sd15') === baseModel))
+  // SD1.5 的 LoRA 装在 SDXL 上完全无效，会静默出废图 —— 按基座直接过滤掉。
+  // **比的是架构不是底模名**：`sdxl-anime` 的架构是 sdxl，按名字比会把挂在它
+  // 上面的 SDXL LoRA 全过滤掉（实测切到 sdxl-anime 后 LoRA 下拉只剩「不挂」）。
+  return items.filter(
+    (x) => !x.hidden && (!baseModel || (x.base || 'sd15') === baseModel))
 }
 
 export async function health(): Promise<{ ok: boolean; device?: string }> {

@@ -268,6 +268,9 @@ type Props = {
   onToggleFavorite: () => void
   loras: LoraInfo[]
   model: string
+  /** 切底模：产出风格档位可能要求特定底模（如「像素精灵·Illustrious」要 sdxl-anime）。
+   *  keepNodes=true 表示参数由档位负责，别套推荐值（否则会覆盖刚 patch 的 LoRA/尺寸）。 */
+  onModel?: (m: string, opts?: { keepNodes?: boolean }) => void
   /** 当前底模在 W4 上能批量几个候选（后端按总显存算）；缺省不限制 */
   maxCandidates?: number
   /** 可当 W4 输入的骨架帧目录（后端扫出来的） */
@@ -310,9 +313,14 @@ type Props = {
  * LoRA（LoRA 自带契约）之后参数被外部改掉，`genStyle` 却停在旧值——只信它
  * 就会显示「像素精灵」而参数实际是动漫立绘。
  */
+/** 取文件名 stem：lora 字段可能是名字，也可能是绝对路径。 */
+function loraStem(v: string): string {
+  return (v || '').split(/[\\/]/).pop()!.replace(/\.safetensors$/i, '')
+}
+
 function styleOf(p: GenParams): string {
   if (p.genStyle === 'custom') return 'custom'
-  const byParams = styleFromParams(p.preset, p.pixel, p.palette)
+  const byParams = styleFromParams(p.preset, p.pixel, p.palette, loraStem(p.lora))
   if (p.genStyle && byParams === p.genStyle) return p.genStyle
   return byParams
 }
@@ -330,6 +338,7 @@ export default function GenNodeCard({
   onToggleFavorite,
   loras,
   model,
+  onModel,
   maxCandidates,
   poseDirs,
   hasRefiner,
@@ -1976,7 +1985,18 @@ export default function GenNodeCard({
                   if (st.preset !== undefined) patch.preset = st.preset
                   if (st.pixel !== undefined) patch.pixel = st.pixel
                   if (st.palette !== undefined) patch.palette = st.palette
+                  // 尺寸与像素块必须配套：有效像素 = 宽 ÷ 块，1024/8=128 才对
+                  if (st.width !== undefined) patch.width = st.width
+                  if (st.height !== undefined) patch.height = st.height
+                  // 档位自带的 LoRA（触发词由后端按 loras.json 自动前置）
+                  if (st.lora !== undefined) {
+                    patch.lora = st.lora
+                    patch.loraScale = st.loraScale ?? 0.8
+                  }
                   setParams(patch)
+                  // 底模不属于节点参数（是全局状态）：档位要求 sdxl-anime 就切过去，
+                  // 否则用户漏一步就白挂 LoRA——Illustrious 的 LoRA 挂 SD1.5 会直接报错
+                  if (st.model && st.model !== model) onModel?.(st.model, { keepNodes: true })
                 }}
               >
                 {GEN_STYLES.map((x) => (

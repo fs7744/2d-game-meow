@@ -1,6 +1,8 @@
 """推理链路：确定性、局部重绘的「选区外不变」、姿态序列、显存回收。"""
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
 from pathlib import Path
@@ -1012,3 +1014,33 @@ def test_image_to_pixel_uses_shared_palette_and_edge_rebuild(eng, assets):
     assert m["edge_rebuild"] is True
     assert m["palette_size"] > 0 and len(m["palette"]) == m["palette_size"]
     assert m["pixel"]["offPalette"] == 0
+
+
+def test_lora_trigger_is_prepended_before_prompt(tmp_path):
+    """后端自动把 LoRA 的触发词前置——单 token 触发词漏一个字符就静默失效。
+
+    Pixelizer 的触发词是 `PixelArt_IL_One_Token_style_M_01`（30 个字符），
+    不写完全不生效、写错也完全不生效、**两种情况都不报错**。让用户手抄不是
+    "注意看文档"能解决的，所以由后端按 loras.json 自动补。
+    """
+    from workflows.engine import Engine
+
+    d = tmp_path / "lora"
+    d.mkdir(parents=True)
+    (d / "a.safetensors").write_bytes(b"")           # 只需存在，不加载
+    (d / "loras.json").write_text(json.dumps({
+        "a": {"trigger": "pixelart"}, "b": {"trigger": ""}},
+        ensure_ascii=False), encoding="utf-8")
+    eng = Engine(tmp_path)
+
+    assert g._lora_trigger(eng, "1girl, solo", "a").startswith("pixelart, ")
+    # 配置里 trigger 为空（刻意不用）→ 不加
+    assert g._lora_trigger(eng, "1girl", "b") == "1girl"
+    # 没挂 LoRA → 原样返回
+    assert g._lora_trigger(eng, "1girl", "") == "1girl"
+    assert g._lora_trigger(eng, "1girl", None) == "1girl"
+    # 已经写过就不重复加（大小写不敏感）
+    assert g._lora_trigger(eng, "PixelArt, 1girl", "a") == "PixelArt, 1girl"
+    # 多个 LoRA 各补各的
+    out = g._lora_trigger(eng, "1girl", ["a", "b"])
+    assert out.startswith("pixelart, ") and out.count("pixelart") == 1

@@ -282,6 +282,10 @@ def models() -> Dict[str, Any]:
     have = engine.available_models()
     return {"current": engine.DEFAULT_MODEL, "available": have,
             "recommend": {m: engine.recommend(m) for m in have},
+            # 底模名 → 架构映射。**前端要靠它过滤 LoRA**：LoRA 是按架构兼容的
+            # （sd15 / sdxl），而底模名可以是任意目录名（`sdxl-anime` 的架构是
+            # sdxl）。按名字比会把 `sdxl-anime` 上的 SDXL LoRA 全过滤掉。
+            "arch": {m: engine.arch(m) for m in have},
             # 本机有没有 SDXL refiner 权重：没有就别让用户勾那个开关
             "refiner": engine.has_refiner()}
 

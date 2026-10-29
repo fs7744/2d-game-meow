@@ -73,7 +73,10 @@ function makeFetch() {
         ok: true,
         json: async () => ({
           current: 'sd15',
-          available: ['sd15', 'sdxl'],
+          available: ['sd15', 'sdxl', 'sdxl-anime'],
+          // sdxl-anime 的架构是 sdxl：LoRA 过滤必须按架构比，按名字比会把
+          // 挂在 sdxl-anime 上的 SDXL LoRA 全过滤掉
+          arch: { sd15: 'sd15', sdxl: 'sdxl', 'sdxl-anime': 'sdxl' },
           refiner: true,
           // 与后端 Engine.RECOMMEND 一致：SDXL 推荐 768/24，不是 1024
           recommend: {
@@ -81,6 +84,8 @@ function makeFetch() {
               max_candidates: 6 },
             sdxl: { width: 768, height: 768, steps: 24, cfg: 6.5, pixel: 6, palette: 32,
               max_candidates: 3 },
+            'sdxl-anime': { width: 1024, height: 1024, steps: 28, cfg: 8.0, pixel: 0,
+              palette: 0, clip_skip: 2, preset: 'anime', max_candidates: 3 },
           },
         }),
       }
@@ -105,8 +110,12 @@ function makeFetch() {
       return {
         ok: true,
         json: async () => ({
-          count: 3,
+          count: 4,
           items: [
+            { name: 'Illustrious_PixelArt_Shader_M_01_epoch_4',
+              label: '像素着色器 Pixelizer（真像素 · 推荐）',
+              trigger: 'PixelArt_IL_One_Token_style_M_01', scale: 1,
+              preset: 'anime', note: '真像素', base: 'sdxl' },
             { name: 'wuxia_v2', label: '武侠 Wuxia V2', trigger: 'wuxia',
               scale: 0.8, preset: 'wuxia', note: '水墨武侠', base: 'sd15' },
             { name: 'guofeng', label: '国风插画', trigger: 'guofeng, chinese style',
@@ -636,7 +645,9 @@ function check(name, cond, extra = '') {
   check('底模下拉带「全局生效」说明',
     (section(doc, '底模').textContent || '').includes('全局生效'),
     (section(doc, '底模').textContent || '').slice(0, 60))
-  check('底模下拉列出本机已装的', msel && msel.options.length === 2,
+  // 不写死数量：mock 里加一个底模就会误报。只断言"列出来的都是本机已装的"
+  check('底模下拉列出本机已装的',
+    !!msel && [...msel.options].every((o) => ['sd15', 'sdxl', 'sdxl-anime'].includes(o.value)),
     String(msel?.options.length))
 
   const setSelect = (el, v) => {
@@ -649,8 +660,12 @@ function check(name, cond, extra = '') {
   // 切到 SDXL 后，SD1.5 的 LoRA 必须被过滤掉（装上去是废图）
   const nodeLora = [...doc.querySelectorAll('details select')].find(
     (x) => x.parentElement?.textContent?.startsWith('LoRA'))
-  check('切到 SDXL 后该底模无可用 LoRA',
-    nodeLora && nodeLora.options.length === 1, String(nodeLora?.options.length))
+  // 不锁死数量：现在注册表里有 SDXL 的 LoRA（Pixelizer），断言改成
+  // 「SD1.5 的被过滤、不挂那一项还在」——锁数量会在加 LoRA 后误报
+  const loraVals = [...(nodeLora?.options || [])].map((o) => o.value)
+  check('切到 SDXL 后 SD1.5 的 LoRA 被过滤',
+    loraVals.includes('') && !loraVals.includes('wuxia_v2'),
+    JSON.stringify(loraVals))
 
   check('侧栏场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
@@ -2040,6 +2055,35 @@ function check(name, cond, extra = '') {
     JSON.stringify({ r: body.params.refiner, c: body.params.refiner_cfg }))
 
   check('Refiner 场景无脚本错误', errors.length === 0, errors[0] || '')
+
+  // 34) 「像素精灵·Illustrious」档位：一档配好底模 / LoRA / 尺寸 / 像素块
+  const illStyle = () => [...doc.querySelectorAll('select')].find((x) =>
+    [...x.options].some((o) => o.textContent.includes('像素精灵·Illustrious')))
+  check('有「像素精灵·Illustrious」档位', !!illStyle())
+  setSel(illStyle(), 'spriteIll')
+  await wait(400)
+  check('切到 Illustrious 档不回弹', illStyle()?.value === 'spriteIll',
+    illStyle()?.value)
+  check('档位把底模切到 sdxl-anime', modelSel.value === 'sdxl-anime', modelSel.value)
+  const numsIll = [...doc.querySelectorAll('.node-body input[type=number]')]
+    .map((i) => Number(i.value))
+  check('档位把尺寸改成 1024（1024/8=128 有效像素）', numsIll.includes(1024),
+    JSON.stringify(numsIll))
+  // 按 option 的 **value** 找，别按 textContent：下拉显示的是中文 label
+  // （「像素着色器 Pixelizer…」），文件名只在 value 里
+  const loraSelIll = [...doc.querySelectorAll('select')].find((x) =>
+    [...x.options].some((o) => o.value === 'Illustrious_PixelArt_Shader_M_01_epoch_4'))
+  check('档位自动挂上 Pixelizer LoRA',
+    loraSelIll?.value === 'Illustrious_PixelArt_Shader_M_01_epoch_4',
+    loraSelIll?.value)
+
+  // 手动换掉 LoRA 后档位必须回退成「自定义参数」——不能还显示着 Illustrious 档
+  setSel(loraSelIll, '')
+  await wait(200)
+  check('换掉 LoRA 后档位回退为自定义', illStyle()?.value === 'custom',
+    illStyle()?.value)
+
+  check('Illustrious 档位场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 

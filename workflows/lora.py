@@ -62,6 +62,26 @@ def scan(models_root: str | Path) -> List[Dict[str, Any]]:
     return sorted(out, key=lambda x: (x["label"] or "").lower())
 
 
+def trigger_for(models_root: str | Path, name_or_path: str | None) -> str:
+    """查这个 LoRA 的触发词；返回空字符串表示「不要加」。
+
+    **空值有两种含义，都保持不加**：不知道触发词；或者刻意不用——
+    实测像素 LoRA 加触发词会让多主体率上升（px_illustrious 是 3/3 全变多主体），
+    所以那条配置里 trigger 是空的。这里只读配置，不猜。
+    """
+    if not name_or_path:
+        return ""
+    stem = Path(str(name_or_path)).stem
+    mf = Path(models_root) / LORA_DIR / META_FILE
+    if not mf.exists():
+        return ""
+    try:
+        cfg = json.loads(mf.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return ""
+    return str((cfg.get(stem) or {}).get("trigger") or "").strip()
+
+
 def resolve(models_root: str | Path, name: str | None) -> str | None:
     """把 LoRA 名（stem 或相对路径）解析成绝对路径；空值返回 None。"""
     if not name:
