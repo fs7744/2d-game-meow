@@ -1862,6 +1862,47 @@ function check(name, cond, extra = '') {
   const lab = (name) => [...doc.querySelectorAll('label')]
     .find((l) => (l.textContent || '').trim().startsWith(name))
 
+  // ---- 风格档位真的能切（回归：连调 setParam 会互相覆盖）----
+  // 这一档一次要改 4 个字段（契约 + 像素块 + 色数 + 档位）。以前用连调
+  // setParam 实现，每次展开源都是渲染时闭包的旧 params，只有最后一次生效，
+  // 结果档位立刻弹回「自定义参数」——用户看到的就是「根本选不了」。
+  // 下面必须测**会改多个字段的档位**，只测「自定义」档会漏掉这个 bug。
+  const stylePick = () => [...doc.querySelectorAll('select')].find((x) =>
+    [...x.options].some((o) => o.textContent.includes('像素精灵·高清')))
+  const setSelValue = Object.getOwnPropertyDescriptor(
+    win.HTMLSelectElement.prototype, 'value').set
+  {
+    const s0 = stylePick()
+    check('存在「产出风格」下拉', !!s0)
+    setSelValue.call(s0, 'spriteHi')
+    s0.dispatchEvent(new win.Event('change', { bubbles: true }))
+    await wait(150)
+    check('切到「像素精灵·高清」后下拉不回弹',
+      stylePick()?.value === 'spriteHi', stylePick()?.value)
+
+    // 连切两次，确认第二次同样生效（覆盖「第一次碰巧没坏」的情况）
+    const s1 = stylePick()
+    setSelValue.call(s1, 'pixel8')
+    s1.dispatchEvent(new win.Event('change', { bubbles: true }))
+    await wait(150)
+    check('连续切到「8-bit」也生效', stylePick()?.value === 'pixel8', stylePick()?.value)
+
+    // 参数要真的落地，不只是下拉显示对：切到自定义档看像素块的输入值
+    // （8-bit 档的 pixel=8；连调 bug 下这里会是切换前的 6）
+    const s2 = stylePick()
+    setSelValue.call(s2, 'custom')
+    s2.dispatchEvent(new win.Event('change', { bubbles: true }))
+    await wait(150)
+    check('切档位时像素块真的写进去了（8-bit → 8）',
+      Number(lab('像素块')?.querySelector('input')?.value) === 8,
+      lab('像素块')?.querySelector('input')?.value)
+    // 切回像素精灵·高清，为后续用例保持默认态
+    const s3 = stylePick()
+    setSelValue.call(s3, 'spriteHi')
+    s3.dispatchEvent(new win.Event('change', { bubbles: true }))
+    await wait(150)
+  }
+
   // 像素块/色数只在「自定义参数」风格下暴露——先切过去
   const styleSel = [...doc.querySelectorAll('select')].find((x) =>
     [...x.options].some((o) => o.textContent.includes('自定义参数')))

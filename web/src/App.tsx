@@ -21,6 +21,40 @@ import type {
   NodeSource, Viewport,
 } from './types'
 import type { NodePatch } from './nodes/GenNodeCard'
+import { styleFromParams } from './genStyles'
+import { NODE_W } from './nodes/GenNodeCard'
+
+/**
+ * 画布**可见区域**（屏幕坐标）——必须扣掉左侧浮动侧栏。
+ *
+ * 侧栏是 `position: absolute` 浮在画布上的（展开 236px / 收起 42px），不属于
+ * 布局流。所以 `window.innerWidth` 不等于可见宽度：用它算「中心」或「适应」
+ * 会把节点摆到侧栏底下（实测新节点只露出右半截、「适应」之后依旧被挡住）。
+ */
+function canvasBox() {
+  const rail = document.querySelector<HTMLElement>('.rail')
+  const left = rail && !rail.classList.contains('collapsed')
+    ? rail.offsetWidth : 0
+  return {
+    left,
+    width: Math.max(240, window.innerWidth - left),
+    height: window.innerHeight,
+  }
+}
+
+/**
+ * 可见区中心对应的世界坐标（再往回挪半个节点，让节点视觉居中）。
+ *
+ * 侧栏「+」不带坐标，以前一律落世界原点 (0,0)，而初始平移只有 120px——
+ * 原点正好在 236px 宽的侧栏下面，用户点完什么都看不见。
+ */
+function centerWorld(v: Viewport): { x: number; y: number } {
+  const b = canvasBox()
+  return {
+    x: (b.left + b.width / 2 - v.x) / v.z - NODE_W / 2,
+    y: (b.height / 2 - v.y) / v.z - 200,
+  }
+}
 
 const DEFAULT_PARAMS: GenParams = {
   prompt: '',
@@ -135,6 +169,11 @@ function pickRec(rec?: ModelRecommend): Partial<GenParams> {
   // 只在这两个字段有值时才覆盖，普通底模不受影响。
   if (rec.clip_skip !== undefined) out.clipSkip = rec.clip_skip
   if (rec.preset !== undefined) out.preset = rec.preset
+  // **档位要跟着参数一起改**。只改参数不改 genStyle 的话，切到动漫底模后
+  // 参数已经是「动漫立绘」（pixel/palette 归零），下拉却还停在「像素精灵」——
+  // 显示与实物不一致，用户会以为下拉坏了（真踩过）。
+  out.genStyle = styleFromParams(
+    out.preset ?? 'sprite', out.pixel ?? 0, out.palette ?? 0)
   return out
 }
 
@@ -325,7 +364,7 @@ export default function App() {
     setProjectMeta(next.map(metaOf))
     setCurrentId(p.id)
     setNodes([])
-    setViewport({ x: 120, y: 90, z: 1 })
+    setViewport({ x: canvasBox().left + 40, y: 90, z: 1 })
     setSelectedId(null)
   }, [flushCurrent])
 
@@ -372,7 +411,9 @@ export default function App() {
   }, [])
 
   const addNode = useCallback((type: string, world?: { x: number; y: number }) => {
-    const at = world ?? { x: 0, y: 0 }
+    // 不带坐标（侧栏「+」）→ 落到可见区中心，而不是世界原点：
+    // 原点在侧栏底下，点完看不见节点（实测只露出右半截）。
+    const at = world ?? centerWorld(viewportRef.current)
     if (type === 'airepaint') {
       // 局部 AI 重绘的默认幅度比图生图高：实测 0.8 时模型几乎保留原样，
       // 等于没重画（0.9 才开始明显改动）
@@ -752,30 +793,34 @@ export default function App() {
 
   const fit = useCallback(() => {
     const list = nodesRef.current
+    const box = canvasBox()
     if (list.length === 0) {
-      setViewport({ x: 120, y: 90, z: 1 })
+      // 侧栏收起/展开宽度不同，空画布的初始平移要跟着走，否则原点又陷进侧栏
+      setViewport({ x: box.left + 40, y: 90, z: 1 })
       return
     }
     const minX = Math.min(...list.map((n) => n.x))
     const minY = Math.min(...list.map((n) => n.y))
     const maxX = Math.max(...list.map((n) => n.x + 300))
     const maxY = Math.max(...list.map((n) => n.y + 420))
-    const pad = 80
+    const pad = 60
     const z = Math.min(1.2, Math.max(0.3, Math.min(
-      (window.innerWidth - pad * 2) / (maxX - minX || 1),
-      (window.innerHeight - 140 - pad * 2) / (maxY - minY || 1),
+      (box.width - pad * 2) / (maxX - minX || 1),
+      (box.height - 140 - pad * 2) / (maxY - minY || 1),
     )))
+    // 水平起点要加侧栏宽度，否则「适应」后节点一半压在侧栏下面
     setViewport({
       z,
-      x: pad - minX * z,
+      x: box.left + pad - minX * z,
       y: 96 - minY * z,
     })
   }, [])
 
   const zoomTo = useCallback((z: number) => {
     setViewport((v) => {
-      const cx = window.innerWidth / 2
-      const cy = window.innerHeight / 2
+      const box = canvasBox()
+      const cx = box.left + box.width / 2
+      const cy = box.height / 2
       const k = z / v.z
       return { z, x: cx - (cx - v.x) * k, y: cy - (cy - v.y) * k }
     })
@@ -888,7 +933,7 @@ export default function App() {
           const files = e.target.files ? Array.from(e.target.files) : []
           e.target.value = ''
           if (files.length) {
-            void handleFiles(files, { x: 120, y: 120 })
+            void handleFiles(files, centerWorld(viewportRef.current))
           }
         }}
       />

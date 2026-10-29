@@ -3,7 +3,8 @@ import { hasCJK } from '../store/prompts'
 import MaskEditor from '../components/MaskEditor'
 import MaskPreview from '../components/MaskPreview'
 import type { PoseDir } from '../api'
-import type { GenNode, GenParams, LoraInfo, Preset } from '../types'
+import type { GenNode, GenParams, LoraInfo } from '../types'
+import { GEN_STYLES, styleFromParams } from '../genStyles'
 
 /**
  * 每个参数的说明：做什么 / 影响什么 / 推荐值。
@@ -153,9 +154,12 @@ const PARAM_HINTS: Record<string, { what: string; effect: string; rec: string }>
     rec: '5~7，与底模 CFG 接近',
   },
   精修起点: {
-    what: 'refiner 从去噪过程的哪一段接手',
-    effect: '0.8 = 底模走完 80% 后交给 refiner。起点太早会削弱底模的构图',
-    rec: '0.8（官方默认）；想更明显地"换风格"可以调到 0.7',
+    what: 'refiner 接手收尾的那一段，起点越高改得越少',
+    effect: '0.8 = 只修最后 20% 的幅度（不毁构图）；'
+      + '0.6 会明显改画风，但也更容易把脸和手改坏。'
+      + '注意实际执行步数 = 精修步数 ×(1−起点)，20 步 × 0.8 只剩 4 步',
+    rec: '0.8。refiner 只微调质感，**不是画质增强**——'
+      + '实测清晰度不升反略降（VAE 编解码有损），别指望它救糊图',
   },
   像素化: {
     what: '要不要把出图变成像素画（把画面按色块栅格化）',
@@ -292,77 +296,25 @@ type Props = {
   projectId?: string
 }
 
-/**
- * 产出风格：**一档决定「契约 + 像素块 + 色数」三件事**。
- *
- * 为什么不再让用户填像素块和色数：那两个参数强耦合且互相影响——
- * 「768² 配 6px 块 = 128 有效像素」这种换算要用户在脑子里做，而填错
- * 不会报错、只是出图"看着不对"（实测有人填 64 → 8px 有效像素，细节全没）。
- * 产线上真正要选的是「要什么样的成品」，不是「块多大」。
- *
- * `custom` 才暴露原始参数（老用户/特殊需求）。
- */
-export type GenStyle = {
-  v: string
-  label: string
-  preset?: Preset
-  pixel?: number
-  palette?: number
-  note: string
-}
-
-export const GEN_STYLES: GenStyle[] = [
-  {
-    v: 'sprite16', label: '像素精灵（16-bit）',
-    preset: 'sprite', pixel: 6, palette: 32,
-    note: '最常用。768² 生成后每 6px 一格，约 128 有效像素，32 色。',
-  },
-  {
-    v: 'spriteHi', label: '像素精灵·高清',
-    preset: 'sprite', pixel: 4, palette: 48,
-    note: '细节更多：每 4px 一格，约 192 有效像素；色数放宽到 48 保住层次。',
-  },
-  {
-    v: 'pixel8', label: '像素·8-bit 粗颗粒',
-    preset: 'pixel', pixel: 8, palette: 16,
-    note: '颗粒更粗、色数更少（16 色），复古 8-bit 味。',
-  },
-  {
-    v: 'anime', label: '动漫立绘（不像素化）',
-    preset: 'anime', pixel: 0, palette: 0,
-    note: '纯插画，保画质。建议底模选 sdxl-anime，尺寸 1024²。',
-  },
-  {
-    v: 'realistic', label: '写实插画（不像素化）',
-    preset: 'portrait', pixel: 0, palette: 0,
-    note: '厚涂/写实风，不像素化。',
-  },
-  {
-    v: 'ink', label: '水墨国风（不像素化）',
-    preset: 'wuxia', pixel: 0, palette: 0,
-    note: '水墨线稿风，建议配武侠 LoRA（wuxia_v2）。',
-  },
-  {
-    v: 'custom', label: '自定义参数',
-    pixel: undefined, palette: undefined,
-    note: '自己填像素块与色数（在「更多设置」里）。',
-  },
-]
 
 /**
  * 当前参数落在哪一档风格上（用来回显下拉）。
  *
- * 读的是显式记录的 `genStyle`，**但不能只信它**：用户可能单独改了色数或
- * 切了 LoRA（LoRA 会带自己的契约），那实际参数已经偏离档位了——这时要
- * 老实显示「自定义参数」，而不是骗人说还在预设档上。
+ * 规则按优先级：
+ *  1. 用户明确选了「自定义参数」→ 保持自定义。这一档不改任何参数，靠反推
+ *     必然落回某个预设档（参数恰好没变），不特判的话下拉会「弹回去」。
+ *  2. 记录的档位与实际参数一致 → 用它（正常路径）。
+ *  3. 其余一律按参数反推。
+ *
+ * 第 3 条是为了**不骗人**：切底模（动漫底模会改 preset/pixel/palette）或挂
+ * LoRA（LoRA 自带契约）之后参数被外部改掉，`genStyle` 却停在旧值——只信它
+ * 就会显示「像素精灵」而参数实际是动漫立绘。
  */
 function styleOf(p: GenParams): string {
-  const st = GEN_STYLES.find((x) => x.v === p.genStyle)
-  if (!st) return 'custom'
-  if (st.v === 'custom') return 'custom'
-  const same = st.preset === p.preset && st.pixel === p.pixel
-    && st.palette === p.palette
-  return same ? st.v : 'custom'
+  if (p.genStyle === 'custom') return 'custom'
+  const byParams = styleFromParams(p.preset, p.pixel, p.palette)
+  if (p.genStyle && byParams === p.genStyle) return p.genStyle
+  return byParams
 }
 
 export default function GenNodeCard({
@@ -486,6 +438,21 @@ export default function GenNodeCard({
 
   const setParam = <K extends keyof typeof p>(k: K, v: (typeof p)[K]) =>
     onPatch({ params: { ...p, [k]: v } })
+
+  /**
+   * 一次改多个参数。**要改 ≥2 个字段时必须用它，不能连调 setParam。**
+   *
+   * 原因：`setParam` 的展开源是**渲染时闭包里的 `p`**，连调 N 次各自基于
+   * 同一份旧对象造新对象，React 合并后只有最后一次生效，前几次静默丢失。
+   * 风格下拉一次要改「契约 + 像素块 + 色数 + 档位」4 个字段，连调的后果是
+   * 只有 palette 落地——`styleOf()` 发现参数偏离档位就回退成「自定义参数」，
+   * 用户看到的现象是**下拉怎么点都弹回去**。
+   *
+   * 顺带记一条：给这种多字段联动写测试时别只测「自定义」档（它只改一个字段，
+   * 恰好绕过 bug），要测真会改多个字段的档位。
+   */
+  const setParams = (patch: Partial<GenParams>) =>
+    onPatch({ params: { ...p, ...patch } })
 
   /** 图片节点的展示宽度（高度按原图比例自动算） */
   const setImageW = (w: number) => {
@@ -1280,20 +1247,18 @@ export default function GenNodeCard({
         </div>
       ) : isToPixel ? (
         <div className="node-body animepixel-body">
-          <div className="src-note">
-            任意图 → 像素画：照片、插画、3D 渲染、动漫角色都行。
-            有源图就直接转（不跑模型、秒回）；没有就按描述先出一张再转——
-            比让模型直接画像素稳得多（直接画常裁到腿、颜色是连续渐变）。
-          </div>
+          {/* 说明只留两行：300px 宽的卡片里塞四行长文会把整个面板顶满，
+              下面的源图区和提示词框全被挤走（实测截图确认）。细节放 tooltip。 */}
+          <div className="src-note">任意图都行：照片 / 插画 / 3D / 动漫。有源图直接转，没有就按描述先出一张。</div>
           {sourceBox}
           <div className="prompt-wrap">
             <textarea
               className="prompt"
-              rows={2}
+              rows={3}
               placeholder={
                 hasSource
                   ? '（有源图，提示词可留空）'
-                  : '描述要画什么（动漫角色用 danbooru tag）e.g. 1girl, red cape, holding sword, full body'
+                  : '1girl, red cape, holding sword, full body'
               }
               value={p.prompt}
               onChange={(e) => setParam('prompt', e.target.value)}
@@ -1991,6 +1956,12 @@ export default function GenNodeCard({
             >
               🎲
             </button>
+          </div>
+
+          {/* 产出风格单独占一行。**别和种子挤半行**：这一档的标签很长
+              （「像素精灵·高清」「动漫立绘（不像素化）」），300px 宽的卡片里
+              挤半行会直接把文字顶出 select 边框，看起来像坏掉。 */}
+          <div className="row">
             <label className="grow" title={hint('风格')}>
               产出风格
               <select
@@ -1998,14 +1969,14 @@ export default function GenNodeCard({
                 onChange={(e) => {
                   const st = GEN_STYLES.find((x) => x.v === e.target.value)
                   if (!st) return
-                  // **必须先记下档位本身**：自定义档不改任何参数，只记档位；
-                  // 不记的话受控 select 会被 React 弹回原值（踩过）。
-                  setParam('genStyle', st.v)
-                  // 一档同时定「契约 + 像素块 + 色数」——用户不用再算
-                  // 「768² 配 6px 块 = 128 有效像素」这种换算
-                  if (st.preset !== undefined) setParam('preset', st.preset)
-                  if (st.pixel !== undefined) setParam('pixel', st.pixel)
-                  if (st.palette !== undefined) setParam('palette', st.palette)
+                  // **一次 patch 改完，不能连调 setParam**（那会只有最后一个生效）。
+                  // 档位本身也要记：自定义档不改任何别的字段，不记档位
+                  // 受控 select 会被 React 弹回原值。
+                  const patch: Partial<GenParams> = { genStyle: st.v }
+                  if (st.preset !== undefined) patch.preset = st.preset
+                  if (st.pixel !== undefined) patch.pixel = st.pixel
+                  if (st.palette !== undefined) patch.palette = st.palette
+                  setParams(patch)
                 }}
               >
                 {GEN_STYLES.map((x) => (
@@ -2188,7 +2159,12 @@ export default function GenNodeCard({
                         value={p.refinerEnd}
                         onChange={(e) => setParam('refinerEnd', Number(e.target.value))}
                       />
-                      <b>{p.refinerEnd.toFixed(2)}</b>
+                      <b>
+                        {p.refinerEnd.toFixed(2)}
+                        <em className="sub-val">
+                          ≈{Math.max(1, Math.round(p.refinerSteps * (1 - p.refinerEnd)))} 步
+                        </em>
+                      </b>
                     </label>
                   </div>
                 )}

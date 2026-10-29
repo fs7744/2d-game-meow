@@ -90,21 +90,34 @@ input:disabled, select:disabled, textarea:disabled { opacity: 0.45; cursor: not-
   box-shadow: 3px 3px 0 var(--pink);
 }
 .title { font-weight: 800; letter-spacing: 0.2px; }
-.sub { font-family: var(--chip); font-size: 10px; color: var(--muted); letter-spacing: 0.6px; }
+.sub {
+  font-family: var(--chip); font-size: 10px; color: var(--muted);
+  letter-spacing: 0.6px;
+  /* 项目名可能很长：允许收缩并省略，否则会把右侧缩放组顶出视口 */
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .spacer { flex: 1; }
 .gpu {
   font-family: var(--mono); font-size: 11px; color: var(--muted);
   border: 1px solid var(--line); padding: 4px 8px;
-  max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 260px; min-width: 48px; flex-shrink: 1;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .gpu.ok { border-color: rgba(0, 255, 136, 0.45); color: var(--green); }
 .gpu.bad { border-color: rgba(255, 51, 102, 0.45); color: var(--pink); }
 
-.zoom-group { display: flex; align-items: center; border: 1px solid var(--line-strong); background: var(--bg-2); }
+/* 缩放组是画布操作的核心入口：**不许被压缩**。默认 flex 会在窄窗口里把它
+   连同按钮一起挤窄，中文按钮（「适应」）文字不换行、又没有溢出可见——结果
+   就是只露出半个字（实测窄窗口复现）。要挤就挤副标题和 GPU 标签。 */
+.zoom-group {
+  display: flex; align-items: center; flex-shrink: 0;
+  border: 1px solid var(--line-strong); background: var(--bg-2);
+}
 .zoom-group button {
-  height: 28px; min-width: 28px; padding: 0 8px;
+  height: 28px; min-width: 28px; padding: 0 9px; flex-shrink: 0;
   background: transparent; border: 0; border-right: 1px solid var(--line);
   font-family: var(--mono); font-size: 12px;
+  white-space: nowrap;
 }
 .zoom-group button:last-child { border-right: 0; }
 .zoom-group button:hover { background: var(--bg-3); color: var(--green); }
@@ -632,7 +645,15 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
 }
 .strength input[type='range'] { flex: 1; min-width: 0; accent-color: var(--cyan); }
 .strength b { font-family: var(--mono); font-size: 10px; color: var(--cyan); font-weight: 400; }
-.src-note { font-size: 9.5px; line-height: 1.5; color: var(--muted-2); }
+/* 参数值后的补充说明（如精修起点「0.80 ≈4 步」）：
+   实际生效值跟界面上填的总量常常不是一个数，不标出来就是误导。 */
+.strength b .sub-val {
+  font-style: normal; font-size: 9px; color: var(--muted); margin-left: 3px;
+  white-space: nowrap;
+}
+/* 9.5px 在高分屏上几乎看不清；说明文字是用户理解参数的唯一途径，
+   太小等于没写。10.5px 是「不挤爆 300px 卡片」的下限。 */
+.src-note { font-size: 10.5px; line-height: 1.55; color: var(--muted-2); }
 
 .lang-hint.bad {
   color: #ffb3c4; border-left-color: var(--pink);
