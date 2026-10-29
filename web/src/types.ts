@@ -142,6 +142,14 @@ export type GenParams = {
   refinerSteps: number
   /** 精修从去噪过程的哪一段接手（0.8 = 最后 20%） */
   refinerEnd: number
+  /**
+   * 透明背景：只有 Qwen-Image-2.1 原生支持（VAE 第 4 通道）。
+   *
+   * 与 `matte` 的区别：matte 是**生成后**用分割模型抠一遍，边缘会有
+   * 半透明毛边、发丝/细剑这类结构容易抠断；transparent 是生成时就让模型
+   * 直接画 alpha，边界更干净、细节不丢。SD 系列开这个无效（后端会忽略）。
+   */
+  transparent: boolean
 }
 
 /** 后端 /loras 返回的条目 */
@@ -194,6 +202,14 @@ export type GenNode = {
   y: number
   /** 节点宽度（px）。缺省用 NODE_W；图片节点的宽度在 image.w 上，与此无关。 */
   w?: number
+  /**
+   * 节点高度（px）。缺省 = 内容自适应。
+   *
+   * 为什么要能锁高度：参数面板长的节点（序列帧替换、姿态序列有十几个字段）在
+   * 画布上会撑到 900px 以上，摆两张就把视野占满。锁高 + 内部滚动才能把画布
+   * 排得开。只对参数视图生效；图片节点的尺寸由 image.w 决定，不参与。
+   */
+  h?: number
   params: GenParams
   view: NodeView
   source?: NodeSource

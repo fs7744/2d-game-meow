@@ -237,6 +237,21 @@ input:disabled, select:disabled, textarea:disabled { opacity: 0.45; cursor: not-
 .node-resize:hover { background: rgba(0, 255, 136, 0.14); }
 .node-resize:hover::after { background: var(--cyan); opacity: 1; }
 
+/* 右下角双向手柄：同时改宽和高。
+   必须给足热区——12px 在 4K 屏上几乎点不到，而它又是唯一能改高度的入口。 */
+.node-corner {
+  position: absolute; right: 0; bottom: 0; width: 16px; height: 16px;
+  cursor: nwse-resize; z-index: 4;
+}
+.node-corner::after {
+  content: ''; position: absolute; right: 3px; bottom: 3px;
+  width: 6px; height: 6px;
+  border-right: 2px solid var(--line-strong);
+  border-bottom: 2px solid var(--line-strong);
+  opacity: 0.7;
+}
+.node:hover .node-corner::after { border-color: var(--green); opacity: 1; }
+
 .node-head {
   display: flex; align-items: center; gap: 6px;
   padding: 7px 8px; cursor: grab;
@@ -270,16 +285,56 @@ svg.links {
 svg.links path.link {
   fill: none; stroke: var(--cyan); stroke-width: 2; opacity: 0.75;
 }
+/* 角色图那一路换成黄色：同一个上游节点可能同时接源图和角色图，
+   两条线一个颜色就分不清哪条是哪条 */
+svg.links path.link.char { stroke: var(--yellow, #ffd34d); }
 svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
+/* 箭头填充必须显式给，不能用 stroke——marker 里的 path 默认继承 fill:black，
+   在深色画布上等于看不见 */
+.link-arrow-head { fill: var(--cyan); }
+.link-arrow-head.char { fill: var(--yellow, #ffd34d); }
+
+/* 连线旁端口的「断开」按钮。
+   线本身是 pointer-events:none 的 2px 细线，直接点根本点不中，所以给一个真实按钮。
+   只在悬停/选中目标节点时渲染（见 Canvas），避免满屏 ✕ 盖住连线。 */
+.link-cut {
+  position: absolute; width: 16px; height: 16px; margin: -8px 0 0 -8px;
+  padding: 0; line-height: 1; font-size: 10px;
+  display: grid; place-items: center;
+  border-radius: 50%; cursor: pointer;
+  background: rgba(12, 12, 16, 0.92); border: 1px solid var(--line-strong);
+  color: var(--muted); opacity: 0.75; transition: opacity 0.12s, color 0.12s;
+  z-index: 5;
+}
+.link-cut:hover { opacity: 1; color: var(--pink); border-color: var(--pink); }
 
 /* 连接点：右侧是输出（从这里拉线），左侧是接入 */
 .conn {
-  position: absolute; top: 9px; width: 11px; height: 11px; border-radius: 50%;
+  position: absolute; top: 9px; width: 12px; height: 12px; border-radius: 50%;
   background: var(--bg-2); border: 2px solid var(--cyan); cursor: crosshair;
+  z-index: 2;
+}
+/*
+ * 热区扩大：圆点本身只有 12px，画布缩到 80% 时屏幕上不到 10px，
+ * 想精确按住非常难（实测自动化拖拽都打不中）。用透明伪元素把可点区域
+ * 撑到 26px，视觉不变但手感正常——这是「连不上线」最常见的物理原因。
+ */
+.conn::after {
+  content: ''; position: absolute; left: 50%; top: 50%;
+  width: 26px; height: 26px; transform: translate(-50%, -50%);
+  border-radius: 50%;
 }
 .conn.out { right: -6px; }
 .conn.in { left: -6px; border-color: var(--line-strong); }
 .conn.out:hover { background: var(--cyan); }
+/* 输入端口：挂在源图区/角色图区上，靠 left 负值探出卡片左边缘 */
+.conn.in {
+  left: -14px; top: 50%; transform: translateY(-50%);
+  border-color: var(--cyan); cursor: crosshair;
+}
+.conn.in.char { border-color: var(--yellow, #ffd34d); }
+.conn.in:hover { background: var(--cyan); }
+.conn.in.char:hover { background: var(--yellow, #ffd34d); }
 .node.link-target { outline: 2px dashed var(--cyan); outline-offset: 2px; }
 
 /* 图片节点 */
@@ -287,10 +342,6 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
 .img-body { display: flex; flex-direction: column; gap: 6px; padding: 8px; }
 .img-holder { position: relative; line-height: 0; background: #0d0d10; }
 .img-holder img { width: 100%; height: auto; display: block; image-rendering: pixelated; }
-.img-holder .resize {
-  position: absolute; right: -5px; bottom: -5px; width: 12px; height: 12px;
-  background: var(--cyan); border: 1px solid #000; cursor: nwse-resize; z-index: 2;
-}
 .img-tools { display: flex; align-items: center; gap: 6px; }
 .img-tools label { display: flex; align-items: center; gap: 4px; font-size: 10px; color: var(--muted); }
 .img-tools input { width: 64px; height: 24px; }
@@ -450,6 +501,19 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
 .icon-btn.view-toggle.on { color: var(--green); border-color: rgba(0, 255, 136, 0.4); }
 
 .node-body { display: flex; flex-direction: column; gap: 8px; padding: 10px; }
+/*
+ * 锁了高度的节点：正文区吃掉剩余高度并自己滚动。
+ * 不加 overflow 的后果是内容顶着卡片底边溢出（CSS 默认 overflow:visible），
+ * 看起来像节点没变小、只是被截断——用户会以为拖高度没生效。
+ * min-height:0 是 flex 子项能收缩的前提，少了它 overflow 不会触发。
+ */
+.node.fixed-h .node-body {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden;
+}
+.node.fixed-h .node-body::-webkit-scrollbar { width: 8px; }
+.node.fixed-h .node-body::-webkit-scrollbar-thumb {
+  background: var(--line-strong); border-radius: 4px;
+}
 
 .prompt {
   width: 100%; resize: vertical; min-height: 60px;
@@ -596,6 +660,7 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
   border-left: 2px solid var(--line-strong); padding-left: 6px;
 }
 .src-box {
+  position: relative;   /* 输入端口 .conn.in 相对它定位 */
   display: grid; grid-template-columns: 64px 1fr; gap: 7px;
   border: 1px solid var(--line); border-left: 2px solid var(--cyan);
   padding: 6px; background: rgba(0, 208, 255, 0.04);

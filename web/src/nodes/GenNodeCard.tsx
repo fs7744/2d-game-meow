@@ -234,6 +234,27 @@ const PARAM_HINTS: Record<string, { what: string; effect: string; rec: string }>
     effect: '透明=出 PNG 带 alpha；纯色=叠一个色底；换背景图=叠到另一张图上',
     rec: '要进引擎用「透明」；要做展示图用「纯色」或「换背景图」',
   },
+  像素边长: {
+    what: '转像素后成品的原生边长（px）',
+    effect: '这是**成品**尺寸，不是画布尺寸：192 就是 192×192 的像素画，放大看是色块',
+    rec: '精灵 64~192；头像 96；宣传图 256~384。小于 64 细节必然丢',
+  },
+  对比度增强: {
+    what: '量化前先拉对比度/饱和度的强度',
+    effect: '不开时量化会整体发灰、红变暗红、金发变土黄；开 1.0 后颜色才鲜',
+    rec: '1.0（默认体验最好）；原图本身已经高饱和时给 0.5，避免溢出',
+  },
+  描边: {
+    what: '量化后给主体补一圈 1px 轮廓线',
+    effect: '量化后相邻色块只有色差没有结构线，缩小看会糊成一坨（melt）；描边后轮廓立住',
+    rec: '开。只描外轮廓——对内部结构边全描会把脸糊成一块灰',
+  },
+  透明背景: {
+    what: '让模型直接输出带 alpha 的 RGBA 图（原生透明底）',
+    effect: '与「抠图」不同：抠图是画完再用分割模型切一遍，发丝、细剑、半透明布料常被切断；'
+      + '这个是从生成时就有 alpha，边缘更干净、细节不丢',
+    rec: 'Qwen-Image 底模出精灵/立绘时开。开它就别再开「抠图」——重复处理反而把 alpha 弄脏',
+  },
 }
 
 /** 拼成原生 title：换行分三段，扫一眼就知道"是什么/影响什么/填多少" */
@@ -247,13 +268,28 @@ function hint(k: string): string {
 }
 
 export const NODE_W = 300
-/** 节点可拖宽度范围：窄于 260 参数会换行，宽于 620 画布上就不好摆 */
-export const WIDE_MIN = 260
-export const WIDE_MAX = 620
+/** 节点可拖宽度范围：窄于 240 参数会换行，宽于 720 画布上就不好摆 */
+export const WIDE_MIN = 240
+export const WIDE_MAX = 720
+/** 节点可拖高度范围。低于 160 连卡头和一行参数都放不下 */
+export const TALL_MIN = 160
+export const TALL_MAX = 1400
 
 export type NodePatch = Partial<
-  Pick<GenNode, 'x' | 'y' | 'w' | 'params' | 'view' | 'job' | 'source' | 'image' | 'charSource'>
+  Pick<GenNode,
+    'x' | 'y' | 'w' | 'h' | 'params' | 'view' | 'job' | 'source' | 'image' | 'charSource'>
 >
+
+/**
+ * 两个输入端口在节点左边缘的纵向位置（相对节点顶部，px）。
+ *
+ * 连线端点和端口圆点**共用这两个常量**：只要各写一份，改样式时必然对不上——
+ * 表现是线插在端口上方/下方十几像素，看着像画错了。`char` 那个值对的是
+ * 「源图区 + 间距」之后角色图区的中心（头部 37 + body padding 10 + 源图区 78
+ * + gap 8，再往下 39 是角色图区中线）。
+ */
+export const PORT_SRC_Y = 13
+export const PORT_CHAR_Y = 172
 
 type Props = {
   node: GenNode
@@ -277,6 +313,8 @@ type Props = {
   poseDirs?: PoseDir[]
   /** 本机是否装了 SDXL refiner 权重（没有就别让人勾） */
   hasRefiner?: boolean
+  /** 当前底模支不支持原生透明背景（只有 Qwen-Image-2.1 支持） */
+  canTransparent?: boolean
   onSpawnImg2Img: () => void
   /** 图生图的上游节点（从 source.nodeId 解析而来） */
   sourceNode?: GenNode
@@ -342,6 +380,7 @@ export default function GenNodeCard({
   maxCandidates,
   poseDirs,
   hasRefiner,
+  canTransparent,
   onSpawnImg2Img,
   sourceNode,
   sourceOptions,
@@ -392,6 +431,8 @@ export default function GenNodeCard({
   const isPoseClone = node.kind === 'poseclone'
   const isSpriteSwap = node.kind === 'spriteswap'
   const isPoseSwap = node.kind === 'poseswap'
+  /** 是否锁了高度（只有参数视图能锁；图片等比显示，锁高会拉伸） */
+  const lockH = !isImg && !imageMode && !!node.h
   // 当前选中的骨架目录（可能是手填的通配，那就匹配不到，只是没有帧数提示）
   const poseDirInfo = (poseDirs || []).find((d) => d.path === p.psDir)
   const [maskOpen, setMaskOpen] = useState(false)
@@ -470,21 +511,29 @@ export default function GenNodeCard({
     onPatch({ image: { ...node.image, w: cw } })
   }
 
-  /** 拖右下角的手柄改大小：屏幕像素差要除以缩放比才是世界坐标 */
-  const resizeRef = useRef<{ x: number; w: number } | null>(null)
   /**
-   * 拖右边缘改节点宽度。
+   * 拖右边缘改宽度 ——— **所有节点统一走这一个手柄**。
    *
-   * 为什么要能拖：采样参数横排时，"宽/高/步数/CFG/种子"在 300px 里会挤成两列，
-   * 标签被截断就只能靠猜。而参数 tooltip 又需要一行放得下说明，所以宽度得可调。
+   * 图片节点以前用的是 `.img-holder` 里那个小角标（只在图片右下角、只有图片节点有），
+   * 于是"怎么变宽"在不同节点上是两套手感：参数节点拖右边缘、图片节点拖图片角落，
+   * 而且图片角标跟 `.conn.out` 输出点在同一个位置附近，经常误点到连线。
+   * 现在统一成：右边缘 = 只改宽，右下角 = 改宽（+参数节点改高）。
+   *
+   * 图片节点的宽度存在 `image.w`（不是 `node.w`）——它的高度按原图比例推，
+   * 拉宽就是等比放大，不会变形。
    */
   const startWiden = (e: React.PointerEvent) => {
     e.stopPropagation()
     e.preventDefault()
     const startX = e.clientX
-    const startW = node.w ?? NODE_W
+    // 图片节点宽度在 image.w；图片视图与参数节点都在 node.w
+    const startW = isImg ? node.image?.w ?? NODE_W : node.w ?? NODE_W
     const move = (ev: PointerEvent) => {
       const next = Math.round(startW + (ev.clientX - startX) / zoom)
+      if (isImg) {
+        setImageW(next)
+        return
+      }
       onPatch({ w: Math.min(WIDE_MAX, Math.max(WIDE_MIN, next)) })
     }
     const up = () => {
@@ -495,17 +544,52 @@ export default function GenNodeCard({
     window.addEventListener('pointerup', up)
   }
 
-  const startResize = (e: React.PointerEvent) => {
+  /**
+   * 拖右下角：参数节点同时改宽和高，图片类节点（含「只看图」视图）只改宽。
+   *
+   * **高度是这次补的**：早先只能拖右边缘改宽度，`h` 根本没实现，所以像
+   * 「序列帧替换」这种十几个字段的节点会一路撑到 900px 以上，两张就把画布占满，
+   * 用户只能靠缩小画布看全，参数又小到看不清。锁高 + 内部滚动才排得开。
+   *
+   * 图片节点 / 图片视图不锁高：高度由图片比例决定，硬改高会把图压扁——
+   * 而且 `h` 在 `lockH` 为假时根本不会写进 style，拖了也不动，等于假手柄。
+   */
+  const startCorner = (e: React.PointerEvent) => {
     e.stopPropagation()
     e.preventDefault()
-    resizeRef.current = { x: e.clientX, w: node.image?.w ?? 160 }
+    const sx = e.clientX
+    const sy = e.clientY
+    const el = (e.currentTarget as HTMLElement).closest('.node') as HTMLElement | null
+    if (isImg || imageMode) {
+      const sw = isImg ? node.image?.w ?? NODE_W : node.w ?? NODE_W
+      const move = (ev: PointerEvent) => {
+        const next = sw + (ev.clientX - sx) / zoom
+        if (isImg) {
+          setImageW(next)
+          return
+        }
+        onPatch({ w: Math.min(WIDE_MAX, Math.max(WIDE_MIN, Math.round(next))) })
+      }
+      const up = () => {
+        window.removeEventListener('pointermove', move)
+        window.removeEventListener('pointerup', up)
+      }
+      window.addEventListener('pointermove', move)
+      window.addEventListener('pointerup', up)
+      return
+    }
+    const sw = node.w ?? NODE_W
+    // 起始高度取**实际渲染高度**：h 未设置时节点是内容撑开的，读不到就是 0
+    const sh = node.h ?? (el ? Math.round(el.getBoundingClientRect().height / zoom) : 320)
     const move = (ev: PointerEvent) => {
-      const st = resizeRef.current
-      if (!st) return
-      setImageW(st.w + (ev.clientX - st.x) / zoom)
+      const dw = (ev.clientX - sx) / zoom
+      const dh = (ev.clientY - sy) / zoom
+      onPatch({
+        w: Math.min(WIDE_MAX, Math.max(WIDE_MIN, Math.round(sw + dw))),
+        h: Math.min(TALL_MAX, Math.max(TALL_MIN, Math.round(sh + dh))),
+      })
     }
     const up = () => {
-      resizeRef.current = null
       window.removeEventListener('pointermove', move)
       window.removeEventListener('pointerup', up)
     }
@@ -572,6 +656,17 @@ export default function GenNodeCard({
   /** 源图区：图生图与抠图节点共用（连线接上来的源，或直接拖一张图） */
   const sourceBox = (
     <div className="src-box">
+      {/*
+        输入端口挂在这里，而不是节点绝对定位的某个 top 值。
+        原因：不同节点的正文块数不一样（转像素在源图区上面还有一行说明），
+        写死偏移后端口就会悬在说明文字旁边、和它管的输入框错开一截。
+        位置由 Canvas 实测 DOM 得到，线端点跟着端口走。
+      */}
+      <span
+        className="conn in src"
+        data-port="source"
+        title="源图 / 动作参考：把上游节点的输出点拖到这里"
+      />
       <div className="src-thumb" title={sourceNode ? '源图' : '还没有选源图'}>
         {sourceThumb ? (
           <img src={sourceThumb} alt="源图" draggable={false} />
@@ -624,12 +719,14 @@ export default function GenNodeCard({
     <div
       className={`node gen${selected ? ' selected' : ''}${imageMode ? ' image-mode' : ''}${
         isImg ? ' is-img' : ''
-      }${linkTarget ? ' link-target' : ''}`}
+      }${lockH ? ' fixed-h' : ''}${linkTarget ? ' link-target' : ''}`}
       data-node-id={node.id}
       style={{
         left: node.x,
         top: node.y,
         width: isImg ? node.image?.w ?? NODE_W : node.w ?? NODE_W,
+        // 高度只对参数视图生效：图片/图片视图是等比显示，锁高会把图压扁
+        height: lockH ? node.h : undefined,
       }}
       onPointerDown={(e) => {
         e.stopPropagation()
@@ -645,6 +742,11 @@ export default function GenNodeCard({
         }
       }}
     >
+      {/*
+        输入端口不在这里画——它们挂在各自的输入框上（源图区 / 角色图区），
+        这样端口永远挨着它管的那块 UI，不会因为节点正文多一行说明就漂走。
+        位置由 Canvas 实测（见 portTops），连线端点跟着走。
+      */}
       <div
         className="node-head"
         onPointerDown={startDrag}
@@ -875,6 +977,11 @@ export default function GenNodeCard({
         <div className="node-body poseclone-body">
           {sourceBox}
           <div className="src-box char-box">
+            <span
+              className="conn in char"
+              data-port="char"
+              title="角色图（身份来源）：把上游节点的输出点拖到这里"
+            />
             <div className="src-thumb" title="角色图（身份来源）">
               {charThumb ? (
                 <img src={charThumb} alt="角色" draggable={false} />
@@ -947,7 +1054,7 @@ export default function GenNodeCard({
               <textarea
                 className="prompt"
                 rows={2}
-                placeholder="角色描述？e.g. a blue slime monster with big eyes"
+                placeholder="可选：补充描述（外观已由角色图决定）"
                 value={p.prompt}
                 onChange={(e) => setParam('prompt', e.target.value)}
               />
@@ -1090,16 +1197,11 @@ export default function GenNodeCard({
           )}
           <button
             className="gen-btn"
-            disabled={
-              busy || !hasSource || !charThumb ||
-              (p.ssMode === 'generate' && !p.prompt.trim())
-            }
+            disabled={busy || !hasSource || !charThumb}
             onClick={onGenerate}
             title={
               !hasSource ? '先接一张动作序列帧（精灵图）'
-                : !charThumb ? '再选一张角色图'
-                  : p.ssMode === 'generate' && !p.prompt.trim()
-                    ? '写上角色长什么样' : undefined
+                : !charThumb ? '再选一张角色图' : undefined
             }
           >
             {busy ? '替换中…' : '替换序列帧'}
@@ -1125,6 +1227,11 @@ export default function GenNodeCard({
         <div className="node-body poseclone-body">
           {sourceBox}
           <div className="src-box char-box">
+            <span
+              className="conn in char"
+              data-port="char"
+              title="角色图（身份来源）：把上游节点的输出点拖到这里"
+            />
             <div className="src-thumb" title="角色图（身份来源）">
               {charThumb ? (
                 <img src={charThumb} alt="角色" draggable={false} />
@@ -1159,7 +1266,7 @@ export default function GenNodeCard({
             <textarea
               className="prompt"
               rows={2}
-              placeholder="角色描述？e.g. a blue slime monster with big eyes"
+              placeholder="可选：补充描述（外观已由角色图决定）"
               value={p.prompt}
               onChange={(e) => setParam('prompt', e.target.value)}
             />
@@ -1231,12 +1338,11 @@ export default function GenNodeCard({
           )}
           <button
             className="gen-btn"
-            disabled={busy || !hasSource || !charThumb || !p.prompt.trim()}
+            disabled={busy || !hasSource || !charThumb}
             onClick={onGenerate}
             title={
               !hasSource ? '先接一张动作参考图'
-                : !charThumb ? '再选一张角色图'
-                  : !p.prompt.trim() ? '写上角色长什么样' : undefined
+                : !charThumb ? '再选一张角色图' : undefined
             }
           >
             {busy ? '迁移中…' : '迁移角色'}
@@ -1316,13 +1422,26 @@ export default function GenNodeCard({
               />
               轮廓描边
             </label>
-            <label className="check" title="先抠掉背景，得到透明底的精灵；转风景/照片时建议关掉">
+            <label className="check" title={hint('透明背景')}>
               <input
                 type="checkbox"
-                checked={p.apMatte}
+                checked={p.transparent && canTransparent}
+                disabled={!canTransparent}
+                onChange={(e) => setParam('transparent', e.target.checked)}
+              />
+              透明背景{p.transparent && canTransparent ? '（原生）' : ''}
+            </label>
+            <label
+              className="check"
+              title="先抠掉背景，得到透明底的精灵；转风景/照片时建议关掉"
+            >
+              <input
+                type="checkbox"
+                checked={p.apMatte && !(p.transparent && canTransparent)}
+                disabled={p.transparent && canTransparent}
                 onChange={(e) => setParam('apMatte', e.target.checked)}
               />
-              抠背景
+              抠背景{p.transparent && canTransparent ? '（已用原生 alpha）' : ''}
             </label>
           </div>
           {hasImage && (
@@ -1819,11 +1938,6 @@ export default function GenNodeCard({
                     onPreview?.(node.image!.url, previewName)
                   }}
                 />
-                <span
-                  className="resize"
-                  title="拖动改变大小（也可以直接改下面的宽度）"
-                  onPointerDown={startResize}
-                />
               </div>
               <div className="img-tools">
                 <label title={hint('图片宽')}>
@@ -2056,6 +2170,14 @@ export default function GenNodeCard({
                   ))}
                 </select>
               </label>
+              {/* LoRA 列表按**架构**过滤（后端 /loras?arch=…），所以 Qwen 底下
+                  本来就只剩「不挂」。但空列表不解释的话用户会以为扫坏了。 */}
+              {!loras.length && (
+                <p className="src-note">
+                  当前底模下没有可用 LoRA：Qwen-Image 不吃 SD 的 LoRA（不同的主干与
+                  文本编码器），能挂的只有它自己的微调。
+                </p>
+              )}
               {loraInfo && (
                 <div className="lora-box">
                   <div className="lora-trigger">
@@ -2145,6 +2267,27 @@ export default function GenNodeCard({
                     onChange={(e) => setParam('cfg', Number(e.target.value) || 7.5)}
                   />
                 </label>
+                {/* 透明背景：Qwen-Image-2.1 原生 RGBA。跟「抠图」不是一回事——
+                    抠图是生成后用分割模型切一遍（发丝/细剑常被切断），
+                    这个是让模型直接画 alpha，边界更干净。 */}
+                <label
+                  className="check"
+                  title={hint('透明背景')}
+                >
+                  <input
+                    type="checkbox"
+                    checked={p.transparent && canTransparent}
+                    disabled={!canTransparent}
+                    onChange={(e) => setParam('transparent', e.target.checked)}
+                  />
+                  透明背景（原生 RGBA）
+                  {!canTransparent && <span className="dim"> 仅 Qwen-Image</span>}
+                </label>
+                {canTransparent && p.transparent && (
+                  <p className="src-note">
+                    模型直接输出 alpha，不用再抠图；此时「抠图」会被跳过。
+                  </p>
+                )}
                 <label className="check" title={hint('精修')}>
                   <input
                     type="checkbox"
@@ -2350,14 +2493,27 @@ export default function GenNodeCard({
           )}
         </div>
       )}
-      {/* 右边缘拖宽。图片节点有自己的手柄（改的是 image.w），这里只管参数面板 */}
-      {!isImg && (
-        <div
-          className="node-resize"
-          title="拖动改变节点宽度（参数挤的时候拖宽一点）"
-          onPointerDown={startWiden}
-        />
-      )}
+      {/* 右边缘拖宽：**所有节点统一**（含图片节点，改的是 image.w）。
+          以前图片节点用的是图片右下角那个小角标，两种节点两套手感，
+          而且角标紧挨着输出连接点，经常误触连线。 */}
+      <div
+        className="node-resize"
+        title="拖动改变宽度（参数挤的时候拖宽一点）"
+        onPointerDown={startWiden}
+      />
+      {/* 右下角：参数节点改宽×高，图片节点等比改宽。
+          图片/图片视图不锁高——那是等比显示，硬拉会变形。 */}
+      <div
+        className="node-corner"
+        title={isImg || imageMode
+          ? '拖动等比缩放（高度跟着原图比例）'
+          : '拖动改变大小（宽 × 高；拉矮后正文可滚动；双击恢复自适应高度）'}
+        onPointerDown={startCorner}
+        onDoubleClick={(e) => {
+          e.stopPropagation()
+          if (!isImg && !imageMode) onPatch({ h: undefined })  // 恢复自适应高度
+        }}
+      />
     </div>
   )
 }

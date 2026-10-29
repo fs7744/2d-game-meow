@@ -325,6 +325,140 @@ QUALITY_PRESETS = {
 }
 
 
+# ---------------- Qwen-Image-2.1 ----------------
+
+# 透明背景的「双段式声明」。
+#
+# Qwen-Image-2.1 的 VAE 有第 4 通道（alpha），但它**不会自己想起来用**——
+# 必须在提示词首尾各加一句显式声明，否则输出恒为不透明（实测：不写这段，
+# 提示词里写 "transparent background" 也只是画一块白底）。
+# 这两句是从官方卡片抄来的原话，别改写：换说法会掉回不透明。
+QWEN_ALPHA_HEAD = "This is an RGBA image with transparency. "
+QWEN_ALPHA_TAIL = " The image has alpha channel and the background is transparent."
+
+# Qwen 的负向词：**不能为空**（空了 true_cfg 静默失效，见 _qwen_call）。
+# 内容也别照搬 SD 那套——它不理解 "16-bit pixel art" 这类风格词，
+# 但认得出质量词与常见的构图失败。
+QWEN_NEG = ("blurry, low quality, worst quality, jpeg artifacts, "
+            "watermark, signature, text, deformed, extra limbs, bad anatomy, "
+            "cropped, out of frame")
+
+
+def _qwen_prompt(prompt: str, transparent: bool) -> str:
+    """按是否要透明底拼最终提示词。"""
+    body = (prompt or "").strip().strip(",")
+    if not transparent:
+        return body
+    return f"{QWEN_ALPHA_HEAD}{body}{QWEN_ALPHA_TAIL}"
+
+
+def sanitize_alpha(img: Image.Image) -> Image.Image:
+    """清理 Qwen 透明底的脏 alpha：半透明毛边全部二值化。
+
+    实测透明区常出现 alpha=1~8 的「几乎全透明但不为零」像素，RGB 还是 VAE
+    解出来的噪声色。不清掉的话，任何丢掉 alpha 的下游（转 RGB、别的看图工具）
+    都会看到一片品红/黑底。这里 alpha<16 连同 RGB 一起清零，>240 拉满。
+    """
+    if img.mode != "RGBA":
+        return img
+    arr = np.asarray(img).copy()
+    a = arr[:, :, 3]
+    low = a < 16
+    high = a > 240
+    if not low.any() and not high.any():
+        return img
+    arr[low, 0:3] = 0
+    arr[low, 3] = 0
+    arr[high, 3] = 255
+    return Image.fromarray(arr, "RGBA")
+
+
+def _qwen_call(eng: Engine, *, prompt: str, negative: str, width: int, height: int,
+               steps: int, seed: int, ref_image: Optional[Image.Image] = None,
+               transparent: bool = False, model: str = "qwen-image-2.1",
+               label: str = "w1") -> Image.Image:
+    """Qwen 单次推理。带 ref_image 就走「指令改图」，不带就是文生图。
+
+    两个**必须**记住的点（都是实测踩出来的）：
+      1. `true_cfg_scale` 只有配 `negative_prompt` 才生效——管线里的判据是
+         `do_true_cfg = true_cfg_scale > 1 and has_neg_prompt`，不传负向时
+         CFG 静默失效（cfg=1 与 cfg=4 输出逐字节相同）。
+      2. 尺寸必须是 16 的倍数（VAE 下采样 + patchify）。不是的话 diffusers
+         只 warn 一句就静默改尺寸，最后 meta 里记的尺寸是假的。
+    """
+    pipe = eng.txt2img_pipe(model)
+    w = max(256, int(width) // 16 * 16)
+    h = max(256, int(height) // 16 * 16)
+    full = _qwen_prompt(prompt, transparent)
+    gen = torch.Generator("cuda").manual_seed(int(seed))
+    kw: Dict[str, Any] = dict(
+        prompt=full,
+        negative_prompt=negative or QWEN_NEG,
+        width=w, height=h,
+        num_inference_steps=max(8, min(int(steps), 60)),
+        true_cfg_scale=4.0,
+        generator=gen,
+    )
+    if ref_image is not None:
+        # 参考图统一缩放到目标尺寸：管线对多图原生支持，但单图这条路径
+        # 不走 resize 的话会把原图尺寸带进 latent token 计算
+        kw["image"] = ref_image.convert("RGB").resize((w, h), Image.LANCZOS)
+    out = _infer(eng, pipe, kw, label=label)
+    return sanitize_alpha(out.images[0].convert("RGBA"))
+
+
+def _qwen_txt2img(eng: Engine, *, prompt: str, negative: Optional[str],
+                  width: int, height: int, steps: int, seed: int,
+                  transparent: bool, pixel: int, palette: int, preset: str,
+                  matte: bool, matte_backend: str, denoise: int, clean_iso: int,
+                  model: str, scope: str, tag: str) -> Dict[str, Any]:
+    """Qwen 文生图。
+
+    **透明底时不能用 SD 那套契约后缀**：SPRITE_SUFFIX 里写着 "flat plain
+    background"，跟"背景要透明"是直接矛盾的指令——实测会画出白底/灰底，
+    alpha 通道不激活。所以透明场景换成只保留构图约束的短后缀。
+    """
+    if preset and preset != "none":
+        if transparent:
+            prompt, negative = presets.build(prompt, negative, "none",
+                                             max_tokens=presets.CHUNK_BUDGET)
+            prompt = f"{prompt}, single character, full body, centered" if prompt \
+                else "single character, full body, centered"
+        else:
+            prompt, negative = presets.build(prompt, negative, preset,
+                                             max_tokens=presets.CHUNK_BUDGET)
+    if seed < 0:
+        seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
+    torch.cuda.reset_peak_memory_stats()
+    dt = _timer()
+    img = _qwen_call(eng, prompt=prompt, negative=(negative or ""),
+                     width=width, height=height, steps=steps, seed=seed,
+                     transparent=transparent, model=model, label="w1")
+    seconds = dt()
+    width, height = img.size
+    # 透明底的原图自带 alpha，再跑抠图会把 alpha 当背景重算一遍，纯属浪费
+    raw = img.copy() if (pixel > 1 or palette) else None
+    info: Dict[str, Any] = {}
+    img2, edge, subjects = _postprocess(
+        img, eng, matte=(matte and not transparent), matte_backend=matte_backend,
+        denoise=denoise, pixel=pixel, palette=palette, clean_iso=clean_iso, info=info)
+    return _save(img2, _stamp(tag), "txt2img", {
+        "workflow": "w1", "prompt": _qwen_prompt(prompt, transparent),
+        "negative": negative or QWEN_NEG,
+        "width": width, "height": height, "steps": steps, "cfg": 4.0,
+        "true_cfg": 4.0, "seed": seed,
+        "lora": None, "lora_scale": None,
+        "pixel_block": pixel, "palette": palette, "matte": matte,
+        "matte_backend": matte_backend, "denoise": denoise, "clean_iso": clean_iso,
+        "matte_used": info.get("backend"), "matte_fallback": info.get("fallback"),
+        "edge_touch": edge, "model": model, "clip_skip": None,
+        "subjects": subjects, "transparent": transparent,
+        "hires": None, "distill": None, "refiner": False,
+        "seconds": seconds,
+        "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
+    }, raw=raw, scope=scope)
+
+
 # ---------------- W1 文生图 ----------------
 
 def txt2img(eng: Engine, *, prompt: str, negative: Optional[str] = None,
@@ -337,7 +471,15 @@ def txt2img(eng: Engine, *, prompt: str, negative: Optional[str] = None,
             hires_steps: int = 12, distill: str = "",
             refiner: bool = False, refiner_cfg: float = 6.0,
             refiner_steps: int = 20, refiner_end: float = 0.8,
+            transparent: bool = False,
             scope: str = "", tag: str = "w1") -> Dict[str, Any]:
+    if eng.arch(model) == "qwen21":
+        return _qwen_txt2img(
+            eng, prompt=prompt, negative=negative, width=width, height=height,
+            steps=steps, seed=seed, transparent=transparent, pixel=pixel,
+            palette=palette, preset=preset, matte=matte,
+            matte_backend=matte_backend, denoise=denoise, clean_iso=clean_iso,
+            model=model, scope=scope, tag=tag)
     prompt = _lora_trigger(eng, prompt, lora)
     prompt, negative = presets.build(prompt, negative, preset,
                                     max_tokens=presets.CHUNK_BUDGET)
@@ -448,13 +590,66 @@ def txt2img(eng: Engine, *, prompt: str, negative: Optional[str] = None,
 
 # ---------------- W2 图生图 ----------------
 
+def _qwen_img2img(eng: Engine, *, init_image: str | Path, prompt: str,
+                  negative: Optional[str], steps: int, seed: int,
+                  transparent: bool, preset: Optional[str], pixel: int,
+                  palette: int, matte: bool, matte_backend: str, denoise: int,
+                  clean_iso: int, model: str, scope: str,
+                  tag: str) -> Dict[str, Any]:
+    """Qwen 指令改图：源图当参考，提示词当指令。
+
+    输出尺寸跟源图走（16 的倍数、必要时等比缩放），不额外接受 width/height——
+    改图场景下"我要跟原图一样大"是压倒性预期。
+    """
+    if preset and preset != "none":
+        prompt, negative = presets.build(prompt, negative, preset,
+                                         max_tokens=presets.CHUNK_BUDGET)
+    if scope:
+        src = Path(init_image).resolve()
+        own = scope_dir(scope).resolve()
+        root = PROJECTS_DIR.resolve()
+        if str(src).startswith(str(root)) and not str(src).startswith(str(own)):
+            raise ValueError(
+                f"源图不属于当前项目：{src.name} 在别的项目目录里（项目之间相互隔离）")
+    ref_img = Image.open(init_image).convert("RGBA")
+    if seed < 0:
+        seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
+    torch.cuda.reset_peak_memory_stats()
+    dt = _timer()
+    img = _qwen_call(eng, prompt=prompt, negative=(negative or ""),
+                     width=ref_img.width, height=ref_img.height,
+                     steps=steps, seed=seed, ref_image=ref_img,
+                     transparent=transparent, model=model, label="w2")
+    seconds = dt()
+    raw = img.copy() if (pixel > 1 or palette) else None
+    info: Dict[str, Any] = {}
+    img, edge, subjects = _postprocess(
+        img, eng, matte=(matte and not transparent), matte_backend=matte_backend,
+        denoise=denoise, pixel=pixel, palette=palette, clean_iso=clean_iso, info=info)
+    return _save(img, _stamp(tag), "img2img", {
+        "workflow": "w2", "prompt": _qwen_prompt(prompt, transparent),
+        "negative": negative or QWEN_NEG,
+        "init_image": str(init_image), "strength": None, "steps": steps,
+        "cfg": 4.0, "true_cfg": 4.0, "seed": seed, "lora": None,
+        "lora_scale": None,
+        "pixel_block": pixel, "palette": palette, "matte": matte,
+        "matte_backend": matte_backend, "matte_used": info.get("backend"),
+        "matte_fallback": info.get("fallback"),
+        "edge_touch": edge, "subjects": subjects, "model": model,
+        "clip_skip": None, "transparent": transparent,
+        "seconds": seconds,
+        "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
+    }, raw=raw, scope=scope)
+
+
 def img2img(eng: Engine, *, init_image: str | Path, prompt: str,
             negative: Optional[str] = None, strength: float = 0.55, steps: int = 25,
             cfg: float = 7.0, seed: int = -1, lora: Optional[str] = None,
             lora_scale: float = 0.8, model: str = "sd15", clip_skip: int = 1,
             preset: Optional[str] = None, pixel: int = 0, palette: int = 0,
             matte: bool = False, matte_backend: str = "auto", denoise: int = 1,
-            clean_iso: int = 1, scope: str = "", tag: str = "w2") -> Dict[str, Any]:
+            clean_iso: int = 1, transparent: bool = False,
+            scope: str = "", tag: str = "w2") -> Dict[str, Any]:
     """在图生图里重画原图的**内容**（改姿势细节、换配色、加装饰），构图与轮廓保持。
 
     与 W1 的区别在于「底」是已有图，所以：
@@ -462,7 +657,18 @@ def img2img(eng: Engine, *, init_image: str | Path, prompt: str,
     - `strength` 是重绘幅度：0.3 只动细节，0.6 明显改画风，0.85 基本重画。
     - 后处理（抠图/像素化/量化）与 W1 完全同一套。源图**应当**是未经像素化的
       原图（txt2img 会额外存 `<name>_raw.png`），拿成品精灵回炉会把色块糊掉。
+
+    **Qwen-Image-2.1 走的是「指令改图」**，不是 SD 那种加噪强度：它没有
+    strength 参数，改多少完全由提示词决定。所以同一张源图、同一个提示词，
+    SD 下调 strength 是渐变，Qwen 下是"照指令改"。别拿 strength 去预期它。
     """
+    if eng.arch(model) == "qwen21":
+        return _qwen_img2img(
+            eng, init_image=init_image, prompt=prompt, negative=negative,
+            steps=steps, seed=seed, transparent=transparent, preset=preset,
+            pixel=pixel, palette=palette, matte=matte,
+            matte_backend=matte_backend, denoise=denoise,
+            clean_iso=clean_iso, model=model, scope=scope, tag=tag)
     if preset is not None:
         prompt = _lora_trigger(eng, prompt, lora)
         prompt, negative = presets.build(prompt, negative, preset,
@@ -869,6 +1075,7 @@ def image_to_pixel(eng: Engine, *,
                    steps: int = 28, cfg: float = 8.0, seed: int = -1,
                    model: str = "sdxl-anime", clip_skip: int = 2,
                    matte: bool = True, matte_backend: str = "auto",
+                   transparent: bool = False,
                    scope: str = "", tag: str = "wap") -> Dict[str, Any]:
     """任意图 → 像素画（不限于动漫人物）。**两步走**：先出高质量大图，再做像素化。
 
@@ -919,14 +1126,15 @@ def image_to_pixel(eng: Engine, *,
             raise ValueError(
                 "需要 prompt 或 init_image 之一："
                 "要么描述角色（先出动漫图再转像素），要么给一张现成的图")
-        if model != "sdxl-anime" and "anime" not in model:
+        if model != "sdxl-anime" and "anime" not in model and eng.arch(model) != "qwen21":
             # 用户可能选了别的底模；提示一次但不阻止（有人就想用自己的底模）
             print(f"[warn] 底模 {model} 不是动漫专模，动漫人物质量可能不如 sdxl-anime")
         r = txt2img(eng, prompt=prompt, negative=negative, preset="anime",
                     width=source_width, height=source_height,
                     steps=steps, cfg=cfg, seed=seed, model=model,
                     clip_skip=clip_skip, matte=matte,
-                    matte_backend=matte_backend, tag=f"{tag}_src", scope=scope)
+                    matte_backend=matte_backend, transparent=transparent,
+                    tag=f"{tag}_src", scope=scope)
         src_path = Path(r["file"])
         gen_meta = r["meta"]
         if seed < 0:
@@ -1022,6 +1230,9 @@ def pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | Path,
         prompt = _lora_trigger(eng, prompt, lora)
         prompt, negative = presets.build(prompt, negative, preset,
                                     max_tokens=presets.CHUNK_BUDGET)
+    # 角色图已经给了身份，提示词只是补语义。空串会让 CLIP 的文本条件近乎无效，
+    # 画面容易退化成「一个模糊的人形」——所以给一句中性的兜底，而不是硬要用户写字。
+    prompt = (prompt or "").strip() or "a single character, full body, facing viewer"
 
     ref = Image.open(pose_image).convert("RGB")
     # 1) 动作参考图 → 条件图（骨架或轮廓）
@@ -1148,6 +1359,8 @@ def sprite_swap(eng: Engine, *, sheet_image: str | Path, char_image: str | Path,
         prompt = _lora_trigger(eng, prompt, lora)
         prompt, negative = presets.build(prompt, negative, preset,
                                     max_tokens=presets.CHUNK_BUDGET)
+    # 同 WPC：身份来自角色图（IP-Adapter），描述只是补语义；空串会让文本条件失效
+    prompt = (prompt or "").strip() or "a single character, full body, facing viewer"
 
     sheet = Image.open(sheet_image).convert("RGBA")
     if cols <= 0 or rows <= 0:

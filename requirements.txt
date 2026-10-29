@@ -5,7 +5,9 @@ torch==2.6.0+cu124
 torchvision==0.21.0+cu124
 
 diffusers==0.41.0
-transformers>=5.0
+# 5.21 起才有 Qwen3VLForConditionalGeneration（Qwen-Image-2.1 的文本编码器）。
+# 低于这个版本会在加载 qwen 时 ImportError，其他底模不受影响。
+transformers>=5.21
 accelerate>=1.0
 safetensors
 huggingface_hub

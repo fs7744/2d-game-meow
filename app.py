@@ -286,6 +286,14 @@ def models() -> Dict[str, Any]:
             # （sd15 / sdxl），而底模名可以是任意目录名（`sdxl-anime` 的架构是
             # sdxl）。按名字比会把 `sdxl-anime` 上的 SDXL LoRA 全过滤掉。
             "arch": {m: engine.arch(m) for m in have},
+            # 能力表：前端据此决定哪些开关该显示。
+            #   transparent —— 原生 RGBA（只有 Qwen-Image-2.1 的 VAE 有第 4 通道）；
+            #                  SD 系列要做透明底只能靠抠图，那是另一条路。
+            #   instruction —— 图生图是否走「指令改图」（无 strength 语义）。
+            "caps": {m: {"transparent": engine.arch(m) == "qwen21",
+                         "instruction": engine.arch(m) == "qwen21",
+                         "lora": engine.arch(m) != "qwen21"}
+                     for m in have},
             # 本机有没有 SDXL refiner 权重：没有就别让用户勾那个开关
             "refiner": engine.has_refiner()}
 

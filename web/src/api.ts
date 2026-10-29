@@ -115,6 +115,9 @@ function common(params: GenParams, opts: SubmitOpts) {
     refiner_cfg: params.refinerCfg,
     refiner_steps: params.refinerSteps,
     refiner_end: params.refinerEnd,
+    // 透明背景：只有 Qwen-Image-2.1 原生支持（VAE 第 4 通道）。
+    // 后端会在这个字段为真时给提示词加双段式声明，否则 alpha 不会激活。
+    transparent: params.transparent || undefined,
     // 项目作用域：产物写进 assets/projects/<scope>/，项目之间互不可见
     scope: opts.scope || undefined,
   }
@@ -270,6 +273,9 @@ export function submitToPixel(
     edge_rebuild: params.apEdgeRebuild,
     model: opts.model || 'sdxl-anime',
     matte: params.apMatte,
+    // 原生透明底：Qwen 直接出 alpha，比「生成后再抠」干净得多
+    //（白猫白底这类场景，抠图会把身体一起切掉——实测过）
+    transparent: params.transparent || undefined,
     clip_skip: params.clipSkip,
     seed: params.seed,
     scope: opts.scope || undefined,
@@ -506,11 +512,22 @@ export async function fetchTrain(id: string): Promise<TrainState> {
   return (await r.json()) as TrainState
 }
 
+export type ModelCaps = {
+  /** 是否支持原生透明背景（Qwen-Image-2.1 的 VAE 有第 4 通道） */
+  transparent: boolean
+  /** 图生图是否走「指令改图」语义（没有 strength 渐变） */
+  instruction: boolean
+  /** 是否支持挂 LoRA（Qwen 底模不吃 SD 的 LoRA） */
+  lora: boolean
+}
+
 export type ModelList = {
   available: string[]
   recommend: Record<string, ModelRecommend>
-  /** 底模名 → 架构（sd15 / sdxl）。LoRA 按架构兼容，不能按底模名比 */
+  /** 底模名 → 架构（sd15 / sdxl / qwen21）。LoRA 按架构兼容，不能按底模名比 */
   arch: Record<string, string>
+  /** 底模名 → 能力表（透明底 / 指令改图 / LoRA） */
+  caps: Record<string, ModelCaps>
   /** 本机是否装了 SDXL refiner 权重 */
   refiner: boolean
 }
@@ -519,7 +536,11 @@ export async function fetchModels(): Promise<ModelList> {
   const r = await fetch(`${base}/models`)
   // 后端不可达时退回 SD1.5 单档：宁可少显示，也不要让下拉是空的
   if (!r.ok) {
-    return { available: ['sd15'], recommend: {}, arch: { sd15: 'sd15' }, refiner: false }
+    return {
+      available: ['sd15'], recommend: {}, arch: { sd15: 'sd15' },
+      caps: { sd15: { transparent: false, instruction: false, lora: true } },
+      refiner: false,
+    }
   }
   const j = await r.json()
   const available: string[] = Array.isArray(j.available) ? j.available : ['sd15']
@@ -527,11 +548,19 @@ export async function fetchModels(): Promise<ModelList> {
     j.recommend && typeof j.recommend === 'object' ? j.recommend : {}
   // 老后端没有 arch 字段：按名字兜底（含 xl 就是 sdxl），至少不比以前差
   const arch: Record<string, string> = {}
+  const caps: Record<string, ModelCaps> = {}
   for (const m of available) {
     arch[m] = (j.arch && j.arch[m]) || (/xl/i.test(m) ? 'sdxl' : 'sd15')
+    // 老后端没有 caps：按架构推。qwen 的能力是固定的，推出来的结果一致
+    const c = (j.caps && j.caps[m]) || {}
+    caps[m] = {
+      transparent: c.transparent ?? arch[m] === 'qwen21',
+      instruction: c.instruction ?? arch[m] === 'qwen21',
+      lora: c.lora ?? arch[m] !== 'qwen21',
+    }
   }
   const refiner = j.refiner === true
-  return { available, recommend, arch, refiner }
+  return { available, recommend, arch, caps, refiner }
 }
 
 /**

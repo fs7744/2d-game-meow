@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PoseDir } from '../api'
 import type { GenNode, LoraInfo, Viewport } from '../types'
-import GenNodeCard, { NODE_W, type NodePatch } from '../nodes/GenNodeCard'
+import GenNodeCard, { NODE_W, PORT_CHAR_Y, PORT_SRC_Y, type NodePatch } from '../nodes/GenNodeCard'
+
+/** 连线指向节点的哪个输入：source（源图/动作参考）还是 charSource（角色图） */
+export type LinkField = 'source' | 'char'
 
 type Props = {
   nodes: GenNode[]
@@ -14,6 +17,8 @@ type Props = {
   poseDirs?: PoseDir[]
   /** 本机是否装了 SDXL refiner 权重 */
   hasRefiner?: boolean
+  /** 当前底模是否支持原生透明背景 */
+  canTransparent?: boolean
   selectedId: string | null
   viewport: Viewport
   setViewport: (v: Viewport | ((prev: Viewport) => Viewport)) => void
@@ -28,7 +33,10 @@ type Props = {
   onDropType: (type: string, world: { x: number; y: number }) => void
   onSpawnImg2Img: (id: string) => void
   onDropFiles: (files: File[], world: { x: number; y: number }, targetId?: string) => void
-  onConnect: (from: string, to: string) => void
+  /** 连线落点：field 决定接到源图还是角色图 */
+  onConnect: (from: string, to: string, field: LinkField) => void
+  /** 断开一条连线（点连线中点的 ×，或右键） */
+  onDisconnect: (to: string, field: LinkField) => void
   onPreview: (url: string, name: string) => void
   projectId: string
 }
@@ -43,6 +51,7 @@ export default function Canvas({
   maxCandidates,
   poseDirs,
   hasRefiner,
+  canTransparent,
   selectedId,
   viewport,
   setViewport,
@@ -58,6 +67,7 @@ export default function Canvas({
   onSpawnImg2Img,
   onDropFiles,
   onConnect,
+  onDisconnect,
   onPreview,
   projectId,
 }: Props) {
@@ -159,16 +169,77 @@ export default function Canvas({
     }
   }
 
-  // 图生图的源候选：出过图的节点 + 图片节点（它们没有 job，路径在 image 上）
+  /**
+   * 可以当源图的节点：出过图的节点 + 图片节点（它们没有 job，路径在 image 上）。
+   *
+   * **已连上但还没出图的上游也要列进来**：连线只记 nodeId，节点可以先连后生成。
+   * 如果下拉只列出"已有产物"的节点，先连好的那一路会显示成「未选择源图」——
+   * 连线和下拉互相打脸，用户会以为连线没生效（实测复现）。
+   */
+  const referencedIds = new Set(
+    nodes.flatMap((n) => [n.source?.nodeId, n.charSource?.nodeId]).filter(Boolean) as string[],
+  )
   const sourceOptions = nodes
-    .filter((n) => n.job?.path || n.job?.raw || (n.kind === 'image' && n.image?.path))
-    .map((n) => ({
-      id: n.id,
-      label:
-        n.kind === 'image'
-          ? `图片 · ${n.image?.path.split(/[\\/]/).pop() || n.id}`
-          : `${n.kind === 'img2img' ? '图生图' : '图生成'} · ${n.params.prompt.slice(0, 20) || n.id}`,
-    }))
+    .filter((n) => n.job?.path || n.job?.raw || (n.kind === 'image' && n.image?.path)
+      || referencedIds.has(n.id))
+    .map((n) => {
+      const kindLabel = n.kind === 'image' ? '图片' : n.kind === 'gen' ? '图生成' : '图'
+      const name = n.kind === 'image'
+        ? n.image?.path.split(/[\\/]/).pop() || n.id
+        : n.params.prompt.slice(0, 20) || n.id
+      // 还没出图要标出来，否则用户以为连上就能直接用
+      const pending = !(n.job?.path || n.job?.raw || n.image?.path) ? '（未生成）' : ''
+      return { id: n.id, label: `${kindLabel} · ${name}${pending}` }
+    })
+
+  /**
+   * 当前视口/回调的最新值，供 startLink 里挂的原生监听读取。
+   *
+   * 为什么不直接在 effect 里挂：`setLinking(true)` 之后要等 React 渲染完才跑 effect，
+   * 这中间有一段窗口。自动化拖拽（以及手速极快的人）会在这段窗口里就松手，
+   * pointerup 落在监听挂上之前 = 连线静默丢失。改成 pointerdown 时**同步**挂监听，
+   * 用 ref 读最新值避开闭包过期。
+   */
+  const vpRef = useRef(viewport)
+  vpRef.current = viewport
+  const connectRef = useRef(onConnect)
+  connectRef.current = onConnect
+
+  const endLink = useCallback((e: PointerEvent) => {
+    const from = linkFrom.current
+    linkFrom.current = null
+    hoverRef.current = null
+    setHoverId(null)
+    setLinking(false)
+    setLinkTip(null)
+    if (!from) return
+    /**
+     * 落点判定用 elementFromPoint，而不是 hover 状态。
+     *
+     * hover 只能知道"在哪个节点上"，说不出"落在哪个输入端口"——而角色迁移 /
+     * 序列帧替换有两个图片输入（源图 = 动作参考，角色图 = 身份），光靠节点
+     * 级 hover 永远只会连到 source，角色图那一路根本连不上。端口圆点带
+     * data-port，落点直接在它身上就能拿到 field。
+     */
+    const el = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null
+    const nodeEl = el?.closest('[data-node-id]') as HTMLElement | null
+    const to = nodeEl?.dataset.nodeId
+    if (!to) return
+    const portEl = el?.closest('[data-port]') as HTMLElement | null
+    const field = (portEl?.dataset.port as LinkField) || 'source'
+    connectRef.current(from, to, field)
+  }, [])
+
+  const moveLink = useCallback((e: PointerEvent) => {
+    const v = vpRef.current
+    const el = wrapRef.current
+    if (!el) return
+    const rect = el.getBoundingClientRect()
+    setLinkTip({
+      x: (e.clientX - rect.left - v.x) / v.z,
+      y: (e.clientY - rect.top - v.y) / v.z,
+    })
+  }, [])
 
   const startLink = useCallback((id: string) => {
     linkFrom.current = id
@@ -176,31 +247,18 @@ export default function Canvas({
     setHoverId(null)
     setLinking(true)
     setLinkTip({ x: 0, y: 0 })
-  }, [])
+    // 同步挂：不能等 effect，否则快速松手会丢
+    window.addEventListener('pointermove', moveLink)
+    window.addEventListener('pointerup', endLink)
+    window.addEventListener('pointercancel', endLink)
+  }, [moveLink, endLink])
 
-  useEffect(() => {
-    if (!linking) return
-    const move = (e: PointerEvent) => {
-      const w = toWorld(e.clientX, e.clientY)
-      setLinkTip({ x: w.x, y: w.y })
-    }
-    const up = () => {
-      const from = linkFrom.current
-      const to = hoverRef.current
-      linkFrom.current = null
-      hoverRef.current = null
-      setHoverId(null)
-      setLinking(false)
-      setLinkTip(null)
-      if (from && to) onConnect(from, to)
-    }
-    window.addEventListener('pointermove', move)
-    window.addEventListener('pointerup', up)
-    return () => {
-      window.removeEventListener('pointermove', move)
-      window.removeEventListener('pointerup', up)
-    }
-  }, [linking, toWorld, onConnect])
+  useEffect(() => () => {
+    // 组件卸载时兜底摘掉，避免监听泄漏到 window 上
+    window.removeEventListener('pointermove', moveLink)
+    window.removeEventListener('pointerup', endLink)
+    window.removeEventListener('pointercancel', endLink)
+  }, [moveLink, endLink])
 
   const setHover = useCallback((id: string | null) => {
     hoverRef.current = id
@@ -211,23 +269,67 @@ export default function Canvas({
     dragOverRef.current = id
   }, [])
 
-  // 连线几何：两端都锚在卡头（y+13），这样线永远贴着卡片顶部，不会穿过内容
+  // 连线几何：两端锚在卡片左/右边缘，线贴着卡片顶部，不会穿过内容
   // 节点宽度现在可拖：连线端点必须跟着实际宽度走，否则线会插进卡片中间
   const widthOf = (n: GenNode) =>
     (n.kind === 'image' ? n.image?.w ?? NODE_W : n.w ?? NODE_W)
+  /**
+   * 输入端口相对节点顶部的实际 y。
+   *
+   * 为什么不用常量：端口挂在「源图区 / 角色图区」上，而这两个框在各类节点里的
+   * 纵向位置并不一致（转像素节点在源图区上面多一行说明，序列帧替换有两块输入框）。
+   * 写死偏移的后果是线端点和圆圈差十几像素，看起来像画错了。这里从 DOM 实测，
+   * 只在节点集合/尺寸变化时重测。
+   */
+  const [portY, setPortY] = useState<Record<string, number>>({})
+  const nodesKey = nodes
+    .map((n) => `${n.id}:${n.kind}:${n.w ?? ''}:${n.h ?? ''}:${n.view}`)
+    .join('|')
+  useEffect(() => {
+    const el = wrapRef.current
+    if (!el) return
+    const next: Record<string, number> = {}
+    el.querySelectorAll<HTMLElement>('[data-node-id]').forEach((nodeEl) => {
+      const id = nodeEl.dataset.nodeId!
+      const top = nodeEl.getBoundingClientRect().top
+      nodeEl.querySelectorAll<HTMLElement>('[data-port]').forEach((p) => {
+        const r = p.getBoundingClientRect()
+        // 用屏幕坐标差 → 世界坐标：除以缩放比
+        next[`${id}:${p.dataset.port}`] = (r.top + r.height / 2 - top) / viewport.z
+      })
+    })
+    setPortY(next)
+  }, [nodesKey, viewport.z])
+
+  const portAt = (n: GenNode, field: LinkField) =>
+    portY[`${n.id}:${field === 'char' ? 'char' : 'source'}`] ??
+    (field === 'char' ? PORT_CHAR_Y : PORT_SRC_Y)
   const edgePath = (from: GenNode, toX: number, toY: number) => {
     const x1 = from.x + widthOf(from)
-    const y1 = from.y + 13
+    const y1 = from.y + PORT_SRC_Y
     return `M ${x1} ${y1} C ${x1 + 70} ${y1}, ${toX - 70} ${toY}, ${toX} ${toY}`
   }
-  const edges = nodes
-    .filter((n) => n.source?.nodeId)
-    .map((n) => {
-      const from = nodes.find((x) => x.id === n.source!.nodeId)
-      if (!from) return null
-      return { id: n.id, d: edgePath(from, n.x, n.y + 13) }
-    })
-    .filter((e): e is { id: string; d: string } => e !== null)
+  type Edge = { key: string; to: string; field: LinkField; d: string; mx: number; my: number }
+  const edges: Edge[] = []
+  for (const n of nodes) {
+    // 一个节点可能有两条入边（源图 + 角色图），key 必须带 field 才不互相覆盖
+    const targets: [LinkField, string | undefined][] = [
+      ['source', n.source?.nodeId],
+      ['char', n.charSource?.nodeId],
+    ]
+    for (const [field, fromId] of targets) {
+      if (!fromId) continue
+      const from = nodes.find((x) => x.id === fromId)
+      if (!from) continue
+      const ty = n.y + portAt(n, field)
+      edges.push({ key: `${n.id}:${field}`, to: n.id, field,
+        d: edgePath(from, n.x, ty),
+        // 断开按钮贴在端口外侧 26px，而不是贝塞尔中点：
+        // 中点经常正好压在节点身上（上下堆叠时尤其明显），会挡住参数控件。
+        // 贴在端口旁边还有语义——它管的就是这一路输入。
+        mx: n.x - 26, my: ty })
+    }
+  }
 
   // 可以当新背景用的节点：图片节点（拖进来的本地图）或任何已出图的节点
   const bgOptions = nodes
@@ -286,8 +388,21 @@ export default function Canvas({
       >
         <div className="origin-mark" style={{ left: 0, top: 0 }} title="画布原点 (0,0)" />
         <svg className="links">
+          {/* 箭头：一条线上只有一个终点，用 marker 而不是手画三角形——
+              手画要算切线角度，曲线一变就得跟着改，迟早对不上 */}
+          <defs>
+            <marker id="link-arrow" viewBox="0 0 10 10" refX="9" refY="5"
+              markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" className="link-arrow-head" />
+            </marker>
+            <marker id="link-arrow-char" viewBox="0 0 10 10" refX="9" refY="5"
+              markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" className="link-arrow-head char" />
+            </marker>
+          </defs>
           {edges.map((e) => (
-            <path key={e.id} className="link" d={e.d} />
+            <path key={e.key} className={`link ${e.field}`} d={e.d}
+              markerEnd={`url(#link-arrow${e.field === 'char' ? '-char' : ''})`} />
           ))}
           {linking && linkTip && linkFrom.current && (() => {
             const from = nodes.find((x) => x.id === linkFrom.current)
@@ -295,6 +410,24 @@ export default function Canvas({
             return <path className="link pending" d={edgePath(from, linkTip.x, linkTip.y)} />
           })()}
         </svg>
+        {/* 断开按钮：连线本身是 pointer-events:none 的细线，直接点很难命中，
+            所以在端口外侧放真正的按钮。只在悬停/选中该节点时显示——
+            常显会让满屏都是 ✕，反而看不清连线本身 */}
+        {edges.filter((e) => hoverId === e.to || selectedId === e.to).map((e) => (
+          <button
+            key={`x-${e.key}`}
+            className="link-cut"
+            style={{ left: e.mx, top: e.my }}
+            title={`断开这条连线（${e.field === 'char' ? '角色图' : '源图'}）`}
+            onPointerDown={(ev) => ev.stopPropagation()}
+            onClick={(ev) => {
+              ev.stopPropagation()
+              onDisconnect(e.to, e.field)
+            }}
+          >
+            ✕
+          </button>
+        ))}
         {nodes.map((n) => (
           <GenNodeCard
             key={n.id}
@@ -314,6 +447,7 @@ export default function Canvas({
             maxCandidates={maxCandidates}
             poseDirs={poseDirs}
             hasRefiner={hasRefiner}
+            canTransparent={canTransparent}
             onSpawnImg2Img={() => onSpawnImg2Img(n.id)}
             sourceNode={nodes.find((x) => x.id === n.source?.nodeId)}
             sourceOptions={sourceOptions}
@@ -347,7 +481,8 @@ export default function Canvas({
         </div>
       )}
       <div className="canvas-hint" data-bg="1">
-        <b>拖空白</b> 平移　<b>滚轮</b> 缩放　<b>Delete</b> 删除　<b>Ctrl+D</b> 复制
+        <b>拖空白</b> 平移　<b>滚轮</b> 缩放　<b>Delete</b> 删除　<b>Ctrl+D</b> 复制　
+        <b>连线中点 ✕</b> 断开
       </div>
       <div className="node-width-hint" style={{ display: 'none' }}>
         {NODE_W}

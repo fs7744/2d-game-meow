@@ -36,7 +36,8 @@
 | FastAPI 服务（单卡串行队列 + 资产索引） | 已完成 |
 | 抠图 / 去白边（纯色连通域 + u2net 语义分割 + 抠空自动回退） | 已完成，实测通过 |
 | 游戏动效导出（GIF/APNG + Godot 4 + 通用 JSON） | 已完成，实测通过 |
-| **底模自选（SD1.5 / SDXL 1.0）** | 已完成，实测通过 |
+| **底模自选（SD1.5 / SDXL 1.0 / Qwen-Image-2.1）** | 已完成，实测通过 |
+| **Qwen 原生透明底（RGBA）+ 指令改图** | 已完成，实测通过（alpha 66~68%，改图能精确执行） |
 | LoRA 选装（Civitai 精选 + 注册表 + 节点下拉） | 已完成，实测通过 |
 | **LoRA 训练**（自包含训练循环 + CLI + 面板） | 已完成，实测通过 |
 | 姿态提取（YOLOX 检测 + RTMPose 回归 → OpenPose 骨架） | 已完成，实测通过 |
@@ -329,6 +330,76 @@ SDXL 三条 ControlNet 与 IP-Adapter 的实测（1024²）：
 | W4 + Tile 高清放大（1 帧） | 32s | **21.94GB**（接近 24GB 上限，别再叠加别的） |
 
 `poseswap` 新增 `controlnet="openpose|canny|tile"` 参数，三个底模无关地通用。
+
+### Qwen-Image-2.1：第三个底模（原生透明底 / 指令改图）
+
+```bash
+# 43GB：transformer 14G（另有 6.7G fp8 缓存）+ text_encoder 22G + vae 1.3G
+# 放 models/checkpoints/qwen-image-2.1/，需要 diffusers≥0.41 + transformers≥5.21
+```
+
+它不是"更大的 SD"：**7B 单流 DiT + Qwen3-VL 视觉语言编码器**，一个权重同时干
+文生图 / 指令改图 / 原生 RGBA 三件事。接入后它出现在「底模」下拉里，
+`arch` 是 `qwen21`，与 SD 系列**不共用任何组件**（LoRA、ControlNet、Refiner 全部不通用）。
+
+| 项 | 实测值（RTX 4090 24G） |
+|---|---|
+| 文生图 768² / 20 步 | **24~50s**，峰值 **16.4GB** |
+| 原生透明底 | alpha 占 66~68%，边缘无脏毛边 |
+| 指令改图（图生图） | 24~28s，"把红披风改成蓝的"能精确执行 |
+| 像素风 | **直接出像样的像素画**，不需要像素 LoRA |
+
+**几个必须知道的坑**（都是实测踩出来的）：
+
+1. **`true_cfg_scale` 要配负向词才有用**。管线的判据是
+   `do_true_cfg = true_cfg_scale > 1 and has_neg_prompt`，不传 `negative_prompt`
+   时 CFG **静默失效**（cfg=1 与 cfg=4 输出逐字节相同）。代码里恒定传 `QWEN_NEG`。
+2. **透明底要双段式声明**。VAE 有第 4 通道，但模型不会自己想起来用——
+   提示词首尾必须各加一句官方原话：
+   ```
+   This is an RGBA image with transparency. <正文> The image has alpha channel and the background is transparent.
+   ```
+   改写说法会掉回不透明。而且**不能同时用 SD 的像素契约后缀**——
+   `SPRITE_SUFFIX` 里的 "flat plain background" 和"背景透明"直接矛盾，
+   实测会画出白底。透明场景走短后缀（只留构图约束）。
+3. **尺寸必须是 16 的倍数**，否则 diffusers 只 warn 一句就静默改尺寸。
+4. **本机 32G 内存装不下全量 bf16**（13.3G + 16.3G 一次性读会 swap）。
+   必须分组件加载：transformer 走预量化 fp8 缓存（6.7G），text_encoder 靠
+   `enable_model_cpu_offload` 在编码后搬出显存。torchao 的 fp8 量化在本机
+   不可用（要求 torch≥2.11，本机 2.6），所以 text_encoder 保持 bf16。
+5. **图生图没有 `strength`**。SD 是"加噪强度"，Qwen 是"照指令改"——
+   同一张源图，SD 调 strength 是渐变，Qwen 下改多少全看提示词怎么写。
+
+`transparent` 开关同时出现在「图生成」和「转像素」节点上，只有 Qwen 底模可勾
+（`/models` 的 `caps.transparent`）。开它之后「抠图」会自动跳过——
+重复处理反而把 alpha 弄脏，白猫白底这类场景分割模型会把身体一起切掉。
+
+### 调研：MultiAngle-T8 能不能用于角色迁移 / 序列帧替换
+
+结论：**姿态迁移部分不能直接用，只有 AnyAngle LoRA 值得单独拿来做多视角立绘。**
+
+[Comfyui-Qwen-Image-2.1-MultiAngle-T8](https://github.com/T8mars/Comfyui-Qwen-Image-2.1-MultiAngle-T8)
+是个 ComfyUI 节点（不是 diffusers 库），核心是「三维相机重打光」：用 TripoSplat
+把原图重建/用 MakeHuman 人偶摆姿势，在真实三维相机里取景，导出 POSE/深度/Canny
+引导图，再喂给 Qwen Image 2.1 生成新机位图。
+
+不能用的原因（按重要性）：
+
+1. **没有 ControlNet**。作者自己写明"底模把结构图作为**图像参考**理解，
+   没有独立的 ControlNet 控制端口；遵循程度取决于底模与提示词，不能保证
+   像专用控制模型一样严格"。我们的 W4/WPC 是 ControlNet 硬约束
+   （`controlnet_conditioning_scale` 直接乘在条件图上），换成软引导会掉一大截。
+2. **实测精度不够产线**。它自己公布的主矩阵：32 张里只有 **7 张基本符合、
+   2 张部分符合**，九人场景会增人/丢动作。序列帧要求"帧数和动作逐一对应"，
+   这个合格率直接判死。
+3. **它是 ComfyUI 生态**（依赖 ComfyUI 0.36 原生节点 + 浏览器 WebGL），
+   我们是 diffusers 进程内推理，移植等于重写。
+
+值得单独拿的只有一个：**AnyAngle LoRA**（`QI2.1_AnyAngle.safetensors`，
+出自 `lilylilith/QI_2.1_AnyAngle`）。它是给 Qwen Image 2.1 做**相机方位控制**的
+LoRA，对我们的"同一角色出正面/侧面/背面三视图"有用——这条路不需要 3D 重建，
+直接 Qwen + LoRA + 角度提示词即可，可以之后单独接一个"多视角立绘"节点。
+优先级不高：现有 W4 姿态序列 + IP-Adapter 已经能覆盖精灵帧的主要需求。
 
 ## 挑帧：批量候选 + 质量闸门（W4）
 

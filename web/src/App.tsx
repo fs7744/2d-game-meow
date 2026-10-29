@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import Canvas from './canvas/Canvas'
+import Canvas, { type LinkField } from './canvas/Canvas'
 import Sidebar from './components/Sidebar'
 import TrainPanel from './components/TrainPanel'
 import { hasPrompt, loadPrompts, removePrompt, savePrompts, togglePrompt } from './store/prompts'
@@ -16,6 +16,7 @@ import {
 import ConfirmDialog from './components/ConfirmDialog'
 import Lightbox from './components/Lightbox'
 import type { PoseDir } from './api'
+import type { ModelCaps } from './api'
 import type {
   FavoritePrompt, GenNode, GenParams, LoraInfo, ModelRecommend, NodeImage, NodeKind,
   NodeSource, Viewport,
@@ -130,6 +131,9 @@ const DEFAULT_PARAMS: GenParams = {
   refinerCfg: 6,
   refinerSteps: 20,
   refinerEnd: 0.8,
+  // 透明底默认关：只有 Qwen 底模支持，SD 系列开了会被后端忽略，
+  // 默认打开会让用户误以为选 SD 时也能出透明图
+  transparent: false,
 }
 
 let seq = 0
@@ -232,6 +236,9 @@ export default function App() {
   const [scanning, setScanning] = useState(false)
   // 本机有没有 SDXL refiner 权重（后端 /models 给的）
   const [hasRefiner, setHasRefiner] = useState(false)
+  // 底模能力表（透明底 / 指令改图 / LoRA）。当前底模支不支持透明底由它决定，
+  // 不能按名字判断——底模名可以是任意目录名。
+  const [caps, setCaps] = useState<Record<string, ModelCaps>>({})
   const [matteBackend, setMatteBackend] = useState('auto')
   const [uploadMsg, setUploadMsg] = useState('')
   const [notice, setNotice] = useState('')          // 底模切换之类的一次性提示
@@ -282,6 +289,7 @@ export default function App() {
       setRecommend(m.recommend)
       setArch(m.arch)
       setHasRefiner(m.refiner)
+      setCaps(m.caps)
       // **有 SDXL 就默认用它**：精灵场景实测 SDXL@768 可交付率 92% / 贴边 0%，
       // 而 SD1.5@768 是 33% / 67%——差距不在速度（同分辨率只慢约 40%），
       // 全在构图。让所有人默认踩在差的那个上，是不合理的默认值。
@@ -550,14 +558,32 @@ export default function App() {
     [patchNode, currentId],
   )
 
-  /** 连线：把 from 接到 to（图生图节点）上。 */
-  const onConnect = useCallback((from: string, to: string) => {
+  /**
+   * 连线：把 from 接到 to 的某个输入上。
+   *
+   * field 区分两个图片输入：
+   *   source     —— 源图 / 动作参考（图生图、抠图、局部重绘…都用它）
+   *   char       —— 角色图（身份来源），只有角色迁移 / 序列帧替换有
+   * 落点由 Canvas 按端口 data-port 判定，用户拖到哪个圆点就接哪一路。
+   */
+  const onConnect = useCallback((from: string, to: string, field: LinkField) => {
     const target = nodesRef.current.find((n) => n.id === to)
+    if (!target || target.id === from) return
+    if (field === 'char') {
+      // 只有这两类节点有角色图输入；别的节点拖过来静默忽略，别乱塞字段
+      if (!['poseclone', 'spriteswap'].includes(target.kind)) return
+      patchNode(to, { charSource: { nodeId: from } })
+      return
+    }
     // 能接源的节点：图生图（要底图）、抠图与局部重绘（要源图）；文生图没有「底」这回事
-    if (!target || !['img2img', 'bg', 'inpaint', 'airepaint', 'pixelify', 'poseclone',
+    if (!['img2img', 'bg', 'inpaint', 'airepaint', 'pixelify', 'poseclone',
       'spriteswap', 'topixel'].includes(target.kind)) return
-    if (target.id === from) return
     patchNode(to, { source: { nodeId: from } })
+  }, [patchNode])
+
+  /** 断开一条入边：只清对应字段，不影响另一路 */
+  const onDisconnect = useCallback((to: string, field: LinkField) => {
+    patchNode(to, field === 'char' ? { charSource: undefined } : { source: undefined })
   }, [patchNode])
 
   const duplicateNode = useCallback((id: string) => {
@@ -924,6 +950,7 @@ export default function App() {
           maxCandidates={recommend[model]?.max_candidates}
           poseDirs={poseDirs}
           hasRefiner={hasRefiner}
+          canTransparent={!!caps[model]?.transparent}
           selectedId={selectedId}
           viewport={viewport}
           setViewport={setViewport}
@@ -939,6 +966,7 @@ export default function App() {
           onSpawnImg2Img={spawnImg2Img}
           onDropFiles={(files, world, targetId) => void handleFiles(files, world, targetId)}
           onConnect={onConnect}
+          onDisconnect={onDisconnect}
           onPreview={(url, name) => setPreview({ url, name })}
           projectId={currentId}
         />

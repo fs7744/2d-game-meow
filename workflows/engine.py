@@ -74,6 +74,42 @@ CN_SDXL_DIRS = {
 IPADAPTER_SDXL_WEIGHT = "ipadapter/models/ip-adapter_sdxl_vit-h.safetensors"
 
 
+def _fp8_linear_cls():
+    """fp8(E4M3) 权重量化 Linear：权重存 fp8 buffer，前向时反量化成 bf16 再算。
+
+    **为什么权重不直接放 `weight`**：diffusers 到处用「取第一个 Parameter 的
+    dtype」推断计算精度，时间步张量（0~1000）会被转成 fp8，而 e4m3 上限只有
+    448 —— 一转就溢出成 inf/NaN，采样直接崩。所以布局是「真数据放 buffer
+    `w_fp8`，`weight` 置成 0 字节 bf16 Parameter 专供 dtype 探针」。
+
+    类只建一次（闭包里带 torch，模块顶层 import 会拖慢 CLI 启动）。
+    """
+    cached = getattr(_fp8_linear_cls, "_cls", None)
+    if cached is not None:
+        return cached
+    import torch.nn.functional as F
+
+    class _FP8Linear(torch.nn.Linear):
+        def forward(self, x):  # type: ignore[override]
+            w_fp8 = getattr(self, "w_fp8", None)
+            if w_fp8 is None:                 # 理论上不会走到
+                return F.linear(x, self.weight.to(x.dtype), self.bias)
+            dt = x.dtype if x.dtype in (torch.bfloat16, torch.float16) else torch.bfloat16
+            if x.dtype != dt:
+                x = x.to(dt)
+            w = w_fp8.to(device=x.device, dtype=dt)
+            sc = getattr(self, "w_scale", None)
+            if sc is not None:
+                w = w * sc.to(device=w.device, dtype=dt)[:, None]
+            b = self.bias
+            if b is not None:
+                b = b.to(device=w.device, dtype=dt)
+            return F.linear(x, w, b)
+
+    _fp8_linear_cls._cls = _FP8Linear
+    return _FP8Linear
+
+
 def _norm_lora_items(lora_path, scale) -> list[tuple[Path, float]]:
     """把「单个 / 列表」统一成 [(路径, 强度)]。
 
@@ -238,6 +274,15 @@ class Engine:
         # latent 再精修），不是文生图底模。留在下拉里会让用户选中后跑出废图。
         if "Img2Img" in cls:
             return False
+        # Qwen-Image 没有 unet/，主干是 transformer/。不特判的话下面读 unet
+        # 会走 except 分支返回 True —— 碰巧"能用"，但 `in_channels` 那层保护
+        # 就失效了（将来放个 9 通道的 qwen inpaint 进来会被误放行）。
+        if "Qwen" in cls and "Transformer" in cls:
+            try:
+                tr = json.loads((path / "transformer" / "config.json").read_text("utf-8"))
+                return int(tr.get("in_channels", 64)) == 64
+            except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                return False
         try:
             unet = json.loads((path / "unet" / "config.json").read_text("utf-8"))
             return int(unet.get("in_channels", 4)) == 4
@@ -245,7 +290,7 @@ class Engine:
             return True                   # 读不到就按可用处理，别误伤正常权重
 
     def _arch_of(self, path: Path) -> str:
-        """按 model_index.json 的 _class_name 判定架构（sd15 / sdxl）。
+        """按 model_index.json 的 _class_name 判定架构（sd15 / sdxl / qwen21）。
 
         不能靠目录名：用户可能把 SDXL 微调放进 `checkpoints/my_style/`。
         """
@@ -260,12 +305,18 @@ class Engine:
             cls = str(idx.get("_class_name") or "")
         except (OSError, json.JSONDecodeError):
             cls = ""
-        arch = "sdxl" if ("XL" in cls or "xl" in cls) else "sd15"
+        # 顺序重要：QwenImage21Pipeline 不含 "XL"，先判它，否则会被当 sd15
+        if "QwenImage" in cls:
+            arch = "qwen21"
+        elif "XL" in cls or "xl" in cls:
+            arch = "sdxl"
+        else:
+            arch = "sd15"
         cache[key] = arch
         return arch
 
     def arch(self, model: str = DEFAULT_MODEL) -> str:
-        """'sd15' | 'sdxl'。所有"要不要走 XL 管线"的判断都该用它，而不是比字符串。"""
+        """'sd15' | 'sdxl' | 'qwen21'。所有"走哪条管线"的判断都该用它。"""
         return self._arch_of(self._check_model(model))
 
     def is_xl(self, model: str = DEFAULT_MODEL) -> bool:
@@ -416,6 +467,11 @@ class Engine:
         if key not in self._cache:
             t0 = time.perf_counter()
             p = self._check_model(model)
+            if self.arch(model) == "qwen21":
+                pipe = self._load_qwen21(p)
+                self._cache[key] = pipe
+                log.info("%s 加载 %.1fs", key, time.perf_counter() - t0)
+                return pipe
             xl = self.is_xl(model)
             cls = StableDiffusionXLPipeline if xl else StableDiffusionPipeline
             pipe = cls.from_pretrained(p, variant=detect_variant(p), **self._base_kwargs())
@@ -425,6 +481,96 @@ class Engine:
         pipe = self._get(key)
         self._release_ipa_if_needed(pipe)
         return pipe
+
+    # ---------- Qwen-Image-2.1 ----------
+
+    def _load_qwen21(self, root: Path):
+        """Qwen-Image-2.1：单流 DiT（7B）+ Qwen3-VL 编码器，一个权重干三件事。
+
+        文生图 / 指令改图（给 image 即走编辑路径）/ 原生 RGBA 透明输出。
+        与 SD 系列不共用任何组件，所以是独立管线，不进共享 UNet 池。
+
+        **必须分组件加载**（实测本机 32G 内存）：
+        transformer 13.3G bf16 + text_encoder 16.3G bf16 一次性 from_pretrained
+        会把内存打满（连 43G 目录一起读会直接 swap）。这里 transformer 走
+        预量化 fp8 缓存（6.7G，项目里已带），text_encoder 保持 bf16 靠
+        cpu offload 在编码后搬出显存。
+
+        torchao 的 fp8 量化在本机不可用（要求 torch≥2.11，本机 2.6），
+        所以 text_encoder 不做量化 —— 换来的是峰值 16.4G 仍能进 24G 卡。
+        """
+        from diffusers import QwenImage21Pipeline
+        from transformers import Qwen3VLForConditionalGeneration
+
+        tor = self._load_qwen_transformer(root)
+        te = Qwen3VLForConditionalGeneration.from_pretrained(
+            str(root / "text_encoder"), torch_dtype=torch.bfloat16,
+            local_files_only=True)
+        pipe = QwenImage21Pipeline.from_pretrained(
+            str(root), transformer=tor, text_encoder=te,
+            torch_dtype=torch.bfloat16, local_files_only=True)
+        # 峰值 16.4G 是靠 offload 拿到的：不 offload 时 6.6G(transformer fp8)
+        # + 16.3G(text_encoder) 同时驻留会 OOM。代价是每张多几秒搬运，
+        # 但 24G 卡上没有别的选择。
+        pipe.enable_model_cpu_offload()
+        pipe.set_progress_bar_config(disable=True)
+        return pipe
+
+    def _load_qwen_transformer(self, root: Path):
+        """加载 transformer：优先 fp8 缓存（6.7G），没有就 bf16 完整加载（13.3G）。
+
+        fp8 缓存的键布局是 `w_fp8` + `w_scale` 两个 buffer 顶替 bf16 的 `weight`
+        （weight 留一个 0 长度 bf16 Parameter 专供 diffusers 的 dtype 探针）。
+        不能走 load_state_dict —— 它对 assign=True 仍做形状校验，0 长度占位会
+        报一屏 size mismatch，所以逐键直接挂到模块上。
+        """
+        from safetensors.torch import load_file
+
+        fp8_dir = root / "transformer-fp8"
+        use_fp8 = (fp8_dir / "model.safetensors").is_file() and \
+            os.environ.get("MEOW_QWEN_FP8", "1") != "0"
+        if not use_fp8:
+            from diffusers import QwenImage21Transformer2DModel
+            t = QwenImage21Transformer2DModel.from_pretrained(
+                str(root / "transformer"), torch_dtype=torch.bfloat16,
+                local_files_only=True)
+            return t.eval()
+
+        from accelerate import init_empty_weights
+        from diffusers import QwenImage21Transformer2DModel
+
+        cfg = QwenImage21Transformer2DModel.load_config(str(fp8_dir / "config.json"))
+        with init_empty_weights():
+            model = QwenImage21Transformer2DModel.from_config(cfg)
+
+        sd = load_file(str(fp8_dir / "model.safetensors"), device="cpu")
+        linear_keys = sorted({k[: -len(".w_fp8")] for k in sd if k.endswith(".w_fp8")})
+        dev = "cuda" if torch.cuda.is_available() else "cpu"
+        for t in linear_keys:
+            model.get_submodule(t).weight = torch.nn.Parameter(
+                torch.empty(0, dtype=torch.bfloat16, device=dev), requires_grad=False)
+        for k, v in sd.items():
+            if k.endswith(".w_fp8") or k.endswith(".w_scale"):
+                mod = model.get_submodule(k.rsplit(".", 1)[0])
+                mod.register_buffer(k.rsplit(".", 1)[1], v.to(dev), persistent=False)
+                continue
+            mod = model.get_submodule(k.rsplit(".", 1)[0])
+            name = k.rsplit(".", 1)[1]
+            if name in mod._parameters and mod._parameters[name] is not None:
+                mod._parameters[name] = torch.nn.Parameter(v.to(dev), requires_grad=False)
+            else:
+                mod._buffers[name] = v.to(dev)
+        del sd
+        cls_fp8 = _fp8_linear_cls()
+        for t in linear_keys:
+            model.get_submodule(t).__class__ = cls_fp8
+        stuck = [k for k, v in list(model.named_parameters()) + list(model.named_buffers())
+                 if getattr(v, "is_meta", False)]
+        if stuck:
+            raise RuntimeError(f"qwen transformer 有 {len(stuck)} 个参数停在 meta：{stuck[:5]}")
+        log.info("qwen transformer fp8 就绪：%d 个 Linear，%.1fGB",
+                 len(linear_keys), torch.cuda.memory_allocated() / 2**30)
+        return model.eval()
 
     def img2img_pipe(self, model: str = DEFAULT_MODEL):
         key = f"img2img:{model}"
@@ -924,6 +1070,14 @@ class Engine:
         # 仍用 32 免得把噪点也放大成色阶。
         "sdxl": {"width": 768, "height": 768, "steps": 24, "cfg": 6.5,
                  "pixel": 6, "palette": 64},
+        # Qwen-Image-2.1：**默认不像素化**（pixel/palette 归零）。
+        # 它直接就能画出像样的像素风（实测 768² / 20 步直接出 16-bit 猫骑士），
+        # 再过一遍后处理反而把它的色阶优势抹平。步骤 20~40 是官方区间，
+        # 40 是默认，但精灵场景 20 已经够（实测 38s vs 更久，构图没差别）。
+        # cfg 这个字段对它没有意义（真正的引导是 true_cfg_scale=4.0），
+        # 填 4.0 只是让界面显示的值与实际生效值一致。
+        "qwen21": {"width": 1024, "height": 1024, "steps": 20, "cfg": 4.0,
+                   "pixel": 0, "palette": 0},
     }
 
     # **按底模名覆盖**（优先于按架构的 RECOMMEND）。

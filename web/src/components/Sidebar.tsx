@@ -32,6 +32,10 @@ type Props = {
 const MODEL_LABEL: Record<string, string> = {
   sd15: 'SD1.5 · 省显存（默认）',
   sdxl: 'SDXL 1.0 · 结构更稳',
+  'sdxl-anime': 'SDXL 动漫专模',
+  // 显示名带能力提示：它跟 SD 系列完全不是一个东西（7B DiT、原生透明底、
+  // 中文直喂、图生图是指令改图），只写个目录名用户不会知道该选它做什么。
+  'qwen-image-2.1': 'Qwen-Image-2.1 · 原生透明底 / 指令改图',
 }
 
 const MATTE_LABEL: Record<string, string> = {
@@ -183,7 +187,11 @@ export default function Sidebar({
           <p className="rail-tip">
             {model === 'sdxl'
               ? '结构更稳（实测可交付率 92% vs 33%），同分辨率只慢约 40%；但 W4 显存很紧（单帧约 15GB），且 SD1.5 的 LoRA 不能通用。'
-              : '显存友好（W4 单帧约 6.6GB）、LoRA 生态全；代价是构图控制弱，需要多出候选让闸门挑。'}
+              : model === 'qwen-image-2.1'
+                ? '7B 单流 DiT：能直接出像素风、支持原生透明底、中文提示词直喂；'
+                  + '图生图是「指令改图」（没有重绘幅度）。单张约 25~50s、峰值 16.4GB，'
+                  + '不能挂 SD 的 LoRA。'
+                : '显存友好（W4 单帧约 6.6GB）、LoRA 生态全；代价是构图控制弱，需要多出候选让闸门挑。'}
           </p>
           {recommend[model] && (
             <p className="rail-tip">
