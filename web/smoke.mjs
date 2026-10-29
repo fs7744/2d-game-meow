@@ -205,9 +205,9 @@ function check(name, cond, extra = '') {
   const doc = dom.window.document
   check('渲染出顶栏品牌', doc.querySelector('.brand .title')?.textContent?.includes('喵叫'))
   check('空状态引导可见', !!doc.querySelector('.canvas-empty .empty-card'))
-  check('侧栏存在（节点 10 项：图生成 / 图生图 / 局部重绘 / 局部AI重绘 / 角色迁移 / '
-    + '序列帧替换 / 姿态序列 / 像素转换 / 抠图 / 图片）',
-    section(doc, '节点')?.querySelectorAll('.rail-item').length === 10,
+  check('侧栏存在（节点 11 项：图生成 / 图生图 / 局部重绘 / 局部AI重绘 / 角色迁移 / '
+    + '序列帧替换 / 姿态序列 / 像素转换 / 动漫转像素 / 抠图 / 图片）',
+    section(doc, '节点')?.querySelectorAll('.rail-item').length === 11,
     String(section(doc, '节点')?.querySelectorAll('.rail-item').length))
   check('有「项目」分组（独立画布）', !!section(doc, '项目'))
   check('缩放显示 100%', doc.querySelector('.zoom-val')?.textContent === '100%')

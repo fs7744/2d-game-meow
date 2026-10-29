@@ -3,7 +3,7 @@ export type Preset = 'sprite' | 'portrait' | 'wuxia' | 'pixel' | 'anime' | 'none
 /** 节点类型：图生成（w1）/ 图生图（w2）/ 图片 / 抠图换背景（wbg）/ 局部重绘（w3）/ 局部 AI 重绘（w5） */
 export type NodeKind =
   | 'gen' | 'img2img' | 'image' | 'bg' | 'inpaint' | 'airepaint' | 'pixelify'
-  | 'poseclone' | 'spriteswap' | 'poseswap'
+  | 'poseclone' | 'spriteswap' | 'poseswap' | 'animepixel'
 
 /** 角色迁移 / 序列帧替换：动作参考图的解释方式 */
 export type RefMode = 'auto' | 'pose' | 'outline'
@@ -98,6 +98,11 @@ export type GenParams = {
   pxGridSnap: boolean     // 像素转换：是否做网格检测/吸附
   pxTransparentBg: boolean// 像素转换：把纯色背景转成透明
   pxSnapTo: number        // 像素转换：网格吸附到这个数的整数倍（0 = 不吸附）
+  // 动漫转像素（wap）：先出动漫全身大图，再压缩成像素画
+  apTarget: number        // 目标原生像素边长（192 = 精灵常用）
+  apColors: number        // 共享色板色数（32 = 16-bit 风格）
+  apPreEnhance: number    // 量化前对比度/饱和度增强强度（0 = 关）
+  apEdgeRebuild: boolean  // 轮廓描边（色数不变，压缩后不「融化」）
   pcCnScale: number       // 角色迁移：ControlNet 姿态强度（越大越贴参考动作）
   pcIpaScale: number      // 角色迁移：IP-Adapter 身份强度（越大越像角色图）
   pcFill: number          // 角色迁移：人物在画布里占的高度比例

@@ -813,6 +813,124 @@ def pixelify(eng: Engine, *, init_image: str | Path,
     return _save(out, _stamp(tag), "pixelify", meta, scope=scope)
 
 
+# ---------------- WAP 动漫人物 → 像素 ----------------
+
+def anime_to_pixel(eng: Engine, *,
+                   init_image: Optional[str | Path] = None,
+                   prompt: str = "", negative: Optional[str] = None,
+                   target: Optional[Sequence[int]] = None,
+                   colors: int = 32, snap_to: Optional[int] = 16,
+                   grid_snap: bool = True,
+                   sample_method: str = "median",
+                   pre_enhance: float = 1.0,
+                   edge_rebuild: bool = True,
+                   source_width: int = 1024, source_height: int = 1024,
+                   steps: int = 28, cfg: float = 8.0, seed: int = -1,
+                   model: str = "sdxl-anime", clip_skip: int = 2,
+                   matte: bool = True, matte_backend: str = "auto",
+                   scope: str = "", tag: str = "wap") -> Dict[str, Any]:
+    """动漫人物 → 像素画。**两步走**：先出高质量大图，再做像素化。
+
+    为什么这样比「让 SD 直接画像素」好（本项目实测）：
+
+        SD 直接画（像素 LoRA + pixel=6）  构图常裁到腿、颜色是连续渐变、
+                                          输出 768² 但有效像素只有 128
+        动漫大图 → 像素化                全身完整、1px 描边清晰、
+                                          输出就是原生 128²/192²
+
+    根因是**两种能力互相打架**：像素风要求极简色块和硬边，而人物结构
+    （脸、手、持握武器）需要足够的分辨率理解。让模型一次做两件事，它会在
+    两者之间妥协。分开做则各取所长：动漫底模负责「画对」，像素化负责
+    「压成像素」。
+
+    `init_image` 给了就直接转；没给就用 `prompt` 先出动漫全身图再转。
+    后者是产线默认路径——用户只写角色描述，一步拿到像素精灵。
+
+    **像素化三步增强**（都是实测出来的，缺一个质量就掉）：
+      1. `pre_enhance`  量化前拉对比度/饱和度/锐度。不开时红披风变暗红、
+                        金发变土黄、整体发灰；开 1.0 后鲜红 + 亮黄。
+      2. 共享色板      整批共用一块色板，逐张各自量化会让相邻帧颜色打架。
+                        且**必须排除透明像素**——抠图后透明区 RGB 是纯黑，
+                        不排除的话 84% 的色位被背景吃掉（实测只剩 12 色）。
+      3. `edge_rebuild` 轮廓描边（色板内暗色，色数不变）。量化后相邻色块
+                        只有"颜色不同"没有"结构线"，缩小看是一坨色斑
+                        （业界叫 melt）。只描外轮廓——对内部结构边全描
+                        会把脸糊成一块灰。
+
+    参数：
+      target   目标原生像素尺寸（默认 192×192；游戏精灵常用 64/96/128/192）
+      colors   共享色板色数（默认 32；8-bit 风格可给 16，16-bit 给 32~48）
+      snap_to  网格边长吸附到该数的整数倍（16 = 精灵常用）
+      matte    先把源图的背景抠掉（像素精灵必须有透明底）
+    """
+    t_all = _timer()
+    meta: Dict[str, Any] = {"workflow": "wap", "scope": scope or "default"}
+    src_path: Optional[Path] = None
+    gen_meta: Dict[str, Any] = {}
+
+    # 1) 没有源图就先出一张动漫全身图
+    if init_image is None:
+        if not (prompt or "").strip():
+            raise ValueError(
+                "需要 prompt 或 init_image 之一："
+                "要么描述角色（先出动漫图再转像素），要么给一张现成的图")
+        if model != "sdxl-anime" and "anime" not in model:
+            # 用户可能选了别的底模；提示一次但不阻止（有人就想用自己的底模）
+            print(f"[warn] 底模 {model} 不是动漫专模，动漫人物质量可能不如 sdxl-anime")
+        r = txt2img(eng, prompt=prompt, negative=negative, preset="anime",
+                    width=source_width, height=source_height,
+                    steps=steps, cfg=cfg, seed=seed, model=model,
+                    clip_skip=clip_skip, matte=matte,
+                    matte_backend=matte_backend, tag=f"{tag}_src", scope=scope)
+        src_path = Path(r["file"])
+        gen_meta = r["meta"]
+        if seed < 0:
+            seed = int(gen_meta.get("seed", 0))
+    else:
+        src_path = Path(init_image)
+
+    # 2) 像素化
+    src = Image.open(src_path).convert("RGBA")
+    if matte and init_image is not None:
+        # 外部图没有 alpha 时才需要抠；生成图已经抠过
+        arr = np.asarray(src)
+        if arr.shape[-1] == 4 and float((arr[..., 3] < 128).mean()) < 0.01:
+            info: Dict[str, Any] = {}
+            src = matte_mod.matte_auto(src.convert("RGB"), matte_backend,
+                                       eng.matte_dir, info=info)
+            meta["matte_used"] = info.get("backend")
+
+    size = tuple(target) if target else (192, 192)
+    res = pxf.refine_batch([src], grid_snap=grid_snap, target_size=size,
+                           sample_method=sample_method, colors=colors,
+                           snap_to=snap_to, pre_enhance=pre_enhance,
+                           edge_rebuild=edge_rebuild)
+    item = res["items"][0]
+    out = item["image"]
+    pix_meta = item["meta"]
+
+    meta.update({
+        "source": str(src_path),
+        "generated": init_image is None,
+        "prompt": prompt, "negative": negative,
+        "model": model if init_image is None else None,
+        "clip_skip": clip_skip if init_image is None else None,
+        "seed": seed,
+        "target": list(size), "colors_requested": int(colors),
+        "palette": [list(c) for c in res["palette"]] if res["palette"] else [],
+        "palette_size": len(res["palette"]) if res["palette"] else 0,
+        "pre_enhance": pre_enhance, "edge_rebuild": edge_rebuild,
+        "snap_to": snap_to, "grid_snap": grid_snap,
+        "sample_method": sample_method,
+        "pixel": pix_meta,
+        "seconds_total": round(t_all(), 2),
+        "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
+    })
+    if gen_meta:
+        meta["source_seconds"] = gen_meta.get("seconds")
+    return _save(out, _stamp(tag), "anime_pixel", meta, scope=scope)
+
+
 # ---------------- WPC 角色迁移 ----------------
 
 def pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | Path,
@@ -1442,7 +1560,10 @@ def _sprite_animatediff(eng: Engine, frames: Sequence[tuple], char_image: str | 
                     [c.convert("RGB") for c in cut], palette)
                 cut[i] = pxf.recolor_by_luma(cut[i], pal, keep_alpha=True)
 
-    refined = pxf.refine_batch([c.convert("RGB") for c in cut], grid_snap=False,
+    # **别把 RGBA 转成 RGB 再送进去**：convert("RGB") 会把透明区变成纯黑，
+    # 而序列帧的透明区常常占 70%+ ——色板会被背景黑吃掉大半色位（实测主体
+    # 只分到 2 色）。refine_batch 内部会按 alpha 排除透明像素再提色板。
+    refined = pxf.refine_batch([c.convert("RGBA") for c in cut], grid_snap=False,
                                target_size=(cell_w, cell_h), colors=palette)
     outs: List[Image.Image] = []
     for item, src in zip(refined["items"], cut):

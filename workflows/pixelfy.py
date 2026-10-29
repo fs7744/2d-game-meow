@@ -143,16 +143,31 @@ def alpha_binary_ratio(img: Image.Image) -> float:
 
 def _collect_pixels(images: Sequence[Image.Image], max_side: int = 384,
                     max_total: int = 300_000) -> np.ndarray:
-    """把若干张图缩到小尺寸后拼成一维 RGB 像素数组（可复现，不随机采样）。"""
+    """把若干张图缩到小尺寸后拼成一维 RGB 像素数组（可复现，不随机采样）。
+
+    **必须排除透明像素**——这是踩过的坑：抠图后的图透明区 RGB 是纯黑
+    （`convert("RGB")` 把 alpha=0 变成 0,0,0），而角色图前景常常只占 16%。
+    不排除的话色板会被「背景黑 + 抠图边缘的过渡白」吃掉大半色位，主体真正的
+    银发/蓝甲一个都进不去——实测一张 1024² 动漫立绘转像素后整张只剩 14 色
+    且几乎全白。
+    """
     chunks = []
     for im in images:
-        a = np.asarray(im.convert("RGB"), dtype=np.uint8)
-        h, w = a.shape[:2]
+        rgba = im.convert("RGBA") if im.mode != "RGBA" else im
+        a = np.asarray(rgba, dtype=np.uint8)
+        rgb = a[..., :3]
+        fg = a[..., 3] > 127 if a.shape[-1] == 4 else np.ones(rgb.shape[:2], bool)
+        h, w = rgb.shape[:2]
         scale = max(1.0, max(h, w) / max_side)
         if scale > 1:
-            a = np.asarray(Image.fromarray(a).resize(
-                (max(1, int(w / scale)), max(1, int(h / scale))), Image.BOX))
-        chunks.append(a.reshape(-1, 3))
+            tw, th = max(1, int(w / scale)), max(1, int(h / scale))
+            rgb = np.asarray(Image.fromarray(rgb).resize((tw, th), Image.BOX))
+            fg = np.asarray(
+                Image.fromarray(fg.astype(np.uint8) * 255).resize(
+                    (tw, th), Image.NEAREST)) > 127
+        # 没有前景（全透明）时退回全部像素，免得一张空图把整批色板拖空
+        px = rgb[fg] if fg.any() else rgb.reshape(-1, 3)
+        chunks.append(np.asarray(px, dtype=np.uint8).reshape(-1, 3))
     if not chunks:
         return np.zeros((0, 3), dtype=np.uint8)
     px = np.concatenate(chunks, axis=0)
@@ -233,6 +248,112 @@ def _snap_dim(value: int, base: int = 16, tol: float = 1.5) -> int:
     if max(snapped, raw) > min(snapped, raw) * tol:
         return max(8, min(256, raw))
     return max(8, min(256, snapped))
+
+
+# --------------------------------------------------------------------------- #
+# 输出质量增强（业界 photo-to-pixel 四阶段里的 1 与 3）
+# --------------------------------------------------------------------------- #
+
+def prep_enhance(img: Image.Image, strength: float = 1.0) -> Image.Image:
+    """量化前的对比度/饱和度/锐度增强。
+
+    **为什么必须做**：色板受限后，原本靠细微渐变区分的东西会糊成一片。
+    实测同一张动漫立绘转 192² 像素（32 色）：
+
+        不预增强   红披风偏暗红、金发偏土黄，整体发灰
+        预增强后   鲜红 + 亮黄，色块边界站得住
+
+    业界（hermes pixel-art、hypeart 的 photo-to-pixel 综述）都把
+    「boost contrast/color/sharpness」列为第一步，且**色板越小越要强**。
+
+    只动 RGB，alpha 原样保留——形状是网格决定的，不该被锐化影响。
+    """
+    if strength <= 0:
+        return img.convert("RGBA")
+    from PIL import ImageEnhance
+
+    rgba = img.convert("RGBA")
+    rgb = rgba.convert("RGB")
+    rgb = ImageEnhance.Contrast(rgb).enhance(1.0 + 0.35 * strength)
+    rgb = ImageEnhance.Color(rgb).enhance(1.0 + 0.25 * strength)
+    rgb = ImageEnhance.Sharpness(rgb).enhance(1.0 + 0.6 * strength)
+    out = rgb.convert("RGBA")
+    out.putalpha(rgba.getchannel("A"))
+    return out
+
+
+def enhance_edges(img: Image.Image, palette: Sequence[RGB],
+                  threshold: int = 28, darken: float = 0.72,
+                  outline_only: bool = True) -> Image.Image:
+    """边缘重建：压暗边界形成 1px 描边，**颜色只取色板内的**。
+
+    为什么需要：量化后相邻色块只是"颜色不同"，没有"结构线"，缩小看就是一坨
+    色斑——业界管这叫 melt。四阶段流水线里这是第 3 步，跳过它精灵在 1:1
+    缩放下会"融化"。
+
+    **为什么描边色必须从色板里选**：第一版直接乘 0.7 压暗，色数从 32 涨到
+    45~49——像素画的硬约束是「颜色数 ≤ 色板」，凭空多出中间色等于破功。
+    现在改成「在同色系里找色板内更暗的一档」，色数严格不变（实测 32 → 24~29）。
+
+    `outline_only=True`（默认）**只描外轮廓**，不碰内部结构边。
+    踩过的坑：对**所有**色差边界描边会把脸毁掉——实测同一张角色图，
+    全边界描边后脸部五官糊成一块灰，而只描轮廓时脸保持干净、盔甲与披风的
+    边界照样立起来了。像素游戏精灵的立体感主要来自外轮廓，内部靠色块本身
+    的明暗分层就够了。
+
+    不新增像素、不改 alpha：游戏素材不能因为描边而变胖或改变碰撞框。
+    """
+    if not palette:
+        return img.convert("RGBA")
+    rgba = img.convert("RGBA")
+    a = np.asarray(rgba)
+    rgb = a[..., :3].astype(np.int32)
+    alpha = a[..., 3]
+    fg = alpha > 127
+
+    if outline_only:
+        # 轮廓 = 前景 - 腐蚀(前景)，即紧贴外边的那一圈
+        import cv2
+        m = fg.astype(np.uint8)
+        k = np.ones((3, 3), np.uint8)
+        eroded = cv2.erode(m, k, iterations=1)
+        edge = fg & (eroded == 0)
+    else:
+        # 内部结构边：4 邻域最大色差超过阈值
+        diff = np.zeros(rgb.shape[:2], dtype=np.int32)
+        for dy, dx in ((0, 1), (1, 0), (0, -1), (-1, 0)):
+            shifted = np.roll(rgb, (dy, dx), axis=(0, 1))
+            diff = np.maximum(diff, np.abs(rgb - shifted).max(axis=2))
+        edge = fg & (diff >= int(threshold))
+
+    if not edge.any():
+        return rgba
+
+    pal = np.asarray([(int(c[0]), int(c[1]), int(c[2])) for c in palette],
+                     dtype=np.int32)
+    luma_pal = pal @ np.array([299, 587, 114], dtype=np.int32) // 1000
+    order = np.argsort(luma_pal)
+    pal_by_luma = pal[order]
+    luma_by_luma = luma_pal[order]
+
+    out = rgb.copy()
+    pix = rgb[edge]
+    luma_pix = pix @ np.array([299, 587, 114], dtype=np.int32) // 1000
+    target = (luma_pix.astype(np.float32) * float(darken)).astype(np.int32)
+    # 取「不超过目标亮度」的最亮档（searchsorted right - 1）。
+    # **不能用最近的档**：色板档位稀疏时最近的档可能就是原色本身，
+    # 那样描边等于没画（实测 3 色色板下完全无效果）。找不到更暗的就用最暗色，
+    # 保证描边一定比原色深。
+    pos = np.searchsorted(luma_by_luma, target, side="right") - 1
+    darker = pos >= 0
+    # 还要保证确实比原色暗（同一档位不算描边）
+    safe = np.where(darker, pos, 0)
+    still = luma_by_luma[safe] >= luma_pix
+    safe = np.where(still, 0, safe)
+    out[edge] = pal_by_luma[np.clip(safe, 0, len(luma_by_luma) - 1)]
+
+    res = np.dstack([np.clip(out, 0, 255).astype(np.uint8), alpha])
+    return Image.fromarray(res, "RGBA")
 
 
 # --------------------------------------------------------------------------- #
@@ -455,18 +576,33 @@ def refine_batch(
     colors: int = 32,
     transparent_bg: bool = False,
     snap_to: Optional[int] = None,
+    pre_enhance: float = 0.0,
+    edge_rebuild: bool = False,
+    edge_darken: float = 0.72,
 ) -> Dict[str, Any]:
-    """一批图统一精修：共享色板 + 逐张网格对齐。
+    """一批图统一精修：共享色板 + 逐张网格对齐（+ 可选的质量增强）。
 
     共享色板在 batch 层解析：先各自网格对齐，再汇总所有结果提取一块色板，
     最后统一映射。逐张各自取色板会显著偏色。
+
+    `pre_enhance`  量化前的对比度/饱和度/锐度增强强度（0 = 关）。
+                   **换算素材强烈建议开**：实测同一张动漫立绘转 192²/32 色，
+                   不开时红披风偏暗红、金发偏土黄、整体发灰；开 1.0 后
+                   鲜红 + 亮黄。业界把它列为 photo-to-pixel 的第一步。
+    `edge_rebuild` 色块交界压暗成 1px 描边（描边色只取色板内，色数不变）。
+                   量化后相邻色块只有"颜色不同"、没有"结构线"，缩小看是一坨
+                   色斑（业界叫 melt）。这是四阶段流水线里的第 3 步。
     """
-    # 第一遍：网格对齐（不带色板），拿到像素级中间结果
+    # 第一遍：预增强（只影响后续采样，不改形状）
+    srcs = [prep_enhance(im, pre_enhance) if pre_enhance > 0 else im
+            for im in images]
+
+    # 第二遍：网格对齐（不带色板），拿到像素级中间结果
     interim = [
         refine_one(im, grid_snap=grid_snap, grid_size=grid_size,
                    target_size=target_size, sample_method=sample_method,
                    palette=None, transparent_bg=transparent_bg, snap_to=snap_to)
-        for im in images
+        for im in srcs
     ]
     pal = extract_palette([r["image"] for r in interim], colors) if colors else []
 
@@ -484,10 +620,13 @@ def refine_batch(
                 im = binarize_alpha(im)
             else:
                 im = rgb_img
+            if edge_rebuild:
+                im = enhance_edges(im, pal, darken=edge_darken)
             r["meta"].update({
                 "paletteSize": len(pal),
                 "colors": len(im.convert("RGB").getcolors(maxcolors=1 << 24) or []),
                 "offPalette": count_out_of_palette(im, pal),
             })
         out.append({"image": im, "meta": r["meta"]})
-    return {"items": out, "palette": pal}
+    meta_extra = {"preEnhance": pre_enhance, "edgeRebuild": edge_rebuild}
+    return {"items": out, "palette": pal, "options": meta_extra}

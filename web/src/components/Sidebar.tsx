@@ -13,7 +13,7 @@ type Props = {
   onDeleteProject: (id: string) => void
   onAddNode: (
     kind?: 'gen' | 'img2img' | 'image' | 'bg' | 'inpaint' | 'airepaint' | 'pixelify'
-    | 'poseclone' | 'spriteswap' | 'poseswap',
+    | 'poseclone' | 'spriteswap' | 'animepixel' | 'poseswap',
   ) => void
   canApply: boolean
   onApplyFav: (text: string) => void
@@ -283,6 +283,21 @@ export default function Sidebar({
               <em>网格对齐 · 每格一色</em>
             </span>
             <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('pixelify')}>+</button>
+          </div>
+          <div
+            className="rail-item"
+            draggable
+            onDragStart={(e) => {
+              e.dataTransfer.setData('application/x-node-type', 'animepixel')
+              e.dataTransfer.effectAllowed = 'copy'
+            }}
+            title="动漫转像素：先出动漫全身大图，再压成像素画（比直接画像素稳）"
+          >
+            <span className="rail-item-main">
+              <b>动漫转像素</b>
+              <em>全身动漫图 · 一键像素化</em>
+            </span>
+            <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('animepixel')}>+</button>
           </div>
           <div
             className="rail-item"

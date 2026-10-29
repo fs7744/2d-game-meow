@@ -361,6 +361,8 @@ export default function GenNodeCard({
   const sAttempts = job?.attempts
   const sGate = job?.gatePassed
   const isPixelify = node.kind === 'pixelify'
+  // 动漫转像素：源图可选（没有就用 prompt 先生成），所以不能算「必须源图」
+  const isAnimePixel = node.kind === 'animepixel'
   const isPoseClone = node.kind === 'poseclone'
   const isSpriteSwap = node.kind === 'spriteswap'
   const isPoseSwap = node.kind === 'poseswap'
@@ -616,9 +618,10 @@ export default function GenNodeCard({
             isPixelify ? ' pixelify' : ''
           }${isPoseClone ? ' poseclone' : ''}${isSpriteSwap ? ' spriteswap' : ''}${
             isPoseSwap ? ' poseswap' : ''
-          }`}
+          }${isAnimePixel ? ' animepixel' : ''}`}
         >
           {isImg ? '图片' : isBg ? '抠图' : isPixelify ? '像素转换'
+            : isAnimePixel ? '动漫转像素'
             : isPoseClone ? '角色迁移'
               : isPoseSwap ? '姿态序列'
               : isSpriteSwap ? '序列帧替换'
@@ -1209,6 +1212,96 @@ export default function GenNodeCard({
               ↳ 图生图
             </button>
           )}
+        </div>
+      ) : isAnimePixel ? (
+        <div className="node-body animepixel-body">
+          <div className="src-note">
+            先出**动漫全身大图**，再压成像素画——比让模型直接画像素稳得多：
+            直接画常常裁到腿、颜色是连续渐变；这条路全身完整、色块干净。
+            {!hasSource && ' 不接源图就是「描述角色 → 一步出像素」。'}
+          </div>
+          {sourceBox}
+          <div className="prompt-wrap">
+            <textarea
+              className="prompt"
+              rows={2}
+              placeholder={
+                hasSource
+                  ? '（有源图，提示词可留空）'
+                  : '角色描述（danbooru tag 更好）e.g. 1girl, red cape, blue armor, holding sword, full body'
+              }
+              value={p.prompt}
+              onChange={(e) => setParam('prompt', e.target.value)}
+            />
+          </div>
+          <div className="px-opts">
+            <label className="strength" title={hint('像素边长')}>
+              <span>边长</span>
+              <input
+                type="number"
+                min={16}
+                max={512}
+                value={p.apTarget}
+                onChange={(e) => setParam('apTarget', Number(e.target.value) || 192)}
+              />
+              <b>px</b>
+            </label>
+            <label className="strength" title={hint('色数')}>
+              <span>色数</span>
+              <input
+                type="number"
+                min={2}
+                max={256}
+                value={p.apColors}
+                onChange={(e) => setParam('apColors', Number(e.target.value) || 32)}
+              />
+              <b>色</b>
+            </label>
+            <label className="strength" title={hint('对比度增强')}>
+              <span>增强</span>
+              <input
+                type="number"
+                min={0}
+                max={2}
+                step={0.1}
+                value={p.apPreEnhance}
+                onChange={(e) => setParam('apPreEnhance', Number(e.target.value) || 0)}
+              />
+              <b>{p.apPreEnhance > 0 ? '×' : '关'}</b>
+            </label>
+            <label className="check" title={hint('描边')}>
+              <input
+                type="checkbox"
+                checked={p.apEdgeRebuild}
+                onChange={(e) => setParam('apEdgeRebuild', e.target.checked)}
+              />
+              轮廓描边
+            </label>
+          </div>
+          {hasImage && (
+            <div
+              className="preview"
+              onClick={(e) => {
+                e.stopPropagation()
+                onPreview?.(job!.url!, previewName)
+              }}
+              title="点击全屏预览"
+            >
+              <img src={job!.url} alt="像素画" draggable={false} />
+            </div>
+          )}
+          <button
+            className="gen-btn"
+            disabled={busy || (!hasSource && !p.prompt.trim())}
+            onClick={onGenerate}
+            title={
+              !hasSource && !p.prompt.trim()
+                ? '接一张图，或写上角色描述（会先生成动漫全身图再转像素）'
+                : undefined
+            }
+          >
+            {busy ? '转换中…' : hasSource ? '转成像素' : '生成像素画'}
+          </button>
         </div>
       ) : isPixelify ? (
         <div className="node-body pixelify-body">

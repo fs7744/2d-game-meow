@@ -702,3 +702,95 @@ def test_models_endpoint_reports_refiner_availability(client):
     body = client.get("/models").json()
     assert "refiner" in body
     assert isinstance(body["refiner"], bool)
+
+
+def test_generate_wap_roundtrip(client, tmp_path):
+    """动漫转像素（wap）走同一条队列。用「给源图」的模式：不跑模型，秒回。"""
+    from PIL import Image, ImageDraw
+
+    src = tmp_path / "anime_src.png"
+    im = Image.new("RGBA", (128, 128), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    d.rectangle([40, 20, 88, 100], fill=(200, 50, 60, 255))
+    d.ellipse([52, 32, 76, 56], fill=(235, 200, 160, 255))
+    im.save(src)
+
+    r = client.post("/generate", json={"workflow": "wap", "params": {
+        "init_image": str(src), "target": [48, 48], "colors": 12,
+        "matte": False, "tag": "apiwap"}})
+    assert r.status_code == 200, r.text
+    job_id = r.json()["job_id"]
+
+    job = None
+    for _ in range(120):
+        job = client.get(f"/jobs/{job_id}").json()
+        if job["status"] in ("done", "failed"):
+            break
+        time.sleep(0.5)
+    assert job["status"] == "done", job.get("error")
+    meta = job["result"]["meta"]
+    assert meta["workflow"] == "wap"
+    assert meta["generated"] is False
+    assert meta["pixel"]["size"] == [48, 48]
+    assert Path(job["result"]["file"]).exists()
+
+
+def test_generate_rejects_wap_without_input(client):
+    """wap 既没源图也没提示词 → 任务失败并给出明确原因（不是静默出错图）。"""
+    r = client.post("/generate", json={"workflow": "wap", "params": {"tag": "apiwap_bad"}})
+    assert r.status_code == 200, r.text
+    job_id = r.json()["job_id"]
+    job = None
+    for _ in range(40):
+        job = client.get(f"/jobs/{job_id}").json()
+        if job["status"] in ("done", "failed"):
+            break
+        time.sleep(0.5)
+    assert job["status"] == "failed"
+    assert "prompt 或 init_image" in (job.get("error") or "")
+
+
+def test_generate_wap_roundtrip(client, tmp_path):
+    """动漫转像素（wap）走同一条队列。用「给源图」的模式：不跑模型，秒回。"""
+    from PIL import Image, ImageDraw
+
+    src = tmp_path / "anime_src.png"
+    im = Image.new("RGBA", (128, 128), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    d.rectangle([40, 20, 88, 100], fill=(200, 50, 60, 255))
+    d.ellipse([52, 32, 76, 56], fill=(235, 200, 160, 255))
+    im.save(src)
+
+    r = client.post("/generate", json={"workflow": "wap", "params": {
+        "init_image": str(src), "target": [48, 48], "colors": 12,
+        "matte": False, "tag": "apiwap"}})
+    assert r.status_code == 200, r.text
+    job_id = r.json()["job_id"]
+
+    job = None
+    for _ in range(120):
+        job = client.get(f"/jobs/{job_id}").json()
+        if job["status"] in ("done", "failed"):
+            break
+        time.sleep(0.5)
+    assert job["status"] == "done", job.get("error")
+    meta = job["result"]["meta"]
+    assert meta["workflow"] == "wap"
+    assert meta["generated"] is False
+    assert meta["pixel"]["size"] == [48, 48]
+    assert Path(job["result"]["file"]).exists()
+
+
+def test_generate_rejects_wap_without_input(client):
+    """wap 既没源图也没提示词 → 任务失败并给出明确原因（不是静默出错图）。"""
+    r = client.post("/generate", json={"workflow": "wap", "params": {"tag": "apiwap_bad"}})
+    assert r.status_code == 200, r.text
+    job_id = r.json()["job_id"]
+    job = None
+    for _ in range(40):
+        job = client.get(f"/jobs/{job_id}").json()
+        if job["status"] in ("done", "failed"):
+            break
+        time.sleep(0.5)
+    assert job["status"] == "failed"
+    assert "prompt 或 init_image" in (job.get("error") or "")

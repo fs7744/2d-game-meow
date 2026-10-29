@@ -941,3 +941,74 @@ def test_anime_preset_registered():
     assert "anime" in presets.PRESETS
     with pytest.raises(ValueError, match="未知 preset"):
         presets.build("x", None, preset="nope")
+
+
+# ---------------- WAP 动漫人物 → 像素 ----------------
+
+def test_anime_to_pixel_from_image(eng, assets):
+    """有源图时直接转像素：不跑模型，纯确定性，输出是原生像素尺寸。
+
+    这条链路的价值：把「画对人物」和「压成像素」拆开做。让 SD 一次做两件事
+    会在两者之间妥协——实测直接画像素常裁到腿、颜色是连续渐变。
+    """
+    # 造一张「动漫图」：有 alpha、有颜色块
+    src = assets / "_wap_src.png"
+    im = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    d.rectangle([90, 60, 166, 150], fill=(200, 40, 50, 255))     # 红甲
+    d.ellipse([104, 32, 152, 80], fill=(235, 200, 160, 255))      # 脸
+    d.rectangle([96, 150, 116, 220], fill=(40, 60, 200, 255))     # 蓝腿
+    d.rectangle([140, 150, 160, 220], fill=(40, 60, 200, 255))
+    im.save(src)
+
+    r = g.anime_to_pixel(eng, init_image=src, target=(64, 64), colors=16,
+                         matte=False, tag="wap_img")
+    m = r["meta"]
+    assert m["workflow"] == "wap"
+    assert m["generated"] is False, "给了源图就不该再跑模型"
+    assert m["pixel"]["size"] == [64, 64], "输出是原生像素尺寸"
+    assert m["pixel"]["colors"] <= 16
+    assert m["pixel"]["offPalette"] == 0, "不能有板外色"
+    assert Path(r["file"]).exists()
+
+
+def test_anime_to_pixel_requires_prompt_or_image(eng):
+    """既没源图也没提示词时明确报错，而不是跑一次空生成。"""
+    with pytest.raises(ValueError, match="prompt 或 init_image"):
+        g.anime_to_pixel(eng, prompt="", init_image=None, tag="wap_bad")
+
+
+def test_anime_to_pixel_generates_source_when_prompt_only(eng, assets):
+    """没源图就用提示词先生成动漫全身图再转——这是产线的默认用法。"""
+    if not eng.available_models() or "sdxl-anime" not in eng.available_models():
+        import pytest as _p
+        _p.skip("未下载动漫底模")
+
+    r = g.anime_to_pixel(
+        eng, prompt="1girl, solo, red cape, blue armor, full body",
+        target=(64, 64), colors=16, model="sdxl-anime",
+        source_width=512, source_height=512, steps=6, seed=7,
+        tag="wap_gen")
+    m = r["meta"]
+    assert m["generated"] is True
+    assert m["source_seconds"] is not None, "要记录生成源图花了多久"
+    assert m["pixel"]["size"] == [64, 64]
+    assert Image.open(r["file"]).size == (64, 64)
+
+
+def test_anime_to_pixel_uses_shared_palette_and_edge_rebuild(eng, assets):
+    """色板与增强开关要真的写进 meta（产线据此复现/判断）。"""
+    src = assets / "_wap_src2.png"
+    im = Image.new("RGBA", (128, 128), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    d.rectangle([40, 20, 88, 100], fill=(180, 60, 60, 255))
+    im.save(src)
+
+    r = g.anime_to_pixel(eng, init_image=src, target=(32, 32), colors=8,
+                         pre_enhance=1.0, edge_rebuild=True,
+                         matte=False, tag="wap_meta")
+    m = r["meta"]
+    assert m["pre_enhance"] == 1.0
+    assert m["edge_rebuild"] is True
+    assert m["palette_size"] > 0 and len(m["palette"]) == m["palette_size"]
+    assert m["pixel"]["offPalette"] == 0

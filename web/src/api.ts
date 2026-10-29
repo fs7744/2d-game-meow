@@ -121,7 +121,7 @@ function common(params: GenParams, opts: SubmitOpts) {
 }
 
 async function post(
-  workflow: 'w1' | 'w2' | 'w3' | 'w4' | 'w5' | 'wbg' | 'wpx' | 'wpc' | 'wss',
+  workflow: 'w1' | 'w2' | 'w3' | 'w4' | 'w5' | 'wbg' | 'wpx' | 'wpc' | 'wss' | 'wap',
   params: Record<string, unknown>,
 ) {
   const r = await fetch(`${base}/generate`, {
@@ -244,6 +244,33 @@ export function submitPixelify(
     transparent_bg: params.pxTransparentBg,
     // snap_to=0 表示不吸附，保留检测到的原始网格
     snap_to: params.pxSnapTo > 0 ? params.pxSnapTo : null,
+    scope: opts.scope || undefined,
+  })
+}
+
+/**
+ * 动漫人物 → 像素（wap）。
+ *
+ * 两步走：先出高质量的动漫全身大图，再压成像素画——比让 SD 直接画像素
+ * 好得多（实测 SD 直接画常裁到腿、颜色是连续渐变）。不给 initImage 时
+ * 后端会用 prompt 先出一张动漫图再转。
+ */
+export function submitAnimePixel(
+  params: GenParams,
+  opts: SubmitOpts,
+  initImage?: string,
+) {
+  return post('wap', {
+    init_image: initImage || undefined,
+    prompt: params.prompt,
+    negative: params.negative || undefined,
+    target: params.apTarget > 0 ? [params.apTarget, params.apTarget] : undefined,
+    colors: params.apColors,
+    pre_enhance: params.apPreEnhance,
+    edge_rebuild: params.apEdgeRebuild,
+    model: opts.model || 'sdxl-anime',
+    clip_skip: params.clipSkip,
+    seed: params.seed,
     scope: opts.scope || undefined,
   })
 }
