@@ -2,6 +2,7 @@ import { useRef, useState } from 'react'
 import { hasCJK } from '../store/prompts'
 import MaskEditor from '../components/MaskEditor'
 import MaskPreview from '../components/MaskPreview'
+import SkeletonEditor, { defaultSkeleton } from '../components/SkeletonEditor'
 import type { ModelCaps, PoseDir } from '../api'
 import { fileNameOf } from '../fileName'
 import type { GenNode, GenParams, LoraInfo } from '../types'
@@ -278,7 +279,8 @@ export const TALL_MAX = 1400
 
 export type NodePatch = Partial<
   Pick<GenNode,
-    'x' | 'y' | 'w' | 'h' | 'params' | 'view' | 'job' | 'source' | 'image' | 'charSource'>
+    'x' | 'y' | 'w' | 'h' | 'params' | 'view' | 'job' | 'source' | 'image'
+    | 'charSource' | 'skeleton'>
 >
 
 /**
@@ -325,6 +327,8 @@ type Props = {
   /** 侧栏的「新节点默认底模」，下拉里显示成「跟随默认（xxx）」 */
   defaultModel?: string
   onSpawnImg2Img: () => void
+  /** 骨骼编辑器导出的 PNG（Blob）→ 上传并挂到节点 image 上 */
+  onExportSkeleton?: (blob: Blob) => void
   /** 图生图的上游节点（从 source.nodeId 解析而来） */
   sourceNode?: GenNode
   /** 可以作为源图的节点列表 */
@@ -424,6 +428,7 @@ export default function GenNodeCard({
   modelCaps,
   defaultModel,
   onSpawnImg2Img,
+  onExportSkeleton,
   sourceNode,
   sourceOptions,
   bgOptions,
@@ -484,6 +489,7 @@ export default function GenNodeCard({
   const isPoseClone = node.kind === 'poseclone'
   const isSpriteSwap = node.kind === 'spriteswap'
   const isPoseSwap = node.kind === 'poseswap'
+  const isPoseEdit = node.kind === 'poseedit'
   /** 是否锁了高度（只有参数视图能锁；图片等比显示，锁高会拉伸） */
   const lockH = !isImg && !imageMode && !!node.h
   /**
@@ -493,7 +499,8 @@ export default function GenNodeCard({
    * （此时正文被图占满，没有别的地方能写名字）。参数视图里生成的图
    * 由正文的提示词与状态说明身份，卡头不再重复。
    */
-  const headFilePath = isImg ? node.image?.path || '' : imageMode ? job?.path || '' : ''
+  const headFilePath = isImg || isPoseEdit ? node.image?.path || ''
+    : imageMode ? job?.path || '' : ''
   const headFile = headFilePath ? fileNameOf(headFilePath) : ''
   /**
    * 这个节点的底模是不是 Qwen。
@@ -520,6 +527,7 @@ export default function GenNodeCard({
   // 当前选中的骨架目录（可能是手填的通配，那就匹配不到，只是没有帧数提示）
   const poseDirInfo = (poseDirs || []).find((d) => d.path === p.psDir)
   const [maskOpen, setMaskOpen] = useState(false)
+  const [skelExporting, setSkelExporting] = useState(false)
   // 源图可以是上游节点的产物、图片节点的本地图，也可以是节点上直接记的绝对路径
   const hasSource = !!(
     sourceNode?.job?.raw ||
@@ -868,7 +876,7 @@ export default function GenNodeCard({
             isPoseSwap ? ' poseswap' : ''
           }${isToPixel ? ' topixel' : ''}`}
         >
-          {isImg ? '图片' : isBg ? '抠图' : isPixelify ? '像素转换'
+          {isPoseEdit ? '骨骼编辑' : isImg ? '图片' : isBg ? '抠图' : isPixelify ? '像素转换'
             : isToPixel ? '转像素'
             : isPoseClone ? '角色迁移'
               : isPoseSwap ? '姿态序列'
@@ -993,7 +1001,27 @@ export default function GenNodeCard({
         </div>
       )}
 
-      {isPoseSwap ? (
+      {isPoseEdit ? (
+        <div className="node-body">
+          <SkeletonEditor
+            state={node.skeleton ?? defaultSkeleton()}
+            onChange={(st) => onPatch({ skeleton: st })}
+            onExport={(blob) => {
+              setSkelExporting(true)
+              try { onExportSkeleton?.(blob) } finally {
+                window.setTimeout(() => setSkelExporting(false), 600)
+              }
+            }}
+            exporting={skelExporting}
+          />
+          {node.image?.url && (
+            <div className="skel-preview">
+              <img src={node.image.url} alt="导出的骨架图" />
+              <span>已导出 · {fileNameOf(node.image.path)}</span>
+            </div>
+          )}
+        </div>
+      ) : isPoseSwap ? (
         <div className="node-body poseclone-body">
           <div className="src-box">
             <div className="src-side" style={{ flex: 1 }}>
@@ -1496,6 +1524,7 @@ export default function GenNodeCard({
                 <option value="auto">自动（骨架→轮廓）</option>
                 <option value="pose">骨架（真人照片）</option>
                 <option value="outline">轮廓（游戏素材）</option>
+                <option value="skeleton">已画好的骨架图（骨骼编辑节点）</option>
               </select>
             </label>
             <div className="src-note">

@@ -1259,8 +1259,9 @@ def _qwen_pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | P
     ref = Image.open(pose_image).convert("RGB")
     cond, used_mode, cond_info = refcond.build_condition(
         ref, mode=ref_mode, size=max(width, height),
-        extractor=eng.pose_extractor(), thr=thr, fill=fill,
-        matte_dir=eng.matte_dir)
+        # skeleton 模式输入就是画好的骨架，别再初始化 DWPose / FasterRCNN
+        extractor=None if ref_mode == 'skeleton' else eng.pose_extractor(),
+        thr=thr, fill=fill, matte_dir=eng.matte_dir)
     char = refprep.prepare_reference(Image.open(char_image).convert("RGBA"), size=width)
 
     sem = (prompt or "").strip()

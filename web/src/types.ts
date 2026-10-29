@@ -3,10 +3,21 @@ export type Preset = 'sprite' | 'portrait' | 'wuxia' | 'pixel' | 'anime' | 'none
 /** 节点类型：图生成（w1）/ 图生图（w2）/ 图片 / 抠图换背景（wbg）/ 局部重绘（w3）/ 局部 AI 重绘（w5） */
 export type NodeKind =
   | 'gen' | 'img2img' | 'image' | 'bg' | 'inpaint' | 'airepaint' | 'pixelify'
-  | 'poseclone' | 'spriteswap' | 'poseswap' | 'topixel'
+  | 'poseclone' | 'spriteswap' | 'poseswap' | 'topixel' | 'poseedit'
+
+/** 骨骼编辑器节点的一个关节：x/y 归一化 0~1，z 是前后深度（伪 3D） */
+export type Joint3 = { x: number; y: number; z: number }
+
+/** 骨骼编辑器节点的状态（可持久化，重新打开还能继续编辑） */
+export type SkeletonState = {
+  points: Joint3[]
+  /** 方位角（度）：0 正面 / 90 右侧 / 180 背面 / 270 左侧 */
+  azimuth: number
+  preset: string
+}
 
 /** 角色迁移 / 序列帧替换：动作参考图的解释方式 */
-export type RefMode = 'auto' | 'pose' | 'outline'
+export type RefMode = 'auto' | 'pose' | 'outline' | 'skeleton'
 
 /** 序列帧替换：怎么处理角色 */
 export type SwapMode = 'generate' | 'recolor'
@@ -110,7 +121,7 @@ export type GenParams = {
   pcCnScale: number       // 角色迁移：ControlNet 姿态强度（越大越贴参考动作）
   pcIpaScale: number      // 角色迁移：IP-Adapter 身份强度（越大越像角色图）
   pcFill: number          // 角色迁移：人物在画布里占的高度比例
-  pcRefMode: RefMode      // 角色迁移：动作参考图的解释方式（骨架/轮廓/自动）
+  pcRefMode: RefMode      // 角色迁移：动作参考图的解释方式（自动/骨架/轮廓/已画好的骨架图）
   ssCols: number          // 序列帧替换：精灵图列数（0 = 自动检测）
   ssRows: number          // 序列帧替换：精灵图行数（0 = 自动检测）
   ssMode: SwapMode        // 序列帧替换：AI 重绘 还是 确定性换皮
@@ -226,6 +237,8 @@ export type GenNode = {
   /** 角色迁移节点：角色图（身份来源） */
   charSource?: NodeCharSource
   image?: NodeImage
+  /** 骨骼编辑器节点：关节坐标 + 方位角（导出过图时 image 上还有产物路径） */
+  skeleton?: SkeletonState
   job?: JobState
 }
 

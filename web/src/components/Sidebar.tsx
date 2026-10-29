@@ -13,7 +13,7 @@ type Props = {
   onDeleteProject: (id: string) => void
   onAddNode: (
     kind?: 'gen' | 'img2img' | 'image' | 'bg' | 'inpaint' | 'airepaint' | 'pixelify'
-    | 'poseclone' | 'spriteswap' | 'topixel' | 'poseswap',
+    | 'poseclone' | 'spriteswap' | 'topixel' | 'poseswap' | 'poseedit',
   ) => void
   canApply: boolean
   onApplyFav: (text: string) => void
@@ -187,6 +187,21 @@ export default function Sidebar({
               <em>拿已有图改内容 / 改画风</em>
             </span>
             <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('img2img')}>+</button>
+          </div>
+          <div
+            className="rail-item"
+            draggable
+            onDragStart={(e) => {
+              e.dataTransfer.setData('application/x-node-type', 'poseedit')
+              e.dataTransfer.effectAllowed = 'copy'
+            }}
+            title="骨骼编辑：拖关节摆姿势，方位角换正面/侧面/背面，导出 OpenPose 骨架图"
+          >
+            <span className="rail-item-main">
+              <b>骨骼编辑</b>
+              <em>拖关节 · 换视觉方向</em>
+            </span>
+            <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('poseedit')}>+</button>
           </div>
           <div
             className="rail-item"

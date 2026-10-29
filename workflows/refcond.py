@@ -23,6 +23,10 @@ RTMPose 骨架 → ControlNet OpenPose。这条路对游戏素材彻底失效：
       先试 pose：检测得到人体就用骨架；检测不到就退回 outline。
       这样真人素材走更精确的骨架路，非真人素材自动降级，不至于直接报错。
 
+  **skeleton（已画好的骨架图）**
+      输入就是 OpenPose 格式的骨架图（骨骼编辑器节点导出的），原样 resize 使用。
+      用来做「手动摆关节 → 出姿势」的可控编辑，不需要人体检测。
+
 **为什么轮廓要在原分辨率上取边再放大**：反过来（先放大再取边）会把像素画的
 锯齿边抹平，条件图就丢掉了像素感，生成结果会变成普通插画。
 """
@@ -38,7 +42,7 @@ from PIL import Image
 OUTLINE_CANNY_LO = 100
 OUTLINE_CANNY_HI = 200
 
-MODES = ("pose", "outline", "auto")
+MODES = ("pose", "outline", "auto", "skeleton")
 
 
 def _alpha_mask(img: Image.Image) -> Optional[np.ndarray]:
@@ -167,6 +171,13 @@ def build_condition(img: Image.Image, mode: str = "auto", size: int = 768,
     """
     if mode not in MODES:
         raise ValueError(f"未知参考模式 {mode}（可选 {', '.join(MODES)}）")
+
+    if mode == "skeleton":
+        # 输入**本身就是画好的 OpenPose 骨架图**（骨骼编辑器节点导出的）。
+        # 绝不能再走 pose/auto：骨架图上没有真人，FasterRCNN 一个框都检不出，
+        # auto 会静默降级成 outline（剪影边缘），把精心画的骨架毁成一张黑图。
+        cond = img.convert("RGB").resize((size, size), Image.LANCZOS)
+        return cond, "skeleton", {"mode": "skeleton", "joints": None}
 
     if mode in ("pose", "auto"):
         try:

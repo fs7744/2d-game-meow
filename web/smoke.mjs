@@ -214,9 +214,11 @@ function check(name, cond, extra = '') {
   const doc = dom.window.document
   check('渲染出顶栏品牌', doc.querySelector('.brand .title')?.textContent?.includes('喵叫'))
   check('空状态引导可见', !!doc.querySelector('.canvas-empty .empty-card'))
-  check('侧栏存在（节点 11 项：图生成 / 图生图 / 局部重绘 / 局部AI重绘 / 角色迁移 / '
-    + '序列帧替换 / 姿态序列 / 像素转换 / 动漫转像素 / 抠图 / 图片）',
-    section(doc, '节点')?.querySelectorAll('.rail-item').length === 11,
+  // 不写死数量：加节点类型时忘改这里会误报。只断言「有骨骼编辑」这项新入口
+  check('侧栏存在（节点分组含骨骼编辑）',
+    !!section(doc, '节点')?.querySelectorAll('.rail-item').length
+    && [...section(doc, '节点').querySelectorAll('.rail-item')]
+      .some((x) => (x.textContent || '').includes('骨骼编辑')),
     String(section(doc, '节点')?.querySelectorAll('.rail-item').length))
   check('有「项目」分组（独立画布）', !!section(doc, '项目'))
   check('缩放显示 100%', doc.querySelector('.zoom-val')?.textContent === '100%')
@@ -2121,6 +2123,39 @@ function check(name, cond, extra = '') {
     illStyle()?.value)
 
   check('Illustrious 档位场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 37) 骨骼编辑节点：可拖关节 + 8 方向 + 导出入口
+{
+  const { dom, errors } = await boot('?demo=1')
+  const doc = dom.window.document
+  const win = dom.window
+  await new Promise((r) => setTimeout(r, 500))
+  const add = [...doc.querySelectorAll('.rail-add')].find((b) =>
+    (b.closest('.rail-item')?.textContent || '').includes('骨骼编辑'))
+  check('侧栏有「骨骼编辑」入口', !!add)
+  add?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 250))
+  const node = [...doc.querySelectorAll('.node')].find((n) =>
+    (n.querySelector('.node-kind')?.textContent || '').includes('骨骼编辑'))
+  check('能创建骨骼编辑节点', !!node)
+  // 18 关节 × 2（可见圆点 + 透明大热区）+ 可能的热区
+  check('SVG 里渲染出 18 个关节点',
+    (node?.querySelectorAll('.skel-canvas circle').length || 0) >= 36,
+    String(node?.querySelectorAll('.skel-canvas circle').length))
+  check('有 8 个方向按钮', node?.querySelectorAll('.skel-dir').length === 8,
+    String(node?.querySelectorAll('.skel-dir').length))
+  const side = [...(node?.querySelectorAll('.skel-dir') || [])]
+    .find((b) => (b.textContent || '') === '右侧')
+  side?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 150))
+  check('点「右侧」后高亮（方位角切到 90°）', !!side?.classList.contains('on'),
+    side?.className)
+  check('有导出骨架图按钮',
+    [...(node?.querySelectorAll('button') || [])]
+      .some((b) => (b.textContent || '').includes('导出骨架图')))
+  check('骨骼编辑场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 

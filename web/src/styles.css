@@ -957,3 +957,42 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
 }
 .rail-scan:hover:not(:disabled) { background: rgba(0, 255, 136, 0.18); }
 .rail-scan:disabled { opacity: 0.5; cursor: default; }
+
+/* ---------------- 骨骼编辑器节点 ----------------
+   编辑器画在节点正文里，宽度跟着节点走（默认 300 → 内容 280）。
+   SVG 用 viewBox 0 0 100 100，拖拽坐标与画布缩放无关。 */
+.skel-editor { display: flex; flex-direction: column; gap: 6px; }
+.skel-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.skel-row label { display: flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--muted); }
+.skel-row select { flex: 1; min-width: 0; }
+.skel-size { font-family: var(--mono); font-size: 9px; color: var(--muted-2); }
+.skel-dirs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 3px; }
+.skel-dir {
+  font-size: 10px; padding: 3px 0; line-height: 1.2;
+  border: 1px solid var(--line); background: rgba(255, 255, 255, 0.02);
+  color: var(--muted); cursor: pointer; border-radius: 2px;
+}
+.skel-dir:hover { border-color: var(--line-strong); color: var(--white); }
+.skel-dir.on { border-color: var(--cyan); color: var(--cyan); background: rgba(0, 208, 255, 0.1); }
+.skel-range {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 10px; color: var(--muted);
+}
+.skel-range b { font-family: var(--mono); font-weight: 400; color: var(--cyan); min-width: 34px; }
+.skel-range input[type='range'] { flex: 1; min-width: 0; height: 16px; }
+.skel-canvas {
+  display: block; width: 100%; aspect-ratio: 1 / 1;
+  border: 1px solid var(--line); background: #08080b; border-radius: 3px;
+  touch-action: none; cursor: default;
+}
+.skel-actions { display: flex; gap: 6px; }
+.skel-actions .wide { flex: 1; }
+.skel-preview {
+  display: flex; align-items: center; gap: 7px;
+  border: 1px solid var(--line); padding: 5px;
+  font-size: 10px; color: var(--muted);
+}
+.skel-preview img {
+  width: 46px; height: 46px; object-fit: contain;
+  background: #08080b; border: 1px solid var(--line);
+}

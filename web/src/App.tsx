@@ -23,6 +23,7 @@ import type {
 } from './types'
 import type { NodePatch } from './nodes/GenNodeCard'
 import { styleFromParams } from './genStyles'
+import { defaultSkeleton } from './components/SkeletonEditor'
 import { NODE_W } from './nodes/GenNodeCard'
 
 /**
@@ -141,6 +142,28 @@ const DEFAULT_PARAMS: GenParams = {
 let seq = 0
 const newId = () => `n${Date.now().toString(36)}${(seq++).toString(36)}`
 
+/**
+ * 骨骼编辑节点的方位角 → 方向提示词。
+ *
+ * 骨架图本身已经带上朝向信息（肩膀叠合、鼻子偏一侧），但 Qwen 有时会把
+ * "侧面骨架"仍理解成正面人物。方位角是编辑器里的确定值，直接补一句方向词
+ * 是零成本的双保险——不改用户写的 prompt，只在提交时附加。
+ */
+const VIEW_PHRASES = [
+  'front view, facing the viewer',
+  'three-quarter front view from the right',
+  'side view, facing right',
+  'three-quarter rear view from the right',
+  'back view, seen from behind',
+  'three-quarter rear view from the left',
+  'side view, facing left',
+  'three-quarter front view from the left',
+]
+function viewPhrase(az: number): string {
+  const a = ((Math.round(az) % 360) + 360) % 360
+  return VIEW_PHRASES[Math.round(a / 45) % 8]
+}
+
 function makeNode(
   x: number,
   y: number,
@@ -158,6 +181,8 @@ function makeNode(
     source,
     image,
     params: { ...DEFAULT_PARAMS, ...params },
+    // 骨骼编辑器节点：初始给一个「张手正面」骨架，打开就能拖
+    ...(kind === 'poseedit' ? { skeleton: defaultSkeleton() } : {}),
   }
 }
 
@@ -456,14 +481,18 @@ export default function App() {
                 : type === 'poseclone' ? 'poseclone'
                   : type === 'spriteswap' ? 'spriteswap'
                     : type === 'poseswap' ? 'poseswap'
-                    : 'gen'
+                      : type === 'poseedit' ? 'poseedit'
+                        : 'gen'
     setNodes((list) => {
       // 原点放多个时阶梯错开，避免完全重叠
       const sameSpot = list.filter((n) => n.x === at.x && n.y === at.y).length
       const node = makeNode(at.x + sameSpot * 24, at.y + sameSpot * 24, kind)
       // 新节点跟当前底模走：否则选了 SDXL 还是按 SD1.5 的 512/30 步出一张废图
       const rec = recRef.current[modelRef.current]
-      if (rec) node.params = { ...node.params, ...pickRec(rec, node.params.lora) }
+      // 骨骼编辑器不跑模型，别把采样参数写进去（没意义，还会误导）
+      if (rec && kind !== 'poseedit') {
+        node.params = { ...node.params, ...pickRec(rec, node.params.lora) }
+      }
       setSelectedId(node.id)
       return [...list, node]
     })
@@ -517,6 +546,27 @@ export default function App() {
       setNotice(`${next}：推荐 ${rec.width}×${rec.height} / ${rec.steps} 步`)
     }
   }, [models, recommend, caps, model])
+
+  /**
+   * 骨骼编辑器「导出骨架图」：前端画好 OpenPose-18 PNG → 上传 → 挂到节点 image 上。
+   *
+   * 挂 image 是关键：画布的连线与「源候选」只认有 image.path / job.path 的节点，
+   * 有了它这张骨架图才能像普通图片节点一样连到角色迁移的「动作参考」输入。
+   */
+  const exportSkeleton = useCallback(async (id: string, blob: Blob) => {
+    try {
+      const f = new File([blob], 'skeleton.png', { type: 'image/png' })
+      const up = await uploadImage(f, currentId)
+      patchNode(id, {
+        image: { path: up.path, url: up.url, w: 300, h: 300 },
+      })
+      setNotice('骨架图已导出：把它连到角色迁移节点的「动作参考」输入即可')
+      window.setTimeout(() => setNotice(''), 5000)
+    } catch (e) {
+      setNotice(`导出骨架图失败：${e instanceof Error ? e.message : '未知错误'}`)
+      window.setTimeout(() => setNotice(''), 5000)
+    }
+  }, [patchNode, currentId])
 
   /** 以某个节点的产物为源，在它右边新建一个图生图节点。 */
   const spawnImg2Img = useCallback((id: string) => {
@@ -662,7 +712,7 @@ export default function App() {
       ? nodesRef.current.find((x) => x.id === n.source!.nodeId)
       : undefined
     if (!up) return undefined
-    if (up.kind === 'image') return up.image?.path
+    if (up.kind === 'image' || up.kind === 'poseedit') return up.image?.path
     return up.job?.raw || up.job?.path
   }, [])
 
@@ -725,8 +775,22 @@ export default function App() {
           })
           return
         }
+        // 动作参考来自「骨骼编辑」节点时：它导出的就是 OpenPose 骨架图，
+        // 必须走 skeleton 模式（auto 会因检不到人体降级成剪影，把骨架毁掉），
+        // 并把编辑器的方位角补成方向词，让「换视觉方向」稳定生效。
+        const upNode = node.source?.nodeId
+          ? nodesRef.current.find((x) => x.id === node.source!.nodeId)
+          : undefined
+        const fromEditor = upNode?.kind === 'poseedit'
+        const pcParams: GenParams = { ...node.params }
+        if (fromEditor) {
+          pcParams.pcRefMode = 'skeleton'
+          pcParams.prompt = [node.params.prompt.trim(),
+            `viewing direction: ${viewPhrase(upNode?.skeleton?.azimuth ?? 0)}`]
+            .filter(Boolean).join('. ')
+        }
         const r = await submitPoseClone(
-          node.params, { model: mdl, matteBackend, scope: currentId }, posePath, charPath)
+          pcParams, { model: mdl, matteBackend, scope: currentId }, posePath, charPath)
         jobId = r.job_id
       } else if (node.kind === 'spriteswap') {
         const sheetPath = sourcePathOf(node)
@@ -980,6 +1044,7 @@ export default function App() {
           loras={loras}
           onDropType={(t, world) => addNode(t, world)}
           onSpawnImg2Img={spawnImg2Img}
+          onExportSkeleton={(id, blob) => void exportSkeleton(id, blob)}
           onDropFiles={(files, world, targetId) => void handleFiles(files, world, targetId)}
           onConnect={onConnect}
           onDisconnect={onDisconnect}

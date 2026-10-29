@@ -43,6 +43,8 @@ type Props = {
   loras: LoraInfo[]
   onDropType: (type: string, world: { x: number; y: number }) => void
   onSpawnImg2Img: (id: string) => void
+  /** 骨骼编辑器导出 PNG（Blob），由 App 上传并挂到节点上 */
+  onExportSkeleton?: (id: string, blob: Blob) => void
   onDropFiles: (files: File[], world: { x: number; y: number }, targetId?: string) => void
   /** 连线落点：field 决定接到源图还是角色图 */
   onConnect: (from: string, to: string, field: LinkField) => void
@@ -81,6 +83,7 @@ export default function Canvas({
   loras,
   onDropType,
   onSpawnImg2Img,
+  onExportSkeleton,
   onDropFiles,
   onConnect,
   onDisconnect,
@@ -196,11 +199,13 @@ export default function Canvas({
     nodes.flatMap((n) => [n.source?.nodeId, n.charSource?.nodeId]).filter(Boolean) as string[],
   )
   const sourceOptions = nodes
-    .filter((n) => n.job?.path || n.job?.raw || (n.kind === 'image' && n.image?.path)
+    .filter((n) => n.job?.path || n.job?.raw
+      || ((n.kind === 'image' || n.kind === 'poseedit') && n.image?.path)
       || referencedIds.has(n.id))
     .map((n) => {
-      const kindLabel = n.kind === 'image' ? '图片' : n.kind === 'gen' ? '图生成' : '图'
-      const name = n.kind === 'image'
+      const kindLabel = n.kind === 'image' ? '图片' : n.kind === 'poseedit' ? '骨骼'
+        : n.kind === 'gen' ? '图生成' : '图'
+      const name = (n.kind === 'image' || n.kind === 'poseedit')
         ? fileNameOf(n.image?.path) || n.id
         : n.params.prompt.slice(0, 20) || n.id
       // 还没出图要标出来，否则用户以为连上就能直接用
@@ -494,6 +499,7 @@ export default function Canvas({
               modelCaps?.[n.params.model || model]?.transparent ?? canTransparent
             }
             onSpawnImg2Img={() => onSpawnImg2Img(n.id)}
+            onExportSkeleton={(blob) => onExportSkeleton?.(n.id, blob)}
             sourceNode={nodes.find((x) => x.id === n.source?.nodeId)}
             sourceOptions={sourceOptions}
             bgOptions={bgOptions}
