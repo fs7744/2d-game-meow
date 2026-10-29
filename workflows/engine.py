@@ -47,7 +47,9 @@ IPADAPTER = "ipadapter"
 # Engine 初始化时自动登记进来（架构按 model_index 的 _class_name 判定），
 # 所以"换一个社区 SD1.5 微调"不需要改代码，只要换目录。
 BASE_MODELS = {"sd15": SD15, "sdxl": SDXL}
-DEFAULT_MODEL = "sd15"
+# 运行态只跑 Qwen：SD 权重已移到 models/_archive/sd/（不删，可恢复）。
+# 回退 SD：把归档里的权重移回原位并改回 "sd15"，或直接切到 git tag `sd`。
+DEFAULT_MODEL = "qwen-image-2.1"
 
 # LoRA 应用状态挂在 UNet 上的属性名。**必须挂在 unet 而不是 Engine**：
 # pose 管线复用同一份 UNet 后，两条管线共享的是同一个 unet 对象，

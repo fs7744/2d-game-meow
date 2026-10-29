@@ -106,7 +106,7 @@ function common(params: GenParams, opts: SubmitOpts) {
     matte: params.matte,
     clip_skip: params.clipSkip,
     // 底模与抠图后端是全局设置，不在节点参数里
-    model: opts.model || 'sd15',
+    model: opts.model || 'qwen-image-2.1',
     matte_backend: opts.matteBackend || 'auto',
     // 空串表示不挂 LoRA；后端会把名字解析成绝对路径
     ...loraPayload(params),
@@ -191,7 +191,7 @@ export function submitInpaint(
     seed: params.seed,
     preset: params.preset,
     ...loraPayload(params),
-    model: opts.model || 'sd15',
+    model: opts.model || 'qwen-image-2.1',
     scope: opts.scope || undefined,
   })
 }
@@ -218,7 +218,7 @@ export function submitAiRepaint(
     preset: params.preset,
     clip_skip: params.clipSkip,
     ...loraPayload(params),
-    model: opts.model || 'sd15',
+    model: opts.model || 'qwen-image-2.1',
     scope: opts.scope || undefined,
     context: params.rpContext,
     expand: params.rpExpand,
@@ -305,7 +305,7 @@ export function submitPoseClone(
     preset: params.preset,
     clip_skip: params.clipSkip,
     ...loraPayload(params),
-    model: opts.model || 'sd15',
+    model: opts.model || 'qwen-image-2.1',
     scope: opts.scope || undefined,
     cn_scale: params.pcCnScale,
     ipa_scale: params.pcIpaScale,
@@ -369,7 +369,7 @@ export function submitPoseSeq(
     negative: params.negative || undefined,
     preset: params.preset,
     ...loraPayload(params),
-    model: opts.model || 'sd15',
+    model: opts.model || 'qwen-image-2.1',
     scope: opts.scope || undefined,
     width: params.width,
     height: params.height,
@@ -408,7 +408,7 @@ export function submitSpriteSwap(
     negative: params.negative || undefined,
     preset: params.preset,
     ...loraPayload(params),
-    model: opts.model || 'sd15',
+    model: opts.model || 'qwen-image-2.1',
     scope: opts.scope || undefined,
     // 0 = 后端自动检测精灵图网格
     cols: params.ssCols > 0 ? params.ssCols : undefined,
@@ -554,6 +554,8 @@ export type ModelCaps = {
 }
 
 export type ModelList = {
+  /** 后端的默认底模（engine.DEFAULT_MODEL）。前端初始选它，而不是猜一个 */
+  current: string
   available: string[]
   recommend: Record<string, ModelRecommend>
   /** 底模名 → 架构（sd15 / sdxl / qwen21）。LoRA 按架构兼容，不能按底模名比 */
@@ -566,22 +568,25 @@ export type ModelList = {
 
 export async function fetchModels(): Promise<ModelList> {
   const r = await fetch(`${base}/models`)
-  // 后端不可达时退回 SD1.5 单档：宁可少显示，也不要让下拉是空的
+  // 后端不可达时退回 Qwen 单档（SD 权重已归档）：宁可少显示，也不要让下拉是空的
   if (!r.ok) {
     return {
-      available: ['sd15'], recommend: {}, arch: { sd15: 'sd15' },
+      current: 'qwen-image-2.1',
+      available: ['qwen-image-2.1'], recommend: {},
+      arch: { 'qwen-image-2.1': 'qwen21' },
       caps: {
-        sd15: {
-          transparent: false, instruction: false, lora: true,
-          workflows: ['txt2img', 'img2img', 'inpaint', 'poseswap', 'matte',
-            'ai_repaint', 'pixelify', 'pose_clone', 'sprite_swap', 'topixel'],
+        'qwen-image-2.1': {
+          transparent: true, instruction: true, lora: false,
+          workflows: ['txt2img', 'img2img', 'matte', 'pixelify', 'topixel',
+            'pose_clone'],
         },
       },
       refiner: false,
     }
   }
   const j = await r.json()
-  const available: string[] = Array.isArray(j.available) ? j.available : ['sd15']
+  const available: string[] = Array.isArray(j.available)
+    ? j.available : ['qwen-image-2.1']
   const recommend: Record<string, ModelRecommend> =
     j.recommend && typeof j.recommend === 'object' ? j.recommend : {}
   // 老后端没有 arch 字段：按名字兜底（含 xl 就是 sdxl），至少不比以前差
@@ -590,7 +595,8 @@ export async function fetchModels(): Promise<ModelList> {
   const ALL_WF = ['txt2img', 'img2img', 'inpaint', 'poseswap', 'matte',
     'ai_repaint', 'pixelify', 'pose_clone', 'sprite_swap', 'topixel']
   for (const m of available) {
-    arch[m] = (j.arch && j.arch[m]) || (/xl/i.test(m) ? 'sdxl' : 'sd15')
+    arch[m] = (j.arch && j.arch[m])
+      || (/qwen/i.test(m) ? 'qwen21' : /xl/i.test(m) ? 'sdxl' : 'sd15')
     // 老后端没有 caps：按架构推。qwen 的能力是固定的，推出来的结果一致
     const c = (j.caps && j.caps[m]) || {}
     const isQwen = arch[m] === 'qwen21'
@@ -600,11 +606,15 @@ export async function fetchModels(): Promise<ModelList> {
       lora: c.lora ?? !isQwen,
       workflows: Array.isArray(c.workflows) ? c.workflows
         // 老后端不给 workflows：qwen 只留不依赖 SD 组件的
-        : isQwen ? ['txt2img', 'img2img', 'matte', 'pixelify', 'topixel'] : ALL_WF,
+        : isQwen ? ['txt2img', 'img2img', 'matte', 'pixelify', 'topixel',
+          'pose_clone'] : ALL_WF,
     }
   }
   const refiner = j.refiner === true
-  return { available, recommend, arch, caps, refiner }
+  // current 缺失时退回第一个可用底模：宁可给个能跑的，也别让下拉是空的
+  const current = (typeof j.current === 'string' && available.includes(j.current))
+    ? j.current : (available[0] || 'qwen-image-2.1')
+  return { current, available, recommend, arch, caps, refiner }
 }
 
 /**

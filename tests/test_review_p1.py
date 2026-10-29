@@ -6,6 +6,16 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from pathlib import Path
+# SD 权重已归档到 models/_archive/sd/：下面这些用例要真跑 SD 管线，
+# 权重不在就跳过（恢复权重后自动重新生效，不是删测试）。
+_SD_WEIGHTS = (Path(__file__).resolve().parent.parent / "models" / "checkpoints"
+               / "sd15" / "model_index.json").is_file()
+requires_sd = pytest.mark.skipif(
+    not _SD_WEIGHTS,
+    reason="SD 权重已归档到 models/_archive/sd/（恢复后自动恢复）")
+
+from pathlib import Path
 import torch
 from PIL import Image
 
@@ -16,6 +26,7 @@ from workflows import presets
 
 # ---------------- 共享 UNet：IP-Adapter 必须能摘能挂 ----------------
 
+@requires_sd
 def test_txt2img_works_after_ip_adapter_pipeline(eng):
     """pose 管线把 IP-Adapter 注进**共享 UNet** 之后，文生图还能跑。
 
@@ -40,6 +51,7 @@ def test_txt2img_works_after_ip_adapter_pipeline(eng):
     assert getattr(again.unet, "encoder_hid_proj", None) is not None
 
 
+@requires_sd
 def test_shared_unet_saves_memory(eng):
     """txt2img 与 pose 共用同一个 UNet 对象（省一份 1.7GB）。"""
     t = eng.txt2img_pipe("sd15")
@@ -49,6 +61,7 @@ def test_shared_unet_saves_memory(eng):
 
 # ---------------- 批量候选：输出必须与逐个生成一致 ----------------
 
+@requires_sd
 def test_batched_candidates_are_deterministic_and_close(eng):
     """批量候选要**可复现**，并且与逐个生成数值等价。
 
@@ -102,6 +115,7 @@ def test_long_negative_kept_under_chunk_budget():
     assert presets.count(long) <= presets.CHUNK_BUDGET
 
 
+@requires_sd
 def test_text_kwargs_chunks_only_when_needed(eng):
     """短文本走字符串（与历史逐像素一致），长文本才走 embeds。"""
     pipe = eng.txt2img_pipe("sd15")
@@ -135,6 +149,7 @@ def test_postprocess_exposes_pre_pixel_image(eng):
     assert n_out <= 8, n_out
 
 
+@requires_sd
 def test_text_embeds_align_when_only_negative_is_long(eng):
     """正向短、负向长时两侧 embeds 必须等长。
 
@@ -161,6 +176,7 @@ def test_text_embeds_align_when_only_negative_is_long(eng):
     assert pos.shape[1] == 154, "负向超长时应该分段到 154"
 
 
+@requires_sd
 def test_text_embeds_both_short_stays_string_path(eng):
     """两侧都短时仍走字符串路径——历史输出必须逐像素不变。"""
     pipe = eng.txt2img_pipe("sd15")

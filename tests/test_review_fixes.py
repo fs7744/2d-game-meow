@@ -9,6 +9,7 @@ import inspect
 import json
 
 import pytest
+from pathlib import Path
 
 from workflows import generate as g
 from workflows.engine import BASE_MODELS, Engine, LORA_ATTR
@@ -327,6 +328,10 @@ def test_lora_base_mismatch_reports_cause_not_variant(fresh_engine, tmp_path):
     assert fresh_engine._pool["lora"] is None
 
 
+@pytest.mark.skipif(
+    not (Path(__file__).resolve().parent.parent / "models" / "checkpoints" / "sdxl"
+         / "model_index.json").is_file(),
+    reason="SD 权重已归档到 models/_archive/sd/（恢复后此用例自动生效）")
 def test_max_candidates_matches_measured_limits(eng):
     """候选上限按总显存算：sdxl@1024 只能 1 张（实测批量 2 会占满 24GB）。
 

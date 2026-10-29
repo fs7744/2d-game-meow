@@ -1,10 +1,16 @@
-# 2D Game Asset Pipeline（SD1.5 本地版）
+# 2D Game Asset Pipeline（Qwen-Image-2.1 本地版）
 
-单卡 RTX 4090 上的本地 2D 游戏资产生成工作台。**全栈 SD1.5**：文生图、图生图、局部重绘、
-姿态驱动→精灵帧、精灵图打包。代码化推理（diffusers，不依赖 ComfyUI）+ FastAPI 服务。
+单卡 RTX 4090 上的本地 2D 游戏资产生成工作台。**当前运行态是 Qwen-Image-2.1 单底模**：
+文生图 / 图生图（指令改图）/ 角色迁移（双图条件）/ 原生透明底 / 像素化 / 精灵图打包。
+代码化推理（diffusers，不依赖 ComfyUI）+ FastAPI 服务。
 
-设计基线来自资料库文档 `RTX4090_2D_Game_Pipeline` v1.1；本仓库把其中的 SDXL 部分收敛为 SD1.5，
-原因与实测结论见文末「版本选型」。
+> **SD 时代已归档**：SD1.5 / SDXL / SDXL 动漫 / Refiner 底模、ControlNet、IP-Adapter、
+> AnimateDiff、27 个 SD LoRA 全部移到 `models/_archive/sd/`（**没有删**）。
+> 完整基线备份在 git tag `sd`。恢复方法见「底模」章节。
+> SD 代码路径仍在仓库里，所以回滚只是搬回权重 + 改一个常量。
+
+设计基线来自资料库文档 `RTX4090_2D_Game_Pipeline` v1.1；本仓库最初是全栈 SD1.5，
+现在运行态换成 Qwen——两代的实测结论与取舍见文末「版本选型」与「Qwen 能做什么」。
 
 ---
 
@@ -37,6 +43,8 @@
 | 抠图 / 去白边（纯色连通域 + u2net 语义分割 + 抠空自动回退） | 已完成，实测通过 |
 | 游戏动效导出（GIF/APNG + Godot 4 + 通用 JSON） | 已完成，实测通过 |
 | **底模自选（SD1.5 / SDXL 1.0 / Qwen-Image-2.1）** | 已完成，实测通过 |
+| **运行态切 Qwen-only**（SD 权重归档到 `models/_archive/sd/`，默认底模 = Qwen） | 已完成，实测通过 |
+| **骨骼编辑节点**（拖关节 / 8 方向换视觉方向 / 从图片自动提姿势） | 已完成，实测通过 |
 | **Qwen 原生透明底（RGBA）+ 指令改图** | 已完成，实测通过（alpha 66~68%，改图能精确执行） |
 | LoRA 选装（Civitai 精选 + 注册表 + 节点下拉） | 已完成，实测通过 |
 | **LoRA 训练**（自包含训练循环 + CLI + 面板） | 已完成，实测通过 |
@@ -187,7 +195,68 @@ SDXL 的像素风出图，量化到 32 色后角色周围会冒出一粒粒红 /
 - 像素 LoRA 必须配 `pixel` 或 `sprite` 契约，配错了会出彩色色块怪物（见下节）。
 - 武侠 LoRA 必须配 `wuxia` 契约（压印章与水墨背景），且抠图要用 u2net。
 
-## 底模：SD1.5 / SDXL 1.0（可自选）
+## 底模：当前只有 Qwen-Image-2.1（SD 已归档）
+
+### 归档了什么、怎么恢复
+
+```
+models/_archive/sd/
+├── checkpoints/   sd15, sd15-inpaint, sdxl, sdxl-anime, sdxl-refiner（28G）
+├── controlnet/    SD1.5/SDXL 的 openpose / canny / tile（12G）
+├── ipadapter/     ViT-H 编码器 + SD1.5/SDXL 两套 adapter（3.1G）
+├── animatediff/   SD1.5 的 motion module（1.7G）
+└── lora/          27 个 SD LoRA 权重 + loras.json 备份（2.2G）
+```
+
+`models/lora/loras.json` 已清空为 `{}`（LoRA 是 SD 生态，Qwen 不吃）。
+**保留没动的**：`qwen-image-2.1`、`matte/`（抠图模型，Qwen 也用）、
+`pose_keypoint/`（DWPose，骨骼提取用）。
+
+恢复 SD（两种都行）：
+
+```bash
+# A. 搬回权重 + 改一个常量
+mv models/_archive/sd/checkpoints/sd15 models/checkpoints/
+mv models/_archive/sd/controlnet models/ && mv models/_archive/sd/ipadapter models/
+mv models/_archive/sd/animatediff models/
+mv models/_archive/sd/lora/*.safetensors models/lora/
+cp models/_archive/sd/lora/loras.json.bak models/lora/loras.json
+# 然后把 workflows/engine.py 的 DEFAULT_MODEL 改回 "sd15"
+
+# B. 直接切到备份标签（代码也一起回退）
+git checkout sd
+```
+
+`engine.DEFAULT_MODEL` 是唯一的默认底模来源，`/models` 的 `current` 字段带出来；
+前端初始选它（`App.tsx` 里 `want = available.includes(current) ? current : …`）。
+**不要在前端写死底模名**——SD 时代写死的「有 SDXL 就用 SDXL」在权重归档后会挑一个
+根本没装的底模出来（这是这次切换踩到的坑）。
+
+### Qwen-Image-2.1 能做什么、不能做什么
+
+| 工作流 | Qwen | 说明 |
+|---|---|---|
+| 文生图 / 图生图 | ✅ | 图生图是**指令改图**（没有 strength 语义） |
+| 角色迁移 | ✅ | **双图条件**：角色图 + 骨架图进同一个 vision context，实测姿势几乎逐点一致 |
+| 抠图 / 像素转换 / 转像素 | ✅ | 原生 RGBA（alpha 66~68%），开透明底会自动跳过抠图 |
+| 局部重绘 / 局部AI重绘 / 姿态序列 / 序列帧替换 | ❌ | 没有 SD 的 UNet / CLIP；Qwen 编辑管线也没有 `mask` 参数（见下） |
+| LoRA / Refiner / ControlNet 硬约束 | ❌ | 不同主干与文本编码器，一点都不通用 |
+
+**为什么局部重绘做不了**：`StableDiffusionInpaintPipeline` 靠 **9 通道 UNet**
+（4 噪声 latent + 4 被遮原图 latent + 1 mask）做 masked latent 混合，选区外逐点不变；
+Qwen 的 `QwenImage21Pipeline / QwenImageEditPipeline / QwenImageEditPlusPipeline`
+签名里**都没有 `mask` / `mask_image` / `strength`**，它的机制是「条件图编码成 vision
+context + VAE latent tokens 前置到噪声」，改哪里由**指令**决定。
+`qwen-image-edit-2511` 权重（本机 pixelforge 里有）只有 transformer + processor，
+缺 text_encoder / vae / tokenizer，配齐后同样没有 mask 入口。
+
+能替代的是「局部 AI 重绘（w5）」那条路：裁剪「选区 + 上下文」→ **Qwen 指令改图**
+→ 羽化贴回原图。选区外逐点不变由二值蒙版保证，与用哪个模型无关。
+实测数据见「Qwen-only 可行性验证」。
+
+### SD1.5 / SDXL（已归档，代码仍在）
+
+
 
 ```bash
 # 权重（SDXL 约 6.5GB，fp16 变体，走代理从 HF 直下）

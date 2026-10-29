@@ -252,12 +252,12 @@ export default function App() {
   const [favs, setFavs] = useState<FavoritePrompt[]>(() => loadPrompts())
   const [loras, setLoras] = useState<LoraInfo[]>([])
   const [trainOpen, setTrainOpen] = useState(false)
-  const [models, setModels] = useState<string[]>(['sd15'])
+  const [models, setModels] = useState<string[]>(['qwen-image-2.1'])
   // 每个底模的推荐采样参数，由后端 /models 给出（见 types.ts 的 ModelRecommend）
   const [recommend, setRecommend] = useState<Record<string, ModelRecommend>>({})
   // 底模名 → 架构：过滤 LoRA 要用架构，不能拿目录名比（sdxl-anime 的架构是 sdxl）
   const [arch, setArch] = useState<Record<string, string>>({})
-  const [model, setModel] = useState<string>('sd15')
+  const [model, setModel] = useState<string>('qwen-image-2.1')
   // W4 的输入是"一组骨架帧"，后端扫 assets 给出可选目录，前端只做下拉
   const [poseDirs, setPoseDirs] = useState<PoseDir[]>([])
   const [scanning, setScanning] = useState(false)
@@ -320,11 +320,14 @@ export default function App() {
       setArch(m.arch)
       setHasRefiner(m.refiner)
       setCaps(m.caps)
-      // **有 SDXL 就默认用它**：精灵场景实测 SDXL@768 可交付率 92% / 贴边 0%，
-      // 而 SD1.5@768 是 33% / 67%——差距不在速度（同分辨率只慢约 40%），
-      // 全在构图。让所有人默认踩在差的那个上，是不合理的默认值。
-      // 显存不够（<12GB）的用户在侧栏切回 SD1.5 即可，那里也写了代价。
-      const want = m.available.includes('sdxl') ? 'sdxl' : m.available[0]
+      // **跟随后端给的默认底模**（/models 的 current = engine.DEFAULT_MODEL）。
+      //
+      // 之前这里写死「有 SDXL 就用 SDXL」——那是 SD 时代的结论（SDXL@768 可交付率
+      // 92% vs SD1.5 33%）。现在 SD 权重已归档、默认是 Qwen-Image-2.1，
+      // 写死的规则会挑一个**用户根本没装**的底模出来。
+      // 老后端没有 current 时退回「有 SDXL 用 SDXL」，保持向后兼容。
+      const want = m.available.includes(m.current) ? m.current
+        : (m.available.includes('sdxl') ? 'sdxl' : m.available[0])
       if (m.available.length && !m.available.includes(model)) setModel(want)
     })
   }, [model])
