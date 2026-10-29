@@ -28,6 +28,7 @@
 | **动漫底模 + anime 契约**（Illustrious / SDXL clip_skip 换算 / 推荐参数按底模覆盖） | 已完成，实测通过（画风/五官/线条全面优于 base） |
 | **画布「转像素」节点**（topixel：任意图 → 像素化，对比度增强 + 轮廓描边） | 已完成，实测通过（全身完整 / 32 色 / 板外 0） |
 | **像素色板污染修复**（透明区 RGB 纯黑吃掉 84% 色位） | 已完成，实测通过（12 色 → 32 色） |
+| **Refiner 精修“越修越糊”修复**（embeds 1280 维拼错 / 误用 denoising_start） | 已完成，实测通过（方差 480→1582，像素差 28→7.7） |
 | **画布「姿态序列」节点**（w4：骨架帧目录 → 逐帧多候选择优 + 质量闸门 → 对齐打包） | 已完成，实测通过（8 帧，候选 2/帧，闸门 8/8） |
 | **显存优化**（VAE 逐帧解码 / 参考图编码器用完即退 / 补提复用管线 / 权重池共享 / 显存档位） | 已完成，实测通过（9.86→5.78GB，-41%，输出逐像素一致） |
 | 后处理（像素化 / 16 色量化 / 锚点对齐 / 打包） | 已完成并自测（28px 漂移 → 0） |
@@ -1417,7 +1418,7 @@ python tools/video.py i2v assets/cat.png "the same character walking" -o assets/
 ## 测试
 
 ```bash
-python -m pytest tests -q        # 397 个用例，约 480s（含 SDXL 与动漫底模慢用例）
+python -m pytest tests -q        # 401 个用例，约 540s（含 SDXL 与动漫底模慢用例）
 ```
 
 **按改动选测试，不要每次都跑全量**（全量 4 分钟，只在合并/发版前跑一次）：
@@ -1461,7 +1462,7 @@ python -m pytest tests -q        # 397 个用例，约 480s（含 SDXL 与动漫
 | `tests/test_video.py` | numpy/PIL 帧兼容、mp4 落地、模型路径校验、Wan 真实生成（`RUN_WAN=1`） | 6 |
 | `tests/test_lora.py` | 注册表扫描/元数据/坏 JSON 容错、名称解析、去碎屑、贴边占比判定、武侠契约预算 | 13 |
 | `tests/test_train.py` | 数据集读取与兜底、步数规划、**端到端 6 步真训练**（导出的体积上限、可被 scan/apply_lora 认出）、`/train` 全流程 | 9 |
-| `tests/test_models.py` | `/models` 只列出本机已装的、未知底模报错、**W3+SDXL 走 base 权重且选区外不变**、**SDXL 忽略 clip_skip**、SDXL 真实生成、**W4+SDXL 端到端**、SDXL 版 IPA 与三条 ControlNet | 11 |
+| `tests/test_models.py` | `/models` 只列出本机已装的、未知底模报错、**W3+SDXL 走 base 权重且选区外不变**、**SDXL clip_skip 的 penultimate 换算**、SDXL 真实生成、**W4+SDXL 端到端**、SDXL 版 IPA 与三条 ControlNet、**refiner embeds 必须等于 OpenCLIP 1280 维隐层**、**精修强度换算**、**精修不糊（方差 ≥ 不精修的 70%）** | 14 |
 | `tests/test_denoise.py` | `strip_fringe` 剥白边/迭代/不误伤主体、`clean_isolated` 内部改色/外挂删除/**斜向轮廓不被吃** | 9 |
 
 已知限制：骨架质量决定成败——实测 8 帧序列里有 2 帧只提取到 8/18 个关节（手臂与身体重叠），
@@ -1784,22 +1785,54 @@ SD1.5 上我先后试过降分辨率、加留白词、feet visible、换像素 L
 | 参数 | 作用 | 推荐 |
 |---|---|---|
 | 精修强度（CFG） | refiner 的提示词服从度 | 5~7 |
-| 精修步数 | refiner 自己的去噪步数 | 20~30 |
-| 精修起点 | 从去噪的哪一段接手（0.8 = 最后 20%） | 0.8 |
+| 精修步数 | refiner 的**总**步数（实际只跑 `步数 ×(1−起点)`） | 20~30 |
+| 精修起点 | 只修最后这一段（0.8 = 幅度 20%） | 0.8 |
 
-**但要先知道一件事：SDXL refiner 是"照片化"精修器**。实测把动漫剑客喂给它，
-出来的是"墙上挂的一幅画"——它把画面往写实拉。这是它的训练目标，不是 bug。
+界面会在起点旁边标出实际步数（`0.80 ≈4 步`）——「精修步数 20」并不等于跑了
+20 步，不标出来就是误导。
+
+**先知道一件事：refiner 不是画质增强按钮。** 它是「照片化」精修器——把画面往
+写实质感拉。实测把动漫剑客喂给它，出来的是「墙上挂的一幅画」。而且它**不提升
+锐度**：768² 下拉普拉斯方差 1826 → 1616、1024² 下 611 → 450（VAE 编解码有损，
+这是 img2img 的固有代价）。
+
 所以：**写实图才值得开；像素/动漫素材别开**（后处理本来就会抹平细节，refiner
 只会把风格带偏）。
 
-实现上有两个坑（都踩过）：
+#### ⚠️ 「勾了精修反而糊成灰雾」的两个真 bug（都修了）
 
-- refiner 的 UNet **没有 encoder_hid_proj**，cross-attention 只吃 **1280 维**
-  = CLIP-L(768) + OpenCLIP 前 512；直接传 `prompt=` 会用底模那套 2816 维拼接，
-  报 `mat1 and mat2 shapes cannot be multiplied (154x2048 and 1280x768)`。
-  所以 embeds 要自己拼（`Engine.refiner_embeds`）。
-- refiner 是 **img2img 管线，只接受图片**：传 latent 会被当成 PIL 图再走一遍
-  VAE 编码，出来是糊掉的鬼影。
+**1) embeds 拼错了维度语义**（致命）
+
+refiner 的 UNet `cross_attention_dim = 1280`，而 OpenCLIP bigG 的 hidden size
+也正好是 1280——**是同一个数，不是巧合**：refiner 的 cross-attn 就要
+text_encoder_2 的完整 1280 维隐层。
+
+老代码写的是 `CLIP-L(768) + OpenCLIP 前 512 = 1280`：维度凑对了，语义完全错位。
+refiner 拿着「半段 CLIP-L + 半段 OpenCLIP」的拼接向量去噪，按错误的语义理解
+提示词，出图直接糊成一团灰雾，连颜色都变（白底线稿 → 灰底）。
+
+实测同一组参数（768²/20 步/起点 0.8）：
+
+| | 拉普拉斯方差 | 与不精修的像素差 |
+|---|---|---|
+| 不精修 | 1826 | — |
+| 拼接 embeds（老） | 480~727 | 28.4 |
+| 完整 1280 维（新） | 1582~1616 | 7.7 |
+
+回归测试 `test_refiner_embeds_match_unet_cross_attention_dim` 不只断言维度
+（拼出来也是 1280，拦不住），还断言**与 OpenCLIP 隐层逐元素相等**。
+
+**2) 用错了 `denoising_start`**（语义错）
+
+`denoising_start` 是「两段式」参数：底模 `denoising_end` 提前停、refiner 从那个
+时间点接着跑。但这里底模跑满了全部步数，再传 `denoising_start=0.8` 的实际语义
+就变成「把成品重新加噪到 80%，再只走 4 步」——必然糊。
+
+精修是「低幅度 img2img」，对应的是 `strength = 1 − 精修起点`（0.8 → 0.2）。
+
+另一个坑（没改，但要知道）：refiner 是 **img2img 管线，只接受图片**。把底模的
+latent 直接传进去会被当成 PIL 图再走一遍预处理，出来是糊掉的鬼影（实测接续
+latent 的方差只有 631）。所以底模解码成图再喂，代价就是那一次 VAE 往返损失。
 
 ### 明确未做（以及为什么）
 

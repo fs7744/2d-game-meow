@@ -214,3 +214,110 @@ def test_sdxl_controlnet_kinds(eng):
     assert any(k.endswith(":sdxl") for k in eng._ctrl)
     assert not any(k == "openpose" for k in eng._ctrl if "sdxl" in k)
     eng.free()
+
+
+# ---------------- SDXL Refiner：embeds 维度与「精修不糊」----------------
+
+def test_refiner_embeds_match_unet_cross_attention_dim(eng):
+    """refiner 的 cross-attn embeds 必须正好等于 UNet 的 cross_attention_dim。
+
+    踩过的坑：写成 `CLIP-L(768) + OpenCLIP 前 512 = 1280`——维度凑对了，
+    但**语义完全错位**。refiner 拿到「半段 CLIP-L + 半段 OpenCLIP」的拼接
+    向量，按错误语义去噪，出图糊成一团灰雾（实测拉普拉斯方差 1826 → 480，
+    白底线稿直接变灰底）。正确做法是只取 text_encoder_2 的完整 1280 维隐层：
+    SDXL refiner 的 `cross_attention_dim=1280` 与 OpenCLIP bigG 的 hidden
+    size 是同一个数，不是巧合。
+
+    这条断言只看维度的话抓不住 bug（拼出来的也是 1280），所以同时断言
+    **与 OpenCLIP 隐层逐元素相等**——拼接向量不可能等于它。
+    """
+    if not eng.has_refiner():
+        pytest.skip("未下载 SDXL refiner")
+    if "sdxl" not in eng.available_models():
+        pytest.skip("未下载 SDXL 底模")
+
+    import torch as _t
+
+    base = eng.txt2img_pipe("sdxl")
+    rp = eng.refiner_pipe()
+    pos, neg, pos_pool, neg_pool = eng.refiner_embeds("a cat knight", "blurry")
+
+    dim = rp.unet.config.cross_attention_dim
+    assert pos.shape == (1, 77, dim), pos.shape
+    assert neg.shape == (1, 77, dim), neg.shape
+    # pooled 走 text_embeds，也是 1280
+    assert pos_pool.shape == (1, 1280), pos_pool.shape
+    assert neg_pool.shape == (1, 1280), neg_pool.shape
+
+    # 必须是 OpenCLIP 隐层本身，不能是拼接出来的
+    tok2, enc2 = base.tokenizer_2, base.text_encoder_2
+    ids = tok2("a cat knight", padding="max_length",
+               max_length=tok2.model_max_length, truncation=True,
+               return_tensors="pt").input_ids.to(enc2.device)
+    with _t.no_grad():
+        ref = enc2(ids, output_hidden_states=True).hidden_states[-2]
+    assert _t.allclose(pos, ref, atol=1e-4), "cross-attn embeds 不等于 OpenCLIP 隐层（又拼了？）"
+
+
+def test_refiner_strength_maps_from_start_ratio():
+    """「精修起点」→ 精修幅度 = 1 − 起点，且有安全上下限。
+
+    为什么用 strength 而不是 denoising_start：denoising_start 是「底模提前停」
+    的两段式参数，这里底模已经跑满，再传 0.8 等于把成品重新加噪到 80% 再只走
+    4 步——实测糊成灰雾。精修本质是低幅度 img2img，对应 strength。
+    """
+    for end, want in ((0.8, 0.2), (0.9, 0.1), (0.5, 0.5)):
+        got = max(0.03, min(0.60, 1.0 - float(end)))
+        assert abs(got - want) < 1e-6, (end, got)
+    # 极端值要夹住：起点 0.99 不能让 strength 归零（否则等于没跑）
+    assert max(0.03, min(0.60, 1.0 - 0.99)) == 0.03
+    assert max(0.03, min(0.60, 1.0 - 0.1)) == 0.60
+
+
+def test_refiner_output_is_not_mush(eng):
+    """回归：勾了精修不能把图弄糊。
+
+    实测基线（768²/20 步）：
+      不精修     拉普拉斯方差 ~1826
+      修复前精修   ~727，且整体像素差 28（糊 + 变色）
+      修复后精修   ~1616，像素差 ~8
+
+    阈值定在「方差 ≥ 不精修的 70% 且像素差 ≤ 20」——修复前的 727/28 会被
+    两条同时拦下，修复后（1616/8）通过。用相对值而不是绝对值，换显卡/换
+    权重也能用。
+    """
+    if not eng.has_refiner():
+        pytest.skip("未下载 SDXL refiner")
+    if "sdxl" not in eng.available_models():
+        pytest.skip("未下载 SDXL 底模")
+
+    import numpy as np
+    from PIL import Image
+
+    def lap_var(im):
+        a = np.asarray(im.convert("L"), dtype=np.float32)
+        r = (4 * a - np.roll(a, 1, 0) - np.roll(a, -1, 0)
+             - np.roll(a, 1, 1) - np.roll(a, -1, 1))
+        return float(r[1:-1, 1:-1].var())
+
+    # **步数不能太低**：strength 0.2 × 8 步只剩 1 步，改动量太小，
+    # 条件错了也看不出糊（第一版用 8 步就是这么漏过去的）。20 步 → 4 步够暴露。
+    kw = dict(prompt="a cat knight, red cape", negative=None, preset="none",
+              width=512, height=512, steps=20, cfg=6.5, seed=4242,
+              model="sdxl", clip_skip=2, matte=False)
+    off = g.txt2img(eng, refiner=False, tag="rf_off", **kw)
+    on = g.txt2img(eng, refiner=True, refiner_end=0.8, refiner_steps=20,
+                   tag="rf_on", **kw)
+
+    a = Image.open(off["file"])
+    b = Image.open(on["file"])
+    mine, theirs = lap_var(a), lap_var(b)
+    diff = float(np.abs(np.asarray(a.convert("RGB"), dtype=np.int16)
+                        - np.asarray(b.convert("RGB"), dtype=np.int16)).mean())
+
+    assert theirs >= mine * 0.70, f"精修把图弄糊了：{mine:.0f} → {theirs:.0f}"
+    assert diff <= 20, f"精修改动过大（应当小幅）：{diff:.1f}"
+    m = on["meta"]
+    assert m["refiner"] is True
+    assert m["refiner_strength"] == 0.2
+    assert m["refiner_steps_run"] >= 1

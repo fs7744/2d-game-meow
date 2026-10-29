@@ -343,6 +343,9 @@ def txt2img(eng: Engine, *, prompt: str, negative: Optional[str] = None,
     # 它不是"换个更大的模型"，而是把收尾的去噪交给专攻细节的权重，
     # 所以对发丝/布料纹理的提升远大于对构图的提升。
     use_refiner = bool(refiner) and model == "sdxl" and eng.has_refiner()
+    # 精修幅度 = 1 − 精修起点（与 UI 上那个滑块直接对应）。
+    # img2img 内部按 `int(steps × strength)` 取实际步数，所以 20 步 × 0.2 = 4 步。
+    refiner_strength = max(0.03, min(0.60, 1.0 - float(refiner_end)))
     if refiner and model != "sdxl":
         print(f"[warn] Refiner 只支持 SDXL（当前 {model}），已忽略")
     if refiner and model == "sdxl" and not eng.has_refiner():
@@ -356,18 +359,25 @@ def txt2img(eng: Engine, *, prompt: str, negative: Optional[str] = None,
     out = _infer(eng, pipe, call_kw, label="w1")
     img = out.images[0]
     if use_refiner:
-        # refiner 是 img2img 管线：**只接受图片**（传 latent 会被当成 PIL 图
-        # 走一遍预处理，出来是糊掉的鬼影）。所以底模先解码成图再喂进去。
+        # refiner 是 img2img 管线：只接受图片（latent 是给「底模提前停」的
+        # 两段式用的，这里底模已经跑满，所以先解码成图再喂进去）。
         rp = eng.refiner_pipe()
         # refiner 的 embeds 要自己组装（见 Engine.refiner_embeds 的说明）：
-        # 直接传 prompt 会用底模那套 2816 维拼接，喂不进 refiner 的 UNet。
+        # 直接传 prompt 会用底模那套 2048 维拼接，喂不进 refiner 的 1280 维 UNet。
         pos_e, neg_e, pos_pool, neg_pool = eng.refiner_embeds(prompt, neg)
+        # **用 strength 表达精修幅度，不要用 denoising_start。**
+        #
+        # denoising_start 是「两段式」参数：底模 denoising_end 提前停、refiner
+        # 从那个时间点接着跑。这里底模已经跑满全部步数，再传 denoising_start=0.8
+        # 的语义就变成「把成品重新加噪到 80% 再只走 4 步」——实测出图糊成一团
+        # 灰雾（拉普拉斯方差 1826 → 727，颜色也从白底线稿变灰底）。
+        # 精修是「低幅度 refinement」，对应 img2img 的 strength：0.05~0.3。
         img = _infer(eng, rp, dict(prompt_embeds=pos_e,
                                    negative_prompt_embeds=neg_e,
                                    pooled_prompt_embeds=pos_pool,
                                    negative_pooled_prompt_embeds=neg_pool,
                                    image=img,
-                                   denoising_start=refiner_end,
+                                   strength=refiner_strength,
                                    num_inference_steps=refiner_steps,
                                    guidance_scale=refiner_cfg,
                                    generator=gen),
@@ -403,6 +413,12 @@ def txt2img(eng: Engine, *, prompt: str, negative: Optional[str] = None,
         "refiner": bool(use_refiner), "refiner_cfg": refiner_cfg if use_refiner else None,
         "refiner_steps": refiner_steps if use_refiner else None,
         "refiner_end": refiner_end if use_refiner else None,
+        # 实际生效的幅度与步数：界面上的「精修步数」是**总步数**，
+        # img2img 只执行其中 strength 那一段（20 步 × 0.2 = 4 步）。
+        # 不写清楚的话，用户会以为跑了 20 步却还是没细节。
+        "refiner_strength": round(refiner_strength, 3) if use_refiner else None,
+        "refiner_steps_run": (max(1, round(refiner_steps * refiner_strength))
+                              if use_refiner else None),
         "seconds": seconds, "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
     }, raw=raw, scope=scope)
 

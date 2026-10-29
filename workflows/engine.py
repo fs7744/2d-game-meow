@@ -875,52 +875,36 @@ class Engine:
         log.info("%s 加载 %.1fs", key, time.perf_counter() - t0)
         return self._get(key)
 
-    def refiner_embeds(self, prompt: str, negative: str, clip_skip: int = 1):
+    def refiner_embeds(self, prompt: str, negative: str, clip_skip: int = 2):
         """给 refiner 准备文本 embeds（SDXL refiner 的输入跟底模不一样）。
 
-        **为什么不能直接 `refiner(prompt=...)`**：refiner 的 UNet
-        `cross_attention_dim=1280` 且**没有 encoder_hid_proj**，cross-attention
-        只吃 **768 维的 CLIP-L 隐层**；而 added_cond 的 text_embeds 要 **1280 维**
-        = CLIP-L pooled(768) + OpenCLIP pooled 的前 512 维。
-        底模那套"两个编码器拼成 2816"的做法喂进去会直接报
-        `mat1 and mat2 shapes cannot be multiplied (154x2048 and 1280x768)`。
+        **cross-attn 只吃 text_encoder_2（OpenCLIP bigG）的完整 1280 维隐层。**
+        refiner UNet 的 `cross_attention_dim=1280`，而 OpenCLIP bigG 的 hidden
+        size 正好是 1280——两者是同一个数，不是巧合。
+
+        ⚠️ 曾经写成 `CLIP-L(768) + OpenCLIP 前 512 = 1280`：维度凑对了，
+        但**语义完全错位**。refiner 拿到的是"半段 CLIP-L + 半段 OpenCLIP"的
+        拼接向量，它按错误的语义去噪，出图直接糊成一团灰雾（实测拉普拉斯
+        方差 1826 → 480，颜色也从白底线稿变成灰底，用户报的就是这个）。
+        换成完整 1280 维后同一组参数下 1582，视觉效果与不精修基本一致。
+
+        pooled 用 `text_embeds`（text_projection 之后的 1280 维），这也是
+        官方 encode_prompt 的做法；**不要**再拼 CLIP-L 的 768。
 
         返回 (正 embeds, 负 embeds, 正 pooled, 负 pooled)。
         """
         base = self.txt2img_pipe("sdxl")
-        tok, enc = base.tokenizer, base.text_encoder
         tok2, enc2 = base.tokenizer_2, base.text_encoder_2
-        dev = enc.device
 
-        def _ids(t, tk):
-            out = tk(t, padding="max_length", max_length=tk.model_max_length,
-                     truncation=True, return_tensors="pt")
-            return out.input_ids.to(dev)
-
-        def _clip_l(text):
-            ids = _ids(text, tok)
-            out = enc(ids, output_hidden_states=True)
-            # SDXL 官方取 hidden_states[-2]（最后一层是过 LN 的 pooled 之前的）
-            emb = out.hidden_states[-2]
-            pooled = out.pooler_output
-            return emb, pooled
-
-        def _openclip(text):
-            """OpenCLIP：隐层（前 512 维要进 cross-attn）+ pooled（也要前 512 维）。"""
-            ids = _ids(text, tok2)
+        def _pack(text: str):
+            ids = tok2(text, padding="max_length",
+                       max_length=tok2.model_max_length, truncation=True,
+                       return_tensors="pt").input_ids.to(enc2.device)
             out = enc2(ids, output_hidden_states=True)
-            hidden = out.hidden_states[-2][:, :, :512]      # (1, 77, 512)
-            pooled = out.text_embeds                        # (1, 1280) 完整，不截
-            return hidden, pooled
-
-        def _pack(text):
-            emb, _pool = _clip_l(text)
-            oh, op = _openclip(text)
-            # cross-attn 要 1280 = CLIP-L(768) + OpenCLIP 前 512
-            # pooled 直接用 OpenCLIP 的 1280 维（**不要**再拼 CLIP-L 的 768：
-            # 拼出来是 1280 但语义不对，实测 refiner 会把输入图当成"要画的画"，
-            # 输出成一张"画中画"）
-            return torch.cat([emb, oh], dim=-1), op
+            # SDXL 默认取倒数第二层（= 业界说的「clip skip 2」）；n > 2 才真多跳，
+            # 语义与 generate._text_kwargs 里对底模的处理保持一致。
+            idx = -2 if clip_skip <= 2 else -clip_skip
+            return out.hidden_states[idx], out[0]
 
         pos, pos_pool = _pack(prompt)
         neg, neg_pool = _pack(negative)
