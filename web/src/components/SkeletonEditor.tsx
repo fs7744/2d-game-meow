@@ -47,6 +47,9 @@ type Props = {
   /** 导出 PNG（Blob，不含文件名）；由节点负责上传 */
   onExport: (blob: Blob) => void
   exporting?: boolean
+  /** 从用户提供的图片自动提骨架（上传 + DWPose 由节点侧负责） */
+  onImportImage?: (file: File) => void
+  importing?: boolean
 }
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v))
@@ -127,6 +130,42 @@ export function defaultSkeleton(): SkeletonState {
   return { points: PRESETS['张手'].map((p) => ({ ...p })), azimuth: 0, preset: '张手' }
 }
 
+/**
+ * 2D 骨架（DWPose 从图里提的）→ 编辑器用的 3D 骨架。
+ *
+ * **为什么需要推断 z**：2D 图里没有深度，直接把 z 全设 0 的话，一转到侧面
+ * 肩膀和髋部就叠成一个点，模型读不懂。这里按"人体左右侧"给每个关节一个
+ * 基础深度（右侧在前、左侧在后），手腕/脚踝再加大一点前后差，于是换方向时
+ * 至少能正确表现"一前一后"的四肢。数值是保守的启发式，不是从图里测出来的——
+ * 用户还能用深度滑块再改。
+ */
+const SIDE_Z: number[] = [
+  0, 0,
+  -0.04, -0.06, -0.12,   // 右肩 / 右肘 / 右腕
+  0.04, 0.06, 0.12,      // 左肩 / 左肘 / 左腕
+  -0.04, -0.06, -0.10,   // 右髋 / 右膝 / 右踝
+  0.04, 0.06, 0.10,      // 左髋 / 左膝 / 左踝
+  -0.03, 0.03, -0.03, 0.03,
+]
+
+export function skeletonFromPoints(
+  points: ([number, number] | null)[], azimuthGuess = 0,
+): SkeletonState {
+  const base = PRESETS['站立']
+  const pts: Joint3[] = base.map((b, i) => {
+    const q = points[i]
+    if (!q) return { ...b }        // 没检到的关节用站立预设补，保证 18 点齐全
+    return {
+      x: clamp(q[0], 0, 1), y: clamp(q[1], 0, 1),
+      z: SIDE_Z[i] ?? 0,
+    }
+  })
+  // 2D 分不出正/背面；把后端给的朝向猜测只用于提示，导入一律按正面，
+  // 用户点方向按钮切换（避免对已经是侧面的图做二次旋转）
+  void azimuthGuess
+  return { points: pts, azimuth: 0, preset: '自定义' }
+}
+
 /** 8 个方向：精灵素材常用的方位。名字里的「右」指人物自己的右侧。 */
 export const DIRECTIONS: Array<[string, number]> = [
   ['正面', 0], ['右前', 45], ['右侧', 90], ['右后', 135],
@@ -168,10 +207,13 @@ export function renderSkeletonPNG(state: SkeletonState, size = 768): Promise<Blo
   })
 }
 
-export default function SkeletonEditor({ state, onChange, onExport, exporting }: Props) {
+export default function SkeletonEditor({
+  state, onChange, onExport, exporting, onImportImage, importing,
+}: Props) {
   const [dragIdx, setDragIdx] = useState<number | null>(null)
   const [selected, setSelected] = useState<number | null>(null)
   const svgRef = useRef<SVGSVGElement | null>(null)
+  const fileRef = useRef<HTMLInputElement | null>(null)
   const dragRef = useRef<{ i: number; sx: number; sy: number; ox: number; oy: number; oz: number } | null>(null)
 
   const pts = state.points.map((p) => project(p, state.azimuth))
@@ -313,12 +355,32 @@ export default function SkeletonEditor({ state, onChange, onExport, exporting }:
 
       <div className="skel-actions">
         <button className="mini" onClick={() => onChange(defaultSkeleton())}>重置</button>
+        <button
+          className="mini"
+          onClick={() => fileRef.current?.click()}
+          disabled={importing || !onImportImage}
+          title="从一张真人/写实人像自动提取 18 个关节，再手动换方向"
+        >
+          {importing ? '提取中…' : '📷 从图片'}
+        </button>
         <button className="mini wide" onClick={() => void doExport()} disabled={exporting}>
           {exporting ? '导出中…' : '导出骨架图'}
         </button>
       </div>
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/*"
+        hidden
+        onChange={(e) => {
+          const f = e.target.files?.[0]
+          if (f) onImportImage?.(f)
+          e.target.value = ''        // 允许连续选同一张图
+        }}
+      />
       <div className="src-note">
-        拖圆点摆关节；方位角绕竖轴旋转（0° 正面 / 180° 背面）。导出的骨架图可直接连到角色迁移节点。
+        拖圆点摆关节；「从图片」自动提真人姿势（像素/插画认不出，用预设手动摆）。
+        方位角绕竖轴旋转（0° 正面 / 180° 背面）即可换视觉方向。
       </div>
     </div>
   )

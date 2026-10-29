@@ -328,6 +328,80 @@ def loras_scan() -> Dict[str, Any]:
 _POSE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
 
+class PoseExtractReq(BaseModel):
+    path: str
+
+
+def _readable_asset_path(p: str) -> Optional[Path]:
+    """只读用途的路径校验：必须在 assets 内、是文件、是图片。
+
+    `_safe_asset_path` 是给删除接口写的（还带"不能删 uploads/index"这类规则），
+    读图用它会误伤；单独写一个，只做最小必要的安全约束。
+    """
+    try:
+        t = Path(p)
+        if not t.is_absolute():
+            t = (ASSETS / t) if (ASSETS / t).exists() else (ROOT / t)
+        t = t.resolve()
+    except (OSError, ValueError):
+        return None
+    if not str(t).startswith(str(ASSETS.resolve())):
+        return None
+    if not t.is_file() or t.suffix.lower() not in (
+            ".png", ".jpg", ".jpeg", ".webp", ".bmp"):
+        return None
+    return t
+
+
+@app.post("/pose/extract")
+def pose_extract(req: PoseExtractReq) -> Dict[str, Any]:
+    """骨骼编辑器「从图片提取」：一张图 → OpenPose-18 归一化关节点。
+
+    复用项目里已有的 DWPose（FasterRCNN 检人 + RTMPose 关键点），坐标经过
+    `normalized_points` 归一化——人物居中、按 fill 占满画面高度，正好和
+    编辑器里的 0~1 坐标一致，不用再换算。
+
+    返回的 `azimuth_guess` 只是**提示**：2D 图没有深度，正面/背面在骨架上
+    是对称的，无法可靠区分；只有"肩膀宽度很窄"能较有把握地判成侧面。
+    前端一律按正面导入，方向交给用户点按钮切换。
+    """
+    target = _readable_asset_path(req.path)
+    if target is None:
+        raise HTTPException(400, "图片路径不在 assets 内（或不是图片文件）")
+    try:
+        img = Image.open(target).convert("RGB")
+        img.load()
+    except Exception as exc:                       # noqa: BLE001
+        raise HTTPException(400, f"打不开图片：{exc}") from exc
+    ex = engine.pose_extractor()
+    if ex is None:
+        raise HTTPException(503, "姿态模型未安装（缺 dwpose onnx 或 onnxruntime）")
+    try:
+        pts = ex.normalized_points(img, thr=0.25, fill=0.8, min_points=8)
+    except ValueError as exc:
+        # 真人检测器认不出像素画 / 插画 / 版画——和 WPC 的 pose 模式同一个限制。
+        # 给能照做的下一步，别让用户对着 "0 boxes" 猜。
+        raise HTTPException(
+            422, f"没识别出人体：{exc}。骨架提取目前只对真人 / 写实人像有效；"
+                 "游戏像素素材、插画请用上面的姿势预设手动摆，或用角色迁移的"
+                 "「轮廓」参考模式。") from exc
+    except Exception as exc:                       # noqa: BLE001
+        raise HTTPException(500, f"姿态提取失败：{exc}") from exc
+
+    points: List[Any] = []
+    for i in range(18):
+        if i in pts:
+            x, y = pts[i]
+            points.append([round(float(x), 4), round(float(y), 4)])
+        else:
+            points.append(None)
+    guess = 0
+    if 2 in pts and 5 in pts and abs(pts[2][0] - pts[5][0]) < 0.07:
+        # 肩膀在画面上几乎重叠 → 原图接近侧面。鼻尖相对颈的方向决定朝左/朝右。
+        guess = 90 if (0 in pts and 1 in pts and pts[0][0] >= pts[1][0]) else 270
+    return {"points": points, "joints": len(pts), "azimuth_guess": guess}
+
+
 @app.get("/pose_dirs")
 def pose_dirs(limit: int = 40) -> Dict[str, Any]:
     """可以当 W4 输入的**骨架帧目录**（含 ≥2 张图的目录，按帧数降序）。

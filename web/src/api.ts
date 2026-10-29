@@ -315,6 +315,32 @@ export function submitPoseClone(
   })
 }
 
+/** /pose/extract 的返回：18 个 COCO 关节点（缺失为 null）+ 原图朝向猜测 */
+export type PoseExtract = {
+  points: ([number, number] | null)[]
+  joints: number
+  /** 只用来提示：2D 图分不出正面/背面，只有肩宽很窄时才有把握说是侧面 */
+  azimuth_guess: number
+}
+
+/** 骨骼编辑器「从图片提取」：上传后拿磁盘路径，让后端跑 DWPose 提 18 个关节 */
+export async function extractPose(path: string): Promise<PoseExtract> {
+  const r = await fetch(`${base}/pose/extract`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  })
+  if (!r.ok) {
+    let msg = `HTTP ${r.status}`
+    try {
+      const j = await r.json()
+      if (j?.detail) msg = String(j.detail)
+    } catch { /* 响应不是 JSON，用状态码兜底 */ }
+    throw new Error(msg)
+  }
+  return r.json() as Promise<PoseExtract>
+}
+
 export type PoseDir = { path: string; count: number; sample: string[]; name: string }
 
 /** 可当 W4 输入的骨架帧目录（后端扫 assets 下两层） */

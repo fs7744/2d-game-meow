@@ -329,6 +329,8 @@ type Props = {
   onSpawnImg2Img: () => void
   /** 骨骼编辑器导出的 PNG（Blob）→ 上传并挂到节点 image 上 */
   onExportSkeleton?: (blob: Blob) => void
+  /** 骨骼编辑器「从图片提取」，返回 Promise 以便节点显示"提取中" */
+  onImportPose?: (file: File) => void | Promise<void>
   /** 图生图的上游节点（从 source.nodeId 解析而来） */
   sourceNode?: GenNode
   /** 可以作为源图的节点列表 */
@@ -429,6 +431,7 @@ export default function GenNodeCard({
   defaultModel,
   onSpawnImg2Img,
   onExportSkeleton,
+  onImportPose,
   sourceNode,
   sourceOptions,
   bgOptions,
@@ -528,6 +531,7 @@ export default function GenNodeCard({
   const poseDirInfo = (poseDirs || []).find((d) => d.path === p.psDir)
   const [maskOpen, setMaskOpen] = useState(false)
   const [skelExporting, setSkelExporting] = useState(false)
+  const [skelImporting, setSkelImporting] = useState(false)
   // 源图可以是上游节点的产物、图片节点的本地图，也可以是节点上直接记的绝对路径
   const hasSource = !!(
     sourceNode?.job?.raw ||
@@ -1013,6 +1017,11 @@ export default function GenNodeCard({
               }
             }}
             exporting={skelExporting}
+            importing={skelImporting}
+            onImportImage={async (f) => {
+              setSkelImporting(true)
+              try { await onImportPose?.(f) } finally { setSkelImporting(false) }
+            }}
           />
           {node.image?.url && (
             <div className="skel-preview">

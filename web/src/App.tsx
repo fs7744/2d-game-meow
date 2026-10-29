@@ -11,7 +11,7 @@ import {
   fetchPoseDirs, scanLoras, submitToPixel, submitInpaint, submitMatte,
   submitPixelify, submitPoseClone,
   submitPoseSeq,
-  submitSpriteSwap, submitTxt2Img, uploadImage,
+  submitSpriteSwap, submitTxt2Img, uploadImage, extractPose,
 } from './api'
 import ConfirmDialog from './components/ConfirmDialog'
 import Lightbox from './components/Lightbox'
@@ -23,7 +23,7 @@ import type {
 } from './types'
 import type { NodePatch } from './nodes/GenNodeCard'
 import { styleFromParams } from './genStyles'
-import { defaultSkeleton } from './components/SkeletonEditor'
+import { defaultSkeleton, skeletonFromPoints } from './components/SkeletonEditor'
 import { NODE_W } from './nodes/GenNodeCard'
 
 /**
@@ -568,6 +568,28 @@ export default function App() {
     }
   }, [patchNode, currentId])
 
+  /**
+   * 骨骼编辑器「从图片提取」：上传原图 → 后端 DWPose 提 18 关节 → 2D 点补深度
+   * 变成可旋转的 3D 骨架 → 写回节点。
+   *
+   * 不改 node.image：那个字段挂的是**导出的骨架图**（连线源）。把原图写进去
+   * 会让下游角色迁移拿到原图而不是骨架，方向也就无从谈起。
+   */
+  const importPoseFromImage = useCallback(async (id: string, file: File) => {
+    try {
+      const up = await uploadImage(file, currentId)
+      const r = await extractPose(up.path)
+      patchNode(id, { skeleton: skeletonFromPoints(r.points, r.azimuth_guess) })
+      const dir = r.azimuth_guess === 90 ? '右侧'
+        : r.azimuth_guess === 270 ? '左侧' : '正面'
+      setNotice(`已从图片提取 ${r.joints}/18 个关节（原图疑似${dir}）；`
+        + '点上方方向按钮换视觉方向，再导出骨架图')
+    } catch (e) {
+      setNotice(`提取骨架失败：${e instanceof Error ? e.message : '未知错误'}`)
+    }
+    window.setTimeout(() => setNotice(''), 7000)
+  }, [patchNode, currentId])
+
   /** 以某个节点的产物为源，在它右边新建一个图生图节点。 */
   const spawnImg2Img = useCallback((id: string) => {
     setNodes((list) => {
@@ -1045,6 +1067,7 @@ export default function App() {
           onDropType={(t, world) => addNode(t, world)}
           onSpawnImg2Img={spawnImg2Img}
           onExportSkeleton={(id, blob) => void exportSkeleton(id, blob)}
+          onImportPose={(id, file) => importPoseFromImage(id, file)}
           onDropFiles={(files, world, targetId) => void handleFiles(files, world, targetId)}
           onConnect={onConnect}
           onDisconnect={onDisconnect}

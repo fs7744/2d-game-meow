@@ -26,6 +26,16 @@ function makeFetch() {
         json: async () => ({ deleted: ['D:////x////out.png'], skipped: [], not_found: [], count: 1 }),
       }
     }
+    if (String(url).endsWith('/pose/extract')) {
+      return {
+        ok: true,
+        json: async () => ({
+          points: Array.from({ length: 18 }, (_, i) =>
+            i === 0 ? [0.6, 0.05] : [0.5, 0.2]),
+          joints: 18, azimuth_guess: 90,
+        }),
+      }
+    }
     if (String(url).includes('/upload')) {
       return {
         ok: true,
@@ -2156,6 +2166,35 @@ function check(name, cond, extra = '') {
     [...(node?.querySelectorAll('button') || [])]
       .some((b) => (b.textContent || '').includes('导出骨架图')))
   check('骨骼编辑场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 38) 骨骼编辑：从图片自动提取 18 个关节（DWPose 由后端 mock）
+{
+  const { dom, errors } = await boot('?demo=1')
+  const doc = dom.window.document
+  const win = dom.window
+  await new Promise((r) => setTimeout(r, 500))
+  const add = [...doc.querySelectorAll('.rail-add')].find((b) =>
+    (b.closest('.rail-item')?.textContent || '').includes('骨骼编辑'))
+  add?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 250))
+  const node = [...doc.querySelectorAll('.node')].find((n) =>
+    (n.querySelector('.node-kind')?.textContent || '').includes('骨骼编辑'))
+  const input = node?.querySelector('input[type=file]')
+  check('编辑器有「从图片提取」的文件入口', !!input)
+  const file = new win.File([new Uint8Array([1, 2, 3])], 'pose.png', { type: 'image/png' })
+  Object.defineProperty(input, 'files', { value: [file], configurable: true })
+  input.dispatchEvent(new win.Event('change', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 500))
+  const first = node?.querySelector('.skel-canvas circle')
+  check('导入后关节坐标被替换（鼻 y=0.05 → SVG cy=5）',
+    first?.getAttribute('cy') === '5', first?.getAttribute('cy'))
+  check('提示带上提取到的 18/18 关节与朝向猜测',
+    (doc.querySelector('.toast')?.textContent || '').includes('18/18')
+    && (doc.querySelector('.toast')?.textContent || '').includes('右侧'),
+    doc.querySelector('.toast')?.textContent)
+  check('从图片提取场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 
