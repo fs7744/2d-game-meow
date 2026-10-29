@@ -2083,6 +2083,31 @@ function check(name, cond, extra = '') {
   check('换掉 LoRA 后档位回退为自定义', illStyle()?.value === 'custom',
     illStyle()?.value)
 
+  // 35) 从 Illustrious 档**切出去**必须能切走（回归：档位自带的 LoRA 不摘，
+  // 参数就永远比不中任何档位——下拉立刻弹回「自定义」，而且之后每档都弹，
+  // 等于进了这一档就再也出不来）
+  setSel(illStyle(), 'spriteIll')
+  await wait(300)
+  check('重新选中 Illustrious 档', illStyle()?.value === 'spriteIll', illStyle()?.value)
+
+  setSel(illStyle(), 'sprite16')
+  await wait(300)
+  check('从 Illustrious 切到「像素精灵 16-bit」不回弹',
+    illStyle()?.value === 'sprite16', illStyle()?.value)
+  const loraAfter = [...doc.querySelectorAll('select')].find((x) =>
+    [...x.options].some((o) => o.value === 'Illustrious_PixelArt_Shader_M_01_epoch_4'))
+  check('切走后档位自带的 LoRA 被摘掉', loraAfter?.value === '', loraAfter?.value)
+  const numsAfter = [...doc.querySelectorAll('.node-body input[type=number]')]
+    .map((i) => Number(i.value))
+  check('尺寸跟着档位回到 768（768÷6=128 有效像素）', numsAfter.includes(768),
+    JSON.stringify(numsAfter))
+
+  // 再切到「动漫立绘」也不能弹回去——连着切多档都得稳
+  setSel(illStyle(), 'anime')
+  await wait(300)
+  check('连切第二档（动漫立绘）也不回弹', illStyle()?.value === 'anime',
+    illStyle()?.value)
+
   check('Illustrious 档位场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }

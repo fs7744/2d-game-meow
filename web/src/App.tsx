@@ -467,6 +467,14 @@ export default function App() {
    * 前端若按直觉填 1024，用户会稳定拿到更差的结果且没有任何报错。
    */
   const switchModel = useCallback((next: string, opts?: { keepNodes?: boolean }) => {
+    // **切之前先确认这台机器上真有这个底模**：产出风格档位会指定底模
+    // （「像素精灵·Illustrious」→ sdxl-anime），没下载时 setModel 会把 model
+    // 设成一个下拉里根本不存在选项的值——底模选择框变空、生成直接失败。
+    // 宁可只套参数并说明原因。
+    if (!models.includes(next)) {
+      setNotice(`未安装底模 ${next}，已套用档位参数但底模没切（先装权重或手动换个底模）`)
+      return
+    }
     const oldRec = recommend[model]
     const rec = recommend[next]
     setModel(next)
@@ -492,7 +500,7 @@ export default function App() {
     }))
     setNotice(`已套用 ${next} 推荐参数：${rec.width}×${rec.height} / ${rec.steps} 步` +
       `，候选上限 ${cap} 张/帧`)
-  }, [recommend, model])
+  }, [recommend, model, models])
 
   /** 以某个节点的产物为源，在它右边新建一个图生图节点。 */
   const spawnImg2Img = useCallback((id: string) => {

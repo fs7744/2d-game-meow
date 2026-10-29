@@ -34,12 +34,12 @@ export type GenStyle = {
 export const GEN_STYLES: GenStyle[] = [
   {
     v: 'sprite16', label: '像素精灵（16-bit）',
-    preset: 'sprite', pixel: 6, palette: 32,
+    preset: 'sprite', pixel: 6, palette: 32, width: 768, height: 768,
     note: '最常用。768² 生成后每 6px 一格，约 128 有效像素，32 色。',
   },
   {
     v: 'spriteHi', label: '像素精灵·高清',
-    preset: 'sprite', pixel: 4, palette: 48,
+    preset: 'sprite', pixel: 4, palette: 48, width: 768, height: 768,
     note: '细节更多：每 4px 一格，约 192 有效像素；色数放宽到 48 保住层次。',
   },
   {
@@ -53,7 +53,7 @@ export const GEN_STYLES: GenStyle[] = [
   },
   {
     v: 'pixel8', label: '像素·8-bit 粗颗粒',
-    preset: 'pixel', pixel: 8, palette: 16,
+    preset: 'pixel', pixel: 8, palette: 16, width: 768, height: 768,
     note: '颗粒更粗、色数更少（16 色），复古 8-bit 味。',
   },
   {
@@ -94,9 +94,11 @@ export function styleFromParams(
   const hit = GEN_STYLES.find(
     (x) => x.v !== 'custom' && x.preset === preset
       && x.pixel === pixel && x.palette === palette
-      // LoRA 也是档位的组成部分：档位挂着 Pixelizer，用户手动换掉就该回退
-      // 成「自定义参数」，不能还显示「像素精灵·Illustrious」
-      && (x.lora ?? '') === lora,
+      // LoRA **只在档位自己声明了才作为判据**（它是那一档的必备装备）。
+      // 对没声明 LoRA 的档位（像素精灵 / 动漫立绘 / 水墨…）不能比：用户
+      // 手动挂了个风格 LoRA，参数其实和档位一致，比下去会全都判成
+      // 「自定义参数」——实测「水墨国风」这条就永远选不进去。
+      && (x.lora === undefined || x.lora === lora),
   )
   return hit ? hit.v : 'custom'
 }

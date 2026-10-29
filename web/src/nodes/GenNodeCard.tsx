@@ -1985,13 +1985,24 @@ export default function GenNodeCard({
                   if (st.preset !== undefined) patch.preset = st.preset
                   if (st.pixel !== undefined) patch.pixel = st.pixel
                   if (st.palette !== undefined) patch.palette = st.palette
-                  // 尺寸与像素块必须配套：有效像素 = 宽 ÷ 块，1024/8=128 才对
+                  // 尺寸与像素块必须配套：有效像素 = 宽 ÷ 块，1024/8=128 才对。
+                  // 只改块不改尺寸的话，从「Illustrious 档」(1024) 切回
+                  // 「16-bit 档」会变成 1024÷6=170 有效像素，跟档位说明对不上。
                   if (st.width !== undefined) patch.width = st.width
                   if (st.height !== undefined) patch.height = st.height
-                  // 档位自带的 LoRA（触发词由后端按 loras.json 自动前置）
+                  // LoRA 是「档位的装备」：
+                  //  · 目标档位自带 LoRA → 挂上
+                  //  · 目标档位不带，而当前这个 LoRA 是**上一个档位挂上的** → 摘掉
+                  //    （不摘的话参数永远比不中任何档位，下拉立刻弹回「自定义」，
+                  //     而且之后每一档都弹回去——等于进了 Illustrious 档就出不来）
+                  //  · 用户自己手动选的 LoRA（不属于任何档位）→ 保留，别抢
+                  const cur = GEN_STYLES.find((x) => x.v === styleOf(p))
+                  const owned = cur?.lora && cur.lora === loraStem(p.lora)
                   if (st.lora !== undefined) {
                     patch.lora = st.lora
                     patch.loraScale = st.loraScale ?? 0.8
+                  } else if (owned) {
+                    patch.lora = ''
                   }
                   setParams(patch)
                   // 底模不属于节点参数（是全局状态）：档位要求 sdxl-anime 就切过去，
