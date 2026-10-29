@@ -99,7 +99,10 @@ def one(eng, model: str, pid: str, text: str, seed: int, lora: str,
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="sdxl-anime")
-    ap.add_argument("--lora", default="", help="逗号分隔的 LoRA 名或路径")
+    ap.add_argument("--lora", default="",
+                    help="逗号分隔；用 `名字:触发词` 带单 token 触发词"
+                         "（如 Illustrious_PixelArt_Shader_M_01_epoch_4:"
+                         "PixelArt_IL_One_Token_style_M_01）")
     ap.add_argument("--lora-scale", type=float, default=0.8)
     ap.add_argument("--preset", default="anime", choices=["anime", "pixel"])
     ap.add_argument("--size", type=int, default=1024)
@@ -109,21 +112,31 @@ def main() -> None:
                     help="额外跑一组不挂 LoRA 的对照")
     a = ap.parse_args()
 
-    names = [x for x in a.lora.split(",") if x] or [""]
-    if a.base_line and "" not in names:
-        names.insert(0, "")
+    names: list[tuple[str, str]] = []
+    for item in a.lora.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        n, _, t = item.partition(":")
+        names.append((n, t.strip()))
+    if not names:
+        names = [("", "")]
+    if a.base_line and names[0][0] != "":
+        names.insert(0, ("", ""))
 
     eng = Engine(ROOT / "models")
     OUT.mkdir(parents=True, exist_ok=True)
     rows = []
-    for name in names:
+    for name, trigger in names:
         path = lora_reg.resolve(ROOT / "models", name) if name else ""
         label = name or "(不挂 LoRA)"
         got = []
         for pid, text in PROMPTS:
+            # 单 token 触发词（Pixelizer 那种）必须前置，否则 LoRA 完全不生效
+            full = f"{trigger}, {text}" if trigger else text
             for i in range(a.seeds):
                 seed = 1000 + i * 7919
-                m = one(eng, a.model, pid, text, seed, path, a.lora_scale,
+                m = one(eng, a.model, pid, full, seed, path, a.lora_scale,
                         a.preset, a.size, a.steps)
                 got.append(m)
                 print(f"  [{label}] {pid} s{seed}: subj={m['subj']} "

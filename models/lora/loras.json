@@ -313,5 +313,27 @@
     "source": "auto",
     "base": "sd15",
     "rank": 4
+  },
+  "pixelizer_il": {
+    "label": "像素着色器 Pixelizer（真像素 · 推荐）",
+    "trigger": "PixelArt_IL_One_Token_style_M_01",
+    "scale": 1.0,
+    "preset": "anime",
+    "matte": true,
+    "base": "sdxl",
+    "size_mb": 435.4,
+    "source": "civitai:2451774",
+    "note": "**实测是项目里唯一能出「真像素」的方案，而且可交付率最高**。挂 sdxl-anime（同为 Illustrious）+ tag 契约 + 后处理（pixel=8 / 32 色 / 轮廓描边），9 样本（3 prompt × 3 seed）：\n- **可交付 89%｜多主体 11%｜贴边 0%｜均色数 41｜硬边 0.407｜4.7s 一张**\n- 硬边占比 0.407 是「不挂 LoRA」（0.198）的 2 倍，也追平产线 64px 真精灵帧（0.447）\n- 横向对比：sd15+px_illustrious 50%｜sdxl+pixelart_xl 83%｜**本组合 89%**\n\n三个必须的设置：\n1. **触发词是单 token `PixelArt_IL_One_Token_style_M_01`**（从 safetensors 的 ss_tag_frequency 读出），必须前置，否则完全不生效。\n2. **强度 1.0**：0.8 时实测只有 50% 可交付（多主体 33%、贴边 17%，还出过崩坏姿态），1.0 是 89%——这个 LoRA 是「着色器」性质，强度不够等于没套上网格。\n3. **契约用 anime（danbooru tag）不用 pixel**：Illustrious 不认自然语言构图词，用 pixel 契约贴边率会从 0% 涨到 83%。提示词里必带 `solo` / `full body`。\n\n它只负责「把画面变成像素网格」，不负责构图——构图要靠 tag 与画布留白。"
+  },
+  "pixeldream_il": {
+    "label": "PixelDream（Illustrious · 实测是厚涂不是像素）",
+    "trigger": "pixeldream",
+    "scale": 0.8,
+    "preset": "anime",
+    "matte": true,
+    "base": "sdxl",
+    "size_mb": 217.9,
+    "source": "civitai:1528534@1729424",
+    "note": "Civitai 上标「Pixel Art Style」、按 Illustrious 训的像素 LoRA（4350 下载、Very Positive），但**实测画出来的不是像素画**：\n- 硬边占比 **0.279**，只比不挂 LoRA（0.198）高一点，远低于 Pixelizer（0.458）；视觉上是厚涂/写实质感（盔甲有金属渐变），没有像素网格。\n- 可交付 67%、多主体 17%、贴边 0%，色数 34 —— 当「质量不错的插画 LoRA」好用，当像素 LoRA 不合格。\n- 训练元数据里 `ss_base_model_version` 写的是 `sdxl_base_v1-0`，但挂 sdxl-anime 出图质量明显好于挂 sdxl，说明实际底模是 Illustrious 系。\n- 结论：**做像素精灵用 pixelizer_il，不要用它**。"
   }
 }
