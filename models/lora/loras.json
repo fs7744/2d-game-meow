@@ -79,7 +79,7 @@
     "base": "sdxl",
     "size_mb": 163,
     "source": "civitai:?@130580",
-    "note": "SDXL 最高人气像素风（下载 119741 / 赞 6288）。无触发词，靠 prompt 里的 pixel art 生效。\n\n**实测（2026-10，3 prompt × 2 seed，1024²/24 步，有效像素固定 128）：**\n- 挂 sdxl：可交付 83% / 多主体 17% / 贴边 0% —— 项目里 SDXL 路线最好的一组\n- 挂 sdxl-anime（Illustrious）：只有 17% 可交付、多主体 50%、**贴边 83%**\n- 换成 danbooru tag 契约再挂 sdxl-anime：贴边 83%→0%（构图约束终于生效），但可交付仍只有 50%（多主体 50%）\n\n两条结论：① **像素 LoRA 必须配它训练时的底模**——架构对（都是 SDXL UNet）不代表能用，挂 Illustrious 会明显掉质量；② Illustrious 类底模**不认自然语言构图词**，必须用 danbooru tag（`full body` / `solo`），否则 83% 的图会贴边裁切。\n\n背景一定会画彩色/纹理底，必须开抠图。"
+    "note": "SDXL 最高人气像素风（下载 119741 / 赞 6288）。无触发词，靠 prompt 里的 pixel art 生效。\n\n**实测（2026-10，3 prompt × 2 seed，1024²/24 步，有效像素固定 128）：**\n- 挂 sdxl：可交付 83% / 多主体 17% / 贴边 0% —— 项目里 SDXL 路线最好的一组\n- 挂 sdxl-anime（Illustrious）：只有 17% 可交付、多主体 50%、**贴边 83%**\n- 换成 danbooru tag 契约再挂 sdxl-anime：贴边 83%→0%（构图约束终于生效），但可交付仍只有 50%（多主体 50%）\n\n两条结论：① **像素 LoRA 必须配它训练时的底模**——架构对（都是 SDXL UNet）不代表能用，挂 Illustrious 会明显掉质量；② Illustrious 类底模**不认自然语言构图词**，必须用 danbooru tag（`full body` / `solo`），否则 83% 的图会贴边裁切。\n\n背景一定会画彩色/纹理底，必须开抠图。\n\n**硬边占比**（相邻像素色差 >32 占所有非零色差的比例，衡量「像素画 vs 低分辨率插画」）：\n- 产线 64px 真精灵帧 0.447｜Illustrious 不挂 LoRA 0.245｜Illustrious + pixelart_xl 0.258\n- 挂不挂 LoRA 几乎没差别、色数也都是 37 → **像素纯度靠后处理**（色板量化 + 轮廓描边 + 二值化），不是 LoRA 给的；LoRA 只改「画得像不像像素」的风格，不改可交付率和纯度。\n- 前提是整个链路一致：`_postprocess` 只做量化，**没有描边**；少了 pixelfy.enhance_edges 那一步，硬边占比会掉到 0.02（看起来像 LoRA 没用）。"
   },
   "inkwash_xl2": {
     "label": "水墨风格 ink wash（SDXL）",

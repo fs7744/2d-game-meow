@@ -54,9 +54,27 @@ RETRO_FILES: list[tuple[str, int]] = [
 ]
 
 # PixelDream：Civitai 1528534 / version 1729424，217.9MB，底模 Illustrious。
+# civitai 直链下不了（307 → b2.civitai.com 不通），改走 HF 上的第三方搬运版。
+# Muapi / John6666 这类账号会把 Civitai 权重原样转到 HF，是国内唯一能走的渠道。
 PIXELDREAM_URL = f"{CIVITAI}/api/download/models/1729424"
 PIXELDREAM_DEST = ROOT / "models" / "lora" / "pixeldream_il.safetensors"
 PIXELDREAM_MB = 218
+
+# HF 镜像上的搬运版 LoRA：(repo, 文件名, 目标名, 预期 MB)
+#
+# 为什么走这里：hf-mirror **限速到 ~30-50KB/s**（实测；同一时刻 ModelScope
+# 是 7~9MB/s，差 200 倍），所以只有几十~二百 MB 的 LoRA 值得下，
+# 2GB 级的底模（RetroDiffusion）在这个网速下没有实际可行性（约 11 小时）。
+MIRROR_LORAS: dict[str, tuple[str, str, str, int]] = {
+    # 217.9MB 与 Civitai 上 PixelDream 的文件大小完全一致 → 就是它
+    "pixeldream": ("Muapi/pixel-art-style-illustrious-by-skormino",
+                   "pixel-art-style-illustrious-by-skormino.safetensors",
+                   "pixeldream_il.safetensors", 218),
+    # 同作者的另一支 Illustrious 像素 LoRA，体积小、下得快，可先验证路子
+    "pixelxl15": ("Muapi/illustrious-pixel-art-xl-1.5-by-creativehotia",
+                  "illustrious-pixel-art-xl-1.5-by-creativehotia.safetensors",
+                  "pixel_xl15_il.safetensors", 55),
+}
 
 
 def _download(url: str, dest: Path, expect_mb: int = 0) -> None:
@@ -81,7 +99,7 @@ def _download(url: str, dest: Path, expect_mb: int = 0) -> None:
                 f.write(chunk)
                 done += len(chunk)
                 mb = done / 2**20
-                if total and int(mb) % 100 == 0 and int(mb) != last:
+                if total and int(mb) % 10 == 0 and int(mb) != last:
                     last = int(mb)
                     print(f"    {mb:7.0f} / {total / 2**20:.0f} MB", flush=True)
     got = tmp.stat().st_size / 2**20
@@ -110,6 +128,16 @@ def fetch_retrodiffusion() -> None:
     print("RetroDiffusion 就绪（Public Domain Mark 1.0，可商用）")
 
 
+def fetch_mirror_lora(name: str) -> None:
+    """从 HF 镜像的搬运仓库下 LoRA（国内唯一可行的渠道）。"""
+    repo, fname, dest_name, mb = MIRROR_LORAS[name]
+    dest = ROOT / "models" / "lora" / dest_name
+    url = f"{HF}/{repo}/resolve/main/{fname}"
+    print(f"{repo} → {dest.relative_to(ROOT)}（约 {mb}MB，镜像限速 ~40KB/s，"
+          f"预计 {mb*1024/40/60:.0f} 分钟）")
+    _download(url, dest, mb)
+
+
 def fetch_pixeldream() -> None:
     print(f"PixelDream → {PIXELDREAM_DEST.relative_to(ROOT)}")
     _download(PIXELDREAM_URL, PIXELDREAM_DEST, PIXELDREAM_MB)
@@ -119,9 +147,14 @@ def fetch_pixeldream() -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="all",
-                    choices=["pixeldream", "retrodiffusion", "all"])
+                    choices=["pixeldream", "pixelxl15", "retrodiffusion", "all"])
+    ap.add_argument("--via", default="mirror", choices=["mirror", "civitai"],
+                    help="mirror=走 HF 搬运版（国内可用）；civitai=直连（需代理）")
     a = ap.parse_args()
-    if a.model in ("pixeldream", "all"):
+    if a.model in ("pixeldream", "pixelxl15", "all") and a.via == "mirror":
+        for n in (["pixelxl15", "pixeldream"] if a.model == "all" else [a.model]):
+            fetch_mirror_lora(n)
+    elif a.model == "pixeldream":
         fetch_pixeldream()
     if a.model in ("retrodiffusion", "all"):
         fetch_retrodiffusion()
