@@ -459,9 +459,13 @@ function check(name, cond, extra = '') {
   await new Promise((r) => setTimeout(r, 100))
 
   check('选中后显示触发词', (doc.querySelector('.lora-trigger')?.textContent || '').includes('wuxia'))
+  // 「产出风格」下拉按 preset+pixel+palette 三项反推档位。
+  // LoRA 会把 preset 改成 wuxia，此时参数已偏离任何预设档 → 老实显示 custom
+  // （不骗人还在预设档上）。
   const presetSel = [...doc.querySelectorAll('select')].find(
-    (s) => s.parentElement?.textContent?.startsWith('风格'))
-  check('自动切到武侠契约', presetSel?.value === 'wuxia', presetSel?.value)
+    (s) => s.parentElement?.textContent?.startsWith('产出风格'))
+  check('LoRA 自带契约后风格档位转为「自定义」（不谎报还在预设档）',
+    presetSel?.value === 'custom', presetSel?.value)
 
   const before = doc.querySelector('textarea.prompt').value
   doc.querySelector('.lora-trigger .mini')
@@ -1733,8 +1737,17 @@ function check(name, cond, extra = '') {
 
   // 「像素块」曾经漏过一条：hint 查不到键时返回空串，界面上只是没说明、不报错。
   // 现在既补了说明，也让 hint 返回显眼文案 + 加了静态检查。
+  // 像素块默认藏在「自定义参数」风格下——先切过去再查 tooltip
+  const stSel3 = [...doc.querySelectorAll('select')].find((x) =>
+    [...x.options].some((o) => o.textContent.includes('自定义参数')))
+  if (stSel3) {
+    const s3 = Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value').set
+    s3.call(stSel3, 'custom')
+    stSel3.dispatchEvent(new win.Event('change', { bubbles: true }))
+    await new Promise((r) => setTimeout(r, 120))
+  }
   const pxTip = lab('像素块')?.getAttribute('title') || ''
-  check('像素块有 tooltip', pxTip.includes('有效像素'), pxTip)
+  check('像素块有 tooltip（自定义档下）', pxTip.includes('有效像素'), pxTip)
   const allTips = [...nd().querySelectorAll('label[title]')]
     .map((l) => l.getAttribute('title') || '')
   check('没有「未定义说明」的占位',
@@ -1849,6 +1862,18 @@ function check(name, cond, extra = '') {
   const lab = (name) => [...doc.querySelectorAll('label')]
     .find((l) => (l.textContent || '').trim().startsWith(name))
 
+  // 像素块/色数只在「自定义参数」风格下暴露——先切过去
+  const styleSel = [...doc.querySelectorAll('select')].find((x) =>
+    [...x.options].some((o) => o.textContent.includes('自定义参数')))
+  check('有「产出风格」下拉（含 7 档）', !!styleSel && styleSel.options.length >= 7,
+    styleSel?.options.length)
+  check('默认不暴露像素块（由风格档位决定）', !lab('像素块'), '像素块本该隐藏')
+  const selSetter = Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value').set
+  selSetter.call(styleSel, 'custom')
+  styleSel.dispatchEvent(new win.Event('change', { bubbles: true }))
+  await wait(150)
+  check('切到自定义后出现像素块与色数', !!lab('像素块') && !!lab('色数'))
+
   // 768² 配像素块 6 → 128px 有效像素（参考图那种密度）
   setNum(lab('像素块').querySelector('input'), 6)
   await wait(120)
@@ -1888,8 +1913,18 @@ function check(name, cond, extra = '') {
   const clickCheck = (el) =>
     el.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
 
+  // 像素化开关只在「自定义参数」风格下暴露——先切过去
+  const stSel2 = [...doc.querySelectorAll('select')].find((x) =>
+    [...x.options].some((o) => o.textContent.includes('自定义参数')))
+  if (stSel2) {
+    const set2 = Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value').set
+    set2.call(stSel2, 'custom')
+    stSel2.dispatchEvent(new win.Event('change', { bubbles: true }))
+    await wait(150)
+  }
+
   const pxToggle = lab('像素化')?.querySelector('input')
-  check('有「像素化」开关', !!pxToggle)
+  check('有「像素化」开关（自定义档下）', !!pxToggle)
   check('默认是开的（推荐值 6）', pxToggle?.checked === true, String(pxToggle?.checked))
   check('像素块输入框可用', lab('像素块')?.querySelector('input')?.disabled === false)
 

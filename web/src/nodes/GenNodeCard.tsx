@@ -3,7 +3,7 @@ import { hasCJK } from '../store/prompts'
 import MaskEditor from '../components/MaskEditor'
 import MaskPreview from '../components/MaskPreview'
 import type { PoseDir } from '../api'
-import type { GenNode, LoraInfo, Preset } from '../types'
+import type { GenNode, GenParams, LoraInfo, Preset } from '../types'
 
 /**
  * 每个参数的说明：做什么 / 影响什么 / 推荐值。
@@ -292,13 +292,78 @@ type Props = {
   projectId?: string
 }
 
-const PRESETS: { v: Preset; label: string }[] = [
-  { v: 'sprite', label: '像素精灵' },
-  { v: 'portrait', label: '立绘' },
-  { v: 'wuxia', label: '武侠 / 国风' },
-  { v: 'anime', label: '动漫（配动漫底模）' },
-  { v: 'none', label: '不套契约' },
+/**
+ * 产出风格：**一档决定「契约 + 像素块 + 色数」三件事**。
+ *
+ * 为什么不再让用户填像素块和色数：那两个参数强耦合且互相影响——
+ * 「768² 配 6px 块 = 128 有效像素」这种换算要用户在脑子里做，而填错
+ * 不会报错、只是出图"看着不对"（实测有人填 64 → 8px 有效像素，细节全没）。
+ * 产线上真正要选的是「要什么样的成品」，不是「块多大」。
+ *
+ * `custom` 才暴露原始参数（老用户/特殊需求）。
+ */
+export type GenStyle = {
+  v: string
+  label: string
+  preset?: Preset
+  pixel?: number
+  palette?: number
+  note: string
+}
+
+export const GEN_STYLES: GenStyle[] = [
+  {
+    v: 'sprite16', label: '像素精灵（16-bit）',
+    preset: 'sprite', pixel: 6, palette: 32,
+    note: '最常用。768² 生成后每 6px 一格，约 128 有效像素，32 色。',
+  },
+  {
+    v: 'spriteHi', label: '像素精灵·高清',
+    preset: 'sprite', pixel: 4, palette: 48,
+    note: '细节更多：每 4px 一格，约 192 有效像素；色数放宽到 48 保住层次。',
+  },
+  {
+    v: 'pixel8', label: '像素·8-bit 粗颗粒',
+    preset: 'pixel', pixel: 8, palette: 16,
+    note: '颗粒更粗、色数更少（16 色），复古 8-bit 味。',
+  },
+  {
+    v: 'anime', label: '动漫立绘（不像素化）',
+    preset: 'anime', pixel: 0, palette: 0,
+    note: '纯插画，保画质。建议底模选 sdxl-anime，尺寸 1024²。',
+  },
+  {
+    v: 'realistic', label: '写实插画（不像素化）',
+    preset: 'portrait', pixel: 0, palette: 0,
+    note: '厚涂/写实风，不像素化。',
+  },
+  {
+    v: 'ink', label: '水墨国风（不像素化）',
+    preset: 'wuxia', pixel: 0, palette: 0,
+    note: '水墨线稿风，建议配武侠 LoRA（wuxia_v2）。',
+  },
+  {
+    v: 'custom', label: '自定义参数',
+    pixel: undefined, palette: undefined,
+    note: '自己填像素块与色数（在「更多设置」里）。',
+  },
 ]
+
+/**
+ * 当前参数落在哪一档风格上（用来回显下拉）。
+ *
+ * 读的是显式记录的 `genStyle`，**但不能只信它**：用户可能单独改了色数或
+ * 切了 LoRA（LoRA 会带自己的契约），那实际参数已经偏离档位了——这时要
+ * 老实显示「自定义参数」，而不是骗人说还在预设档上。
+ */
+function styleOf(p: GenParams): string {
+  const st = GEN_STYLES.find((x) => x.v === p.genStyle)
+  if (!st) return 'custom'
+  if (st.v === 'custom') return 'custom'
+  const same = st.preset === p.preset && st.pixel === p.pixel
+    && st.palette === p.palette
+  return same ? st.v : 'custom'
+}
 
 export default function GenNodeCard({
   node,
@@ -361,8 +426,8 @@ export default function GenNodeCard({
   const sAttempts = job?.attempts
   const sGate = job?.gatePassed
   const isPixelify = node.kind === 'pixelify'
-  // 动漫转像素：源图可选（没有就用 prompt 先生成），所以不能算「必须源图」
-  const isAnimePixel = node.kind === 'animepixel'
+  // 转像素：源图可选（没有就用 prompt 先生成），所以不能算「必须源图」
+  const isToPixel = node.kind === 'topixel'
   const isPoseClone = node.kind === 'poseclone'
   const isSpriteSwap = node.kind === 'spriteswap'
   const isPoseSwap = node.kind === 'poseswap'
@@ -618,10 +683,10 @@ export default function GenNodeCard({
             isPixelify ? ' pixelify' : ''
           }${isPoseClone ? ' poseclone' : ''}${isSpriteSwap ? ' spriteswap' : ''}${
             isPoseSwap ? ' poseswap' : ''
-          }${isAnimePixel ? ' animepixel' : ''}`}
+          }${isToPixel ? ' topixel' : ''}`}
         >
           {isImg ? '图片' : isBg ? '抠图' : isPixelify ? '像素转换'
-            : isAnimePixel ? '动漫转像素'
+            : isToPixel ? '转像素'
             : isPoseClone ? '角色迁移'
               : isPoseSwap ? '姿态序列'
               : isSpriteSwap ? '序列帧替换'
@@ -1213,12 +1278,12 @@ export default function GenNodeCard({
             </button>
           )}
         </div>
-      ) : isAnimePixel ? (
+      ) : isToPixel ? (
         <div className="node-body animepixel-body">
           <div className="src-note">
-            先出**动漫全身大图**，再压成像素画——比让模型直接画像素稳得多：
-            直接画常常裁到腿、颜色是连续渐变；这条路全身完整、色块干净。
-            {!hasSource && ' 不接源图就是「描述角色 → 一步出像素」。'}
+            任意图 → 像素画：照片、插画、3D 渲染、动漫角色都行。
+            有源图就直接转（不跑模型、秒回）；没有就按描述先出一张再转——
+            比让模型直接画像素稳得多（直接画常裁到腿、颜色是连续渐变）。
           </div>
           {sourceBox}
           <div className="prompt-wrap">
@@ -1228,7 +1293,7 @@ export default function GenNodeCard({
               placeholder={
                 hasSource
                   ? '（有源图，提示词可留空）'
-                  : '角色描述（danbooru tag 更好）e.g. 1girl, red cape, blue armor, holding sword, full body'
+                  : '描述要画什么（动漫角色用 danbooru tag）e.g. 1girl, red cape, holding sword, full body'
               }
               value={p.prompt}
               onChange={(e) => setParam('prompt', e.target.value)}
@@ -1276,6 +1341,14 @@ export default function GenNodeCard({
                 onChange={(e) => setParam('apEdgeRebuild', e.target.checked)}
               />
               轮廓描边
+            </label>
+            <label className="check" title="先抠掉背景，得到透明底的精灵；转风景/照片时建议关掉">
+              <input
+                type="checkbox"
+                checked={p.apMatte}
+                onChange={(e) => setParam('apMatte', e.target.checked)}
+              />
+              抠背景
             </label>
           </div>
           {hasImage && (
@@ -1919,12 +1992,23 @@ export default function GenNodeCard({
               🎲
             </button>
             <label className="grow" title={hint('风格')}>
-              风格
+              产出风格
               <select
-                value={p.preset}
-                onChange={(e) => setParam('preset', e.target.value as Preset)}
+                value={styleOf(p)}
+                onChange={(e) => {
+                  const st = GEN_STYLES.find((x) => x.v === e.target.value)
+                  if (!st) return
+                  // **必须先记下档位本身**：自定义档不改任何参数，只记档位；
+                  // 不记的话受控 select 会被 React 弹回原值（踩过）。
+                  setParam('genStyle', st.v)
+                  // 一档同时定「契约 + 像素块 + 色数」——用户不用再算
+                  // 「768² 配 6px 块 = 128 有效像素」这种换算
+                  if (st.preset !== undefined) setParam('preset', st.preset)
+                  if (st.pixel !== undefined) setParam('pixel', st.pixel)
+                  if (st.palette !== undefined) setParam('palette', st.palette)
+                }}
               >
-                {PRESETS.map((x) => (
+                {GEN_STYLES.map((x) => (
                   <option key={x.v} value={x.v}>
                     {x.label}
                   </option>
@@ -1932,12 +2016,18 @@ export default function GenNodeCard({
               </select>
             </label>
           </div>
+          {(() => {
+            const st = GEN_STYLES.find((x) => x.v === styleOf(p))
+            return st ? (
+              <p className="src-note" style={{ margin: '4px 0 0' }}>{st.note}</p>
+            ) : null
+          })()}
           {/* 不乘契约是"看起来无害"的默认值，实际等于放弃全身/居中/纯背景三条约束。
               实测不选契约时 SD1.5 大量出半身特写——用户会以为是模型不行。 */}
           {p.preset === 'none' && (
             <p className="warn" style={{ margin: '4px 0 0' }}>
               ⚠ 没选提示词契约＝没有「全身 / 居中 / 纯背景」约束，SD1.5 多半出半身特写。
-              要像素角色就选 <b>pixel</b> 或 <b>sprite</b>。
+              在「产出风格」里选一档像素风格即可。
             </p>
           )}
 
@@ -2110,43 +2200,48 @@ export default function GenNodeCard({
                     本机没有 refiner 权重（models/checkpoints/sdxl-refiner），勾了也不会生效。
                   </p>
                 )}
-                <label className="check" title={hint('像素化')}>
-                  <input
-                    type="checkbox"
-                    checked={p.pixel > 1}
-                    // 开关直接控制「要不要像素化」：以前只能靠"像素块填 0"来关，
-                    // 太隐蔽——正是有人把 64 当成成品尺寸填进去的原因。
-                    onChange={(e) => setParam('pixel',
-                      e.target.checked ? (p.pixel > 1 ? p.pixel : 6) : 0)}
-                  />
-                  像素化
-                </label>
-                <label title={hint('像素块')}>
-                  像素块
-                  <input
-                    type="number"
-                    min={0}
-                    max={16}
-                    value={p.pixel}
-                    disabled={p.pixel <= 1}
-                    // max 挡不住手输，所以 onChange 也要夹一下：曾经手输 64，
-                    // 512/64 = 8px 有效像素，出图细节全被抹平
-                    onChange={(e) => setParam('pixel',
-                      Math.min(16, Math.max(0, Number(e.target.value) || 0)))}
-                  />
-                  <b>{p.pixel > 1 ? `${effPx}px` : '关'}</b>
-                </label>
-                <label title={hint('色数')}>
-                  色数
-                  <input
-                    type="number"
-                    min={0}
-                    max={64}
-                    value={p.palette}
-                    onChange={(e) => setParam('palette',
-                      Math.min(64, Math.max(0, Number(e.target.value) || 0)))}
-                  />
-                </label>
+                {/* 像素块 / 色数**只在「自定义」风格下暴露**：
+                    平时由产出风格一档决定（用户不用算「768² 配 6px = 128 有效像素」），
+                    填错不报错、只是出图看着不对，所以默认藏起来。 */}
+                {styleOf(p) === 'custom' && (
+                  <>
+                    <label className="check" title={hint('像素化')}>
+                      <input
+                        type="checkbox"
+                        checked={p.pixel > 1}
+                        onChange={(e) => setParam('pixel',
+                          e.target.checked ? (p.pixel > 1 ? p.pixel : 6) : 0)}
+                      />
+                      像素化
+                    </label>
+                    <label title={hint('像素块')}>
+                      像素块
+                      <input
+                        type="number"
+                        min={0}
+                        max={16}
+                        value={p.pixel}
+                        disabled={p.pixel <= 1}
+                        // max 挡不住手输，所以 onChange 也要夹一下：曾经手输 64，
+                        // 512/64 = 8px 有效像素，出图细节全被抹平
+                        onChange={(e) => setParam('pixel',
+                          Math.min(16, Math.max(0, Number(e.target.value) || 0)))}
+                      />
+                      <b>{p.pixel > 1 ? `${effPx}px` : '关'}</b>
+                    </label>
+                    <label title={hint('色数')}>
+                      色数
+                      <input
+                        type="number"
+                        min={0}
+                        max={64}
+                        value={p.palette}
+                        onChange={(e) => setParam('palette',
+                          Math.min(64, Math.max(0, Number(e.target.value) || 0)))}
+                      />
+                    </label>
+                  </>
+                )}
                 <label title="1=最后一层（默认）；2=跳过最后一层，多数动漫/像素 LoRA 的训练设置">
                   跳过层
                   <input

@@ -4,7 +4,7 @@
 端点：
   GET  /health            服务与显存状态
   GET  /engine            加载中的 pipeline
-  POST /generate          提交任务 -> {"job_id": ...}（w1/w2/w3/w4/wbg/w5/wpx/wpc/wss/wap）
+  POST /generate          提交任务 -> {"job_id": ...}（w1/w2/w3/w4/wbg/w5/wpx/wpc/wss/topixel）
   GET  /jobs/{job_id}     查询任务
   GET  /jobs              最近任务
   GET  /assets            资产清单（读 assets/index.jsonl）
@@ -159,7 +159,9 @@ def _run(job_id: str, workflow: str, params: Dict[str, Any]) -> None:
               "w4": gen.poseswap, "wbg": gen.matte_bg,
               "w5": gen.ai_repaint, "wpx": gen.pixelify,
               "wpc": gen.pose_clone, "wss": gen.sprite_swap,
-              "wap": gen.anime_to_pixel}[workflow]
+              "topixel": gen.image_to_pixel,
+              # 旧名保留：早期只用于动漫人物
+              "wap": gen.image_to_pixel}[workflow]
         with _gpu_lock:                    # 与训练互斥，单卡不并发
             job["result"] = fn(engine, **_resolve_lora(params))
         job["status"] = "done"
@@ -344,9 +346,10 @@ def pose_dirs(limit: int = 40) -> Dict[str, Any]:
 @app.post("/generate")
 def submit(job: Job) -> Dict[str, Any]:
     if job.workflow not in ("w1", "w2", "w3", "w4", "wbg", "w5", "wpx", "wpc",
-                            "wss", "wap"):
+                            "wss", "topixel", "wap"):
         raise HTTPException(
-            400, "workflow 必须是 w1/w2/w3/w4/wbg/w5/wpx/wpc/wss/wap")
+            400, "workflow 必须是 w1/w2/w3/w4/wbg/w5/wpx/wpc/wss/topixel/"
+                 "wap（wap 是 topixel 的旧名）")
     job_id = uuid.uuid4().hex[:12]
     _jobs[job_id] = {"job_id": job_id, "workflow": job.workflow, "params": job.params,
                      "status": "queued", "created": time.time()}

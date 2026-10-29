@@ -943,9 +943,9 @@ def test_anime_preset_registered():
         presets.build("x", None, preset="nope")
 
 
-# ---------------- WAP 动漫人物 → 像素 ----------------
+# ---------------- topixel 任意图 → 像素 ----------------
 
-def test_anime_to_pixel_from_image(eng, assets):
+def test_image_to_pixel_from_image(eng, assets):
     """有源图时直接转像素：不跑模型，纯确定性，输出是原生像素尺寸。
 
     这条链路的价值：把「画对人物」和「压成像素」拆开做。让 SD 一次做两件事
@@ -961,10 +961,10 @@ def test_anime_to_pixel_from_image(eng, assets):
     d.rectangle([140, 150, 160, 220], fill=(40, 60, 200, 255))
     im.save(src)
 
-    r = g.anime_to_pixel(eng, init_image=src, target=(64, 64), colors=16,
+    r = g.image_to_pixel(eng, init_image=src, target=(64, 64), colors=16,
                          matte=False, tag="wap_img")
     m = r["meta"]
-    assert m["workflow"] == "wap"
+    assert m["workflow"] == "topixel"
     assert m["generated"] is False, "给了源图就不该再跑模型"
     assert m["pixel"]["size"] == [64, 64], "输出是原生像素尺寸"
     assert m["pixel"]["colors"] <= 16
@@ -972,19 +972,19 @@ def test_anime_to_pixel_from_image(eng, assets):
     assert Path(r["file"]).exists()
 
 
-def test_anime_to_pixel_requires_prompt_or_image(eng):
+def test_image_to_pixel_requires_prompt_or_image(eng):
     """既没源图也没提示词时明确报错，而不是跑一次空生成。"""
     with pytest.raises(ValueError, match="prompt 或 init_image"):
-        g.anime_to_pixel(eng, prompt="", init_image=None, tag="wap_bad")
+        g.image_to_pixel(eng, prompt="", init_image=None, tag="wap_bad")
 
 
-def test_anime_to_pixel_generates_source_when_prompt_only(eng, assets):
+def test_image_to_pixel_generates_source_when_prompt_only(eng, assets):
     """没源图就用提示词先生成动漫全身图再转——这是产线的默认用法。"""
     if not eng.available_models() or "sdxl-anime" not in eng.available_models():
         import pytest as _p
         _p.skip("未下载动漫底模")
 
-    r = g.anime_to_pixel(
+    r = g.image_to_pixel(
         eng, prompt="1girl, solo, red cape, blue armor, full body",
         target=(64, 64), colors=16, model="sdxl-anime",
         source_width=512, source_height=512, steps=6, seed=7,
@@ -996,7 +996,7 @@ def test_anime_to_pixel_generates_source_when_prompt_only(eng, assets):
     assert Image.open(r["file"]).size == (64, 64)
 
 
-def test_anime_to_pixel_uses_shared_palette_and_edge_rebuild(eng, assets):
+def test_image_to_pixel_uses_shared_palette_and_edge_rebuild(eng, assets):
     """色板与增强开关要真的写进 meta（产线据此复现/判断）。"""
     src = assets / "_wap_src2.png"
     im = Image.new("RGBA", (128, 128), (0, 0, 0, 0))
@@ -1004,7 +1004,7 @@ def test_anime_to_pixel_uses_shared_palette_and_edge_rebuild(eng, assets):
     d.rectangle([40, 20, 88, 100], fill=(180, 60, 60, 255))
     im.save(src)
 
-    r = g.anime_to_pixel(eng, init_image=src, target=(32, 32), colors=8,
+    r = g.image_to_pixel(eng, init_image=src, target=(32, 32), colors=8,
                          pre_enhance=1.0, edge_rebuild=True,
                          matte=False, tag="wap_meta")
     m = r["meta"]

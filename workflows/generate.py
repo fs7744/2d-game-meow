@@ -815,7 +815,7 @@ def pixelify(eng: Engine, *, init_image: str | Path,
 
 # ---------------- WAP 动漫人物 → 像素 ----------------
 
-def anime_to_pixel(eng: Engine, *,
+def image_to_pixel(eng: Engine, *,
                    init_image: Optional[str | Path] = None,
                    prompt: str = "", negative: Optional[str] = None,
                    target: Optional[Sequence[int]] = None,
@@ -829,7 +829,11 @@ def anime_to_pixel(eng: Engine, *,
                    model: str = "sdxl-anime", clip_skip: int = 2,
                    matte: bool = True, matte_backend: str = "auto",
                    scope: str = "", tag: str = "wap") -> Dict[str, Any]:
-    """动漫人物 → 像素画。**两步走**：先出高质量大图，再做像素化。
+    """任意图 → 像素画（不限于动漫人物）。**两步走**：先出高质量大图，再做像素化。
+
+    **不只动漫**：照片、插画、3D 渲染、手绘图都能转——像素化那一半是通用的
+    （网格对齐 + 色板量化 + 轮廓描边），与前一步出什么图无关。只在"没有源图、
+    需要先生成"时才会用到动漫底模。
 
     为什么这样比「让 SD 直接画像素」好（本项目实测）：
 
@@ -843,8 +847,8 @@ def anime_to_pixel(eng: Engine, *,
     两者之间妥协。分开做则各取所长：动漫底模负责「画对」，像素化负责
     「压成像素」。
 
-    `init_image` 给了就直接转；没给就用 `prompt` 先出动漫全身图再转。
-    后者是产线默认路径——用户只写角色描述，一步拿到像素精灵。
+    `init_image` 给了就直接转（任何图都行）；没给就用 `prompt` 先出图再转。
+    后者默认走动漫底模，用户只写角色描述就能一步拿到像素精灵。
 
     **像素化三步增强**（都是实测出来的，缺一个质量就掉）：
       1. `pre_enhance`  量化前拉对比度/饱和度/锐度。不开时红披风变暗红、
@@ -864,7 +868,7 @@ def anime_to_pixel(eng: Engine, *,
       matte    先把源图的背景抠掉（像素精灵必须有透明底）
     """
     t_all = _timer()
-    meta: Dict[str, Any] = {"workflow": "wap", "scope": scope or "default"}
+    meta: Dict[str, Any] = {"workflow": "topixel", "scope": scope or "default"}
     src_path: Optional[Path] = None
     gen_meta: Dict[str, Any] = {}
 
@@ -928,7 +932,11 @@ def anime_to_pixel(eng: Engine, *,
     })
     if gen_meta:
         meta["source_seconds"] = gen_meta.get("seconds")
-    return _save(out, _stamp(tag), "anime_pixel", meta, scope=scope)
+    return _save(out, _stamp(tag), "image_pixel", meta, scope=scope)
+
+
+# 旧名保留：早期只用于动漫人物，现在通用了
+anime_to_pixel = image_to_pixel
 
 
 # ---------------- WPC 角色迁移 ----------------

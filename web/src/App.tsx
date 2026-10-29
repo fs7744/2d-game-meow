@@ -8,7 +8,7 @@ import {
 } from './store/projects'
 import {
   deleteAssets, fetchJob, fetchLoras, fetchModels, health, submitAiRepaint, submitImg2Img,
-  fetchPoseDirs, scanLoras, submitAnimePixel, submitInpaint, submitMatte,
+  fetchPoseDirs, scanLoras, submitToPixel, submitInpaint, submitMatte,
   submitPixelify, submitPoseClone,
   submitPoseSeq,
   submitSpriteSwap, submitTxt2Img, uploadImage,
@@ -60,11 +60,13 @@ const DEFAULT_PARAMS: GenParams = {
   pxGridSnap: true,
   pxTransparentBg: false,
   pxSnapTo: 16,           // 网格吸附到 16 的整数倍（精灵常用尺寸）
-  // 动漫转像素（wap）：先出动漫全身大图，再压成像素画
+  genStyle: 'sprite16',   // 产出风格：像素精灵 16-bit（最常用）
+  // 转像素（topixel）：任意图 → 像素画（没有源图时先出图再转）
   apTarget: 192,          // 目标原生像素边长（192 装得下「全身 + 武器」）
   apColors: 32,           // 共享色板（32 色 = 16-bit 风格）
   apPreEnhance: 1.0,      // 量化前拉对比度——不开会发灰
   apEdgeRebuild: true,    // 轮廓描边——不描就「融化」
+  apMatte: true,          // 先抠背景（转照片时可关掉保留背景）
   // 角色迁移：姿态强度 / 身份强度 / 人物占画面高度
   pcCnScale: 1.0,
   pcIpaScale: 0.8,
@@ -143,7 +145,9 @@ function matchesRec(p: GenParams, rec?: ModelRecommend): boolean {
 
 /** 老存档没有 lora/loraScale/strength，读回来补默认值，否则下拉会显示空、强度变 NaN。 */
 function migrate(n: GenNode): GenNode {
-  return { ...n, kind: n.kind ?? 'gen', params: { ...DEFAULT_PARAMS, ...n.params } }
+  // 旧存档兼容：'animepixel'（早期只做动漫人物）改名为 'topixel'（通用）
+  const kind = (n.kind as string) === 'animepixel' ? 'topixel' : (n.kind ?? 'gen')
+  return { ...n, kind: kind as NodeKind, params: { ...DEFAULT_PARAMS, ...n.params } }
 }
 
 // 仅供截图/联调：?demo=1 铺一个示例节点，?demo=gen 同时触发一次生成
@@ -388,7 +392,7 @@ export default function App() {
           : type === 'inpaint' ? 'inpaint'
             : type === 'airepaint' ? 'airepaint'
               : type === 'pixelify' ? 'pixelify'
-                : type === 'animepixel' ? 'animepixel'
+                : type === 'topixel' ? 'topixel'
                 : type === 'poseclone' ? 'poseclone'
                   : type === 'spriteswap' ? 'spriteswap'
                     : type === 'poseswap' ? 'poseswap'
@@ -464,7 +468,7 @@ export default function App() {
           if (target && (target.kind === 'img2img' || target.kind === 'bg'
             || target.kind === 'inpaint' || target.kind === 'airepaint'
             || target.kind === 'pixelify' || target.kind === 'poseclone'
-            || target.kind === 'spriteswap' || target.kind === 'animepixel')) {
+            || target.kind === 'spriteswap' || target.kind === 'topixel')) {
             patchNode(target.id, { source: { path: up.path } })
             continue
           }
@@ -489,7 +493,7 @@ export default function App() {
     const target = nodesRef.current.find((n) => n.id === to)
     // 能接源的节点：图生图（要底图）、抠图与局部重绘（要源图）；文生图没有「底」这回事
     if (!target || !['img2img', 'bg', 'inpaint', 'airepaint', 'pixelify', 'poseclone',
-      'spriteswap', 'animepixel'].includes(target.kind)) return
+      'spriteswap', 'topixel'].includes(target.kind)) return
     if (target.id === from) return
     patchNode(to, { source: { nodeId: from } })
   }, [patchNode])
@@ -589,8 +593,8 @@ export default function App() {
     if (node.kind === 'img2img' || node.kind === 'bg' || node.kind === 'inpaint'
       || node.kind === 'airepaint' || node.kind === 'pixelify' || node.kind === 'poseclone'
       || node.kind === 'spriteswap'
-      // **animepixel 例外**：源图是可选的。没有源图时后端会用 prompt 先出
-      // 一张动漫全身图再转像素——这才是这条链路的默认用法（用户只写描述）。
+      // **topixel 例外**：源图是可选的。没有源图时后端会用 prompt 先出
+      // 一张图再转像素——这才是这条链路的默认用法（用户只写描述）。
       ) {
       init = sourcePathOf(node)
       if (!init) {
@@ -652,9 +656,9 @@ export default function App() {
         const r = await submitPixelify(
           node.params, { model, matteBackend, scope: currentId }, init!)
         jobId = r.job_id
-      } else if (node.kind === 'animepixel') {
+      } else if (node.kind === 'topixel') {
         // 源图可选：有就直转，没有就让后端用 prompt 出图再转
-        const r = await submitAnimePixel(
+        const r = await submitToPixel(
           node.params, { model, matteBackend, scope: currentId }, init)
         jobId = r.job_id
       } else if (node.kind === 'airepaint') {
