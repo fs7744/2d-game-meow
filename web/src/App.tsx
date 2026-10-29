@@ -118,8 +118,16 @@ const REC_KEYS = ['width', 'height', 'steps', 'cfg', 'pixel', 'palette'] as cons
 
 function pickRec(rec?: ModelRecommend): Partial<GenParams> {
   if (!rec) return {}
-  return { width: rec.width, height: rec.height, steps: rec.steps,
-           cfg: rec.cfg, pixel: rec.pixel, palette: rec.palette }
+  const out: Partial<GenParams> = {
+    width: rec.width, height: rec.height, steps: rec.steps,
+    cfg: rec.cfg, pixel: rec.pixel, palette: rec.palette,
+  }
+  // 动漫底模额外带 clip_skip 与 preset：clip_skip=2 是动漫模型的标准设置，
+  // preset=anime 给的是「质量词 + 简单背景 + 短负向」这套 danbooru 契约。
+  // 只在这两个字段有值时才覆盖，普通底模不受影响。
+  if (rec.clip_skip !== undefined) out.clipSkip = rec.clip_skip
+  if (rec.preset !== undefined) out.preset = rec.preset
+  return out
 }
 
 /** 这组参数是否仍等于某个底模的推荐值——等于就说明用户没手改过。 */

@@ -942,6 +942,24 @@ class Engine:
                  "pixel": 6, "palette": 64},
     }
 
+    # **按底模名覆盖**（优先于按架构的 RECOMMEND）。
+    # 动漫底模（Illustrious / Animagine）的正确用法与精灵管线不同：
+    #   · 1024²——它们是在 Danbooru 高分辨率插画上训的，768² 会掉细节
+    #   · pixel=0 / palette=0——动漫立绘要保画质，**不要**像素化
+    #     （像素化是给精灵的，把插画压成 6px 格子等于毁掉它）
+    #   · clip_skip=2——SDXL 默认就是倒数第二层（见 generate._text_kwargs
+    #     的反直觉换算），这里写出来只是让前端能显示出来给用户看
+    #   · preset=anime——质量词 + 简单背景 + 短负向
+    MODEL_RECOMMEND = {
+        # cfg 8.0 是**实测**选的，不是照抄网上的 6.5：
+        # 同一 group 提示词、同 seed，6.5 下兽人五官松散、法师法杖顶端结构
+        # 混乱；8.0 下五官清晰立体、武器造型完整、手部姿势更自然。
+        # 网上流传的 "Illustrious 用 CFG 5~7" 是通用建议，本项目实测 8.0 更好。
+        "sdxl-anime": {"width": 1024, "height": 1024, "steps": 28, "cfg": 8.0,
+                       "pixel": 0, "palette": 0, "clip_skip": 2,
+                       "preset": "anime"},
+    }
+
     def recommend(self, model: str = DEFAULT_MODEL) -> Dict[str, Any]:
         """这个底模在**精灵管线**上的推荐参数（尺寸/步数/像素格/色数）。
 
@@ -949,8 +967,14 @@ class Engine:
         IP-Adapter）最多能批量几个候选。前端拿它当输入框上限——
         实测 sdxl@1024 批量 2 会占满 24GB，**不报 OOM 但耗时从 5.0s 崩到 17.5s**，
         靠用户自己猜是猜不出来的。
+
+        **按底模名的覆盖优先于按架构**：动漫底模要 1024² 且不像素化，
+        跟着 sdxl 的 768²+pixel=6 走会把插画毁掉。
         """
-        rec = dict(self.RECOMMEND.get(self.arch(model), self.RECOMMEND["sd15"]))
+        rec = self.MODEL_RECOMMEND.get(model)
+        if rec is None:
+            rec = self.RECOMMEND.get(self.arch(model), self.RECOMMEND["sd15"])
+        rec = dict(rec)
         rec["max_candidates"] = self.max_candidates(model, rec["width"])
         return rec
 

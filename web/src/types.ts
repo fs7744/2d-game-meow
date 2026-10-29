@@ -1,4 +1,4 @@
-export type Preset = 'sprite' | 'portrait' | 'wuxia' | 'pixel' | 'none'
+export type Preset = 'sprite' | 'portrait' | 'wuxia' | 'pixel' | 'anime' | 'none'
 
 /** 节点类型：图生成（w1）/ 图生图（w2）/ 图片 / 抠图换背景（wbg）/ 局部重绘（w3）/ 局部 AI 重绘（w5） */
 export type NodeKind =
@@ -55,6 +55,10 @@ export type ModelRecommend = {
   cfg: number
   pixel: number
   palette: number
+  /** 动漫底模要 clip_skip=2；普通底模不给这个字段（保持默认） */
+  clip_skip?: number
+  /** 建议的提示词契约（动漫底模 → 'anime'） */
+  preset?: Preset
   /**
    * 这个底模在推荐尺寸下，W4（ControlNet + IP-Adapter）最多能批量几个候选。
    * 由后端按本机总显存算——实测 sdxl@1024 批量 2 会占满 24GB，不报 OOM

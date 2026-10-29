@@ -58,8 +58,15 @@ def pose_frames(assets) -> list[Path]:
 
 
 def _fixture_frames() -> list[Path]:
-    """上一次跑测试留下的夹具帧。poseswap 的目录名带时间戳，必须用 glob。"""
-    found = [p for d in ASSETS.glob("_fixture_walk*_frames") for p in d.glob("frame_*.png")]
+    """上一次跑测试留下的夹具帧。poseswap 的目录名带时间戳，必须用 glob。
+
+    **必须递归找**：产物落在「项目目录」下（assets/projects/default/），
+    不是 assets 根——这是项目作用域隔离之后的行为。以前这里用 `ASSETS.glob`
+    只在根下找，于是每次跑测试都以为"没有夹具"、重新生成一遍
+    （4 帧 × 一次 poseswap），还会在生成后仍然报「夹具帧生成失败」。
+    """
+    found = [p for d in ASSETS.rglob("_fixture_walk*_frames")
+             for p in d.glob("frame_*.png")]
     return sorted(found)
 
 

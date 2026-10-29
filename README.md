@@ -195,6 +195,80 @@ inpaint 微调版，这是唯一可行路径。管线对 4 通道 UNet 是支持
 > LoKr / LoHa / LyCORIS 这类变体加载时会抛一堆「keys have not been correctly renamed」，
 > 用户根本看不懂。引擎已把它翻成人话：「大概率不是标准 LoRA」，并把管道状态卸干净。
 
+### 动漫底模：`sdxl-anime`（Illustrious XL v0.1）
+
+SDXL base 能出动漫味，但**偏厚涂、手部与武器衔接糊、背景不干净**——它的训练
+数据里动漫占比低。要动漫角色立绘就换专门的底模。
+
+```bash
+python tools/fetch_anime_xl.py                  # Illustrious XL v0.1，约 6.5GB
+python tools/fetch_anime_xl.py --model animagine  # 或 Animagine XL 3.1
+```
+
+走 ModelScope（HF 在国内经常 502）。下完**自动登记成底模**（`models/checkpoints/`
+下多一个目录就等于多一个可选底模），前端下拉直接能选。
+
+实测对比（同一提示词、同 seed，1024² / 28 步）：
+
+| | SDXL base | **Illustrious** |
+|---|---|---|
+| 画风 | 偏写实厚涂，动漫感打折 | **纯正日系动漫** |
+| 五官 | 正常 | **清晰锐利，眼睛高光细腻** |
+| 线条 | 柔和、勾线弱 | **干净流畅** |
+| 手部 | 手指略糊 | **SDXL 家族里最好** |
+
+**配套三件事**（缺一件就出不来效果）：
+
+1. **`preset=anime`**——danbooru 契约。选中动漫底模时前端会自动填上。
+2. **`clip_skip=2`**——见下面那个反直觉的坑。
+3. **CFG 8.0 / 1024² / 28 步**——同样由 `/models` 的推荐参数带出。
+
+#### ⚠️ SDXL 的 clip_skip 语义与 SD1.5 不同（踩过坑）
+
+diffusers 的 SDXL `encode_prompt` 里写着：
+
+```python
+if clip_skip is None:
+    embeds = hidden_states[-2]        # 默认 = 倒数第二层
+else:
+    # "2" because SDXL always indexes from the penultimate layer.
+    embeds = hidden_states[-(clip_skip + 2)]
+```
+
+**SDXL 默认取的就是倒数第二层**——那已经等价于业界说的「clip skip 2」，
+也正是动漫底模推荐的那档。所以：
+
+- 用户给 1 或 2 → 都是默认档（penultimate），meta 记 2
+- 用户给 3 → 才真的多跳一层（传给 diffusers 的是 `n-2`）
+
+直接把用户的 `clip_skip=2` 传进去会跳到 **-4 层**，过度跳过——实测出图
+一片灰雾（`std` 从 38 掉到 19，五官全无）。
+
+#### anime 契约怎么写的（每条都有实测依据）
+
+- **质量词只要 `masterpiece, best quality`**：堆更多（amazing quality /
+  absurdres…）不会更好，实测会引入偏差与伪影。
+- **负向词要短**：这些模型已经排除了低质量样本，再堆"通用负面词表"是负优化，
+  只会压制正常特征。
+- **风格必须显式给**：Illustrious v0.1 官方注明未做美学预调。实测三档——
+  不给风格词 → 偏写实厚涂；`flat colors, cel shading` → **赛璐璐平涂**；
+  `clean lineart` → **线条最锐利**。两个都给能同时拿到。
+- **构图 tag 由用户给，契约不写死**：实测不给构图 tag 时前景占 83.5% 且四边
+  贴边，加 `full body` 后前景 24.5%、无贴边。要全身就自己写 `full body`，
+  要头像就写 `upper body`——契约只约束背景与居中，不抢构图。
+
+**提示词用 danbooru tag，不要用自然语言**：
+
+```
+1girl, solo, long silver hair, blue eyes, armor, holding sword, full body
+```
+
+Illustrious 是在 Danbooru 上重训的，tag 到概念的映射很准，同义改写反而变差。
+
+**CFG 8.0 是实测选的**，不是照抄网上的 6.5：同提示词同 seed，6.5 下兽人五官
+松散、法师法杖顶端结构混乱；8.0 下五官清晰立体、武器造型完整、手部姿势自然。
+网上流传的"Illustrious 用 CFG 5~7"是通用建议，本项目实测 8.0 更好。
+
 ### SDXL 版 ControlNet（W4 才能吃 1024）
 
 ```
@@ -1240,7 +1314,7 @@ python tools/video.py i2v assets/cat.png "the same character walking" -o assets/
 ## 测试
 
 ```bash
-python -m pytest tests -q        # 349 个用例，约 240s（含 SDXL 慢用例）
+python -m pytest tests -q        # 387 个用例，约 420s（含 SDXL 慢用例）
 ```
 
 **按改动选测试，不要每次都跑全量**（全量 4 分钟，只在合并/发版前跑一次）：
@@ -1267,7 +1341,7 @@ python -m pytest tests -q        # 349 个用例，约 240s（含 SDXL 慢用例
 | `tests/test_api.py` | **wpc 队列往返**、**wss 队列往返（换皮模式）**、**wpx 队列往返**、**w5 队列往返**、**未知 workflow 报错**、**wbg 队列往返**、**蒙版端点（同名覆盖/拒绝非 PNG）**、全部端点、队列串行性、**w2 队列往返（含 raw 留存）**、**上传端点（坏文件/空文件/文件名清洗/进项目目录）**、**真删（连带 sidecar/raw、索引清理、路径穿越防护、索引不可删）**、**资产按项目过滤**、**下载的 Content-Disposition**、400/404 | 24 |
 | `tests/test_pose.py` | 检测器切换、18 点完整性、关节在画面内且头高于髋、骨架渲染、双后端一致性、引擎内的姿态提取器单例、精灵图切片 CLI | 7 |
 | `tests/test_sheet.py` | **精灵图网格自动检测（等宽网格 / 带缝 / 白底 / 纵向不误判 / 单帧返回 None）**、**切分（数量、位置顺序、跳空格、trim、越界报错）**、前景掩膜 | 16 |
-| `tests/test_generate.py`（新增） | **AnimateDiff 路线（引擎可用性 / 整段生成 / 残缺帧补提记录 / 权重缺失时报错）**、**显存有界 / 档位降分辨率** | 5 |
+| `tests/test_generate.py`（新增） | **AnimateDiff 路线（引擎可用性 / 整段生成 / 残缺帧补提记录 / 权重缺失时报错）**、**显存有界 / 档位降分辨率**、**SDXL clip_skip 换算语义**、**anime 契约（质量词 / 短负向 / 显式风格 / 构图不写死）** | 9 |
 | `tests/test_vramopt.py` | **显存规划（帧数不砍 / 降分辨率 / 档位行为）**、**估算公式（随帧数超线性 / 随分辨率平方）**、**两项优化真的生效**、**重复优化幂等** | 11 |
 | `tests/test_refprep.py` | **参考图预处理（透明区填白不填黑 / 主体裁剪居中 / 像素画最近邻缩放）**、**帧级评分（剪影 IoU / 身份相似度 / 贴边检测 / 候选挑选 / 序列一致性）** | 19 |
 | `tests/test_refcond.py` | **轮廓条件（有边缘 / 标出主体内部 / 最近邻放大 / 全透明报错）**、**auto 模式降级到轮廓且记录原因**、**强制骨架模式时明确报错**、**换皮（保形状 / 只用色板颜色 / 确定性 / 保住明暗关系 / 空色板无副作用）**、色板提取忽略透明区 | 13 |

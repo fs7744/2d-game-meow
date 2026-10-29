@@ -843,3 +843,101 @@ def test_poseswap_accepts_dir_and_auto_cols(eng, assets):
     # cols 在顶层（pack_sheet 的 info），meta 里只有与采样相关的字段
     assert r["cols"] == 2, "cols=0 应自动按帧数排成一行"
     assert Image.open(r["sheet"]).size == (256 * 2, 256)
+
+
+def test_sdxl_clip_skip_semantics_is_offset_by_two(eng):
+    """SDXL 的 clip_skip 语义与 SD1.5 不同——必须换算，不能照抄。
+
+    diffusers 的 SDXL encode_prompt 里：
+
+        if clip_skip is None:
+            embeds = hidden_states[-2]        # 默认 = 倒数第二层
+        else:
+            # "2" because SDXL always indexes from the penultimate layer.
+            embeds = hidden_states[-(clip_skip + 2)]
+
+    也就是 **SDXL 默认取的就是倒数第二层**，那已经等价于业界说的
+    "clip skip 2"（动漫底模 Illustrious/Animagine 推荐的那档）。
+
+    踩过的坑：直接把 clip_skip=2 传进去会跳到 **-4 层**，过度跳过——
+    实测出图一片灰雾（std 从 38 掉到 19，五官全无）。
+
+    所以 n ≤ 2 一律用默认；n > 2 才真的多跳（传给 diffusers 的是 n-2）。
+    """
+    if "sdxl" not in eng.available_models():
+        import pytest
+        pytest.skip("本机没有 SDXL 权重")
+
+    def run(cs: int):
+        return g.txt2img(eng, prompt="1girl, solo, blue eyes",
+                         negative="worst quality", preset="none",
+                         width=512, height=512, steps=6, seed=5,
+                         model="sdxl", clip_skip=cs, matte=False, tag="cs")
+
+    # 1 和 2 都应当落在默认档（penultimate），不应报错也不应过度跳过
+    a = run(1)
+    b = run(2)
+    assert a["meta"]["clip_skip"] == 2
+    assert b["meta"]["clip_skip"] == 2
+    # 3 才是真的多跳一层
+    c = run(3)
+    assert c["meta"]["clip_skip"] == 3
+
+
+def test_anime_preset_has_quality_tags_and_short_negative():
+    """anime 契约：质量词短、负向词短、要求简单背景（游戏素材要能抠图）。
+
+    业界对 Illustrious/Animagine 的共识：
+      · 质量词只要 `masterpiece, best quality`，堆更多是负优化
+      · 负向词要短——这些模型已经排除了低质量样本，堆词反而压制正常特征
+    背景要简单是因为下游要抠图。
+    """
+    from workflows import presets
+
+    pos, neg = presets.build("1girl, solo, cat ears", None, preset="anime")
+    assert "masterpiece" in pos and "best quality" in pos
+    assert "simple background" in pos
+    # 负向只留必要的几条，不能把"通用负面词表"整段抄进来
+    assert "worst quality" in neg and "bad hands" in neg
+    assert "watermark" in neg
+
+
+def test_anime_preset_specifies_style_explicitly():
+    """风格必须显式给——Illustrious v0.1 官方就注明未做美学预调。
+
+    实测三档对比（同一提示词、同 seed）：
+      不给风格词            → 偏写实厚涂，不是日系动漫
+      flat colors+cel shading → 赛璐璐平涂，全身也最完整
+      anime style+clean lineart → 线条最锐利
+    两个都给能同时拿到「色块分明 + 线条干净」。
+    """
+    from workflows import presets
+
+    suffix, _ = presets.PRESETS["anime"]
+    assert "flat colors" in suffix and "cel shading" in suffix
+    assert "clean lineart" in suffix
+
+
+def test_anime_preset_allows_user_framing_tags():
+    """构图 tag（full body / upper body）由用户给，契约不写死。
+
+    实测：不给构图 tag 时前景占 83.5% 且四边贴边；用户加 "full body"
+    后前景 24.5%、无贴边。所以契约只约束背景与居中，不抢构图——
+    否则想要头像的用户会被强制成全身。
+    """
+    from workflows import presets
+
+    pos, _ = presets.build("1girl, full body", None, preset="anime")
+    assert "full body" in pos                 # 用户给的必须保留
+    suffix, _ = presets.PRESETS["anime"]
+    assert "full body" not in suffix          # 契约自己不写死
+    assert "centered" in suffix
+
+
+def test_anime_preset_registered():
+    """anime 要能在 preset 列表里被选到（前端下拉靠这个）。"""
+    from workflows import presets
+
+    assert "anime" in presets.PRESETS
+    with pytest.raises(ValueError, match="未知 preset"):
+        presets.build("x", None, preset="nope")

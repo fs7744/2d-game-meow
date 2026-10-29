@@ -209,6 +209,31 @@ def _hires_fix(eng: Engine, img: Image.Image, *, scale: float, strength: float,
     return out
 
 
+def _sdxl_embeds(pipe, prompt: str, negative: str, clip_skip: int):
+    """SDXL 的 clip_skip embeds，走 diffusers 原生 encode_prompt。
+
+    返回 (pos, neg, pos_pooled, neg_pooled) —— diffusers 的返回顺序就是
+    `(prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds,
+    negative_pooled_prompt_embeds)`，原样解包。
+
+    **`do_classifier_free_guidance=True` 必须给**——踩过的坑：传 False 时
+    diffusers 只算正向，`negative_prompt_embeds` 返回 **None**，于是负面词
+    全部失效、CFG 退化成单向引导，出图一片灰雾（实测 std 从 38 掉到 19，
+    画面糊成米色噪点）。这里要的是「两侧都算好、交给 pipe 直接用」，
+    不是「让 pipe 自己拼 CFG」——pipe 拿到 embeds 就不会再重新编码了。
+    """
+    return pipe.encode_prompt(
+        prompt=prompt,
+        prompt_2=None,                  # 两个编码器用同一段文本
+        negative_prompt=negative,
+        negative_prompt_2=None,
+        device=pipe.text_encoder.device,
+        num_images_per_prompt=1,
+        do_classifier_free_guidance=True,
+        clip_skip=int(clip_skip),
+    )
+
+
 def _text_kwargs(pipe, prompt: str, negative: str, clip_skip: int, model: str):
     """返回 (传给 pipe 的文本参数, 实际生效的 clip_skip)。
 
@@ -220,13 +245,39 @@ def _text_kwargs(pipe, prompt: str, negative: str, clip_skip: int, model: str):
     3. **超过 77 token** → 分段编码。CLIP 超长是**静默丢弃**，本项目的武侠契约
        自己就写到 113 token，等于尾部几条质量兜底词从来没生效。分段后不再丢。
 
-    SDXL 不走 embeds：它有两个文本编码器 + pooled embeds，动一处要动一片，
-    收益远小于 SD1.5，保持字符串路径。
+    SDXL 走**原生的 encode_prompt(clip_skip=...)**：它有两个文本编码器 +
+    pooled embeds，自己拼容易错（两侧形状、pooled、dtype 都得对齐），
+    而 diffusers 的 StableDiffusionXLPipeline.encode_prompt 原生支持
+    clip_skip，直接用它最稳。
+
+    ⚠️ **SDXL 的 clip_skip 语义与 SD1.5 不同，这里必须换算**（踩过坑）：
+
+    diffusers 的 SDXL encode_prompt 里写着：
+
+        if clip_skip is None:
+            embeds = hidden_states[-2]          # 默认 = 倒数第二层
+        else:
+            # "2" because SDXL always indexes from the penultimate layer.
+            embeds = hidden_states[-(clip_skip + 2)]
+
+    也就是说 **SDXL 默认取的就是倒数第二层——那已经等价于 A1111/ComfyUI 里
+    说的"clip skip 2"**（也正是动漫底模 Illustrious/Animagine 推荐的那档）。
+
+    所以直接把用户的 clip_skip=2 传进去会跳到 **-4 层**，过度跳过：实测出图
+    一片灰雾（std 从 38 掉到 19，画面糊成米色噪点、五官全无）。
+
+    换算规则：**n ≤ 2 一律用默认（penultimate）**；n > 2 才真的多跳，
+    传给 diffusers 的是 `n - 2`，让它落在 `-(n)` 层。
     """
     if "XL" in type(pipe).__name__:
-        if clip_skip and clip_skip > 1:
-            print(f"[warn] clip_skip={clip_skip} 只对 SD1.5 生效，{model} 已忽略")
-        return dict(prompt=prompt, negative_prompt=negative), 1
+        # 2 及以下 = SDXL 默认（倒数第二层）；3+ 才真的再往回跳
+        if not (clip_skip and clip_skip > 2):
+            return dict(prompt=prompt, negative_prompt=negative), 2
+        pos, neg, pos_pooled, neg_pooled = _sdxl_embeds(
+            pipe, prompt, negative, clip_skip - 2)
+        return (dict(prompt_embeds=pos, negative_prompt_embeds=neg,
+                     pooled_prompt_embeds=pos_pooled,
+                     negative_pooled_prompt_embeds=neg_pooled), int(clip_skip))
     if not clip_mod.available(pipe):
         return dict(prompt=prompt, negative_prompt=negative), 1
     if clip_skip and clip_skip > 1:

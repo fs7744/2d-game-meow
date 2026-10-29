@@ -37,13 +37,27 @@ def test_models_endpoint(client, eng):
     # 每个底模都要带推荐参数：SDXL 推荐 768 而不是 1024。
     # 实测 1024² 反而更差（角色占比大 → 更易顶边，可交付率 92%→75%），
     # 前端若按"SDXL 就该 1024"填表单，用户会稳定拿到更差的结果。
+    #
+    # **例外：动漫底模**（底模名在 Engine.MODEL_RECOMMEND 里的）是反过来的——
+    # 它们是在 Danbooru 高分辨率插画上训的，1024² 才出细节；而且
+    # pixel/palette 必须是 0：动漫立绘要保画质，像素化是给精灵的，
+    # 把插画压成 6px 格子等于毁掉它。
+    from workflows.engine import Engine as _E
+
     rec = body["recommend"]
     for m in body["available"]:
-        assert rec[m]["width"] == 768 and rec[m]["height"] == 768, rec[m]
-        assert rec[m]["pixel"] > 1 and rec[m]["palette"] > 1
+        r = rec[m]
+        if m in _E.MODEL_RECOMMEND:
+            assert r["width"] == 1024 and r["height"] == 1024, r
+            assert r["pixel"] == 0 and r["palette"] == 0, r
+            # 动漫底模要带上 clip_skip 与 preset，前端靠它们自动填表单
+            assert r["clip_skip"] == 2 and r["preset"] == "anime", r
+        else:
+            assert r["width"] == 768 and r["height"] == 768, r
+            assert r["pixel"] > 1 and r["palette"] > 1
         # 候选上限也要带出来：前端拿它当输入框 max。sdxl@1024 批量 2 会占满
         # 24GB，不报 OOM 但耗时翻 3.5 倍——这个上限得由后端给，不能让用户猜。
-        assert 1 <= rec[m]["max_candidates"] <= 6, rec[m]
+        assert 1 <= r["max_candidates"] <= 6, r
 
 
 def test_txt2img_model_echoed(eng):
@@ -52,13 +66,27 @@ def test_txt2img_model_echoed(eng):
     assert r["meta"]["model"] == "sd15"
 
 
-def test_clip_skip_ignored_on_sdxl(eng):
-    """SDXL 走两个文本编码器，clip_skip 不生效；要记成 1 而不是假装生效。"""
+def test_clip_skip_on_sdxl_uses_penultimate_by_default(eng):
+    """SDXL 的 clip_skip 语义与 SD1.5 不同，记进 meta 的是**换算后**的档位。
+
+    以前这里断言「SDXL 上 clip_skip 不生效、记成 1」——那是旧行为。
+    现在 SDXL 也支持 clip_skip，但要做换算（见 generate._text_kwargs）：
+
+        diffusers 的 SDXL encode_prompt：
+            clip_skip is None  → hidden_states[-2]      ← 默认 = 倒数第二层
+            else               → hidden_states[-(clip_skip + 2)]
+
+    也就是说 **SDXL 默认取的就是倒数第二层**，那已经等价于动漫底模
+    (Illustrious/Animagine) 推荐的 "clip skip 2"。所以：
+      · 用户给 1 或 2 → 都是默认档（penultimate），meta 记 2
+      · 用户给 3      → 真多跳一层
+    不换算的话，直接把 2 传进去会跳到 -4 层，出图一片灰雾（实测过）。
+    """
     if "sdxl" not in eng.available_models():
         pytest.skip("未下载 SDXL 底模")
     r = g.txt2img(eng, prompt="blue slime", width=256, height=256, steps=4, seed=1,
                   preset="none", model="sdxl", clip_skip=2, tag="cs_xl")
-    assert r["meta"]["clip_skip"] == 1
+    assert r["meta"]["clip_skip"] == 2
     assert r["meta"]["model"] == "sdxl"
 
 

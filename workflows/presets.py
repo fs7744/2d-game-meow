@@ -77,11 +77,48 @@ PIXEL_NEG = (
     "photo, blurry, deformed, cropped"
 )
 
+# ---- 动漫（anime）----
+#
+# 面向 **SDXL 动漫底模**（Illustrious / Animagine）。业界对这些模型的共识是：
+#
+#   · 用 **danbooru tag**（1girl / solo / long hair / blue eyes…），不是自然语言。
+#     Illustrious 是在 Danbooru 上重训的，tag 到概念的映射很准，同义改写反而变差。
+#   · **质量词只要两个**——`masterpiece, best quality`。堆更多（amazing quality /
+#     absurdres / very aesthetic…）不会更好，实测会引入偏差与伪影。
+#   · **负向词要短**。写一大串"通用负面词"在这些模型上是负优化：它们已经把
+#     低质量样本排除了，再堆词只会压制正常特征。
+#   · **clip_skip=2** 是硬性设置（见 generate._text_kwargs，SDXL 现已支持）。
+#   · CFG 5~7（v0.1 用 6.5）、步数 20~28、1024²。
+#
+# 与 sprite/pixel 契约的区别：那两个是**给像素精灵**的（扁平背景 + 硬描边）；
+# 这里要的是**动漫插画质感**——赛璐璐/厚涂都行，但人物结构必须正确。
+# 背景仍要求简单，因为游戏素材要抠图（matte）。
+ANIME_SUFFIX = (
+    "masterpiece, best quality, "
+    # 风格必须显式给——Illustrious v0.1 官方就注明「the model is not
+    # aesthetically pre-tuned」。实测三档对比：
+    #   不给风格词      → 偏写实厚涂，不是日系动漫
+    #   flat colors+cel shading → **赛璐璐平涂，全身也最完整**
+    #   anime style+clean lineart → 线条最锐利
+    # 两个都给，实测能同时拿到"色块分明 + 线条干净"。
+    "anime, flat colors, cel shading, clean lineart, "
+    # 背景要简单：游戏素材下游要抠图（matte）
+    "simple background, plain background, centered"
+)
+# 顺序即优先级。**只写这几条**——动漫底模堆负面词是负优化。
+ANIME_NEG = (
+    "worst quality, low quality, "
+    "bad anatomy, bad hands, extra digits, "
+    "text, watermark, signature, "
+    "multiple views, blurry"
+)
+
 PRESETS = {
     "sprite": (SPRITE_SUFFIX, SPRITE_NEG),
     "pixel": (PIXEL_SUFFIX, PIXEL_NEG),
     "portrait": (PORTRAIT_SUFFIX, PORTRAIT_NEG),
     "wuxia": (WUXIA_SUFFIX, WUXIA_NEG),
+    "anime": (ANIME_SUFFIX, ANIME_NEG),
     "none": ("", ""),
 }
 

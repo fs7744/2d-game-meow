@@ -296,6 +296,7 @@ const PRESETS: { v: Preset; label: string }[] = [
   { v: 'sprite', label: '像素精灵' },
   { v: 'portrait', label: '立绘' },
   { v: 'wuxia', label: '武侠 / 国风' },
+  { v: 'anime', label: '动漫（配动漫底模）' },
   { v: 'none', label: '不套契约' },
 ]
 
