@@ -462,3 +462,26 @@ def test_apply_lora_single_still_uses_one_adapter(tmp_path):
 
     eng.apply_lora(pipe, a, 0.8)
     assert pipe.adapters == (['lora0'], [0.8])
+
+
+def test_probe_prefers_sdxl_when_both_768_and_2048(tmp_path):
+    """dims 同时含 768 与 2048 → SDXL，**不能**按 768 判成 SD1.5。
+
+    实测 15 个 SDXL 风格 LoRA（AkihikoStyleXL / BG3EXTurnXL / DiscoLevel …）
+    的输入维度集合是 [640,768,1280,2048,2560,3072,5120]——既有 768 又有 2048。
+    旧逻辑「两个都有 → 按 768 算 sd15」把它们全判成 SD1.5，挂上去直接报
+    「LoRA 与当前底模的模块结构对不上」；改挂 sdxl 后 diff 64~78，全部生效。
+
+    判据：2048 是 SDXL cross-attn 的文本上下文维度，SD1.5 的 UNet 里不存在
+    （SD1.5 最大是 ff.net.0.proj 的 2560）。所以只要见到 2048 就是 SDXL。
+    """
+    p = _fake_st(tmp_path, "xl_style",
+                 {"lora_unet_input_blocks_4_1_proj_in.lora_down.weight": (4, 2048),
+                  "lora_unet_down_blocks_0_attn2_to_k.lora_down.weight": (4, 768)})
+    assert L.probe(p)["base"] == "sdxl"
+
+    # 反向不能误伤：只有 768、没有 2048 的仍是 SD1.5
+    p2 = _fake_st(tmp_path, "sd15_only",
+                  {"lora_unet_down_blocks_0_attn2_to_k.lora_down.weight": (4, 768),
+                   "lora_unet_down_blocks_0_ff_net_0_proj.lora_down.weight": (4, 2560)})
+    assert L.probe(p2)["base"] == "sd15"

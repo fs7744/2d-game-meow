@@ -148,13 +148,21 @@ def probe(path: str | Path) -> Dict[str, Any]:
     elif is_dit:
         base = "flux"
     elif dims:
-        # 文本上下文维度是硬指纹：SD1.5=768，SDXL=2048
-        if _CTX_DIM["sd15"] in dims and _CTX_DIM["sdxl"] not in dims:
-            base = "sd15"
-        elif _CTX_DIM["sdxl"] in dims and _CTX_DIM["sd15"] not in dims:
+        # **判据：2048 出现就是 SDXL。**
+        #
+        # 2048 是 SDXL cross-attn 的文本上下文维度，SD1.5 的 UNet 里不存在
+        # （SD1.5 最大的是 ff.net.0.proj 的 2560）。所以只要见到 2048，
+        # 不管同时有没有 768，都是 SDXL。
+        #
+        # 老逻辑写的是「两个都有 → 按 768 算 sd15」，理由是"SD1.5 的通道恰好
+        # 撞上 2048"——这个理由不成立：实测 15 个 SDXL 风格 LoRA
+        # （AkihikoStyleXL / BG3EXTurnXL / DiscoLevel 等）的 dims 是
+        # [640,768,1280,2048,2560,3072,5120]，同时含 768，于是全被判成 sd15，
+        # 挂上去直接报「LoRA 与当前底模的模块结构对不上」；改挂 sdxl 后
+        # diff 64~78，全部正常生效。
+        if _CTX_DIM["sdxl"] in dims:          # 2048
             base = "sdxl"
-        elif _CTX_DIM["sd15"] in dims:
-            # 两个都有：多半是 SD1.5 的 UNet 通道恰好撞上 2048，按 768 算
+        elif _CTX_DIM["sd15"] in dims:        # 768
             base = "sd15"
 
     if not base:
