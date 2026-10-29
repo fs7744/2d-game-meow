@@ -412,7 +412,7 @@ def sanitize_alpha(img: Image.Image) -> Image.Image:
 def _qwen_call(eng: Engine, *, prompt: str, negative: str, width: int, height: int,
                steps: int, seed: int, ref_image: Optional[Image.Image] = None,
                transparent: bool = False, model: str = "qwen-image-2.1",
-               label: str = "w1") -> Image.Image:
+               label: str = "w1", cfg: float = 4.0) -> Image.Image:
     """Qwen 单次推理。带 ref_image 就走「指令改图」，不带就是文生图。
 
     两个**必须**记住的点（都是实测踩出来的）：
@@ -432,13 +432,22 @@ def _qwen_call(eng: Engine, *, prompt: str, negative: str, width: int, height: i
         negative_prompt=negative or QWEN_NEG,
         width=w, height=h,
         num_inference_steps=max(8, min(int(steps), 60)),
-        true_cfg_scale=4.0,
+        true_cfg_scale=float(cfg),
         generator=gen,
     )
     if ref_image is not None:
         # 参考图统一缩放到目标尺寸：管线对多图原生支持，但单图这条路径
         # 不走 resize 的话会把原图尺寸带进 latent token 计算
-        kw["image"] = ref_image.convert("RGB").resize((w, h), Image.LANCZOS)
+        #
+        # **多图**（list）用于「角色迁移」这类要同时给两张参考的场合：
+        # 角色图 + 骨架图。Qwen 的条件图会一起编码成 vision context，
+        # 所以顺序有意义：第一张是身份，第二张是姿态骨架。
+        if isinstance(ref_image, (list, tuple)):
+            kw["image"] = [
+                im.convert("RGB").resize((w, h), Image.LANCZOS) for im in ref_image
+            ]
+        else:
+            kw["image"] = ref_image.convert("RGB").resize((w, h), Image.LANCZOS)
     out = _infer(eng, pipe, kw, label=label)
     return sanitize_alpha(out.images[0].convert("RGBA"))
 
@@ -1228,6 +1237,77 @@ anime_to_pixel = image_to_pixel
 
 # ---------------- WPC 角色迁移 ----------------
 
+def _qwen_pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | Path,
+                     prompt: str, negative: Optional[str],
+                     width: int, height: int, steps: int, cfg: float, seed: int,
+                     ref_mode: str, thr: float, fill: float,
+                     pixel: int, palette: int, matte: bool, matte_backend: str,
+                     denoise: int, clean_iso: int, model: str,
+                     scope: str, tag: str) -> Dict[str, Any]:
+    """Qwen-Image-2.1 版角色迁移：**双图条件**（角色图 + 姿态条件图）。
+
+    为什么不用 SD 那套 ControlNet + IP-Adapter：
+      - SD 那条路是**两个互相拉扯的约束**——IP-Adapter 抢身份、ControlNet 抢
+        姿态，实测同一角色同一动作，出来的图经常是「身份丢了」或者「姿势变形」。
+      - Qwen 的多图条件是**同一个 vision context**：两张图一起进模型，由它自己
+        分配「谁是身份、谁是姿势」。实测（Qwen-2.1，768²/28 步）：姿势与骨架
+        几乎逐点一致，连角色图的主色都被继承（蓝角色 → 蓝衣服）。
+
+    姿态条件图仍然用本机的 DWPose（OpenPose 格式）：真人照片走骨架，
+    像素/非人形素材走剪影（auto 模式自动降级），跟 SD 那条路一致。
+    """
+    ref = Image.open(pose_image).convert("RGB")
+    cond, used_mode, cond_info = refcond.build_condition(
+        ref, mode=ref_mode, size=max(width, height),
+        extractor=eng.pose_extractor(), thr=thr, fill=fill,
+        matte_dir=eng.matte_dir)
+    char = refprep.prepare_reference(Image.open(char_image).convert("RGBA"), size=width)
+
+    sem = (prompt or "").strip()
+    instr = (
+        "The first image is the character reference: keep the same face, hairstyle, "
+        "outfit and colors. The second image is the pose condition (a body skeleton "
+        "or silhouette). Redraw the same character in exactly that pose, "
+        "full body, centered, clean simple background.")
+    if sem:
+        instr += " " + sem
+
+    if seed < 0:
+        seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
+    torch.cuda.reset_peak_memory_stats()
+    dt = _timer()
+    out = _qwen_call(
+        eng, prompt=instr, negative=negative or QWEN_NEG,
+        ref_image=[char, cond], width=width, height=height, steps=steps,
+        cfg=cfg, seed=seed, model=model, label="wpc")
+    seconds = dt()
+    width, height = out.size
+    raw = out.copy() if (matte or pixel > 1 or palette) else None
+    matte_info: Dict[str, Any] = {}
+    out, edge, subjects = _postprocess(
+        out, eng, matte=matte, matte_backend=matte_backend, denoise=denoise,
+        pixel=pixel, palette=palette, clean_iso=clean_iso, info=matte_info)
+    return _save(out, _stamp(tag), "pose_clone", {
+        "workflow": "wpc", "scope": scope or "default",
+        "prompt": instr, "negative": negative or QWEN_NEG,
+        "pose_image": str(pose_image), "char_image": str(char_image),
+        "backend": "qwen-multiref",
+        "ref_mode": ref_mode, "ref_mode_used": used_mode,
+        "ref_fallback_from": cond_info.get("fallback_from"),
+        "ref_fallback_reason": cond_info.get("fallback_reason"),
+        "joints": cond_info.get("joints"), "fill": fill,
+        "width": width, "height": height,
+        "steps": steps, "cfg": cfg, "seed": seed,
+        "model": model,
+        "pixel_block": pixel, "palette": palette, "matte": matte,
+        "matte_used": matte_info.get("backend"),
+        "matte_fallback": matte_info.get("fallback"),
+        "edge_touch": edge, "subjects": subjects,
+        "seconds": seconds,
+        "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
+    }, raw=raw, scope=scope)
+
+
 def pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | Path,
                 prompt: str, negative: Optional[str] = None,
                 width: int = 768, height: int = 768,
@@ -1265,6 +1345,16 @@ def pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | Path,
     多了 IP-Adapter 这一路，是单帧的身份迁移。多帧批量请用 WSS（sprite_swap）。
     """
     eng.require(model, "pose_clone")
+    if eng.arch(model) == "qwen21":
+        # Qwen 走双图条件（角色图 + 骨架图），不需要 ControlNet / IP-Adapter，
+        # 也不吃 SD 的 LoRA 与提示词契约后缀——那条路在 Qwen 上是反效果。
+        return _qwen_pose_clone(
+            eng, pose_image=pose_image, char_image=char_image,
+            prompt=prompt, negative=negative,
+            width=width, height=height, steps=steps, cfg=cfg, seed=seed,
+            ref_mode=ref_mode, thr=thr, fill=fill,
+            pixel=pixel, palette=palette, matte=matte, matte_backend=matte_backend,
+            denoise=denoise, clean_iso=clean_iso, model=model, scope=scope, tag=tag)
     if preset is not None:
         prompt = _lora_trigger(eng, prompt, lora)
         prompt, negative = presets.build(prompt, negative, preset,

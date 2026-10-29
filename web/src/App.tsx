@@ -251,9 +251,12 @@ export default function App() {
 
   useEffect(() => savePrompts(favs), [favs])
 
+  // LoRA 拉**全量**：底模是节点级的，一张画布上可能同时有 SD1.5 与 SDXL 节点，
+  // 在 App 层按全局底模过滤会让其中一个节点的下拉全是错的。
+  // 各节点拿到全量后按自己的 arch 过滤（见 GenNodeCard.visibleLoras）。
   const reloadLoras = useCallback(() => {
-    fetchLoras(arch[model] || model).then(setLoras).catch(() => setLoras([]))
-  }, [model, arch])
+    fetchLoras().then(setLoras).catch(() => setLoras([]))
+  }, [])
 
   useEffect(() => { reloadLoras() }, [reloadLoras])
 
@@ -469,7 +472,6 @@ export default function App() {
   /**
    * 给**单个节点**换底模，并套用新底模的推荐参数（只动这一个节点）。
    *
-   * 与 switchModel（侧栏，改的是"新节点的默认值"）分开：
    * 底模是节点级属性（见 GenParams.model），画布上混跑 Qwen 立绘 + SDXL
    * 精灵帧是常态。套推荐参数仍然只在"用户没手改过"时生效——判据是当前值
    * 还等于旧底模的推荐值，否则保留手调结果。
@@ -498,6 +500,12 @@ export default function App() {
       if (rec && (n.kind ?? 'gen') === 'gen' && (!oldRec || matchesRec(n.params, oldRec))) {
         Object.assign(patch, pickRec(rec, n.params.lora))
       }
+      // 角色迁移切到 Qwen：换一套适配参数。
+      // 1024² 是 Qwen **文生图**的推荐，但角色迁移是「改图」路线（双图条件），
+      // 768² / 28 步实测姿势跟随最准，也快得多（72s vs 150s+）。
+      if (n.kind === 'poseclone' && next === 'qwen-image-2.1') {
+        Object.assign(patch, { width: 768, height: 768, steps: 28, cfg: 4.0 })
+      }
       // 序列帧候选上限按新底模的显存上限夹住，否则界面写着 4 实际只能出 3
       if (n.kind === 'spriteswap' && rec) {
         const cap = Math.max(1, Math.min(6, rec.max_candidates || 6))
@@ -509,39 +517,6 @@ export default function App() {
       setNotice(`${next}：推荐 ${rec.width}×${rec.height} / ${rec.steps} 步`)
     }
   }, [models, recommend, caps, model])
-
-  /**
-   * 侧栏：设置**新节点的默认底模**。
-   *
-   * 底模已经改成节点级（GenParams.model），所以这里不再遍历画布去改所有节点——
-   * 那正是"想混跑就得来回切、每次都把调好的参数冲一遍"的根源。
-   * 已有节点里显式选过底模的（params.model 非空）完全不受影响；
-   * 没选过的（空 = 跟随默认）会跟着变成新值，这是"默认值"应有的语义。
-   */
-  const switchModel = useCallback((next: string) => {
-    // **切之前先确认这台机器上真有这个底模**：没下载时 setModel 会把值设成
-    // 下拉里不存在的选项——选择框变空、新节点生成直接失败。
-    if (!models.includes(next)) {
-      setNotice(`未安装底模 ${next}（先装权重再选）`)
-      return
-    }
-    const prev = model
-    const oldRec = recommend[prev]
-    const rec = recommend[next]
-    setModel(next)
-    // 「跟随默认」的节点（params.model 为空）要跟着换参数，否则会出现
-    // 「底模已经是 SDXL、步数还是 SD1.5 的 30」这种自相矛盾的配置。
-    // 自己选过底模的节点完全不动；手改过参数的也不覆盖。
-    if (rec) {
-      setNodes((list) => list.map((n) => {
-        if (n.params.model) return n                 // 节点自己选了底模
-        if ((n.kind ?? 'gen') !== 'gen') return n
-        if (oldRec && !matchesRec(n.params, oldRec)) return n   // 用户手调过
-        return { ...n, params: { ...n.params, ...pickRec(rec, n.params.lora) } }
-      }))
-    }
-    setNotice(`新节点默认底模：${next}（已单独选过底模的节点不受影响）`)
-  }, [models, model, recommend])
 
   /** 以某个节点的产物为源，在它右边新建一个图生图节点。 */
   const spawnImg2Img = useCallback((id: string) => {
@@ -975,10 +950,6 @@ export default function App() {
           canApply={!!selectedId}
           onApplyFav={applyFavorite}
           onRemoveFav={removeFavorite}
-          models={models}
-          recommend={recommend}
-          model={model}
-          onModel={switchModel}
           matteBackend={matteBackend}
           onMatteBackend={setMatteBackend}
           onScanLoras={onScanLoras}
@@ -992,6 +963,7 @@ export default function App() {
           hasRefiner={hasRefiner}
           models={models}
           modelCaps={caps}
+          modelArch={arch}
           recommend={recommend}
           defaultModel={model}
           onNodeModel={setNodeModel}

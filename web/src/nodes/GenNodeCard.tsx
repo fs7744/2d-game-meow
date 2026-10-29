@@ -304,6 +304,8 @@ type Props = {
   favorited: boolean
   onToggleFavorite: () => void
   loras: LoraInfo[]
+  /** 这个节点的底模架构（sd15 / sdxl / qwen21）：LoRA 按它过滤，不能按全局默认 */
+  loraBase?: string
   model: string
   /** 切底模：产出风格档位可能要求特定底模（如「像素精灵·Illustrious」要 sdxl-anime）。
    *  keepNodes=true 表示参数由档位负责，别套推荐值（否则会覆盖刚 patch 的 LoRA/尺寸）。 */
@@ -411,6 +413,7 @@ export default function GenNodeCard({
   favorited,
   onToggleFavorite,
   loras,
+  loraBase,
   model,
   onModel,
   maxCandidates,
@@ -434,6 +437,17 @@ export default function GenNodeCard({
 }: Props) {
   const dragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null)
   const p = node.params
+  /**
+   * LoRA 是**按节点底模**过滤的，不是按全局默认。
+   *
+   * 之前在 App 里 fetchLoras(arch[全局model]) 一次拉完，节点改成节点级底模后
+   * 就对不上了：节点切到 SDXL，下拉里仍全是 SD1.5 的 LoRA（装上去是废图），
+   * 而档位要挂的 SDXL LoRA 又根本不在列表里，value 落空。
+   * 现在 App 拉全量，每个节点按自己的 arch 过滤。
+   */
+  const visibleLoras = loraBase
+    ? loras.filter((l) => (l.base || 'sd15') === loraBase)
+    : loras
   const loraInfo = loras.find((l) => l.name === p.lora)
   const job = node.job
   const busy = job?.status === 'queued' || job?.status === 'running'
@@ -472,6 +486,22 @@ export default function GenNodeCard({
   const isPoseSwap = node.kind === 'poseswap'
   /** 是否锁了高度（只有参数视图能锁；图片等比显示，锁高会拉伸） */
   const lockH = !isImg && !imageMode && !!node.h
+  /**
+   * 卡头上显示的文件名。
+   *
+   * 图片节点取它载入的那张；生成节点只在「只看图」视图下有意义
+   * （此时正文被图占满，没有别的地方能写名字）。参数视图里生成的图
+   * 由正文的提示词与状态说明身份，卡头不再重复。
+   */
+  const headFilePath = isImg ? node.image?.path || '' : imageMode ? job?.path || '' : ''
+  const headFile = headFilePath ? fileNameOf(headFilePath) : ''
+  /**
+   * 这个节点的底模是不是 Qwen。
+   *
+   * 判据用 caps.instruction 而不是硬编码底模名：instruction（图生图走「指令改图」）
+   * 目前只有 Qwen 有，但底模名是可以自己放的目录，硬编码名字迟早对不上。
+   */
+  const isQwenModel = !!modelCaps?.[model]?.instruction
   /** 本节点跑的工作流名（和 /models 的 caps.workflows 同一套词） */
   const wf = WORKFLOW_OF[node.kind] || ''
   /** 图片节点不跑模型，不显示底模下拉 */
@@ -515,6 +545,14 @@ export default function GenNodeCard({
     // click 就落到卡头上而不是按钮上，按钮永远点不动（切回参数视图失效即此因）。
     const el = e.target as HTMLElement
     if (el.closest('button, input, textarea, select, summary, a, label')) return
+    /**
+     * 可选中的文字（卡头上的文件名）同样不能启动拖拽。
+     *
+     * 一旦 setPointerCapture，指针事件全被卡头接管，浏览器原生的
+     * 拖选/双击选词就再也收不到事件——表现是「文字选不中，只有节点被拖走」。
+     * 这里是**唯一**放行文字选择的地方，别在别处再开 user-select。
+     */
+    if (el.closest('[data-selectable]')) return
     e.stopPropagation()
     onSelect()
     dragRef.current = { sx: e.clientX, sy: e.clientY, ox: node.x, oy: node.y }
@@ -838,8 +876,19 @@ export default function GenNodeCard({
                 : isAiRepaint ? '局部AI重绘'
                   : isInpaint ? '局部重绘' : isI2I ? '图生图' : '图生成'}
         </span>
+        {/* 文件名放卡头：画布上常同时摆着好几张图/好几帧，只有缩略图时
+            根本分不清哪张是哪张。放在正文底部要滚动才看得到，卡头一眼就能看见，
+            而且 data-selectable 让它能被鼠标选中复制（见 startDrag 的绕过）。
+            名字剥掉上传时拼的 10 位 hash 前缀，否则有用部分被挤没。 */}
+        {headFile && (
+          <span className="node-file" data-selectable="1" title={headFilePath || headFile}>
+            {headFile}
+          </span>
+        )}
         {job && <span className={`node-state s-${job.status}`}>{statusLabel(job.status)}</span>}
-        <span className="spacer" />
+        {/* 有文件名时不留 spacer：让文件名自己长满中间那段，
+            否则 spacer 会把剩余宽度全吃掉，名字只剩「w1_2026…」几个字符。 */}
+        {!headFile && <span className="spacer" />}
         {hasImage && (
           <button
             className={`icon-btn view-toggle${imageMode ? ' on' : ''}`}
@@ -852,7 +901,9 @@ export default function GenNodeCard({
             {imageMode ? '▤ 参数' : '▣'}
           </button>
         )}
-        {previewUrl && (
+        {/* 图片视图下不给预览按钮：正文里的图本身就点得开全屏，
+            省下的 22px 让给卡头的文件名（名字比"多一个入口"更值钱） */}
+        {previewUrl && !imageMode && (
           <button
             className="icon-btn"
             title="全屏预览 / 下载"
@@ -1387,30 +1438,43 @@ export default function GenNodeCard({
           </div>
           <details className="adv">
             <summary>更多设置</summary>
-            <label className="strength" title={hint('姿态')}>
-              <span>姿态</span>
-              <input
-                type="range"
-                min={0.2}
-                max={1.5}
-                step={0.05}
-                value={p.pcCnScale}
-                onChange={(e) => setParam('pcCnScale', Number(e.target.value))}
-              />
-              <b>{p.pcCnScale.toFixed(2)}</b>
-            </label>
-            <label className="strength" title={hint('身份')}>
-              <span>身份</span>
-              <input
-                type="range"
-                min={0}
-                max={1.5}
-                step={0.05}
-                value={p.pcIpaScale}
-                onChange={(e) => setParam('pcIpaScale', Number(e.target.value))}
-              />
-              <b>{p.pcIpaScale.toFixed(2)}</b>
-            </label>
+            {/* 「姿态」「身份」两根滑块是 SD 那条路（ControlNet 强度 / IP-Adapter
+                强度）专属的。Qwen 走的是**双图条件**（角色图 + 骨架图进同一个
+                vision context），模型自己分配两张图各管什么，没有强度旋钮——
+                留着只会让人以为调了有用。 */}
+            {isQwenModel ? (
+              <div className="src-note">
+                Qwen 底模走「双图条件」：角色图 + 骨架图一起进模型，姿势与身份由它
+                自己分配，没有姿态/身份强度可调（SD 那两个滑块已隐藏）。
+              </div>
+            ) : (
+              <>
+                <label className="strength" title={hint('姿态')}>
+                  <span>姿态</span>
+                  <input
+                    type="range"
+                    min={0.2}
+                    max={1.5}
+                    step={0.05}
+                    value={p.pcCnScale}
+                    onChange={(e) => setParam('pcCnScale', Number(e.target.value))}
+                  />
+                  <b>{p.pcCnScale.toFixed(2)}</b>
+                </label>
+                <label className="strength" title={hint('身份')}>
+                  <span>身份</span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={1.5}
+                    step={0.05}
+                    value={p.pcIpaScale}
+                    onChange={(e) => setParam('pcIpaScale', Number(e.target.value))}
+                  />
+                  <b>{p.pcIpaScale.toFixed(2)}</b>
+                </label>
+              </>
+            )}
             <label className="strength" title={hint('占高')}>
               <span>占高</span>
               <input
@@ -2075,12 +2139,6 @@ export default function GenNodeCard({
                   ↳ 图生图
                 </button>
               </div>
-              {/* 文件名：画布上经常同时摆着好几张图，只有缩略图时几乎分不清
-                  哪张是哪张（尤其是同角色的不同帧）。显示时剥掉上传时拼的
-                  10 位 hash 前缀，否则有用的名字会被挤没。 */}
-              <div className="img-name" title={node.image.path}>
-                {fileNameOf(node.image.path)}
-              </div>
             </>
           ) : (
             <div className="img-empty">图片没了（可能文件被删）</div>
@@ -2283,16 +2341,16 @@ export default function GenNodeCard({
                 LoRA
                 <select value={p.lora} onChange={(e) => chooseLora(e.target.value)}>
                   <option value="">不挂（纯底模）</option>
-                  {loras.map((l) => (
+                  {visibleLoras.map((l) => (
                     <option key={l.name} value={l.name}>
                       {l.label}
                     </option>
                   ))}
                 </select>
               </label>
-              {/* LoRA 列表按**架构**过滤（后端 /loras?arch=…），所以 Qwen 底下
+              {/* LoRA 列表按**这个节点自己的底模架构**过滤，所以 Qwen 底下
                   本来就只剩「不挂」。但空列表不解释的话用户会以为扫坏了。 */}
-              {!loras.length && (
+              {!visibleLoras.length && (
                 <p className="src-note">
                   当前底模下没有可用 LoRA：Qwen-Image 不吃 SD 的 LoRA（不同的主干与
                   文本编码器），能挂的只有它自己的微调。
@@ -2321,7 +2379,7 @@ export default function GenNodeCard({
                   <button
                     className="mini"
                     onClick={addExtra}
-                    disabled={!loras.length || extras.length >= 4}
+                    disabled={!visibleLoras.length || extras.length >= 4}
                     title="再加一个 LoRA（与主 LoRA 线性叠加）"
                   >
                     + 叠加
@@ -2335,7 +2393,7 @@ export default function GenNodeCard({
                       title="选择要叠加的 LoRA（必须与主 LoRA 同架构）"
                     >
                       <option value="">（选一个）</option>
-                      {loras.map((l) => (
+                      {visibleLoras.map((l) => (
                         <option key={l.name} value={l.name}>{l.label}</option>
                       ))}
                     </select>

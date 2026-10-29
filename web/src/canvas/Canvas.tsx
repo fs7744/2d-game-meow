@@ -26,6 +26,8 @@ type Props = {
   defaultModel?: string
   /** 各底模的推荐参数（候选上限要按**节点自己的**底模算，不能用全局的） */
   recommend?: Record<string, ModelRecommend>
+  /** 底模名 → 架构（sd15 / sdxl / qwen21），节点据此过滤自己的 LoRA 列表 */
+  modelArch?: Record<string, string>
   /** 给单个节点换底模（keepParams=true 时只改底模，不套推荐参数） */
   onNodeModel?: (id: string, next: string, keepParams?: boolean) => void
   selectedId: string | null
@@ -64,6 +66,7 @@ export default function Canvas({
   modelCaps,
   defaultModel,
   recommend,
+  modelArch,
   onNodeModel,
   selectedId,
   viewport,
@@ -474,6 +477,7 @@ export default function Canvas({
             favorited={isFavorite(n.params.prompt)}
             onToggleFavorite={() => onToggleFavorite(n.id)}
             loras={loras}
+            loraBase={modelArch?.[n.params.model || model] || (n.params.model || model)}
             model={n.params.model || model}
             onModel={(m, opts) => onNodeModel?.(n.id, m, opts?.keepNodes)}
             nodesModels={models}

@@ -1092,9 +1092,12 @@ class Engine:
             "txt2img", "img2img", "inpaint", "poseswap", "matte",
             "ai_repaint", "pixelify", "pose_clone", "sprite_swap", "topixel",
         }),
-        # Qwen 只保留不依赖 SD 组件的：纯生成 + 纯后处理。
+        # Qwen 保留不依赖 SD 组件的：纯生成 + 纯后处理 + **角色迁移**。
+        # 角色迁移在 Qwen 上走的是「双图条件」（角色图 + 骨架图进同一个
+        # vision context），不是 SD 的 ControlNet + IP-Adapter，所以能用。
         # 它的 img2img 是「指令改图」，不是加噪强度。
-        "qwen21": frozenset({"txt2img", "img2img", "matte", "pixelify", "topixel"}),
+        "qwen21": frozenset({"txt2img", "img2img", "matte", "pixelify", "topixel",
+                             "pose_clone"}),
     }
 
     # 工作流 → 中文名（报错时用，别让用户看到 wpc/wss 这种内部代号）

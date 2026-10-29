@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react'
-import type { FavoritePrompt, LoraInfo, ModelRecommend } from '../types'
+import type { FavoritePrompt, LoraInfo } from '../types'
 import type { ProjectMeta } from '../store/projects'
 
 type Props = {
@@ -18,24 +18,11 @@ type Props = {
   canApply: boolean
   onApplyFav: (text: string) => void
   onRemoveFav: (id: string) => void
-  models: string[]
-  recommend: Record<string, ModelRecommend>
-  model: string
-  onModel: (m: string) => void
   matteBackend: string
   onMatteBackend: (v: string) => void
   /** 扫描 models/lora 补配置（读 safetensors 头部，不加载权重） */
   onScanLoras?: () => void
   scanning?: boolean
-}
-
-const MODEL_LABEL: Record<string, string> = {
-  sd15: 'SD1.5 · 省显存（默认）',
-  sdxl: 'SDXL 1.0 · 结构更稳',
-  'sdxl-anime': 'SDXL 动漫专模',
-  // 显示名带能力提示：它跟 SD 系列完全不是一个东西（7B DiT、原生透明底、
-  // 中文直喂、图生图是指令改图），只写个目录名用户不会知道该选它做什么。
-  'qwen-image-2.1': 'Qwen-Image-2.1 · 原生透明底 / 指令改图',
 }
 
 const MATTE_LABEL: Record<string, string> = {
@@ -114,7 +101,7 @@ function ProjectRow({
  */
 export default function Sidebar({
   loras, favs, onAddNode, canApply, onApplyFav, onRemoveFav,
-  models, recommend, model, onModel, matteBackend, onMatteBackend,
+  matteBackend, onMatteBackend,
   onScanLoras, scanning,
   projects, currentProject, onSwitchProject, onCreateProject, onRenameProject, onDeleteProject,
 }: Props) {
@@ -135,7 +122,7 @@ export default function Sidebar({
         <button className="rail-icon" title={`提示词收藏 ${favs.length}`} onClick={() => setCollapsed(false)}>
           ☆{favs.length ? <sup>{favs.length}</sup> : null}
         </button>
-        <button className="rail-icon" title={`底模 ${model}`} onClick={() => setCollapsed(false)}>
+        <button className="rail-icon" title="设置" onClick={() => setCollapsed(false)}>
           ⚙
         </button>
       </aside>
@@ -168,37 +155,6 @@ export default function Sidebar({
             + 新建项目
           </button>
           <p className="rail-tip">每个项目是一套独立的画布，互不干涉。</p>
-        </Section>
-
-        <Section icon="◈" title="底模">
-          <label className="block">
-            底模
-            <select value={model} onChange={(e) => onModel(e.target.value)}>
-              {models.length === 0 && <option value={model}>{model}（仅本机已装）</option>}
-              {models.map((m) => (
-                <option key={m} value={m}>{MODEL_LABEL[m] || m}</option>
-              ))}
-            </select>
-          </label>
-          {/* 底模影响画布上**所有**节点，不是单个节点的参数——这一点必须写明，
-              否则用户会以为只改了当前节点。引擎按 model 缓存管线，
-              两个底模同时驻留要多花十几 GB。 */}
-          <p className="rail-tip">全局生效：画布上所有节点都用它（引擎按底模缓存管线，不混跑）。</p>
-          <p className="rail-tip">
-            {model === 'sdxl'
-              ? '结构更稳（实测可交付率 92% vs 33%），同分辨率只慢约 40%；但 W4 显存很紧（单帧约 15GB），且 SD1.5 的 LoRA 不能通用。'
-              : model === 'qwen-image-2.1'
-                ? '7B 单流 DiT：能直接出像素风、支持原生透明底、中文提示词直喂；'
-                  + '图生图是「指令改图」（没有重绘幅度）。单张约 25~50s、峰值 16.4GB，'
-                  + '不能挂 SD 的 LoRA。'
-                : '显存友好（W4 单帧约 6.6GB）、LoRA 生态全；代价是构图控制弱，需要多出候选让闸门挑。'}
-          </p>
-          {recommend[model] && (
-            <p className="rail-tip">
-              推荐 {recommend[model].width}×{recommend[model].height} /{' '}
-              {recommend[model].steps} 步（切底模时自动套用，手改过的节点不动）
-            </p>
-          )}
         </Section>
 
         <Section icon="▣" title="节点">

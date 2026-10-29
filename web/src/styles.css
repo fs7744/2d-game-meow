@@ -259,7 +259,26 @@ input:disabled, select:disabled, textarea:disabled { opacity: 0.45; cursor: not-
   background: linear-gradient(180deg, rgba(0, 255, 136, 0.07), transparent);
 }
 .node-head:active { cursor: grabbing; }
-.node-kind { font-family: var(--chip); font-size: 10px; letter-spacing: 0.8px; color: var(--green); }
+.node-kind { font-family: var(--chip); font-size: 10px; letter-spacing: 0.8px; color: var(--green); flex: 0 0 auto; }
+/* 卡头上的文件名：画布上常并排摆着同角色的多张图/多帧，缩略图几乎分不清，
+   所以名字放卡头而不是正文底部（底部要滚动才看得见）。
+   卡头整体是 user-select:none（拖拽时不想拖出一片蓝），这里单独放开，
+   光标也换成文本光标——不然用户不知道这里能选。
+   拖拽起点由 startDrag 里的 [data-selectable] 判定绕过。 */
+.node-head .node-file {
+  /* flex:1 = 吃掉 kind 与右侧按钮之间的全部空间（有文件名时不再渲染 spacer），
+     名字能多显示几个字符；min-width:0 是省略号生效的前提 */
+  flex: 1 1 auto; min-width: 0;
+  font-family: var(--mono); font-size: 10px; line-height: 1.4;
+  color: var(--yellow); opacity: 0.85;
+  padding: 0 3px; border-radius: 2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  cursor: text; user-select: text; -webkit-user-select: text;
+}
+/* 卡头里的按钮/标签不参与收缩：让位给文件名时它们被压扁反而更糟 */
+.node-head > .icon-btn, .node-head > .node-kind { flex: 0 0 auto; }
+.node-head .node-file::selection { background: rgba(255, 213, 0, 0.35); color: #fff; }
+.node-head:active .node-file { cursor: text; }
 /* 图生图用另一种颜色，一眼分清两类节点 */
 .node-kind.i2i { color: var(--cyan); }
 .node-kind.img { color: var(--yellow); }
@@ -484,6 +503,8 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
 .node-state {
   font-family: var(--mono); font-size: 10px; padding: 2px 5px;
   border: 1px solid var(--line); color: var(--muted);
+  /* 卡头空间被文件名挤过时，状态 chip 绝不换行——「完/成」竖排比截断难看得多 */
+  flex: 0 0 auto; white-space: nowrap;
 }
 .node-state.s-running { color: var(--yellow); border-color: rgba(255, 213, 0, 0.5); }
 .node-state.s-queued { color: var(--cyan); border-color: rgba(0, 208, 255, 0.4); }

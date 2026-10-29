@@ -613,8 +613,9 @@ function check(name, cond, extra = '') {
 
   check('侧栏存在', !!doc.querySelector('.rail'))
   const titles = [...doc.querySelectorAll('.rail-sec-title')].map((x) => x.textContent)
-  check('五个菜单分组：项目/底模/节点/收藏/设置',
-    JSON.stringify(titles) === JSON.stringify(['项目', '底模', '节点', '提示词收藏', '设置']),
+  // 底模选择已移到每个节点自己的卡头上，侧栏不再有「底模」分组
+  check('四个菜单分组：项目/节点/收藏/设置（选模型在节点卡头上）',
+    JSON.stringify(titles) === JSON.stringify(['项目', '节点', '提示词收藏', '设置']),
     JSON.stringify(titles))
 
   // 分组可折叠
@@ -634,36 +635,32 @@ function check(name, cond, extra = '') {
   await new Promise((r) => setTimeout(r, 100))
   check('侧栏可展开', !doc.querySelector('.rail.collapsed'))
 
-  // 底模下拉（独立分组，放在节点之上——它是全局参数，藏在「设置」里找不到）
+  // 底模已经下放到**节点卡头**，侧栏不再有「底模」分组
   doc.querySelector('details.fold').open = true
   await new Promise((r) => setTimeout(r, 80))
-  const msel = section(doc, '底模').querySelector('select')
-  check('有独立的「底模」分组', !!section(doc, '底模'))
-  check('底模分组在节点分组之前（要显眼）',
-    titles.indexOf('底模') >= 0 && titles.indexOf('底模') < titles.indexOf('节点'),
-    JSON.stringify(titles))
-  check('底模下拉带「全局生效」说明',
-    (section(doc, '底模').textContent || '').includes('全局生效'),
-    (section(doc, '底模').textContent || '').slice(0, 60))
+  check('侧栏不再有「底模」分组（每个节点自己选）', !section(doc, '底模'), JSON.stringify(titles))
+  const nodeModelSel = doc.querySelector('.node-model select')
+  check('节点卡头上有自己的底模下拉', !!nodeModelSel)
   // 不写死数量：mock 里加一个底模就会误报。只断言"列出来的都是本机已装的"
-  check('底模下拉列出本机已装的',
-    !!msel && [...msel.options].every((o) => ['sd15', 'sdxl', 'sdxl-anime'].includes(o.value)),
-    String(msel?.options.length))
+  check('节点底模下拉列出本机已装的',
+    !!nodeModelSel && [...nodeModelSel.options]
+      .filter((o) => o.value).every((o) => ['sd15', 'sdxl', 'sdxl-anime', 'qwen-image-2.1'].includes(o.value)),
+    String(nodeModelSel?.options.length))
 
   const setSelect = (el, v) => {
     const setter = Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value').set
     setter.call(el, v)
     el.dispatchEvent(new win.Event('change', { bubbles: true }))
   }
-  setSelect(msel, 'sdxl')
+  setSelect(nodeModelSel, 'sdxl')
   await new Promise((r) => setTimeout(r, 300))
-  // 切到 SDXL 后，SD1.5 的 LoRA 必须被过滤掉（装上去是废图）
+  // 节点切到 SDXL 后，SD1.5 的 LoRA 必须被过滤掉（装上去是废图）
   const nodeLora = [...doc.querySelectorAll('details select')].find(
     (x) => x.parentElement?.textContent?.startsWith('LoRA'))
   // 不锁死数量：现在注册表里有 SDXL 的 LoRA（Pixelizer），断言改成
   // 「SD1.5 的被过滤、不挂那一项还在」——锁数量会在加 LoRA 后误报
   const loraVals = [...(nodeLora?.options || [])].map((o) => o.value)
-  check('切到 SDXL 后 SD1.5 的 LoRA 被过滤',
+  check('节点切到 SDXL 后 SD1.5 的 LoRA 被过滤',
     loraVals.includes('') && !loraVals.includes('wuxia_v2'),
     JSON.stringify(loraVals))
 
@@ -1543,8 +1540,7 @@ function check(name, cond, extra = '') {
   setNum(wLab.querySelector('input'), 640)
   await new Promise((r) => setTimeout(r, 80))
 
-  const modelSel = [...doc.querySelectorAll('select')]
-    .find((s2) => (s2.closest('label')?.textContent || '').includes('底模'))
+  const modelSel = doc.querySelector('.node-model select')
   const setSel = (el, v) => {
     const setter = Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value').set
     setter.call(el, v)
@@ -1557,12 +1553,12 @@ function check(name, cond, extra = '') {
   // 底模现在是**节点级**：侧栏那个只决定「新节点的默认值」。
   // 仍处于「跟随默认」的节点要跟着走（否则会出现「底模 SDXL、步数 30」
   // 这种自相矛盾的配置）；手改过参数的节点不被覆盖。
-  check('跟随默认的节点跟着侧栏换底模（步数 30 → 24）',
+  check('节点切 SDXL 后套用推荐步数（30 → 24）',
     num(nodes[0], '步数') === '24', num(nodes[0], '步数'))
   check('手改过参数的节点不被覆盖（宽仍是 640）',
     num(nodes[1], '宽') === '640', num(nodes[1], '宽'))
-  check('侧栏切换给出「新节点默认」的提示',
-    (doc.querySelector('.toast')?.textContent || '').includes('新节点默认'),
+  check('切换给出推荐参数提示',
+    (doc.querySelector('.toast')?.textContent || '').includes('推荐'),
     doc.querySelector('.toast')?.textContent)
 
   // 节点自己的底模下拉：只影响这一个节点
@@ -2043,8 +2039,7 @@ function check(name, cond, extra = '') {
     (doc.querySelector('.node-body')?.textContent || '').includes('只支持 SDXL'))
 
   // 切到 SDXL 才可用
-  const modelSel = [...doc.querySelectorAll('select')]
-    .find((s2) => (s2.closest('label')?.textContent || '').includes('底模'))
+  const modelSel = doc.querySelector('.node-model select')
   const setSel = (el, v) => {
     const setter = Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value').set
     setter.call(el, v)
@@ -2078,7 +2073,7 @@ function check(name, cond, extra = '') {
   await wait(400)
   check('切到 Illustrious 档不回弹', illStyle()?.value === 'spriteIll',
     illStyle()?.value)
-  // 档位切的是**节点自己的**底模（底模是节点级），侧栏那个只是新节点默认
+  // 档位切的是**节点自己的**底模（底模是节点级，侧栏已无选模型入口）
   const nodeModelNow = [...doc.querySelectorAll('.node-model select')].pop()
   check('档位把该节点的底模切到 sdxl-anime', nodeModelNow?.value === 'sdxl-anime',
     nodeModelNow?.value)
