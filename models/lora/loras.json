@@ -79,7 +79,7 @@
     "base": "sdxl",
     "size_mb": 163,
     "source": "civitai:?@130580",
-    "note": "SDXL 最高人气像素风（下载 119741 / 赞 6288）。无触发词，靠 prompt 里的 pixel art 生效。"
+    "note": "SDXL 最高人气像素风（下载 119741 / 赞 6288）。无触发词，靠 prompt 里的 pixel art 生效。\n\n**实测（2026-10，3 prompt × 2 seed，1024²/24 步，有效像素固定 128）：**\n- 挂 sdxl：可交付 83% / 多主体 17% / 贴边 0% —— 项目里 SDXL 路线最好的一组\n- 挂 sdxl-anime（Illustrious）：只有 17% 可交付、多主体 50%、**贴边 83%**\n- 换成 danbooru tag 契约再挂 sdxl-anime：贴边 83%→0%（构图约束终于生效），但可交付仍只有 50%（多主体 50%）\n\n两条结论：① **像素 LoRA 必须配它训练时的底模**——架构对（都是 SDXL UNet）不代表能用，挂 Illustrious 会明显掉质量；② Illustrious 类底模**不认自然语言构图词**，必须用 danbooru tag（`full body` / `solo`），否则 83% 的图会贴边裁切。\n\n背景一定会画彩色/纹理底，必须开抠图。"
   },
   "inkwash_xl2": {
     "label": "水墨风格 ink wash（SDXL）",
@@ -163,5 +163,155 @@
     "rank": 16,
     "note": "mushenL/2D-Pixel-Toolkit-2D 的 Sprites_32 分支：拿 32px 精灵图训的 SD1.5\nLoRA（36MB / rank 16）。**必须带触发词 pixelart，否则完全不起作用**——\n实测不加触发词时贴边 67%/多主体 17%，与不挂 LoRA 一模一样；加上后\n多主体 0%、贴边 50%、可交付率 17%→50%（各 6 张，样本小）。\n这条**修正了「像素 LoRA 一律不加触发词」的旧结论**：那条来自 px_illustrious\n（它加触发词会多主体），对这个是反的——所以 trigger 是不是该填，\n必须每个 LoRA 单独测，不能一刀切。选中后点「+ 填入」把 pixelart 加进提示词。",
     "source": "auto"
+  },
+  "AkihikoStyleXL_20241214-1734177549626-000004": {
+    "label": "AkihikoStyleXL_20241214-1734177549626-000004",
+    "trigger": "",
+    "scale": 0.8,
+    "preset": null,
+    "note": "",
+    "source": "auto",
+    "base": "sd15",
+    "rank": 4
+  },
+  "AnimeModTurnXL_v1_LibDim4": {
+    "label": "AnimeModTurnXL_v1_LibDim4",
+    "trigger": "",
+    "scale": 0.8,
+    "preset": null,
+    "note": "",
+    "source": "auto",
+    "base": "sd15",
+    "rank": 4
+  },
+  "BG3EXTurnXL_v1_CivitAIDim32": {
+    "label": "BG3EXTurnXL_v1_CivitAIDim32",
+    "trigger": "",
+    "scale": 0.8,
+    "preset": null,
+    "note": "",
+    "source": "auto",
+    "base": "sd15",
+    "rank": 32
+  },
+  "BG3EXTurnXL_v1_LibDim4": {
+    "label": "BG3EXTurnXL_v1_LibDim4",
+    "trigger": "",
+    "scale": 0.8,
+    "preset": null,
+    "note": "",
+    "source": "auto",
+    "base": "sd15",
+    "rank": 4
+  },
+  "charTurnXL_v1_LibDim4": {
+    "label": "charTurnXL_v1_LibDim4",
+    "trigger": "",
+    "scale": 0.8,
+    "preset": null,
+    "note": "",
+    "source": "auto",
+    "base": "sd15",
+    "rank": 4
+  },
+  "DaiStyleXL_20241214-1734179669841-000005": {
+    "label": "DaiStyleXL_20241214-1734179669841-000005",
+    "trigger": "",
+    "scale": 0.8,
+    "preset": null,
+    "note": "",
+    "source": "auto",
+    "base": "sd15",
+    "rank": 4
+  },
+  "DiscoLevel_20241207-1733548508061-000004": {
+    "label": "DiscoLevel_20241207-1733548508061-000004",
+    "trigger": "",
+    "scale": 0.8,
+    "preset": null,
+    "note": "",
+    "source": "auto",
+    "base": "sd15",
+    "rank": 4
+  },
+  "FFTALevel4_20241206-1733511624460-000004": {
+    "label": "FFTALevel4_20241206-1733511624460-000004",
+    "trigger": "",
+    "scale": 0.8,
+    "preset": null,
+    "note": "",
+    "source": "auto",
+    "base": "sd15",
+    "rank": 4
+  },
+  "HadesLevel_20241207-1733548878458-000004": {
+    "label": "HadesLevel_20241207-1733548878458-000004",
+    "trigger": "",
+    "scale": 0.8,
+    "preset": null,
+    "note": "",
+    "source": "auto",
+    "base": "sd15",
+    "rank": 4
+  },
+  "MuchaStyleXL_20241214-1734176901982-000005": {
+    "label": "MuchaStyleXL_20241214-1734176901982-000005",
+    "trigger": "",
+    "scale": 0.8,
+    "preset": null,
+    "note": "",
+    "source": "auto",
+    "base": "sd15",
+    "rank": 4
+  },
+  "MUJITurnXL_v1_LibDim4": {
+    "label": "MUJITurnXL_v1_LibDim4",
+    "trigger": "",
+    "scale": 0.8,
+    "preset": null,
+    "note": "",
+    "source": "auto",
+    "base": "sd15",
+    "rank": 4
+  },
+  "OdinTurnXL_v1_LibDim4": {
+    "label": "OdinTurnXL_v1_LibDim4",
+    "trigger": "",
+    "scale": 0.8,
+    "preset": null,
+    "note": "",
+    "source": "auto",
+    "base": "sd15",
+    "rank": 4
+  },
+  "SargentiStyleXL_v1_LibDim4": {
+    "label": "SargentiStyleXL_v1_LibDim4",
+    "trigger": "",
+    "scale": 0.8,
+    "preset": null,
+    "note": "",
+    "source": "auto",
+    "base": "sd15",
+    "rank": 4
+  },
+  "TVAnimeStyleXL_20241214-1734195319274-000006": {
+    "label": "TVAnimeStyleXL_20241214-1734195319274-000006",
+    "trigger": "",
+    "scale": 0.8,
+    "preset": null,
+    "note": "",
+    "source": "auto",
+    "base": "sd15",
+    "rank": 4
+  },
+  "ZeroEXStyleXL_v1_LibAIDim4": {
+    "label": "ZeroEXStyleXL_v1_LibAIDim4",
+    "trigger": "",
+    "scale": 0.8,
+    "preset": null,
+    "note": "",
+    "source": "auto",
+    "base": "sd15",
+    "rank": 4
   }
 }
