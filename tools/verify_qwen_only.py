@@ -24,6 +24,7 @@ from workflows import quality as q  # noqa: E402
 from workflows import repaint as rp  # noqa: E402
 from workflows.engine import Engine  # noqa: E402
 from workflows.generate import QWEN_NEG, _qwen_call  # noqa: E402
+from workflows.generate import matte_bg as gen_matte_bg  # noqa: E402
 
 OUT = Path("assets/_qwen_verify")
 OUT.mkdir(parents=True, exist_ok=True)
@@ -108,7 +109,13 @@ def verify_b(eng: Engine, char: Image.Image, extractor) -> dict:
         dt = time.time() - t
         im = im.convert("RGB")
         im.save(OUT / f"b_frame_{i}.png")
-        sc = q.evaluate(im, extractor)
+        matted.save(OUT / f"b_frame_{i}_matted.png")
+        # 先抠图再评估：Qwen 不开透明底时输出是 RGB，alpha 全 255 →
+        # coverage 恒为 1.0，"前景 5~60%" 的判据必须对**抠完的**图算。
+        matted, minfo = gen_matte_bg(
+            eng, init_image=OUT / f"b_frame_{i}.png", matte_backend="auto",
+            scope="qwen_verify")
+        sc = q.evaluate(matted, extractor)
         rows.append((round(dt, 1), sc))
         log(f"[B] 帧{i}: {dt:.1f}s points={sc['points']} coverage={sc['coverage']} "
             f"edge={len(sc['edge'])} passed={sc['passed']}")
