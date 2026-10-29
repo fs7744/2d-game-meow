@@ -158,6 +158,36 @@ def _lora_trigger(eng: Engine, prompt: str, lora: Any) -> str:
     return f"{', '.join(heads)}, {prompt}" if heads else prompt
 
 
+# 会传给 diffusers、且可能被它用 isinstance(x, float) 严格校验的参数。
+# 目前只有 controlnet_conditioning_scale 会被卡，但把同类的都归一化，
+# 免得下次升级 diffusers 又多卡一个再来查一遍。
+# **clip_skip 不能进这个表**：它是整数语义（层数），转成 float 会进到
+# encode_prompt 的切片里（`-(clip_skip + 2)`），语义不对。
+_FLOAT_KEYS = (
+    "controlnet_conditioning_scale", "guidance_scale", "strength",
+    "control_guidance_start", "control_guidance_end",
+)
+
+
+def _floatify(kw: Dict[str, Any]) -> Dict[str, Any]:
+    """把 kwargs 里的数值参数统一转成 Python float。
+
+    **为什么必须做**：JSON 没有 int / float 之分——前端 slider 的 `1.0`
+    序列化出去就是 `1`，Python 收到的是 `int`。而 diffusers 的 check_inputs 用
+    `isinstance(controlnet_conditioning_scale, float)` 严格校验，`int` 直接
+    TypeError（"must be type `float`"）。这个错误在管线都建好、进入采样前才抛，
+    现场看起来像"模型坏了/权重不对"，实际只是 `1` 与 `1.0` 的差别。
+    """
+    out = dict(kw)
+    for k in _FLOAT_KEYS:
+        v = out.get(k)
+        if isinstance(v, bool) or v is None:
+            continue
+        if isinstance(v, (int, float)):
+            out[k] = float(v)
+    return out
+
+
 def _infer(eng: Engine, pipe, kw: Dict[str, Any], *, shrink: bool = True,
            label: str = "") -> Any:
     """带 OOM 恢复的推理调用：清缓存 → 降分辨率 → 重试（最多两次）。
@@ -169,7 +199,13 @@ def _infer(eng: Engine, pipe, kw: Dict[str, Any], *, shrink: bool = True,
 
     降档顺序：先清掉**其它**缓存管线（当前这条由局部变量持有，不会被回收），
     再按 3/4 缩边长（对齐到 8 的倍数）。缩过两次还不行就如实抛出。
+
+    进来先做一次**浮点归一化**（见 `_as_float`）：JSON 没有 int/float 之分，
+    前端 slider 的 `1.0` 到这里是 `int 1`，而 diffusers 对
+    `controlnet_conditioning_scale` 用 `isinstance(x, float)` 严格校验，
+    直接抛 TypeError。放在这里是单点收口——所有 ControlNet 调用都过它。
     """
+    kw = _floatify(kw)
     for attempt in range(3):
         try:
             return pipe(**kw)
@@ -722,6 +758,7 @@ def inpaint(eng: Engine, *, image: str | Path, mask: str | Path, prompt: str,
             cfg: float = 7.5, seed: int = -1, model: str = "sd15", scope: str = "",
             tag: str = "w3") -> Dict[str, Any]:
     """只重画 mask 区域，并把结果按羽化蒙版贴回——选区外像素逐点不变。"""
+    eng.require(model, "inpaint")
     pipe = eng.inpaint_pipe(model)
     src = Image.open(image).convert("RGB")
     msk = Image.open(mask).convert("L")
@@ -911,6 +948,7 @@ def ai_repaint(eng: Engine, *, image: str | Path, mask: str | Path, prompt: str,
 
     代价是接缝需要收：羽化过渡 + 只在边界带做色彩校正 + 可选色板吸附。
     """
+    eng.require(model, "ai_repaint")
     if preset is not None:
         prompt = _lora_trigger(eng, prompt, lora)
         prompt, negative = presets.build(prompt, negative, preset,
@@ -1226,6 +1264,7 @@ def pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | Path,
     **为什么不直接用 W4**：W4 是「骨架序列 → 精灵帧」，没有角色参考图；这里
     多了 IP-Adapter 这一路，是单帧的身份迁移。多帧批量请用 WSS（sprite_swap）。
     """
+    eng.require(model, "pose_clone")
     if preset is not None:
         prompt = _lora_trigger(eng, prompt, lora)
         prompt, negative = presets.build(prompt, negative, preset,
@@ -1254,7 +1293,13 @@ def pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | Path,
     #     主体顶满画面时 patch 里只有局部纹理，编码不出整体身份）
     #   - 像素画用最近邻缩放（LANCZOS 会把像素块糊成渐变）
     char = refprep.prepare_reference(Image.open(char_image).convert("RGBA"), size=width)
-    eng.ensure_headroom(need_gb=2.0, keep=("pose",))
+    # 预估值必须覆盖**实际要加载的量**，不能只留 2GB 余量：
+    # SD15 的 UNet+ControlNet+IP-Adapter+VAE 约 6~7GB、SDXL 约 13GB。
+    # 给 2GB 时，若 qwen 管线仍占着 16GB，检查会判"够用"而不驱逐，
+    # 硬挤进去后 _fit 降级到 cpu offload —— 每一步都在 CPU/GPU 间搬权重，
+    # 表现是「迁移中」转十几分钟、显存全满。
+    eng.ensure_headroom(need_gb=13.0 if eng.is_xl(model) else 7.0,
+                        keep=("pose",))
     pipe = eng.pose_pipe(controlnet=pipe_cn, with_ipadapter=True, model=model)
     eng.apply_lora(pipe, lora, lora_scale)
     pipe.set_ip_adapter_scale(ipa_scale)
@@ -1355,6 +1400,10 @@ def sprite_swap(eng: Engine, *, sheet_image: str | Path, char_image: str | Path,
       - ``frame``：逐帧生成 + 多候选择优。不依赖 motion adapter 权重，
         显存更省（4.5GB vs 13.1GB），但帧间一致性略差。
     """
+    # recolor 是纯确定性换色、**不跑模型**，任何底模都能用，所以不拦。
+    # 只有 generate 模式要 ControlNet + IP-Adapter 这套 SD 组件。
+    if mode != "recolor":
+        eng.require(model, "sprite_swap")
     if preset is not None:
         prompt = _lora_trigger(eng, prompt, lora)
         prompt, negative = presets.build(prompt, negative, preset,
@@ -1403,7 +1452,13 @@ def sprite_swap(eng: Engine, *, sheet_image: str | Path, char_image: str | Path,
             palette=palette, extractor=extractor, vram_profile=vram_profile,
             model=model, scope=scope, tag=tag)
 
-    eng.ensure_headroom(need_gb=2.0, keep=("pose",))
+    # 预估值必须覆盖**实际要加载的量**，不能只留 2GB 余量：
+    # SD15 的 UNet+ControlNet+IP-Adapter+VAE 约 6~7GB、SDXL 约 13GB。
+    # 给 2GB 时，若 qwen 管线仍占着 16GB，检查会判"够用"而不驱逐，
+    # 硬挤进去后 _fit 降级到 cpu offload —— 每一步都在 CPU/GPU 间搬权重，
+    # 表现是「迁移中」转十几分钟、显存全满。
+    eng.ensure_headroom(need_gb=13.0 if eng.is_xl(model) else 7.0,
+                        keep=("pose",))
     pipe = eng.pose_pipe(controlnet=pipe_cn, with_ipadapter=True, model=model)
     eng.apply_lora(pipe, lora, lora_scale)
     pipe.set_ip_adapter_scale(ipa_scale)
@@ -1939,6 +1994,7 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
       姿态模型缺失时闸门自动关闭并告警，此时 candidates 仍然生效（只按分数挑，
       分数里只剩占比/贴边/漂移三项）。
     """
+    eng.require(model, "poseswap")
     # 输入可以是目录 / 通配 / 列表：前端只传目录，CLI 传列表，同一套规则
     pose_images = norm_pose_inputs(pose_images)
     if not pose_images:
@@ -1952,7 +2008,13 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
         prompt = _lora_trigger(eng, prompt, lora)
         prompt, negative = presets.build(prompt, negative, preset,
                                     max_tokens=presets.CHUNK_BUDGET)
-    eng.ensure_headroom(need_gb=2.0, keep=("pose",))
+    # 预估值必须覆盖**实际要加载的量**，不能只留 2GB 余量：
+    # SD15 的 UNet+ControlNet+IP-Adapter+VAE 约 6~7GB、SDXL 约 13GB。
+    # 给 2GB 时，若 qwen 管线仍占着 16GB，检查会判"够用"而不驱逐，
+    # 硬挤进去后 _fit 降级到 cpu offload —— 每一步都在 CPU/GPU 间搬权重，
+    # 表现是「迁移中」转十几分钟、显存全满。
+    eng.ensure_headroom(need_gb=13.0 if eng.is_xl(model) else 7.0,
+                        keep=("pose",))
     pipe = eng.pose_pipe(controlnet=controlnet, with_ipadapter=ref_image is not None,
                         model=model)
     if distill:

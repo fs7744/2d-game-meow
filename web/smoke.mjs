@@ -1554,20 +1554,38 @@ function check(name, cond, extra = '') {
   await new Promise((r) => setTimeout(r, 200))
 
   nodes = [...doc.querySelectorAll('.node')]
-  check('切 SDXL 后未改动的节点套用推荐步数（30 → 24）',
+  // 底模现在是**节点级**：侧栏那个只决定「新节点的默认值」。
+  // 仍处于「跟随默认」的节点要跟着走（否则会出现「底模 SDXL、步数 30」
+  // 这种自相矛盾的配置）；手改过参数的节点不被覆盖。
+  check('跟随默认的节点跟着侧栏换底模（步数 30 → 24）',
     num(nodes[0], '步数') === '24', num(nodes[0], '步数'))
-  check('推荐尺寸是 768 而不是 1024（1024 反而更差）',
-    num(nodes[0], '宽') === '768', num(nodes[0], '宽'))
-  check('手改过参数的节点不被覆盖',
+  check('手改过参数的节点不被覆盖（宽仍是 640）',
+    num(nodes[1], '宽') === '640', num(nodes[1], '宽'))
+  check('侧栏切换给出「新节点默认」的提示',
+    (doc.querySelector('.toast')?.textContent || '').includes('新节点默认'),
+    doc.querySelector('.toast')?.textContent)
+
+  // 节点自己的底模下拉：只影响这一个节点
+  nodes = [...doc.querySelectorAll('.node')]
+  const nodeModelSel = nodes[0].querySelector('.node-model select')
+  check('节点上有自己的底模下拉', !!nodeModelSel)
+  // 先把这个节点单独钉到 sd15，再钉到 sdxl，验「只动自己」
+  setSel(nodeModelSel, 'sd15')
+  await new Promise((r) => setTimeout(r, 250))
+  nodes = [...doc.querySelectorAll('.node')]
+  check('节点单独选 SD1.5 后套用推荐步数（24 → 30）',
+    num(nodes[0], '步数') === '30', num(nodes[0], '步数'))
+  check('该节点值变成具体的底模（不再跟随默认）',
+    nodes[0].querySelector('.node-model select')?.value === 'sd15',
+    nodes[0].querySelector('.node-model select')?.value)
+  check('另一个节点不受影响',
     num(nodes[1], '宽') === '640' && num(nodes[1], '步数') === '30',
     JSON.stringify({ w: num(nodes[1], '宽'), s: num(nodes[1], '步数') }))
-  check('切换时给出提示',
-    (doc.querySelector('.toast')?.textContent || '').includes('sdxl'),
-    doc.querySelector('.toast')?.textContent)
-  check('切回 SD1.5 也能还原',
-    (setSel(modelSel, 'sd15'), true))
+  // 切回「跟随默认」：只改字段，不动参数
+  setSel(nodes[0].querySelector('.node-model select'), '')
   await new Promise((r) => setTimeout(r, 200))
-  check('还原后步数回到 30', num([...doc.querySelectorAll('.node')][0], '步数') === '30',
+  check('切回「跟随默认」步数仍是 30（不重置参数）',
+    num([...doc.querySelectorAll('.node')][0], '步数') === '30',
     num([...doc.querySelectorAll('.node')][0], '步数'))
 
   check('底模切换场景无脚本错误', errors.length === 0, errors[0] || '')
@@ -1611,23 +1629,19 @@ function check(name, cond, extra = '') {
     (node().textContent || '').includes('由当前底模的显存占用算出'),
     (node().textContent || '').slice(-60))
 
-  // 切到 SDXL：上限收到 3，已设的 6 要跟着降
-  const modelSel = [...doc.querySelectorAll('select')]
-    .find((s2) => (s2.closest('label')?.textContent || '').includes('底模'))
+  // 用**这个节点自己的**底模下拉切到 SDXL：上限收到 3，已设的 6 要跟着降
+  const nodeModelSel = node().querySelector('.node-model select')
   const setSel = (el, v) => {
     const setter = Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value').set
     setter.call(el, v)
     el.dispatchEvent(new win.Event('change', { bubbles: true }))
   }
-  setSel(modelSel, 'sdxl')
-  await wait(250)
-  check('切 SDXL 后候选上限收到 3',
+  setSel(nodeModelSel, 'sdxl')
+  await wait(300)
+  check('节点切 SDXL 后候选上限收到 3',
     candInput()?.getAttribute('max') === '3', candInput()?.getAttribute('max'))
   check('已设的 6 张跟着降到 3（界面上不能写着跑不动的值）',
     candInput()?.value === '3', candInput()?.value)
-  check('toast 说明候选上限',
-    (doc.querySelector('.toast')?.textContent || '').includes('候选上限 3'),
-    doc.querySelector('.toast')?.textContent)
 
   check('候选上限场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
@@ -2064,7 +2078,10 @@ function check(name, cond, extra = '') {
   await wait(400)
   check('切到 Illustrious 档不回弹', illStyle()?.value === 'spriteIll',
     illStyle()?.value)
-  check('档位把底模切到 sdxl-anime', modelSel.value === 'sdxl-anime', modelSel.value)
+  // 档位切的是**节点自己的**底模（底模是节点级），侧栏那个只是新节点默认
+  const nodeModelNow = [...doc.querySelectorAll('.node-model select')].pop()
+  check('档位把该节点的底模切到 sdxl-anime', nodeModelNow?.value === 'sdxl-anime',
+    nodeModelNow?.value)
   const numsIll = [...doc.querySelectorAll('.node-body input[type=number]')]
     .map((i) => Number(i.value))
   check('档位把尺寸改成 1024（1024/8=128 有效像素）', numsIll.includes(1024),

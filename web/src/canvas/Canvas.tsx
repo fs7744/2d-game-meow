@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { PoseDir } from '../api'
-import type { GenNode, LoraInfo, Viewport } from '../types'
+import type { ModelCaps, PoseDir } from '../api'
+import { fileNameOf } from '../fileName'
+import type { GenNode, LoraInfo, ModelRecommend, Viewport } from '../types'
 import GenNodeCard, { NODE_W, PORT_CHAR_Y, PORT_SRC_Y, type NodePatch } from '../nodes/GenNodeCard'
 
 /** 连线指向节点的哪个输入：source（源图/动作参考）还是 charSource（角色图） */
@@ -9,8 +10,6 @@ export type LinkField = 'source' | 'char'
 type Props = {
   nodes: GenNode[]
   model: string
-  /** 切底模：节点上的产出风格档位可能要求特定底模，透传上去 */
-  onModel?: (m: string, opts?: { keepNodes?: boolean }) => void
   /** 当前底模的候选数上限（后端按总显存算），透传给每个节点卡 */
   maxCandidates?: number
   /** W4 可用的骨架帧目录 */
@@ -19,6 +18,16 @@ type Props = {
   hasRefiner?: boolean
   /** 当前底模是否支持原生透明背景 */
   canTransparent?: boolean
+  /** 可用底模清单（节点各自选，不再是全局唯一） */
+  models?: string[]
+  /** 底模能力表：节点按自己的 workflow 过滤可选项 */
+  modelCaps?: Record<string, ModelCaps>
+  /** 侧栏的「新节点默认底模」，节点下拉里显示成「跟随默认（xxx）」 */
+  defaultModel?: string
+  /** 各底模的推荐参数（候选上限要按**节点自己的**底模算，不能用全局的） */
+  recommend?: Record<string, ModelRecommend>
+  /** 给单个节点换底模（keepParams=true 时只改底模，不套推荐参数） */
+  onNodeModel?: (id: string, next: string, keepParams?: boolean) => void
   selectedId: string | null
   viewport: Viewport
   setViewport: (v: Viewport | ((prev: Viewport) => Viewport)) => void
@@ -47,11 +56,15 @@ const MAX_Z = 2.4
 export default function Canvas({
   nodes,
   model,
-  onModel,
   maxCandidates,
   poseDirs,
   hasRefiner,
   canTransparent,
+  models,
+  modelCaps,
+  defaultModel,
+  recommend,
+  onNodeModel,
   selectedId,
   viewport,
   setViewport,
@@ -185,7 +198,7 @@ export default function Canvas({
     .map((n) => {
       const kindLabel = n.kind === 'image' ? '图片' : n.kind === 'gen' ? '图生成' : '图'
       const name = n.kind === 'image'
-        ? n.image?.path.split(/[\\/]/).pop() || n.id
+        ? fileNameOf(n.image?.path) || n.id
         : n.params.prompt.slice(0, 20) || n.id
       // 还没出图要标出来，否则用户以为连上就能直接用
       const pending = !(n.job?.path || n.job?.raw || n.image?.path) ? '（未生成）' : ''
@@ -207,6 +220,9 @@ export default function Canvas({
 
   const endLink = useCallback((e: PointerEvent) => {
     const from = linkFrom.current
+    // **先存再清**：hoverRef 在下面会被清空，清空之后再去读就永远是 null
+    //（这个顺序踩过一次：连线在真实浏览器能用、在无布局的 jsdom 里全丢）
+    const hoverAt = hoverRef.current
     linkFrom.current = null
     hoverRef.current = null
     setHoverId(null)
@@ -214,20 +230,36 @@ export default function Canvas({
     setLinkTip(null)
     if (!from) return
     /**
-     * 落点判定用 elementFromPoint，而不是 hover 状态。
+     * 落点判定：**先 elementFromPoint，再退回 hover**。
      *
-     * hover 只能知道"在哪个节点上"，说不出"落在哪个输入端口"——而角色迁移 /
-     * 序列帧替换有两个图片输入（源图 = 动作参考，角色图 = 身份），光靠节点
-     * 级 hover 永远只会连到 source，角色图那一路根本连不上。端口圆点带
-     * data-port，落点直接在它身上就能拿到 field。
+     * 首选 elementFromPoint：只有它能说出"落在哪个输入端口"——角色迁移 /
+     * 序列帧替换有两个图片输入（源图 = 动作参考，角色图 = 身份），节点级
+     * hover 永远只会连到 source，角色图那一路根本连不上。
+     *
+     * 但它依赖布局，且会被覆盖层挡住（灯箱、蒙版编辑器、jsdom 无布局时
+     * 直接返回 null）。所以拿不到就退回 hoverRef——至少把线连到节点上，
+     * 掉进"拖半天没反应"比连错一路更让人困惑。
      */
-    const el = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null
+    let el: HTMLElement | null = null
+    try {
+      // jsdom 没有 elementFromPoint（无布局），直接调会 TypeError 并把整个
+      // pointerup 打断——表现就是"拖了线但什么都没连上"。特征检测 + try 兜住，
+      // 拿不到就走下面的 hover 分支。
+      if (typeof document.elementFromPoint === 'function') {
+        el = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null
+      }
+    } catch {
+      el = null
+    }
     const nodeEl = el?.closest('[data-node-id]') as HTMLElement | null
-    const to = nodeEl?.dataset.nodeId
+    let to = nodeEl?.dataset.nodeId
+    let field = (el?.closest('[data-port]') as HTMLElement | null)?.dataset.port
+    if (!to) {
+      to = hoverAt ?? undefined
+      field = 'source'
+    }
     if (!to) return
-    const portEl = el?.closest('[data-port]') as HTMLElement | null
-    const field = (portEl?.dataset.port as LinkField) || 'source'
-    connectRef.current(from, to, field)
+    connectRef.current(from, to, (field as LinkField) || 'source')
   }, [])
 
   const moveLink = useCallback((e: PointerEvent) => {
@@ -338,7 +370,7 @@ export default function Canvas({
       id: n.id,
       label:
         n.kind === 'image'
-          ? `图片 · ${n.image?.path.split(/[\\/]/).pop() || n.id}`
+          ? `图片 · ${fileNameOf(n.image?.path) || n.id}`
           : `${n.kind === 'bg' ? '抠图' : n.kind === 'img2img' ? '图生图' : '图生成'} · ${
               n.params.prompt.slice(0, 16) || n.id
             }`,
@@ -442,12 +474,21 @@ export default function Canvas({
             favorited={isFavorite(n.params.prompt)}
             onToggleFavorite={() => onToggleFavorite(n.id)}
             loras={loras}
-            model={model}
-            onModel={onModel}
-            maxCandidates={maxCandidates}
+            model={n.params.model || model}
+            onModel={(m, opts) => onNodeModel?.(n.id, m, opts?.keepNodes)}
+            nodesModels={models}
+            modelCaps={modelCaps}
+            defaultModel={defaultModel ?? model}
+            maxCandidates={recommend?.[n.params.model || model]?.max_candidates
+              ?? maxCandidates}
             poseDirs={poseDirs}
             hasRefiner={hasRefiner}
-            canTransparent={canTransparent}
+            canTransparent={
+              // 按**这个节点自己的底模**判断，不是全局默认——一张画布上
+              // 可能一个节点用 Qwen、另一个用 SDXL。modelCaps 缺失时退回
+              // App 算好的全局值（老后端不返回 caps）
+              modelCaps?.[n.params.model || model]?.transparent ?? canTransparent
+            }
             onSpawnImg2Img={() => onSpawnImg2Img(n.id)}
             sourceNode={nodes.find((x) => x.id === n.source?.nodeId)}
             sourceOptions={sourceOptions}

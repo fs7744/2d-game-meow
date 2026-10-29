@@ -501,6 +501,26 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
 .icon-btn.view-toggle.on { color: var(--green); border-color: rgba(0, 255, 136, 0.4); }
 
 .node-body { display: flex; flex-direction: column; gap: 8px; padding: 10px; }
+
+/* 节点级底模选择：贴在节点头部下面一条窄带。
+   放在正文最前面是因为它是仅次于提示词的决定项，而卡片常常高到需要滚动，
+   塞进「更多设置」等于藏起来。 */
+.node-model {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 8px; border-bottom: 1px solid var(--line);
+  background: rgba(0, 255, 136, 0.04);
+}
+.node-model-label {
+  font-size: 10px; color: var(--muted-2); flex: 0 0 auto;
+  letter-spacing: 0.5px;
+}
+.node-model select {
+  flex: 1; min-width: 0; height: 22px; padding: 0 4px;
+  font-size: 10.5px;
+}
+.node-model-note {
+  flex: 0 0 auto; font-size: 10px; color: var(--muted-2); cursor: help;
+}
 /*
  * 锁了高度的节点：正文区吃掉剩余高度并自己滚动。
  * 不加 overflow 的后果是内容顶着卡片底边溢出（CSS 默认 overflow:visible），

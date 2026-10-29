@@ -290,9 +290,14 @@ def models() -> Dict[str, Any]:
             #   transparent —— 原生 RGBA（只有 Qwen-Image-2.1 的 VAE 有第 4 通道）；
             #                  SD 系列要做透明底只能靠抠图，那是另一条路。
             #   instruction —— 图生图是否走「指令改图」（无 strength 语义）。
+            #   workflows   —— 这个底模能跑哪些工作流。前端按节点的 workflow
+            #                  过滤它的底模下拉：Qwen 没有 SD 的 UNet/CLIP，
+            #                  角色迁移/序列帧替换这类依赖 ControlNet 的节点
+            #                  选它就是必崩，不如直接不让选。
             "caps": {m: {"transparent": engine.arch(m) == "qwen21",
                          "instruction": engine.arch(m) == "qwen21",
-                         "lora": engine.arch(m) != "qwen21"}
+                         "lora": engine.arch(m) != "qwen21",
+                         "workflows": engine.workflows_of(m)}
                      for m in have},
             # 本机有没有 SDXL refiner 权重：没有就别让用户勾那个开关
             "refiner": engine.has_refiner()}

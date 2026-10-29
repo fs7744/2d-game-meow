@@ -134,6 +134,8 @@ const DEFAULT_PARAMS: GenParams = {
   // 透明底默认关：只有 Qwen 底模支持，SD 系列开了会被后端忽略，
   // 默认打开会让用户误以为选 SD 时也能出透明图
   transparent: false,
+  // 空串 = 跟随侧栏的「新节点默认底模」。节点一旦自己选过就写具体值
+  model: '',
 }
 
 let seq = 0
@@ -465,50 +467,81 @@ export default function App() {
   }, [])
 
   /**
-   * 切换底模：把推荐采样参数套到「用户没动过」的生成节点上。
+   * 给**单个节点**换底模，并套用新底模的推荐参数（只动这一个节点）。
    *
-   * 为什么不是无条件覆盖：用户可能已经为某个节点手调过步数/尺寸。
-   * 判据是「当前值仍等于旧底模的推荐值」——等于说明没动过，可以跟着换；
-   * 不等就保留，避免把人调好的参数冲掉。
-   *
-   * 为什么需要这件事：后端实测 SDXL 在 1024² 反而更差（可交付率 92%→75%），
-   * 前端若按直觉填 1024，用户会稳定拿到更差的结果且没有任何报错。
+   * 与 switchModel（侧栏，改的是"新节点的默认值"）分开：
+   * 底模是节点级属性（见 GenParams.model），画布上混跑 Qwen 立绘 + SDXL
+   * 精灵帧是常态。套推荐参数仍然只在"用户没手改过"时生效——判据是当前值
+   * 还等于旧底模的推荐值，否则保留手调结果。
    */
-  const switchModel = useCallback((next: string, opts?: { keepNodes?: boolean }) => {
-    // **切之前先确认这台机器上真有这个底模**：产出风格档位会指定底模
-    // （「像素精灵·Illustrious」→ sdxl-anime），没下载时 setModel 会把 model
-    // 设成一个下拉里根本不存在选项的值——底模选择框变空、生成直接失败。
-    // 宁可只套参数并说明原因。
+  const setNodeModel = useCallback((id: string, next: string, keepParams = false) => {
+    const cur = nodesRef.current.find((n) => n.id === id)
+    if (!cur) return
     if (!models.includes(next)) {
-      setNotice(`未安装底模 ${next}，已套用档位参数但底模没切（先装权重或手动换个底模）`)
+      setNotice(`未安装底模 ${next}，先下权重`)
       return
     }
-    const oldRec = recommend[model]
+    const rec = recommend[next]
+    const oldRec = recommend[cur.params.model || model]
+    setNodes((list) => list.map((n) => {
+      if (n.id !== id) return n
+      const patch: Partial<GenParams> = { model: next }
+      // 新底模不支持原生透明底时，把勾着但无效的开关关掉——
+      // 留着会让用户以为这次出的图有 alpha（实际没有）
+      if (!caps[next]?.transparent) patch.transparent = false
+      // keepParams：产出风格档位会自己把尺寸/像素块/LoRA patch 好，
+      // 这里再套一遍推荐值会两边抢同一个节点（setNodes 读的是渲染时闭包的
+      // 旧参数，会把刚 patch 的值覆盖掉——实测档位的 LoRA 和尺寸就是这么丢的）
+      if (keepParams) {
+        return { ...n, params: { ...n.params, ...patch } }
+      }
+      if (rec && (n.kind ?? 'gen') === 'gen' && (!oldRec || matchesRec(n.params, oldRec))) {
+        Object.assign(patch, pickRec(rec, n.params.lora))
+      }
+      // 序列帧候选上限按新底模的显存上限夹住，否则界面写着 4 实际只能出 3
+      if (n.kind === 'spriteswap' && rec) {
+        const cap = Math.max(1, Math.min(6, rec.max_candidates || 6))
+        if (n.params.ssCandidates > cap) patch.ssCandidates = cap
+      }
+      return { ...n, params: { ...n.params, ...patch } }
+    }))
+    if (!keepParams && rec && (cur.kind ?? 'gen') === 'gen') {
+      setNotice(`${next}：推荐 ${rec.width}×${rec.height} / ${rec.steps} 步`)
+    }
+  }, [models, recommend, caps, model])
+
+  /**
+   * 侧栏：设置**新节点的默认底模**。
+   *
+   * 底模已经改成节点级（GenParams.model），所以这里不再遍历画布去改所有节点——
+   * 那正是"想混跑就得来回切、每次都把调好的参数冲一遍"的根源。
+   * 已有节点里显式选过底模的（params.model 非空）完全不受影响；
+   * 没选过的（空 = 跟随默认）会跟着变成新值，这是"默认值"应有的语义。
+   */
+  const switchModel = useCallback((next: string) => {
+    // **切之前先确认这台机器上真有这个底模**：没下载时 setModel 会把值设成
+    // 下拉里不存在的选项——选择框变空、新节点生成直接失败。
+    if (!models.includes(next)) {
+      setNotice(`未安装底模 ${next}（先装权重再选）`)
+      return
+    }
+    const prev = model
+    const oldRec = recommend[prev]
     const rec = recommend[next]
     setModel(next)
-    // 产出风格档位切底模时走这条：档位会自己把参数（尺寸/像素块/LoRA）patch 好。
-    // 如果这里再套一遍推荐参数，两边会抢同一个节点——setNodes 读的是渲染时闭包
-    // 的旧参数，会把刚 patch 的值覆盖掉（实测档位的 LoRA 和尺寸就是这么丢的）。
-    if (opts?.keepNodes) {
-      if (rec) setNotice(`已切到 ${next}，参数由产出风格档位决定`)
-      return
+    // 「跟随默认」的节点（params.model 为空）要跟着换参数，否则会出现
+    // 「底模已经是 SDXL、步数还是 SD1.5 的 30」这种自相矛盾的配置。
+    // 自己选过底模的节点完全不动；手改过参数的也不覆盖。
+    if (rec) {
+      setNodes((list) => list.map((n) => {
+        if (n.params.model) return n                 // 节点自己选了底模
+        if ((n.kind ?? 'gen') !== 'gen') return n
+        if (oldRec && !matchesRec(n.params, oldRec)) return n   // 用户手调过
+        return { ...n, params: { ...n.params, ...pickRec(rec, n.params.lora) } }
+      }))
     }
-    if (!rec) return
-    const cap = Math.max(1, Math.min(6, rec.max_candidates || 6))
-    setNodes((list) => list.map((n) => {
-      // 序列帧：候选数跟着新底模的显存上限走。不夹的话，用户先在 SD1.5
-      // 设了 4 张、切到 SDXL（上限 3）仍会提交 4——运行时守卫会降，
-      // 但界面上写着 4，等于骗人。
-      if (n.kind === 'spriteswap' && n.params.ssCandidates > cap) {
-        return { ...n, params: { ...n.params, ssCandidates: cap } }
-      }
-      if ((n.kind ?? 'gen') !== 'gen') return n
-      if (oldRec && !matchesRec(n.params, oldRec)) return n
-      return { ...n, params: { ...n.params, ...pickRec(rec, n.params.lora) } }
-    }))
-    setNotice(`已套用 ${next} 推荐参数：${rec.width}×${rec.height} / ${rec.steps} 步` +
-      `，候选上限 ${cap} 张/帧`)
-  }, [recommend, model, models])
+    setNotice(`新节点默认底模：${next}（已单独选过底模的节点不受影响）`)
+  }, [models, model, recommend])
 
   /** 以某个节点的产物为源，在它右边新建一个图生图节点。 */
   const spawnImg2Img = useCallback((id: string) => {
@@ -673,6 +706,14 @@ export default function App() {
   const generate = useCallback(async (id: string) => {
     const node = nodesRef.current.find((n) => n.id === id)
     if (!node) return
+    /**
+     * 这个节点用哪个底模：节点自己选过的优先，否则跟随侧栏默认。
+     *
+     * 底模是**节点级**的（见 GenParams.model）：一张画布上混跑 Qwen 立绘和
+     * SDXL 精灵帧是常态，全局一个底模做不到。引擎按 `f"{kind}:{model}"`
+     * 分别缓存管线，两套并存只是多占显存。
+     */
+    const mdl = node.params.model || model
     // 抠图节点不需要提示词（纯图像处理）；文生图/图生图需要
     const needPrompt = node.kind === 'gen' || node.kind === 'img2img' || node.kind === 'inpaint'
       || node.kind === 'airepaint'
@@ -710,7 +751,7 @@ export default function App() {
           return
         }
         const r = await submitPoseClone(
-          node.params, { model, matteBackend, scope: currentId }, posePath, charPath)
+          node.params, { model: mdl, matteBackend, scope: currentId }, posePath, charPath)
         jobId = r.job_id
       } else if (node.kind === 'spriteswap') {
         const sheetPath = sourcePathOf(node)
@@ -725,7 +766,7 @@ export default function App() {
           return
         }
         const r = await submitSpriteSwap(
-          node.params, { model, matteBackend, scope: currentId }, sheetPath, charPath)
+          node.params, { model: mdl, matteBackend, scope: currentId }, sheetPath, charPath)
         jobId = r.job_id
       } else if (node.kind === 'poseswap') {
         // W4 的输入是一组骨架帧（目录），不是单张源图——所以不走 init 那条路
@@ -738,24 +779,24 @@ export default function App() {
           })
           return
         }
-        const r = await submitPoseSeq(node.params, { model, matteBackend, scope: currentId }, dir)
+        const r = await submitPoseSeq(node.params, { model: mdl, matteBackend, scope: currentId }, dir)
         jobId = r.job_id
       } else if (node.kind === 'pixelify') {
         const r = await submitPixelify(
-          node.params, { model, matteBackend, scope: currentId }, init!)
+          node.params, { model: mdl, matteBackend, scope: currentId }, init!)
         jobId = r.job_id
       } else if (node.kind === 'topixel') {
         // 源图可选：有就直转，没有就让后端用 prompt 出图再转
         const r = await submitToPixel(
-          node.params, { model, matteBackend, scope: currentId }, init)
+          node.params, { model: mdl, matteBackend, scope: currentId }, init)
         jobId = r.job_id
       } else if (node.kind === 'airepaint') {
         const r = await submitAiRepaint(
-          node.params, { model, matteBackend, scope: currentId }, init!, node.params.maskPath)
+          node.params, { model: mdl, matteBackend, scope: currentId }, init!, node.params.maskPath)
         jobId = r.job_id
       } else if (node.kind === 'inpaint') {
         const r = await submitInpaint(
-          node.params, { model, matteBackend, scope: currentId }, init!, node.params.maskPath)
+          node.params, { model: mdl, matteBackend, scope: currentId }, init!, node.params.maskPath)
         jobId = r.job_id
       } else if (node.kind === 'bg') {
         // 换背景：背景图来自另一个图片节点
@@ -764,14 +805,14 @@ export default function App() {
           : undefined
         const bgPath = bgNode?.image?.path || bgNode?.job?.path
         const r = await submitMatte(
-          node.params, { model, matteBackend, scope: currentId }, init!,
+          node.params, { model: mdl, matteBackend, scope: currentId }, init!,
           bgPath, node.params.bgMode === 'color' ? node.params.bgColor : undefined)
         jobId = r.job_id
       } else if (init) {
-        const r = await submitImg2Img(node.params, { model, matteBackend, scope: currentId }, init)
+        const r = await submitImg2Img(node.params, { model: mdl, matteBackend, scope: currentId }, init)
         jobId = r.job_id
       } else {
-        const r = await submitTxt2Img(node.params, { model, matteBackend, scope: currentId })
+        const r = await submitTxt2Img(node.params, { model: mdl, matteBackend, scope: currentId })
         jobId = r.job_id
       }
       patchNode(id, { job: { id: jobId, status: 'queued', startedAt: Date.now() } })
@@ -946,11 +987,14 @@ export default function App() {
         <Canvas
           nodes={nodes}
           model={model}
-          onModel={switchModel}
           maxCandidates={recommend[model]?.max_candidates}
           poseDirs={poseDirs}
           hasRefiner={hasRefiner}
-          canTransparent={!!caps[model]?.transparent}
+          models={models}
+          modelCaps={caps}
+          recommend={recommend}
+          defaultModel={model}
+          onNodeModel={setNodeModel}
           selectedId={selectedId}
           viewport={viewport}
           setViewport={setViewport}

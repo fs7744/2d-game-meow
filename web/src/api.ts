@@ -519,6 +519,12 @@ export type ModelCaps = {
   instruction: boolean
   /** 是否支持挂 LoRA（Qwen 底模不吃 SD 的 LoRA） */
   lora: boolean
+  /**
+   * 这个底模能跑哪些工作流（txt2img / pose_clone / sprite_swap …）。
+   * 节点的底模下拉按它过滤——Qwen 没有 SD 的 UNet/CLIP，ControlNet 类节点
+   * 选上它就是必崩，不如直接不列出来。
+   */
+  workflows: string[]
 }
 
 export type ModelList = {
@@ -538,7 +544,13 @@ export async function fetchModels(): Promise<ModelList> {
   if (!r.ok) {
     return {
       available: ['sd15'], recommend: {}, arch: { sd15: 'sd15' },
-      caps: { sd15: { transparent: false, instruction: false, lora: true } },
+      caps: {
+        sd15: {
+          transparent: false, instruction: false, lora: true,
+          workflows: ['txt2img', 'img2img', 'inpaint', 'poseswap', 'matte',
+            'ai_repaint', 'pixelify', 'pose_clone', 'sprite_swap', 'topixel'],
+        },
+      },
       refiner: false,
     }
   }
@@ -549,14 +561,20 @@ export async function fetchModels(): Promise<ModelList> {
   // 老后端没有 arch 字段：按名字兜底（含 xl 就是 sdxl），至少不比以前差
   const arch: Record<string, string> = {}
   const caps: Record<string, ModelCaps> = {}
+  const ALL_WF = ['txt2img', 'img2img', 'inpaint', 'poseswap', 'matte',
+    'ai_repaint', 'pixelify', 'pose_clone', 'sprite_swap', 'topixel']
   for (const m of available) {
     arch[m] = (j.arch && j.arch[m]) || (/xl/i.test(m) ? 'sdxl' : 'sd15')
     // 老后端没有 caps：按架构推。qwen 的能力是固定的，推出来的结果一致
     const c = (j.caps && j.caps[m]) || {}
+    const isQwen = arch[m] === 'qwen21'
     caps[m] = {
-      transparent: c.transparent ?? arch[m] === 'qwen21',
-      instruction: c.instruction ?? arch[m] === 'qwen21',
-      lora: c.lora ?? arch[m] !== 'qwen21',
+      transparent: c.transparent ?? isQwen,
+      instruction: c.instruction ?? isQwen,
+      lora: c.lora ?? !isQwen,
+      workflows: Array.isArray(c.workflows) ? c.workflows
+        // 老后端不给 workflows：qwen 只留不依赖 SD 组件的
+        : isQwen ? ['txt2img', 'img2img', 'matte', 'pixelify', 'topixel'] : ALL_WF,
     }
   }
   const refiner = j.refiner === true

@@ -466,6 +466,7 @@ class Engine:
         key = f"txt2img:{model}"
         if key not in self._cache:
             t0 = time.perf_counter()
+            self.evict_other_models(model)
             p = self._check_model(model)
             if self.arch(model) == "qwen21":
                 pipe = self._load_qwen21(p)
@@ -502,6 +503,11 @@ class Engine:
         from diffusers import QwenImage21Pipeline
         from transformers import Qwen3VLForConditionalGeneration
 
+        # **加载前先清场**：qwen 峰值 16.4GB，SDXL 的 ControlNet 管线约 13GB，
+        # 两条并存必然挤爆。不清的话 _fit 会降级到 cpu offload（每步在 CPU/GPU
+        # 间搬权重），用户看到的是「一直转、显存满」而不是报错。
+        # 反方向也一样——generate.py 里 pose 系加载前会按需驱逐 qwen。
+        self.ensure_headroom(need_gb=17.0)
         tor = self._load_qwen_transformer(root)
         te = Qwen3VLForConditionalGeneration.from_pretrained(
             str(root / "text_encoder"), torch_dtype=torch.bfloat16,
@@ -575,6 +581,7 @@ class Engine:
     def img2img_pipe(self, model: str = DEFAULT_MODEL):
         key = f"img2img:{model}"
         if key not in self._cache:
+            self.evict_other_models(model)
             tkey = f"txt2img:{model}"
             xl = self.is_xl(model)
             cls = StableDiffusionXLImg2ImgPipeline if xl else StableDiffusionImg2ImgPipeline
@@ -604,6 +611,8 @@ class Engine:
             return self._get(key)
 
         t0 = time.perf_counter()
+        # keep 留空：当前这条还没进缓存，别的底模的 inpaint 管线也没必要留着
+        self.evict_other_models(model)
         base = self._base_kwargs()
         xl = self.is_xl(model)
         if xl:
@@ -697,6 +706,8 @@ class Engine:
                     self._pool["ipa_owner"] = cached
             return cached
         t0 = time.perf_counter()
+        # pose 管线要 UNet + ControlNet + IP-Adapter，跟别的底模绝不共存
+        self.evict_other_models(model, keep=(f"pose:{controlnet}",))
         cn = self.controlnet(controlnet, model)
         xl = self.is_xl(model)
         cls = StableDiffusionXLControlNetPipeline if xl else StableDiffusionControlNetPipeline
@@ -1061,6 +1072,62 @@ class Engine:
     # 精灵管线的推荐参数。**SDXL 推荐 768 而不是 1024**：
     # 实测 1024² 下角色占比更大、更容易顶边，可交付率从 92% 掉到 75%，
     # 加上生成慢一倍，每可用帧贵 2.3 倍（见 tools/bench_sprite.py）。
+    # 架构 → 支持的工作流集合。
+    #
+    # **这张表是"某个底模能不能跑这个节点"的唯一判据**：
+    #   · generate.py 各函数入口调 `require()`，提前报人话错误；
+    #   · /models 把它发给前端，节点上的底模下拉据此过滤。
+    #
+    # 为什么要这张表：Qwen-Image 的管线**没有 unet / tokenizer**
+    # （主干是 transformer，文本编码器是 Qwen3-VL），任何依赖 SD 组件的
+    # 工作流都会在 `cls(controlnet=cn, **base.components)` 那里崩成
+    # "Pipeline expected ['unet', 'tokenizer', ...] but only {...} were passed"——
+    # 这行报错完全看不出是"底模选错了"，用户只会以为程序坏了。
+    _ARCH_WORKFLOWS = {
+        "sd15": frozenset({
+            "txt2img", "img2img", "inpaint", "poseswap", "matte",
+            "ai_repaint", "pixelify", "pose_clone", "sprite_swap", "topixel",
+        }),
+        "sdxl": frozenset({
+            "txt2img", "img2img", "inpaint", "poseswap", "matte",
+            "ai_repaint", "pixelify", "pose_clone", "sprite_swap", "topixel",
+        }),
+        # Qwen 只保留不依赖 SD 组件的：纯生成 + 纯后处理。
+        # 它的 img2img 是「指令改图」，不是加噪强度。
+        "qwen21": frozenset({"txt2img", "img2img", "matte", "pixelify", "topixel"}),
+    }
+
+    # 工作流 → 中文名（报错时用，别让用户看到 wpc/wss 这种内部代号）
+    _WF_LABEL = {
+        "txt2img": "文生图", "img2img": "图生图", "inpaint": "局部重绘",
+        "poseswap": "姿态序列", "matte": "抠图", "ai_repaint": "局部 AI 重绘",
+        "pixelify": "像素转换", "pose_clone": "角色迁移",
+        "sprite_swap": "序列帧替换", "topixel": "转像素",
+    }
+
+    def supports(self, model: str, workflow: str) -> bool:
+        """这个底模能不能跑这个工作流。未知架构一律返回 False（保守）。"""
+        return workflow in self._ARCH_WORKFLOWS.get(self.arch(model), frozenset())
+
+    def workflows_of(self, model: str) -> list[str]:
+        """这个底模支持的全部工作流（给前端的下拉过滤用）。"""
+        return sorted(self._ARCH_WORKFLOWS.get(self.arch(model), frozenset()))
+
+    def require(self, model: str, workflow: str) -> None:
+        """不支持的组合直接抛人话错误，别让它崩在 diffusers 内部的组件校验里。"""
+        if self.supports(model, workflow):
+            return
+        label = self._WF_LABEL.get(workflow, workflow)
+        arch = self.arch(model)
+        if arch == "qwen21":
+            raise ValueError(
+                f"「{label}」用不了 Qwen-Image 底模：它的管线没有 SD 的 UNet / "
+                f"CLIP 文本编码器，而{label}依赖 SD 的 ControlNet / IP-Adapter 组件。"
+                f"到这个节点上把底模换成 SD1.5 或 SDXL（节点可以各自选底模，"
+                f"不影响画布上其它节点）。")
+        raise ValueError(
+            f"「{label}」不支持底模 {model}（架构 {arch}）。换回 SD1.5 / SDXL 试试。")
+
     RECOMMEND = {
         "sd15": {"width": 768, "height": 768, "steps": 30, "cfg": 7.0,
                  "pixel": 6, "palette": 32},
@@ -1169,6 +1236,43 @@ class Engine:
             kind = name.split(":")[0]
             if kind not in live:
                 self._ctrl.pop(name, None)
+
+    def evict_other_models(self, model: str, keep: Sequence[str] = ()) -> None:
+        """切到某个底模时，把**其它底模**的管线全部释放。
+
+        为什么要主动驱逐，而不是等显存不够再腾：
+          qwen 峰值 16.4GB、SDXL 的 ControlNet 管线约 13GB，24G 卡上两条并存
+          必然挤爆。而"挤爆"的表现**不是报错**——`_fit` 会静默降级到
+          `enable_model_cpu_offload()`，每一步都在 CPU/GPU 之间搬权重，
+          慢几十倍。用户看到的是「一直转、显存占满、跑不完」，
+          完全看不出是底模并存导致的。
+
+        判据用 `key.split(":")` 里的**完全相等**，不能用子串包含——
+        `sd15` 是 `sd15-inpaint` 的前缀，子串匹配会把正在用的那条也误杀。
+
+        `keep`：调用方马上要用、绝不驱逐的前缀（如 ("pose",)）。
+        """
+        dropped: list[str] = []
+        for key in list(self._cache):
+            if model in key.split(":") or any(k in key for k in keep):
+                continue
+            self._cache.pop(key, None)
+            dropped.append(key)
+        # ControlNet 存在独立字典里，不跟着管线一起走。SDXL 那份的键带
+        # `:model` 后缀，SD1.5 那份只有 which——两个方向都得清，
+        # 否则切底模后旧 CN 还占着 1.4~2.4GB。
+        for name in list(self._ctrl):
+            if ":" in name:
+                if name.rsplit(":", 1)[-1] != model:
+                    self._ctrl.pop(name, None)
+            elif self.is_xl(model):
+                self._ctrl.pop(name, None)
+        if dropped:
+            log.info("底模切到 %s：驱逐其它底模的管线 %s", model, ", ".join(dropped))
+        self._ctrl_gc()
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def drop_others(self, keep: Sequence[str] = ()) -> None:
         """丢掉所有不匹配 `keep` 前缀的缓存管线。

@@ -2,7 +2,8 @@ import { useRef, useState } from 'react'
 import { hasCJK } from '../store/prompts'
 import MaskEditor from '../components/MaskEditor'
 import MaskPreview from '../components/MaskPreview'
-import type { PoseDir } from '../api'
+import type { ModelCaps, PoseDir } from '../api'
+import { fileNameOf } from '../fileName'
 import type { GenNode, GenParams, LoraInfo } from '../types'
 import { GEN_STYLES, styleFromParams } from '../genStyles'
 
@@ -315,6 +316,12 @@ type Props = {
   hasRefiner?: boolean
   /** 当前底模支不支持原生透明背景（只有 Qwen-Image-2.1 支持） */
   canTransparent?: boolean
+  /** 可用底模清单（底模是节点级的，这里给下拉用） */
+  nodesModels?: string[]
+  /** 底模能力表：按本节点的 workflow 过滤可选项 */
+  modelCaps?: Record<string, ModelCaps>
+  /** 侧栏的「新节点默认底模」，下拉里显示成「跟随默认（xxx）」 */
+  defaultModel?: string
   onSpawnImg2Img: () => void
   /** 图生图的上游节点（从 source.nodeId 解析而来） */
   sourceNode?: GenNode
@@ -356,6 +363,35 @@ function loraStem(v: string): string {
   return (v || '').split(/[\\/]/).pop()!.replace(/\.safetensors$/i, '')
 }
 
+/**
+ * 节点 kind → 工作流名。**必须和 engine._ARCH_WORKFLOWS 用同一套词**，
+ * 否则前端过滤和后端 require() 会各说各话（界面允许选、提交后被拒）。
+ */
+const WORKFLOW_OF: Record<string, string> = {
+  gen: 'txt2img',
+  img2img: 'img2img',
+  bg: 'matte',
+  inpaint: 'inpaint',
+  airepaint: 'ai_repaint',
+  pixelify: 'pixelify',
+  poseswap: 'poseswap',
+  poseclone: 'pose_clone',
+  spriteswap: 'sprite_swap',
+  topixel: 'topixel',
+}
+
+/** 底模下拉里的短名：目录名（qwen-image-2.1）太长，撑爆 260px 的卡片 */
+function shortModel(m: string): string {
+  const map: Record<string, string> = {
+    sd15: 'SD1.5',
+    sdxl: 'SDXL',
+    'sdxl-anime': 'SDXL 动漫',
+    'sd15-inpaint': 'SD1.5 重绘',
+    'qwen-image-2.1': 'Qwen-Image 2.1',
+  }
+  return map[m] || m
+}
+
 function styleOf(p: GenParams): string {
   if (p.genStyle === 'custom') return 'custom'
   const byParams = styleFromParams(p.preset, p.pixel, p.palette, loraStem(p.lora))
@@ -381,6 +417,9 @@ export default function GenNodeCard({
   poseDirs,
   hasRefiner,
   canTransparent,
+  nodesModels,
+  modelCaps,
+  defaultModel,
   onSpawnImg2Img,
   sourceNode,
   sourceOptions,
@@ -433,6 +472,21 @@ export default function GenNodeCard({
   const isPoseSwap = node.kind === 'poseswap'
   /** 是否锁了高度（只有参数视图能锁；图片等比显示，锁高会拉伸） */
   const lockH = !isImg && !imageMode && !!node.h
+  /** 本节点跑的工作流名（和 /models 的 caps.workflows 同一套词） */
+  const wf = WORKFLOW_OF[node.kind] || ''
+  /** 图片节点不跑模型，不显示底模下拉 */
+  const modelAble = !isImg && !!wf
+  /**
+   * 本节点能选的底模：按 caps.workflows 过滤。
+   *
+   * 这是**正确性**过滤而不是洁癖：Qwen 管线没有 unet/tokenizer，ControlNet
+   * 类节点选它会在建管线时崩成 "Pipeline expected ['unet', ...]"。
+   * 老后端不返回 workflows 时（列表为空）不过滤，退回旧行为。
+   */
+  const usableModels = (nodesModels || []).filter((m) => {
+    const list = modelCaps?.[m]?.workflows
+    return !list || !list.length || !wf || list.includes(wf)
+  })
   // 当前选中的骨架目录（可能是手填的通配，那就匹配不到，只是没有帧数提示）
   const poseDirInfo = (poseDirs || []).find((d) => d.path === p.psDir)
   const [maskOpen, setMaskOpen] = useState(false)
@@ -716,6 +770,11 @@ export default function GenNodeCard({
   )
 
   return (
+    // pointerover / pointerout 用**冒泡**事件而不是 enter / leave：
+    // enter/leave 是 React 拿 over/out + relatedTarget 模拟的，不冒泡，
+    // 某些派发路径下（jsdom、合成事件）会静默不触发，现象是"拖了线松手却
+    // 什么都没连上"。over/out 一定冒泡到根，再按 relatedTarget 是否仍在元素内
+    // 滤掉子元素间的抖动。
     <div
       className={`node gen${selected ? ' selected' : ''}${imageMode ? ' image-mode' : ''}${
         isImg ? ' is-img' : ''
@@ -732,8 +791,16 @@ export default function GenNodeCard({
         e.stopPropagation()
         onSelect()
       }}
-      onPointerEnter={() => onHover?.(node.id)}
-      onPointerLeave={() => onHover?.(null)}
+      onPointerOver={(e) => {
+        const to = e.relatedTarget as Node | null
+        if (to && (e.currentTarget as Node).contains(to)) return
+        onHover?.(node.id)
+      }}
+      onPointerOut={(e) => {
+        const to = e.relatedTarget as Node | null
+        if (to && (e.currentTarget as Node).contains(to)) return
+        onHover?.(null)
+      }}
       onDragOver={(e) => {
         // 本机图片拖到节点上：落下时把它当该节点的源
         if (e.dataTransfer.types.includes('Files')) {
@@ -827,6 +894,53 @@ export default function GenNodeCard({
           }}
         />
       </div>
+
+      {/*
+        底模：**节点级选择**。放在正文最前面（不是塞进「更多设置」）。
+        原因：底模决定"画成什么样"，是仅次于提示词的决定项；一张画布上
+        经常要混跑（Qwen 出立绘 + SDXL 出精灵帧），藏在二级菜单里等于逼用户
+        全局来回切，而每次全局切都会把各节点调好的参数冲一遍。
+        只列出**本节点真能跑**的底模（Qwen 没有 SD 的 UNet/CLIP，
+        角色迁移/序列帧替换选它就是必崩，不如不列）。
+      */}
+      {modelAble && usableModels.length > 0 && (
+        <div className="node-model">
+          <span className="node-model-label">底模</span>
+          <select
+            value={node.params.model || ''}
+            title={'这个节点用哪个底模。\n'
+              + '「跟随默认」= 跟着侧栏的新节点默认值走；选了具体值就固定住，'
+              + '以后侧栏再改也不影响它。\n'
+              + '切换会套用新底模的推荐尺寸/步数（手调过的参数不会被冲掉）。'}
+            onChange={(e) => {
+              const v = e.target.value
+              if (!v) {
+                // 清空 = 回到「跟随默认」。只改字段，不动参数——
+                // 用户只是想让它跟默认走，不是想重置参数
+                onPatch({ params: { ...p, model: '' } })
+                return
+              }
+              if (v === model) return
+              onModel?.(v)
+            }}
+          >
+            <option value="">跟随默认（{shortModel(defaultModel || model)}）</option>
+            {usableModels.map((m) => (
+              <option key={m} value={m}>{shortModel(m)}</option>
+            ))}
+          </select>
+          {usableModels.length < (nodesModels?.length ?? 0) && (
+            <span
+              className="node-model-note"
+              title={'有些底模没列出来，是因为它们跑不了这个节点：\n'
+                + 'Qwen-Image 的管线没有 SD 的 UNet / CLIP 文本编码器，'
+                + '而 ControlNet / IP-Adapter 这套组件只有 SD 系有。'}
+            >
+              ⓘ
+            </span>
+          )}
+        </div>
+      )}
 
       {isPoseSwap ? (
         <div className="node-body poseclone-body">
@@ -1960,6 +2074,12 @@ export default function GenNodeCard({
                 >
                   ↳ 图生图
                 </button>
+              </div>
+              {/* 文件名：画布上经常同时摆着好几张图，只有缩略图时几乎分不清
+                  哪张是哪张（尤其是同角色的不同帧）。显示时剥掉上传时拼的
+                  10 位 hash 前缀，否则有用的名字会被挤没。 */}
+              <div className="img-name" title={node.image.path}>
+                {fileNameOf(node.image.path)}
               </div>
             </>
           ) : (
