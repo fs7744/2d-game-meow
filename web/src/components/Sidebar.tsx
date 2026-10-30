@@ -27,6 +27,9 @@ type Props = {
   activeLoras: ActiveLora[]
   /** 挂载 / 卸载 LoRA（状态式：一直生效直到下次改） */
   onLorasChange: (items: { name: string; scale: number }[]) => void
+  /** 快速模式（少步蒸馏）：挂 Lightning + 步数压到 8 */
+  fastMode: boolean
+  onFastMode: (on: boolean) => void
 }
 
 const MATTE_LABEL: Record<string, string> = {
@@ -106,7 +109,7 @@ function ProjectRow({
 export default function Sidebar({
   favs, onAddNode, canApply, onApplyFav, onRemoveFav,
   matteBackend, onMatteBackend,
-  loras, activeLoras, onLorasChange,
+  loras, activeLoras, onLorasChange, fastMode, onFastMode,
   projects, currentProject, onSwitchProject, onCreateProject, onRenameProject, onDeleteProject,
 }: Props) {
   const [collapsed, setCollapsed] = useState(false)
@@ -375,6 +378,19 @@ export default function Sidebar({
         </Section>
 
         <Section icon="◈" title="LoRA" count={loras.length}>
+          <label className="lora-row fast-toggle">
+            <input
+              type="checkbox"
+              checked={fastMode}
+              onChange={(e) => onFastMode(e.target.checked)}
+            />
+            <span className="lora-name">快速模式（少步蒸馏）</span>
+            <span className="lora-size">-46%</span>
+          </label>
+          <div className="src-note">
+            挂 Lightning 少步蒸馏 LoRA，步数压到 8。实测 24 步 17.3s → 8 步 9.3s，
+            画质几乎不掉。逐帧路线（姿态序列 / 序列帧替换）建议开着。
+          </div>
           {loras.length === 0 ? (
             <div className="src-note">
               没有可用的 LoRA。Qwen 的 LoRA 要**diffusers 原生格式**

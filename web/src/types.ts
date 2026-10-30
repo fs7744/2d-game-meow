@@ -124,6 +124,8 @@ export type GenParams = {
   ssCols: number          // 序列帧替换：精灵图列数（0 = 自动检测）
   ssRows: number          // 序列帧替换：精灵图行数（0 = 自动检测）
   ssMode: SwapMode        // 序列帧替换：AI 重绘 还是 确定性换皮
+  /** 快速模式：挂 Lightning 少步蒸馏 LoRA + 步数降到 8（实测 -46%，画质几乎不掉） */
+  fastMode: boolean
   ssRefMode: RefMode      // 序列帧替换：动作参考图的解释方式
   ssPalette: number       // 序列帧替换：共享色板色数
   ssCandidates: number    // 序列帧替换：每帧生成几个候选再挑最好的

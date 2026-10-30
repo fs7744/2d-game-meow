@@ -252,25 +252,39 @@ Qwen 后期的修复一起带走（蒙版贴回、尺度归一、fp8 编码器�
 | 文生图 / 图生图 | ✅ | 图生图是**指令改图**（没有 strength 语义） |
 | 角色迁移 | ✅ | **双图条件**：角色图 + 骨架图进同一个 vision context；上身跟随好，**腿部常被参考图的站姿覆盖**（见 §2.8 实测） |
 | 抠图 / 像素转换 / 转像素 | ✅ | 原生 RGBA（alpha 66~68%），开透明底会自动跳过抠图 |
-| 局部重绘 / 局部 AI 重绘 | ⚠️ **近似** | 没有 mask 接口 → 「整图指令改图 + 蒙版贴回」。选区外**逐点不变**，选区内不保证只改那一点 |
+| 局部重绘 / 局部 AI 重绘 | ✅ **真 inpaint** | 蒙版内换噪声 + 每步把蒙版外拉回原 latent（ComfyUI 的 no-offset 做法）。模型**看得见蒙版**，指令准确执行 |
 | 姿态序列 / 序列帧替换 | ⚠️ **近似** | 没有 ControlNet → 「骨架/轮廓当参考图 + 指令」软引导；24s/帧，靠闸门 + 尺度归一兜底 |
-| LoRA / Refiner / ControlNet 硬约束 / AnimateDiff | ❌ | 主干与文本编码器都不同，一点都不通用 |
+| LoRA | ✅ | **Qwen 自己的 LoRA 能挂**（fp8 量化后也行，实测只慢 1.1s）。但必须是 diffusers 原生格式，ComfyUI 格式要先转 |
+| Refiner / ControlNet 硬约束 / AnimateDiff | ❌ | 主干与文本编码器都不同，一点都不通用 |
 
-⚠️ 的三个在前端节点上有橙色「近似」标记（`/models` 的 `caps.approx`）。
-十个工作流的实现方式、实测数据、以及**明确做不到的八件事**见
+⚠️ 的两个在前端节点上有橙色「近似」标记（`/models` 的 `caps.approx`）。
+十个工作流的实现方式、实测数据、以及**明确做不到的事**见
 [`docs/PLAN-QWEN-ONLY.md`](docs/PLAN-QWEN-ONLY.md)。
 
-**为什么局部重绘只能近似**：`StableDiffusionInpaintPipeline` 靠 **9 通道 UNet**
-（4 噪声 latent + 4 被遮原图 latent + 1 mask）做 masked latent 混合，选区外逐点不变；
-Qwen 的 `QwenImage21Pipeline / QwenImageEditPipeline / QwenImageEditPlusPipeline`
-签名里**都没有 `mask` / `mask_image` / `strength`**，它的机制是「条件图编码成 vision
-context + VAE latent tokens 前置到噪声」，改哪里由**指令**决定。
-`qwen-image-edit-2511` 权重（本机 pixelforge 里有）只有 transformer + processor，
-缺 text_encoder / vae / tokenizer，配齐后同样没有 mask 入口。
+**局部重绘是怎么做成的**（2026-10-30 实测推翻旧结论）：
+diffusers 的 `QwenImage21Pipeline` **没有** `mask` 参数，但这不等于模型做不到——
+ComfyUI 的 `Qwen Image 2.1 Inpainting | No-Offset Edits` 工作流用的
+**就是标准 2.1 权重**（没有专用 inpaint 权重），靠两件事实现：
 
-现用的替代是把**整图**当条件 → 指令改图 → 羽化贴回：模型看得到完整角色，
-身份与画风不丢，改完的像素按蒙版贴回去，选区外依旧逐点不变。
-（早期试过的「裁剪块」方案质量不合格：裁剪块放大后被当新图重画，脸会丢。）
+1. 初始 latent 里，蒙版内换成噪声
+2. 采样循环里**每一步**把蒙版外拉回原 latent
+   （ComfyUI `comfy/samplers.py:641-642`，**采样器级**机制，与权重无关）
+
+第 2 步在 diffusers 里用管线现成的 `latents=` 入参 + `callback_on_step_end`
+钩子复刻，核心是 flow matching 的 `x_t = (1-σ)·x0 + σ·ε`。
+实测（768²/20 步）：蒙版内指令准确执行、蒙版外最大像素差 19~46（视觉无差，
+差异来自 VAE 重建本身）、~15s。旧的「整图改图 + 蒙版贴回」保留为对照
+（`strategy="whole"`，逐点为 0 但模型看不见蒙版）。
+实现见 `workflows/qwen_mask.py`，坑见该文件头部注释。
+
+**LoRA 的格式坑**：ComfyUI 格式（`diffusion_model.` + `lora_A/B`）与 diffusers
+原生格式（`transformer.` + `lora.down/up`）键名不同，**ComfyUI 格式挂上去会
+静默不生效**（比报错更坏）。转换：`python tools/convert_lora.py in.safetensors out.safetensors`。
+挂载/卸载在侧栏「LoRA」分组里（全局状态，对所有生成生效）。
+
+**ControlNet 的更正**：`alibaba-pai/Qwen-Image-2.1-Fun-Controlnet-Union` 是
+**专为 2.1** 的（8 种结构控制 + 蒙版 inpaint），不是只有 pixelforge 里那个
+20B 专用的 union。它需要 VideoX-Fun 的代码，接进来是一条新工程线。
 
 ### SD1.5 / SDXL 时代（权重已归档，代码已删）
 

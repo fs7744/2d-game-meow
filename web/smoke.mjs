@@ -129,6 +129,14 @@ function makeFetch() {
     if (String(url).endsWith('/loras/unload')) {
       return { ok: true, json: async () => ({ active: [], items: [] }) }
     }
+    if (String(url).endsWith('/fast_mode')) {
+      const on = JSON.parse(init.body || '{}').on === true
+      return {
+        ok: true,
+        json: async () => ({ fast_mode: on, lora: on ? 'qwen21_lightning' : null,
+          max_steps: on ? 8 : null }),
+      }
+    }
     if (String(url).endsWith('/loras')) {
       // Qwen LoRA：只列 diffusers 原生格式的（engine.available_loras）
       return {
@@ -1916,7 +1924,8 @@ function check(name, cond, extra = '') {
   const doc = dom.window.document
   const win = dom.window
   await new Promise((r) => setTimeout(r, 600))
-  const rows = [...doc.querySelectorAll('.lora-row')]
+  // 排除快速模式那一行（它也是 .lora-row）
+  const rows = [...doc.querySelectorAll('.lora-row:not(.fast-toggle)')]
   check('侧栏列出可用的 Qwen LoRA', rows.length === 2, String(rows.length))
   check('LoRA 行显示名称与体积',
     (rows[0]?.textContent || '').includes('qwen21_anyangle')
@@ -1935,6 +1944,31 @@ function check(name, cond, extra = '') {
       JSON.stringify(body))
   }
   check('LoRA 面板无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 40) 快速模式：侧栏开关 → 调 /fast_mode
+{
+  const { dom, errors } = await boot('?demo=1')
+  const doc = dom.window.document
+  const win = dom.window
+  await new Promise((r) => setTimeout(r, 600))
+  const row = doc.querySelector('.lora-row.fast-toggle')
+  check('侧栏有「快速模式」开关', !!row, row?.textContent)
+  const fastNote = row?.parentElement?.querySelector('.src-note')
+  check('快速模式说明提到步数与提速',
+    (fastNote?.textContent || '').includes('8')
+    && (fastNote?.textContent || '').includes('9.3s'),
+    fastNote?.textContent)
+  const cb = row?.querySelector('input[type=checkbox]')
+  cb?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 400))
+  const fm = calls.find((c) => c.url.endsWith('/fast_mode'))
+  check('勾选后调用了 /fast_mode', !!fm, fm?.url)
+  if (fm) {
+    check('/fast_mode 请求带 on=true', JSON.parse(fm.body).on === true, fm.body)
+  }
+  check('快速模式无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 

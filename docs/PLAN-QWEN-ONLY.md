@@ -461,14 +461,52 @@ x_t = (1 - σ) · x0 + σ · ε
 全部跑在标准 Qwen-Image-2.1 上。它们多出来的是**节点编排**，不是模型能力。
 ComfyUI 生态的价值在于「把能力拼成工作流」，而我们做的是「把能力拼成产品」。
 
-### 2.13 生态侦察：HF 上 Qwen-Image-2.1 的可用资产
+### 2.13 Lightning 少步蒸馏（已实测，速度 -46%）
 
-之前记的「HF 下载被代理挡住」**部分不成立**：hf-mirror.com 现在可用
-（`huggingface.co` 直连仍不通，ModelScope 可用）。已确认的资产：
+`lightx2v/Qwen-Image-2.1-Lightning`（64MB，**diffusers 原生格式**，可直接挂）
+是给 Qwen-Image-2.1 的少步蒸馏 LoRA——正好补上我们一直缺的「少步蒸馏」那一条
+（§2.10 手动把步数从 24 降到 16 已经是一次提速，但画质也掉了）。
+
+**实测（768² / RTX 4090 24GB）**：
+
+| 配置 | 耗时 | 画质 |
+|---|---|---|
+| 24 步 无 LoRA（基线） | 17.3s | 基准 |
+| **8 步 + Lightning** | **9.3s（-46%）** | **几乎不掉**（边缘锐利、细节完整） |
+| 4 步 + Lightning | 7.4s（-57%） | 仍然干净 |
+| 8 步 + Lightning（强度 0.7） | 8.9s | 与 1.0 无明显差别 |
+
+**意义**：我们逐帧路线（w4 姿态序列 / wss 序列帧替换）的瓶颈一直是速度
+（实测 37s/帧，8 帧 ≈ 3~9 分钟）。8 步 Lightning 直接把单帧压到 9.3s，
+**8 帧 ≈ 75s**——逐帧从"不现实"变成"可用"。
+
+**挂载**：侧栏「LoRA」分组有「**快速模式**」开关（推荐），勾选即挂 + 步数压到 8。
+或 `POST /loras/apply {"items":[{"name":"qwen21_lightning","scale":1.0}]}`，
+或 `POST /fast_mode {"on": true}`（一步到位）。
+
+**meta 记的是实际步数**（`_eff_steps`）：快速模式把步数压到 8，meta 里就写 8，
+不写用户请求的 24 —— 产线判据（每可用帧成本）看的是真正跑了多少步。
+
+**端到端实测**（走 `generate.txt2img` 全链路，含加载）：
+- 普通：14.1s（24 步）
+- 快速：8.5s（8 步 + Lightning）→ **-40%**
+
+### 2.14 生态侦察：HF 上 Qwen-Image-2.1 的可用资产
+
+之前记的「HF 下载被代理挡住」**不成立**：本机有可用代理
+**`http://127.0.0.1:7897`**，加上它之后 `huggingface.co` 直连也能通，
+hf-mirror 走代理约 1.8MB/s。下载命令：
+
+```bash
+curl -x http://127.0.0.1:7897 -L -o out.safetensors \
+  "https://hf-mirror.com/<repo>/resolve/main/<file>"
+```
+
+已确认的资产：
 
 | 资产 | 仓库 | 大小 | 格式 | 用途 |
 |---|---|---|---|---|
-| **Lightning LoRA** | `lightx2v/Qwen-Image-2.1-Lightning` | 64MB | **diffusers 原生**（`transformer.…lora.down/up`） | 少步蒸馏（4/8 步），可直接 `load_lora_weights` |
+| **Lightning LoRA** | `lightx2v/Qwen-Image-2.1-Lightning` | 64MB | **diffusers 原生**（`transformer.…lora.down/up`） | 少步蒸馏（4/8 步）——**已实测，见 §2.13** |
 | Turbo 权重 | `Qwen/Qwen-Image-2.1-Turbo` | 9.5GB×2 | diffusers | 8 步生成/编辑 |
 | Turbo LoRA | `Comfy-Org/Qwen-Image-2.1` → `loras/qwen_image_2.1_turbo_lora_avg_rank_178` | — | ComfyUI | 给标准权重加 Turbo 能力 |
 | 5/6/8 步 LoRA | 同上 `loras/p_q_image_2.1_{5,6,8}_steps` | 320MB | ComfyUI | 少步 |

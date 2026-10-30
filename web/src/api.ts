@@ -365,6 +365,24 @@ export async function unloadLoras(): Promise<void> {
   await fetch(`${base}/loras/unload`, { method: 'POST' })
 }
 
+/**
+ * 开关**快速模式**：挂 Lightning 少步蒸馏 LoRA + 步数压到 8。
+ * 实测（768²/RTX4090）：24 步 17.3s → 8 步 9.3s（-46%），画质几乎不掉。
+ */
+export async function setFastMode(on: boolean): Promise<{
+  fast_mode: boolean
+  lora: string | null
+  max_steps: number | null
+}> {
+  const r = await fetch(`${base}/fast_mode`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ on }),
+  })
+  if (!r.ok) throw new Error(`HTTP ${r.status}`)
+  return r.json()
+}
+
 export type PoseDir = { path: string; count: number; sample: string[]; name: string }
 
 /** 可当 W4 输入的骨架帧目录（后端扫 assets 下两层） */

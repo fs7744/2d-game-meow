@@ -11,7 +11,7 @@ import {
   submitPixelify, submitPoseClone,
   submitPoseSeq,
   submitSpriteSwap, submitTxt2Img, uploadImage, extractPose,
-  fetchLoras, applyLoras, type QwenLora, type ActiveLora,
+  fetchLoras, applyLoras, setFastMode, type QwenLora, type ActiveLora,
 } from './api'
 import ConfirmDialog from './components/ConfirmDialog'
 import Lightbox from './components/Lightbox'
@@ -96,6 +96,7 @@ const DEFAULT_PARAMS: GenParams = {
   pxTransparentBg: false,
   pxSnapTo: 16,           // 网格吸附到 16 的整数倍（精灵常用尺寸）
   genStyle: 'sprite16',   // 产出风格：像素精灵 16-bit（最常用）
+  fastMode: false,        // 快速模式（Lightning 少步蒸馏），默认关
   // 转像素（topixel）：任意图 → 像素画（没有源图时先出图再转）
   apTarget: 192,          // 目标原生像素边长（192 装得下「全身 + 武器」）
   apColors: 32,           // 共享色板（32 色 = 16-bit 风格）
@@ -258,6 +259,22 @@ export default function App() {
       setLoras(r.items)
       setActiveLoras(r.active)
     }).catch(() => setLoras([]))
+  }, [])
+
+  /** 快速模式（少步蒸馏）：挂 Lightning + 步数压到 8。 */
+  const [fastMode, setFastModeState] = useState(false)
+  const changeFastMode = useCallback(async (on: boolean) => {
+    try {
+      await setFastMode(on)
+      setFastModeState(on)
+      setNotice(on
+        ? '快速模式已开：步数压到 8（Lightning 少步蒸馏），实测 -46%'
+        : '快速模式已关')
+      window.setTimeout(() => setNotice(''), 4000)
+    } catch (e) {
+      setNotice(`切换快速模式失败：${e instanceof Error ? e.message : '未知错误'}`)
+      window.setTimeout(() => setNotice(''), 6000)
+    }
   }, [])
 
   /** 挂载 / 卸载 LoRA（全局状态：挂上后对所有生成生效）。 */
@@ -1017,6 +1034,8 @@ export default function App() {
           loras={loras}
           activeLoras={activeLoras}
           onLorasChange={(items) => void changeLoras(items)}
+          fastMode={fastMode}
+          onFastMode={(on) => void changeFastMode(on)}
         />
         <Canvas
           nodes={nodes}

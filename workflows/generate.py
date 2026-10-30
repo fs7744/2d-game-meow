@@ -39,6 +39,29 @@ PROJECTS_DIR = ASSETS / "projects"
 
 _seq = itertools.count()
 
+#: 快速模式用的少步蒸馏 LoRA（lightx2v/Qwen-Image-2.1-Lightning，64MB）。
+#: 它是 **diffusers 原生格式**，可直接 `load_lora_weights`。
+FAST_LORA = "qwen21_lightning"
+#: 快速模式的步数上限（Lightning 在 8 步就收敛，实测画质几乎不掉）
+FAST_STEPS = 8
+
+
+def _fast_meta(eng: Engine) -> Dict[str, Any]:
+    """快速模式的状态记进 meta（产线判据要看这个）。"""
+    on = bool(getattr(eng, "fast_mode", False))
+    return {"fast_mode": on, "fast_lora": FAST_LORA if on else None}
+
+
+def _eff_steps(eng: Engine, steps: int) -> int:
+    """快速模式下的**实际执行**步数（非请求值）。
+
+    meta 里必须记这个而不是用户请求的步数——产线判据（每可用帧成本）看的是
+    真正跑了多少步。快速模式把步数压到 8，但 meta 记 24 会让人算错成本。
+    """
+    if getattr(eng, "fast_mode", False):
+        return min(int(steps), FAST_STEPS)
+    return int(steps)
+
 
 def scope_dir(scope: str = "") -> Path:
     """项目产物目录：assets/projects/<scope>/。
@@ -271,7 +294,8 @@ def _qwen_call(eng: Engine, *, prompt: str, negative: str, width: int, height: i
                steps: int, seed: int, ref_image: Optional[Image.Image] = None,
                transparent: bool = False, model: str = "qwen-image-2.1",
                label: str = "w1", cfg: float = 1.0,
-               output_resolution: Optional[int] = None) -> Image.Image:
+               output_resolution: Optional[int] = None,
+               fast: bool = False) -> Image.Image:
     """Qwen 单次推理。带 ref_image 就走「指令改图」，不带就是文生图。
 
     三个**必须**记住的点（都是实测踩出来的）：
@@ -292,6 +316,15 @@ def _qwen_call(eng: Engine, *, prompt: str, negative: str, width: int, height: i
     w = max(256, int(width) // 16 * 16)
     h = max(256, int(height) // 16 * 16)
     full = _qwen_prompt(prompt, transparent)
+    # **快速模式**：挂 Lightning 少步蒸馏 LoRA + 把步数压到 8。
+    # 实测（768²/RTX4090）：24 步 17.3s → 8 步 9.3s（-46%），画质几乎不掉。
+    # 逐帧路线（w4/wss）一直卡在 37s/帧，8 步后单帧 9.3s，8 帧 ≈ 75s。
+    #
+    # **状态式**（与 LoRA 同一套）：`fast` 由调用方写进 `eng.fast_mode`，
+    # 这样不必把它穿过每条工作流的参数链。
+    if fast or getattr(eng, "fast_mode", False):
+        eng.apply_loras(pipe, [{"name": FAST_LORA, "scale": 1.0}])
+        steps = min(int(steps), FAST_STEPS)
     gen = torch.Generator("cuda").manual_seed(int(seed))
     kw: Dict[str, Any] = dict(
         prompt=full,
@@ -482,7 +515,7 @@ def _qwen_txt2img(eng: Engine, *, prompt: str, negative: Optional[str],
     return _save(img2, _stamp(tag), "txt2img", {
         "workflow": "w1", "prompt": _qwen_prompt(prompt, transparent),
         "negative": negative or QWEN_NEG,
-        "width": width, "height": height, "steps": steps,
+        "width": width, "height": height, "steps": _eff_steps(eng, steps), **_fast_meta(eng),
         "cfg": float(cfg), "true_cfg": float(cfg), "seed": seed,
         "lora": None, "lora_scale": None,
         "pixel_block": pixel, "palette": palette, "matte": matte,
@@ -572,7 +605,7 @@ def _qwen_img2img(eng: Engine, *, init_image: str | Path, prompt: str,
     return _save(img, _stamp(tag), "img2img", {
         "workflow": "w2", "prompt": _qwen_prompt(prompt, transparent),
         "negative": negative or QWEN_NEG,
-        "init_image": str(init_image), "strength": None, "steps": steps,
+        "init_image": str(init_image), "strength": None, "steps": _eff_steps(eng, steps), **_fast_meta(eng),
         "cfg": float(cfg), "true_cfg": float(cfg), "seed": seed, "lora": None,
         "lora_scale": None,
         "pixel_block": pixel, "palette": palette, "matte": matte,
@@ -675,7 +708,7 @@ def _qwen_inpaint(eng: Engine, *, image: str | Path, mask: str | Path, prompt: s
         "workflow": "w3", "prompt": full_prompt, "prompt_body": body,
         "negative": negative or QWEN_EDIT_NEG,
         "image": str(image), "mask": str(mask),
-        "strength": None, "steps": steps, "cfg": cfg, "seed": seed,
+        "strength": None, "steps": _eff_steps(eng, steps), **_fast_meta(eng), "cfg": cfg, "seed": seed,
         "model": model, "backend": backend, "approx": approx,
         "strategy": strategy,
         "region": region, "work_size": list(work),
@@ -944,7 +977,7 @@ def _qwen_ai_repaint(eng: Engine, *, image: str | Path, mask: str | Path,
         "prompt": full_prompt, "prompt_body": body, "constraint": QWEN_EDIT_RULES,
         "negative": negative or QWEN_EDIT_NEG,
         "image": str(image), "mask": str(mask),
-        "strength": None, "steps": steps, "cfg": cfg, "seed": seed,
+        "strength": None, "steps": _eff_steps(eng, steps), **_fast_meta(eng), "cfg": cfg, "seed": seed,
         "model": model, "lora": None, "lora_scale": None, "clip_skip": None,
         "backend": backend, "approx": approx, "strategy": strategy,
         "region": region, "work_size": list(work),
@@ -1244,7 +1277,7 @@ def _qwen_pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | P
         "ref_fallback_reason": cond_info.get("fallback_reason"),
         "joints": cond_info.get("joints"), "fill": fill,
         "width": width, "height": height,
-        "steps": steps, "cfg": cfg, "seed": seed,
+        "steps": _eff_steps(eng, steps), **_fast_meta(eng), "cfg": cfg, "seed": seed,
         "model": model,
         "pixel_block": pixel, "palette": palette, "matte": matte,
         "matte_used": matte_info.get("backend"),
@@ -1410,7 +1443,7 @@ def _qwen_sprite_swap(eng: Engine, *, frames: Sequence[tuple],
         "cell": [cell_w, cell_h],
         "ref_mode": ref_mode, "ref_modes_used": sorted(set(used_modes)),
         "model": model, "width": width, "height": height,
-        "steps": steps, "cfg": cfg, "seed": seed,
+        "steps": _eff_steps(eng, steps), **_fast_meta(eng), "cfg": cfg, "seed": seed,
         "cn_scale": None, "ipa_scale": None, "lora": None, "clip_skip": None,
         "matte": matte, "matte_used": matte_info.get("backend"),
         "matte_fallback": matte_info.get("fallback"),
@@ -1830,7 +1863,7 @@ def _qwen_poseswap(eng: Engine, *, pose_images: Sequence[Path], prompt: str,
         "backend": "qwen-pose-ref", "approx": True,
         "condition": kind, "bg": bg, "cn_scale": None, "ipa_scale": None,
         "lora": None, "lora_scale": None, "clip_skip": None,
-        "steps": steps, "cfg": cfg, "seed": seed, "frames": len(frames),
+        "steps": _eff_steps(eng, steps), **_fast_meta(eng), "cfg": cfg, "seed": seed, "frames": len(frames),
         "width": width, "height": height,
         "matte": matte, "matte_used": matte_info.get("backend"),
         "matte_fallback": matte_info.get("fallback"),
