@@ -358,11 +358,15 @@ def pose_dirs(limit: int = 40) -> Dict[str, Any]:
 
 @app.post("/generate")
 def submit(job: Job) -> Dict[str, Any]:
-    if job.workflow not in ("w1", "w2", "w3", "w4", "wbg", "w5", "wpx", "wpc",
-                            "wss", "topixel", "wap"):
+    # 白名单**必须与 `_run` 的分发表同步**：漏一个就是 400，而错误信息里
+    # 又列不出来（用户会以为功能没做）。加新工作流时两处一起改。
+    allowed = ("w1", "w2", "w3", "w4", "wbg", "w5", "wpx", "wpc",
+               "wss", "topixel", "wap",
+               # 2026-10-30 新增
+               "wout", "woutfit", "wface")
+    if job.workflow not in allowed:
         raise HTTPException(
-            400, "workflow 必须是 w1/w2/w3/w4/wbg/w5/wpx/wpc/wss/topixel/"
-                 "wap（wap 是 topixel 的旧名）")
+            400, f"workflow 必须是 {'/'.join(allowed)}（wap 是 topixel 的旧名）")
     job_id = uuid.uuid4().hex[:12]
     _jobs[job_id] = {"job_id": job_id, "workflow": job.workflow, "params": job.params,
                      "status": "queued", "created": time.time()}
