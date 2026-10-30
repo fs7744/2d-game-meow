@@ -192,11 +192,21 @@ class ControlNetUnionBranch(nn.Module):
                     f"image_pad_mask 长度 {mask.shape[0]} 与 joint 长度 {l} 不一致；"
                     f"control token 数 {n}，mask 里 True 有 {int(mask.sum())}")
             got = int(mask.sum())
-            if got != n:
+            if got == n:
+                joint[:, mask] = features
+            elif got > n:
+                # **有角色参考图时会走到这里**：参考图的 vision token 也进了
+                # joint 序列，mask 把它们一并标 True（实测 768×1024 + 一张
+                # 参考图 → 7216 个 True，其中 target 只占 3072）。
+                # control 只该管 target，所以取 mask 里**最后 n 个** True——
+                # joint 的构造顺序是 [文本, 参考图 slot, target],target 恒在末尾。
+                idx = mask.nonzero(as_tuple=True)[0][-n:]
+                joint[:, idx] = features
+                self._ref_slots = got - n
+            else:
                 raise RuntimeError(
-                    f"图像位置 {got} 与 control token 数 {n} 不一致："
+                    f"图像位置 {got} 少于 control token 数 {n}："
                     f"条件图分辨率必须与目标 latent 对齐")
-            joint[:, mask] = features
         else:
             # 兜底（拿不到 img_mask 时）：按"文本在前、图像在后"铺。纯文生图
             # 单条件图时成立，但多图/参考图场景会错位，所以只当兜底。
@@ -372,6 +382,8 @@ class ControlInjection:
         self._device_mismatch = 0
         #: 图像位置 mask（由 transformer 的 pre-hook 每步更新）
         self._image_pad_mask: torch.Tensor | None = None
+        #: 诊断：是否检测到角色参考图多出来的 slot（> 0 说明有多图输入）
+        self._ref_slots = 0
         self._tr_handle = None
         # 注入点：每 2 个 block（与官方 control_layers = [0,2,...,30] 一致）
         self.layers = [i for i in CONTROL_LAYERS
