@@ -55,46 +55,6 @@ def test_rough_tokens_handles_cjk():
 
 # ---------------- 下载器过滤 ----------------
 
-def test_fetch_pick_filters_junk():
-    from tools.fetch_modelscope import pick
-
-    files = [
-        ("safety_checker/model.safetensors", 1_200_000_000),
-        ("unet/diffusion_pytorch_model.safetensors", 3_000_000_000),
-        ("unet/diffusion_pytorch_model.bin", 6_000_000_000),
-        ("v1-5-pruned.ckpt", 7_000_000_000),
-        ("model_index.json", 400),
-    ]
-    kept = pick(files, {"include": [], "exclude": []})
-    names = [p for p, _ in kept]
-    assert "safety_checker/model.safetensors" not in names
-    assert "unet/diffusion_pytorch_model.bin" not in names      # 有同名 safetensors
-    assert "v1-5-pruned.ckpt" not in names
-    assert "unet/diffusion_pytorch_model.safetensors" in names
-
-
-def test_fetch_pick_prefers_fp16():
-    from tools.fetch_modelscope import pick
-
-    files = [
-        ("unet/diffusion_pytorch_model.safetensors", 3_000_000_000),
-        ("unet/diffusion_pytorch_model.fp16.safetensors", 1_500_000_000),
-    ]
-    names = [p for p, _ in pick(files, {"include": [], "exclude": []})]
-    assert names == ["unet/diffusion_pytorch_model.fp16.safetensors"]
-
-
-def test_fetch_pick_include_and_exclude():
-    from tools.fetch_modelscope import pick
-
-    files = [("control_v11p_sd15_openpose.pth", 1),
-             ("control_v11p_sd15_canny.pth", 1),
-             ("control_v11p_sd15_depth.pth", 1)]
-    rules = {"include": ["openpose", "canny"], "exclude": ["canny"]}
-    names = [p for p, _ in pick(files, rules)]
-    assert names == ["control_v11p_sd15_openpose.pth"]
-
-
 def test_long_prompt_keeps_suffix():
     """用户主体描述写超了要截主体，绝不能把契约后缀丢掉。
 

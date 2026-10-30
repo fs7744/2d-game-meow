@@ -136,11 +136,14 @@ def rough_tokens(text: str) -> int:
 
 
 def count(text: str) -> int:
-    """真实 token 数；拿不到 tokenizer 时退回启发式（宁可粗也不能崩）。"""
-    from . import clip as clip_mod
+    """token 数；拿不到 tokenizer 时退回启发式（宁可粗也不能崩）。
 
-    n = clip_mod.count_text(text)
-    return n if n > 0 else rough_tokens(text)
+    SD 时代这里走 `workflows.clip` 的真实 BPE 计数。**那个模块已经删了**：
+    Qwen 的文本编码器是 Qwen3-VL，CLIP 的 77 token 预算对它没有意义，
+    契约后缀的作用也从「别被截断」变成「给模型一句构图约束」。
+    所以现在恒走启发式——保留这个函数是因为 `build(fit=...)` 还要用它。
+    """
+    return rough_tokens(text)
 
 
 def _cut_words(text: str, budget: int) -> str:

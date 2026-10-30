@@ -484,21 +484,6 @@ def test_queue_serializes_two_jobs(client):
     assert b["started"] >= a["finished"] - 0.05
 
 
-def test_loras_endpoint(client):
-    """LoRA 清单：真实目录里应当能扫到 wuxia_v2（含触发词）。"""
-    r = client.get("/loras")
-    assert r.status_code == 200
-    body = r.json()
-    assert isinstance(body["items"], list)
-    names = {x["name"] for x in body["items"]}
-    if not names:
-        pytest.skip("本机未放 LoRA 权重")
-    item = next(x for x in body["items"] if x["name"] == "wuxia_v2")
-    assert item["trigger"] == "wuxia"
-    assert item["path"].startswith("lora/")
-    assert item["size_mb"] > 0
-
-
 @requires_sd
 def test_generate_resolves_lora_name(client):
     """params.lora 传名字要能解析成路径；名字不存在则降级而不是整单失败。"""

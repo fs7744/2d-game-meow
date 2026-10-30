@@ -82,20 +82,23 @@ def test_trim_crops_to_content():
     assert t.getchannel("A").getbbox() == (0, 0, t.width, t.height)
 
 
-def test_matte_on_generated_frame(eng):
-    """真实生成图也要能抠干净（背景是模型自己选的纯色，不是纯白）。"""
-    from workflows import generate as g
+def test_matte_on_generated_frame(root):
+    """真实生成图也要能抠干净（背景是模型自己画的，不是纯白）。
 
-    r = g.txt2img(eng, prompt="blue slime monster", width=256, height=256, steps=8,
-                  seed=21, preset="sprite", tag="mattegen")
-    raw = Image.open(r["file"]).convert("RGBA")
+    素材用 `assets/_qwen_verify/char.png`（tools/verify_qwen_workflows.py 生成的
+    白猫骑士立绘）。**不现场生成**：Qwen 一张 24 步要 25s，而这条测的是抠图，
+    与生成无关；素材不在就跳过，别让单测变成几分钟。
+    """
+    src = root / "assets" / "_qwen_verify" / "char.png"
+    if not src.is_file():
+        import pytest
+        pytest.skip("缺素材 assets/_qwen_verify/char.png（先跑 tools/verify_qwen_workflows.py）")
+    raw = Image.open(src).convert("RGBA")
     out = M.matte(raw)
     a = _alpha(out)
     assert (a == 0).mean() > 0.08, f"透明区域太少，抠图没生效: {(a == 0).mean():.2f}"
     assert (a == 0).mean() < 0.95, "几乎全透明，抠过头了"
     assert set(np.unique(a).tolist()) <= {0, 255}
-
-
 # ---------------- matte_auto 的后端选择与回退 ----------------
 
 def test_auto_without_model_uses_color(tmp_path):

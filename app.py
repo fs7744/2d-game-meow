@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import io
+import inspect
 import json
 import os
 import shutil
@@ -38,8 +39,6 @@ from pydantic import BaseModel, Field
 from PIL import Image
 
 from workflows import generate as gen
-from workflows import lora as lora_reg
-from workflows import train as trainer
 from workflows import assetdb
 from workflows.assetdb import AssetIndex
 from workflows.engine import Engine
@@ -66,7 +65,6 @@ _q: "queue.Queue[tuple[str, str, Dict[str, Any]]]" = queue.Queue()
 # 训练任务单独跑：一次几分钟，绝不能塞进生成队列把出图全卡住。
 # 但"不进队列"不等于"可以并发占卡"——训练 4.7GB + 生成 5.8GB 很容易撞顶，
 # 所以两者共用一把 GPU 锁，串行使用显卡。
-_trains: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
 _gpu_lock = threading.Lock()
 
 
@@ -91,66 +89,6 @@ class DeleteReq(BaseModel):
     paths: list[str] = Field(default_factory=list)
 
 
-class TrainReq(BaseModel):
-    name: str = Field(..., description="输出名，写到 models/lora/<name>.safetensors")
-    data_dir: str = Field(..., description="数据集目录（相对项目根或绝对路径）")
-    caption: str = Field("", description="没有 .txt 时的统一 caption")
-    trigger: str = Field("", description="写进 LoRA 清单的触发词")
-    label: str = Field("", description="清单里显示的名字，默认用 name")
-    rank: int = 8
-    alpha: int = 0
-    lr: float = 1e-4
-    steps: int = 0
-    epochs: int = 8
-    batch: int = 1
-    resolution: int = 512
-    seed: int = 42
-    center_crop: bool = False
-
-
-def _resolve_lora(params: Dict[str, Any]) -> Dict[str, Any]:
-    """params.lora 允许填「名字」或「相对/绝对路径」，统一解析成绝对路径。
-
-    **多个 LoRA 叠加**时传列表：`lora=[名字A, 名字B]`、`lora_scale=[0.8, 0.5]`；
-    `lora_scale` 给单个数值表示所有 LoRA 共用该强度。
-
-    名字不存在时清空而不是报错：LoRA 是增强项，不该因为它让整个任务失败，
-    但要留痕到 job 里以便排查。
-    """
-    name = params.get("lora")
-    if not name:
-        return params
-    params = dict(params)
-
-    names = ([str(x) for x in name if x] if isinstance(name, (list, tuple))
-             else [str(name)])
-    raw = params.get("lora_scale") or []
-    scales = list(raw) if isinstance(raw, (list, tuple)) else [raw or 0.8]
-
-    paths: List[str] = []
-    weights: List[float] = []
-    missing: List[str] = []
-    for i, n in enumerate(names):
-        path = lora_reg.resolve(ROOT / "models", n)
-        if path is None:
-            missing.append(n)
-            continue
-        paths.append(path)
-        weights.append(float(scales[i]) if i < len(scales) and scales[i] else 0.8)
-
-    if missing:
-        params["lora_missing"] = ", ".join(missing)
-    # **单个时仍发标量**：只挂一个是常态，保持与历史 payload 完全一致
-    # （meta 记录、CLI、既有测试都按标量读）。只有叠加时才升级成列表。
-    if len(paths) == 1:
-        params["lora"] = paths[0]
-        params["lora_scale"] = weights[0]
-    else:
-        params["lora"] = paths or None
-        params["lora_scale"] = weights or None
-    return params
-
-
 def _run(job_id: str, workflow: str, params: Dict[str, Any]) -> None:
     job = _jobs[job_id]
     job.update(status="running", started=time.time())
@@ -162,8 +100,17 @@ def _run(job_id: str, workflow: str, params: Dict[str, Any]) -> None:
               "topixel": gen.image_to_pixel,
               # 旧名保留：早期只用于动漫人物
               "wap": gen.image_to_pixel}[workflow]
-        with _gpu_lock:                    # 与训练互斥，单卡不并发
-            job["result"] = fn(engine, **_resolve_lora(params))
+        # **按目标函数的签名过滤参数**：Qwen-only 之后 lora / clip_skip /
+        # hires / distill / refiner / strength / cn_scale / ipa_scale 这些键
+        # 已经没有对应的形参了。旧前端（或手写的 curl）还会传，直接 TypeError
+        # 太粗暴；这里丢掉并记进 meta，用户翻产物时能看到「这条被忽略了」。
+        sig = inspect.signature(fn)
+        accepted = {k: v for k, v in params.items() if k in sig.parameters}
+        ignored = sorted(set(params) - set(accepted) - {"lora", "lora_scale"})
+        with _gpu_lock:                    # 单卡不并发
+            job["result"] = fn(engine, **accepted)
+        if ignored:
+            job["result"].setdefault("meta", {})["params_ignored"] = ignored
         job["status"] = "done"
     except Exception as exc:  # noqa: BLE001
         job.update(status="failed", error=f"{type(exc).__name__}: {exc}")
@@ -181,84 +128,6 @@ def _worker() -> None:
 
 
 threading.Thread(target=_worker, daemon=True, name="gen-worker").start()
-
-
-def _register_lora(name: str, label: str, trigger: str) -> None:
-    """训练完把元数据写进 loras.json —— 否则前端不知道触发词，等于白训。"""
-    mf = ROOT / "models" / "lora" / "loras.json"
-    try:
-        data = json.loads(mf.read_text(encoding="utf-8")) if mf.exists() else {}
-    except json.JSONDecodeError:
-        data = {}
-    prev = data.get(name) or {}
-    data[name] = {
-        **prev,
-        "label": label or prev.get("label") or name,
-        "trigger": trigger or prev.get("trigger") or "",
-        "scale": prev.get("scale", 1.0),
-        "preset": prev.get("preset", "pixel"),
-        "note": prev.get("note") or "本地训练产出",
-    }
-    mf.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def _run_train(train_id: str, req: "TrainReq") -> None:
-    st = _trains[train_id]
-    st.update(status="running", started=time.time())
-
-    def on_progress(ev: Dict[str, Any]) -> None:
-        st.update(ev)
-        st["updated"] = time.time()
-
-    try:
-        data_dir = Path(req.data_dir)
-        if not data_dir.is_absolute():
-            data_dir = ROOT / data_dir
-        steps = req.steps or trainer.plan_steps(
-            len(trainer.Dataset(data_dir, resolution=req.resolution,
-                                caption=req.caption, center_crop=req.center_crop)),
-            epochs=req.epochs, batch_size=req.batch)
-
-        with _gpu_lock:                    # 与生成互斥：不并发占卡
-            info = trainer.train(
-                ROOT / "models", data_dir, req.name,
-                caption=req.caption, rank=req.rank, alpha=req.alpha or None,
-                lr=req.lr, steps=steps, batch_size=req.batch,
-                resolution=req.resolution, seed=req.seed,
-                center_crop=req.center_crop, progress=on_progress,
-            )
-        _register_lora(req.name, req.label, req.trigger)
-        st.update(info, status="done")
-    except Exception as exc:  # noqa: BLE001
-        st.update(status="failed", error=f"{type(exc).__name__}: {exc}",
-                  trace=traceback.format_exc(limit=6))
-    finally:
-        st["finished"] = time.time()
-
-
-@app.post("/train")
-def train_submit(req: TrainReq) -> Dict[str, Any]:
-    """提交 LoRA 训练（后台线程，不占生成队列）。"""
-    tid = uuid.uuid4().hex[:12]
-    _trains[tid] = {"train_id": tid, "status": "queued", "name": req.name,
-                    "params": req.model_dump(), "step": 0, "total": 0}
-    _prune(_trains, TRAIN_KEEP)
-    threading.Thread(target=_run_train, args=(tid, req), daemon=True,
-                     name=f"train-{tid}").start()
-    return {"train_id": tid}
-
-
-@app.get("/train/{train_id}")
-def train_status(train_id: str) -> Dict[str, Any]:
-    if train_id not in _trains:
-        raise HTTPException(404, "no such train job")
-    return _trains[train_id]
-
-
-@app.get("/train")
-def train_list() -> Dict[str, Any]:
-    items = sorted(_trains.values(), key=lambda x: -(x.get("started") or 0))
-    return {"count": len(items), "items": items[:20]}
 
 
 @app.get("/health")
@@ -303,29 +172,9 @@ def models() -> Dict[str, Any]:
                          "workflows": engine.workflows_of(m),
                          "approx": engine.approx_of(m)}
                      for m in have},
-            # 本机有没有 SDXL refiner 权重：没有就别让用户勾那个开关
-            "refiner": engine.has_refiner()}
-
-
-@app.get("/loras")
-def loras() -> Dict[str, Any]:
-    """可用 LoRA 清单（含触发词与推荐强度）。前端下拉直接用。"""
-    items = lora_reg.scan(ROOT / "models")
-    return {"count": len(items), "items": items}
-
-
-@app.post("/loras/scan")
-def loras_scan() -> Dict[str, Any]:
-    """扫描 `models/lora/*.safetensors`，把缺的配置补进 `loras.json`。
-
-    读的是 safetensors 头部（不加载权重），13 个文件约 100ms。
-    **只补不覆盖**：已有条目里手写的 label/scale/note/hidden 一律不动——
-    自动扫描的价值是"别让新放进去的权重变成哑巴"，不是替你重新配一遍。
-    """
-    result = lora_reg.autoscan(ROOT / "models", write=True)
-    items = lora_reg.scan(ROOT / "models")
-    return {**result, "message": lora_reg.format_scan(result),
-            "count": len(items), "items": items}
+            # refiner 已随 SD 一起删掉（Qwen 没有精修器）。字段留着恒 False，
+            # 是为了老前端的 `if (refiner) 显示开关` 不至于拿到 undefined 就崩。
+            "refiner": False}
 
 
 #: 能当 W4 输入的图片扩展名。与 generate.POSE_EXTS 保持一致。

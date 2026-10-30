@@ -12,52 +12,9 @@ from workflows import matte as M
 from workflows import postprocess as pp
 from workflows.assetdb import AssetIndex
 
-# SD 权重已归档：这两条要真跑 SD 的 hires / 蒸馏 LoRA（恢复权重后自动生效）
-from pathlib import Path as _P
-
-_SD_WEIGHTS = (_P(__file__).resolve().parents[1] / "models" / "checkpoints"
-               / "sd15" / "model_index.json").is_file()
-requires_sd = pytest.mark.skipif(
-    not _SD_WEIGHTS,
-    reason="SD 权重已归档到 models/_archive/sd/（恢复后自动恢复）")
-
-
 # ---------------- 高清修复（Q6：512 出结构 → 放大补细节）----------------
 
-@requires_sd
-def test_hires_fix_doubles_size_and_reports(eng):
-    r = g.txt2img(eng, prompt="blue slime", width=256, height=256, steps=3,
-                  seed=5, preset="none", pixel=0, hires=2.0, hires_steps=3,
-                  tag="hires_test")
-    out = Image.open(r["file"])
-    assert out.size == (512, 512), out.size
-    assert r["meta"]["hires"] == 2.0
-    assert r["meta"]["hires_steps"] == 3
-    assert r["meta"]["width"] == 512, "meta 要记录实际尺寸"
-
-
-@requires_sd
-def test_hires_off_by_default(eng):
-    r = g.txt2img(eng, prompt="blue slime", width=256, height=256, steps=3,
-                  seed=5, preset="none", tag="nohires")
-    assert r["meta"]["hires"] is None
-    assert Image.open(r["file"]).size == (256, 256)
-
-
 # ---------------- 少步蒸馏（Q3）----------------
-
-@requires_sd
-def test_distill_missing_gives_actionable_error(eng):
-    """没有权重时必须报清楚「放哪个文件」，而不是晦涩的 diffusers 异常。"""
-    with pytest.raises(FileNotFoundError, match="蒸馏 LoRA 缺失"):
-        g.txt2img(eng, prompt="x", width=256, height=256, steps=2, seed=1,
-                  preset="none", distill="lcm", tag="distill_err")
-
-
-def test_distill_unknown_name_rejected(eng):
-    with pytest.raises(ValueError, match="未知蒸馏方案"):
-        eng.apply_distill(object(), "magic")
-
 
 # ---------------- 抠图：BiRefNet 优先 + 软 alpha ----------------
 

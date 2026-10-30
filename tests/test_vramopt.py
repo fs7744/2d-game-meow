@@ -93,39 +93,6 @@ def test_estimate_matches_measured_values():
 # 管线优化（需要模型）
 # --------------------------------------------------------------------------- #
 
-def test_optimize_pipe_applies_both_measures(eng):
-    """两项优化都要真的生效。
-
-    · VAE 逐帧解码 —— 这条管线没有 enable_vae_slicing，得调 VAE 本身
-    · IP-Adapter encoder 用完即退 —— CLIP Vision（1.18GB）编码后闲置
-    """
-    if not eng.animatediff_available():
-        import pytest
-        pytest.skip("缺少 AnimateDiff motion adapter 权重")
-
-    pipe = eng.animatediff_pipe(controlnet="canny", with_ipadapter=True,
-                                model="sd15")
-    # VAE 逐帧解码已开
-    assert getattr(pipe.vae, "use_slicing", False) is True
-    # image_encoder 不在显存里（编码时才临时上卡）
-    assert next(pipe.image_encoder.parameters()).device.type == "cpu"
-    # 编码钩子已装上
-    assert getattr(pipe, "encode_image", None) is not None
-
-
-def test_optimize_pipe_is_idempotent(eng):
-    """重复优化不能把 encoder 又搬回显存（包装器套包装器）。"""
-    if not eng.animatediff_available():
-        import pytest
-        pytest.skip("缺少 AnimateDiff motion adapter 权重")
-
-    pipe = eng.animatediff_pipe(controlnet="canny", with_ipadapter=True,
-                                model="sd15")
-    for _ in range(3):
-        vramopt.release_ipa_encoder(pipe)
-    assert next(pipe.image_encoder.parameters()).device.type == "cpu"
-
-
 def test_release_encoder_handles_missing(eng):
     """没有 image_encoder 时不能崩（纯 ControlNet 管线）。"""
     class Fake:

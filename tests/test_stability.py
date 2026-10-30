@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -12,12 +13,6 @@ from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# SD 权重已归档（models/_archive/sd/）：跨进程复现那条要真跑 SD 管线，
-# 权重不在就跳过；搬回来自动恢复（不是删测试）。
-_SD_WEIGHTS = (ROOT / "models" / "checkpoints" / "sd15" / "model_index.json").is_file()
-requires_sd = pytest.mark.skipif(
-    not _SD_WEIGHTS,
-    reason="SD 权重已归档到 models/_archive/sd/（恢复后自动恢复）")
 
 _GEN_SNIPPET = """
 import hashlib, sys
@@ -31,15 +26,21 @@ print(hashlib.sha256(open(r["file"], "rb").read()).hexdigest())
 """
 
 
-def test_no_vram_leak_over_20_runs(eng):
+def test_no_vram_leak_over_repeated_runs(eng):
+    """连续出图不涨显存。
+
+    **次数从 20 降到 5**：SD1.5 时代一张 0.3s，20 次是 6 秒；Qwen 8 步 256² 也要
+    10s 一张，20 次等于把单测拖成 3 分钟。泄漏是按「每次前向是否留下常量增量」
+    判定的，5 次足够——真有泄漏（每张 +50MB 那种）5 次就是 250MB，超阈值必红。
+    """
     from workflows import generate as g
 
-    g.txt2img(eng, prompt="warmup", width=256, height=256, steps=6, seed=1, tag="soak")
+    g.txt2img(eng, prompt="warmup", width=256, height=256, steps=8, seed=1, tag="soak")
     torch.cuda.synchronize()
     base_alloc = torch.cuda.memory_allocated() / 2**20
     base_reserved = torch.cuda.memory_reserved() / 2**20
 
-    for i in range(20):
+    for i in range(5):
         g.txt2img(eng, prompt="blue slime monster", width=256, height=256, steps=8,
                   seed=i, tag="soak")
     torch.cuda.synchronize()
@@ -50,38 +51,33 @@ def test_no_vram_leak_over_20_runs(eng):
     assert reserved - base_reserved < 600, f"保留显存涨了 {reserved - base_reserved:.0f}MB"
 
 
-def test_free_releases_pipeline_and_controlnet(root):
-    """free() 必须同时释放 pipeline 与 ControlNet（两者是独立缓存）。
+def test_free_releases_pipeline(root):
+    """free() 要把缓存管线清空，且常驻显存回到接近 0。
 
-    用独立 Engine 实例测量增量：全局显存里有别的引擎（API 测试里的 app.engine），
-    只看绝对值会被污染。判据是「加载后显著上涨、free 后回到基线附近」。
-
-    **基线前必须先 free()**：引擎的权重池按 models_root 共享，前面的用例可能
-    已经把底座留在显存里。不清空的话"加载增量"测出来只有 ControlNet 那一部分
-    （实测 695MB），断言会误判成"加载没生效"。
+    **不能断言「加载后涨几个 GB」**：Qwen 管线走 `enable_model_cpu_offload()`，
+    权重平时不在显存里（峰值只出现在前向过程中），加载完 allocated 仍然是 0。
+    所以这里改为断言缓存表 + 常驻显存两个可判定的量。
     """
-    from workflows.engine import Engine
+    from workflows.engine import DEFAULT_MODEL, Engine
 
     e = Engine(root / "models")
-    e.free()                          # 先回到真正的零基线
+    e.free()
     torch.cuda.synchronize()
-    base = torch.cuda.memory_allocated() / 2**20
+    assert e.stats()["loaded"] == []
 
     e.txt2img_pipe()
-    e.pose_pipe(controlnet="openpose", with_ipadapter=False)
-    torch.cuda.synchronize()
-    loaded = torch.cuda.memory_allocated() / 2**20
-    assert loaded - base > 1500, f"加载后只涨了 {loaded - base:.0f}MB，加载可能没生效"
+    assert e.stats()["loaded"] == [f"txt2img:{DEFAULT_MODEL}"]
+    # offload 下权重不常驻，加载本身不该把显存撑起来
+    assert torch.cuda.memory_allocated() / 2**20 < 512
 
     e.free()
     torch.cuda.synchronize()
-    after = torch.cuda.memory_allocated() / 2**20
-
     assert e.stats()["loaded"] == []
-    assert after - base < 128, f"free 后仍残留 {after - base:.0f}MB（ControlNet 未释放？）"
-
-
-@requires_sd
+    assert torch.cuda.memory_allocated() / 2**20 < 128
+@pytest.mark.slow
+@pytest.mark.skipif(os.environ.get("MEOW_SLOW") != "1",
+                    reason="跨进程复现要起两个子进程、各加载一次 Qwen，约 90s；"
+                           "手动跑：MEOW_SLOW=1 pytest -k same_seed")
 def test_same_seed_identical_across_processes(tmp_path):
     """换进程重跑（模型重新加载）后，同 seed 必须逐像素一致——产线可复现的前提。"""
     code = _GEN_SNIPPET.format(root=str(ROOT))

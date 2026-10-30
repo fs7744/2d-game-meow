@@ -18,7 +18,6 @@ from PIL import Image
 
 from . import anim as anim_mod
 from . import assetdb
-from . import clip as clip_mod
 from . import matte as matte_mod
 from . import pixelfy as pxf
 from . import postprocess as pp
@@ -27,19 +26,13 @@ from . import repaint as rp
 from . import presets
 from . import quality
 from . import framescore
-from . import lora as lora_reg
 from . import refprep
 from . import sheet as sheet_mod
-from .engine import Engine
+from .engine import DEFAULT_MODEL, Engine
 
 ASSETS = Path(__file__).resolve().parent.parent / "assets"
 PROJECTS_DIR = ASSETS / "projects"
 
-NEG_DEFAULT = (
-    "photo, photorealistic, 3d render, blurry, jpeg artifacts, gradient background, "
-    "multiple characters, text, watermark, signature, cropped, out of frame, "
-    "anti-aliasing, soft edges"
-)
 
 
 _seq = itertools.count()
@@ -137,57 +130,6 @@ def _postprocess(img: Image.Image, eng: Engine, *, matte: bool, matte_backend: s
     return img, edge, subjects
 
 
-def _lora_trigger(eng: Engine, prompt: str, lora: Any) -> str:
-    """把 LoRA 的触发词前置到提示词。
-
-    **为什么必须自动做**：Pixelizer 的触发词是单 token 的
-    `PixelArt_IL_One_Token_style_M_01`——不写完全不生效，写了但漏一个字符也
-    完全不生效，而且**都不报错**。`pixel_sprites_32` 的 `pixelart` 同理。
-    让用户在界面上手抄三十个字符不是"注意看文档"能解决的。
-
-    只在配置里 trigger 非空时才加：空值是项目刻意留的实测结论
-    （px_illustrious 加触发词会让多主体率上升），不能替用户补。
-    提示词里已经出现过就不重复加。
-    """
-    items = lora if isinstance(lora, (list, tuple)) else [lora]
-    heads: List[str] = []
-    for it in items:
-        t = lora_reg.trigger_for(eng.root, it)
-        if t and t.lower() not in prompt.lower():
-            heads.append(t)
-    return f"{', '.join(heads)}, {prompt}" if heads else prompt
-
-
-# 会传给 diffusers、且可能被它用 isinstance(x, float) 严格校验的参数。
-# 目前只有 controlnet_conditioning_scale 会被卡，但把同类的都归一化，
-# 免得下次升级 diffusers 又多卡一个再来查一遍。
-# **clip_skip 不能进这个表**：它是整数语义（层数），转成 float 会进到
-# encode_prompt 的切片里（`-(clip_skip + 2)`），语义不对。
-_FLOAT_KEYS = (
-    "controlnet_conditioning_scale", "guidance_scale", "strength",
-    "control_guidance_start", "control_guidance_end",
-)
-
-
-def _floatify(kw: Dict[str, Any]) -> Dict[str, Any]:
-    """把 kwargs 里的数值参数统一转成 Python float。
-
-    **为什么必须做**：JSON 没有 int / float 之分——前端 slider 的 `1.0`
-    序列化出去就是 `1`，Python 收到的是 `int`。而 diffusers 的 check_inputs 用
-    `isinstance(controlnet_conditioning_scale, float)` 严格校验，`int` 直接
-    TypeError（"must be type `float`"）。这个错误在管线都建好、进入采样前才抛，
-    现场看起来像"模型坏了/权重不对"，实际只是 `1` 与 `1.0` 的差别。
-    """
-    out = dict(kw)
-    for k in _FLOAT_KEYS:
-        v = out.get(k)
-        if isinstance(v, bool) or v is None:
-            continue
-        if isinstance(v, (int, float)):
-            out[k] = float(v)
-    return out
-
-
 def _infer(eng: Engine, pipe, kw: Dict[str, Any], *, shrink: bool = True,
            label: str = "") -> Any:
     """带 OOM 恢复的推理调用：清缓存 → 降分辨率 → 重试（最多两次）。
@@ -205,7 +147,6 @@ def _infer(eng: Engine, pipe, kw: Dict[str, Any], *, shrink: bool = True,
     `controlnet_conditioning_scale` 用 `isinstance(x, float)` 严格校验，
     直接抛 TypeError。放在这里是单点收口——所有 ControlNet 调用都过它。
     """
-    kw = _floatify(kw)
     for attempt in range(3):
         try:
             return pipe(**kw)
@@ -227,138 +168,12 @@ def _infer(eng: Engine, pipe, kw: Dict[str, Any], *, shrink: bool = True,
     return None                            # pragma: no cover  （循环内必 return/raise）
 
 
-def _hires_fix(eng: Engine, img: Image.Image, *, scale: float, strength: float,
-               steps: int, cfg: float, kw: Dict[str, Any], model: str,
-               seed: int, lora: Optional[str], lora_scale: float,
-               resample=Image.LANCZOS) -> Image.Image:
-    """高清修复：把生成结果放大后**低幅度重画**一遍。
-
-    **为什么需要**（评审 Q6）：SD1.5 的 ControlNet（openpose/canny v1.1）是 512²
-    训练的，直接在 768² 上推理等于跨分辨率使用控制网，控制力下降、肢体容易糊。
-    业界标准做法是**两段式**：512² 出结构（控制网在训练分辨率上最准）→ img2img
-    低 strength 放大到 768/1024 补细节。
-
-    **不是为了省显存/省时间——实测恰恰相反**（RTX 4090，8 步，strength 0.35）：
-
-        输出 768²   sd15 512+hires  3.36GB / 2.7s   单段 768²  3.36GB / 2.0s
-        输出 1152²  sdxl 768+hires 11.49GB / 5.4s   单段 1152² 11.48GB / 5.1s
-
-    峰值由"第二段在目标尺寸上跑"决定，与单段同尺寸几乎一样；而多跑的第一段
-    纯属额外开销。早先这里写过"显存峰值比单段更低"，是没量过就下的结论，已更正。
-
-    真正站得住的理由只有一条：**控制网/底模在训练分辨率上更准**。所以它只对
-    W4（ControlNet 定姿态）有意义；纯文生图用两段式只是换个构图来源，成本更高。
-
-    另外它补的是细节，不是构图：第一段脚被裁，放大后仍然裁（实测可交付率没变）。
-    精灵帧最终会被像素化抹平细节，所以这条链路基本用不上；立绘/宣传图才值得。
-
-    `strength` 建议 0.3~0.4：再高会把结构重画掉，再低只是插值放大。
-    """
-    w = max(64, int(round(img.width * scale)) // 8 * 8)
-    h = max(64, int(round(img.height * scale)) // 8 * 8)
-    up = img.resize((w, h), resample)
-    pipe = eng.img2img_pipe(model)
-    eng.apply_lora(pipe, lora, lora_scale)      # 共享 UNet 时不会重复加载
-    torch.cuda.reset_peak_memory_stats()
-    out = _infer(eng, pipe, dict(
-        image=up, strength=strength, num_inference_steps=steps,
-        guidance_scale=cfg, generator=torch.Generator("cuda").manual_seed(seed),
-        **kw), shrink=False, label="hires").images[0]
-    return out
-
-
-def _sdxl_embeds(pipe, prompt: str, negative: str, clip_skip: int):
-    """SDXL 的 clip_skip embeds，走 diffusers 原生 encode_prompt。
-
-    返回 (pos, neg, pos_pooled, neg_pooled) —— diffusers 的返回顺序就是
-    `(prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds,
-    negative_pooled_prompt_embeds)`，原样解包。
-
-    **`do_classifier_free_guidance=True` 必须给**——踩过的坑：传 False 时
-    diffusers 只算正向，`negative_prompt_embeds` 返回 **None**，于是负面词
-    全部失效、CFG 退化成单向引导，出图一片灰雾（实测 std 从 38 掉到 19，
-    画面糊成米色噪点）。这里要的是「两侧都算好、交给 pipe 直接用」，
-    不是「让 pipe 自己拼 CFG」——pipe 拿到 embeds 就不会再重新编码了。
-    """
-    return pipe.encode_prompt(
-        prompt=prompt,
-        prompt_2=None,                  # 两个编码器用同一段文本
-        negative_prompt=negative,
-        negative_prompt_2=None,
-        device=pipe.text_encoder.device,
-        num_images_per_prompt=1,
-        do_classifier_free_guidance=True,
-        clip_skip=int(clip_skip),
-    )
-
-
-def _text_kwargs(pipe, prompt: str, negative: str, clip_skip: int, model: str):
-    """返回 (传给 pipe 的文本参数, 实际生效的 clip_skip)。
-
-    三条路径，顺序不能换：
-
-    1. **短文本 + clip_skip<=1** → 原样传字符串。这条必须与历史行为逐像素一致
-       （同一个 seed 的结果有测试钉着），所以不做任何"顺手优化"。
-    2. **clip_skip>1** → 自算 embeds（transformers 5.x 下管道参数会崩，见 clip.py）。
-    3. **超过 77 token** → 分段编码。CLIP 超长是**静默丢弃**，本项目的武侠契约
-       自己就写到 113 token，等于尾部几条质量兜底词从来没生效。分段后不再丢。
-
-    SDXL 走**原生的 encode_prompt(clip_skip=...)**：它有两个文本编码器 +
-    pooled embeds，自己拼容易错（两侧形状、pooled、dtype 都得对齐），
-    而 diffusers 的 StableDiffusionXLPipeline.encode_prompt 原生支持
-    clip_skip，直接用它最稳。
-
-    ⚠️ **SDXL 的 clip_skip 语义与 SD1.5 不同，这里必须换算**（踩过坑）：
-
-    diffusers 的 SDXL encode_prompt 里写着：
-
-        if clip_skip is None:
-            embeds = hidden_states[-2]          # 默认 = 倒数第二层
-        else:
-            # "2" because SDXL always indexes from the penultimate layer.
-            embeds = hidden_states[-(clip_skip + 2)]
-
-    也就是说 **SDXL 默认取的就是倒数第二层——那已经等价于 A1111/ComfyUI 里
-    说的"clip skip 2"**（也正是动漫底模 Illustrious/Animagine 推荐的那档）。
-
-    所以直接把用户的 clip_skip=2 传进去会跳到 **-4 层**，过度跳过：实测出图
-    一片灰雾（std 从 38 掉到 19，画面糊成米色噪点、五官全无）。
-
-    换算规则：**n ≤ 2 一律用默认（penultimate）**；n > 2 才真的多跳，
-    传给 diffusers 的是 `n - 2`，让它落在 `-(n)` 层。
-    """
-    if "XL" in type(pipe).__name__:
-        # 2 及以下 = SDXL 默认（倒数第二层）；3+ 才真的再往回跳
-        if not (clip_skip and clip_skip > 2):
-            return dict(prompt=prompt, negative_prompt=negative), 2
-        pos, neg, pos_pooled, neg_pooled = _sdxl_embeds(
-            pipe, prompt, negative, clip_skip - 2)
-        return (dict(prompt_embeds=pos, negative_prompt_embeds=neg,
-                     pooled_prompt_embeds=pos_pooled,
-                     negative_pooled_prompt_embeds=neg_pooled), int(clip_skip))
-    if not clip_mod.available(pipe):
-        return dict(prompt=prompt, negative_prompt=negative), 1
-    if clip_skip and clip_skip > 1:
-        pos_emb, neg_emb = clip_mod.embeds(pipe, prompt, negative, clip_skip)
-        return (dict(prompt_embeds=pos_emb, negative_prompt_embeds=neg_emb),
-                int(clip_skip))
-    if clip_mod.needs_chunk(pipe, prompt, negative):
-        pos_emb, neg_emb = clip_mod.embeds(pipe, prompt, negative, 1)
-        return (dict(prompt_embeds=pos_emb, negative_prompt_embeds=neg_emb), 1)
-    return dict(prompt=prompt, negative_prompt=negative), 1
-
-
 # 质量档位（实测，RTX 4090，fp16，DPM++ 2M Karras）：
 #   草稿  512² /  8 步  —— 0.30s，只用来验证构图
 #   可用  768² / 30 步  —— 1.8s，SD1.5 的甜点：再大就开始重复肢体（1024² 实测出 3~4 个猫头）
 #   精修  768² / 45 步 + cfg 6.5 —— 2.6s，细节更稳，代价是慢
 # 像素化统一用 pixel=6 / palette=32（768 ÷ 6 = 128 有效像素，正好是精灵尺寸）；
 # 512² 配 pixel=4 会把有效像素压到 128 但源信息本来就少，实测明显更糊。
-QUALITY_PRESETS = {
-    "draft": dict(width=512, height=512, steps=8, cfg=7.0, pixel=0, palette=0),
-    "normal": dict(width=768, height=768, steps=30, cfg=7.0, pixel=6, palette=32),
-    "fine": dict(width=768, height=768, steps=45, cfg=6.5, pixel=6, palette=32),
-}
 
 
 # ---------------- Qwen-Image-2.1 ----------------
@@ -670,130 +485,24 @@ def _qwen_txt2img(eng: Engine, *, prompt: str, negative: Optional[str],
 # ---------------- W1 文生图 ----------------
 
 def txt2img(eng: Engine, *, prompt: str, negative: Optional[str] = None,
-            width: int = 768, height: int = 768, steps: int = 30, cfg: float = 7.0,
-            seed: int = -1, lora: Optional[str] = None, lora_scale: float = 0.8,
-            pixel: int = 0, palette: int = 0, preset: str = "sprite",
+            width: int = 768, height: int = 768, steps: int = 24, cfg: float = 4.0,
+            seed: int = -1, pixel: int = 0, palette: int = 0, preset: str = "sprite",
             matte: bool = False, matte_backend: str = "auto", denoise: int = 1,
-            clean_iso: int = 1, model: str = "sd15", clip_skip: int = 1,
-            hires: float = 0.0, hires_strength: float = 0.35,
-            hires_steps: int = 12, distill: str = "",
-            refiner: bool = False, refiner_cfg: float = 6.0,
-            refiner_steps: int = 20, refiner_end: float = 0.8,
-            transparent: bool = False,
-            scope: str = "", tag: str = "w1") -> Dict[str, Any]:
-    if eng.arch(model) == "qwen21":
-        return _qwen_txt2img(
-            eng, prompt=prompt, negative=negative, width=width, height=height,
-            steps=steps, seed=seed, transparent=transparent, pixel=pixel,
-            palette=palette, preset=preset, matte=matte,
-            matte_backend=matte_backend, denoise=denoise, clean_iso=clean_iso,
-            model=model, scope=scope, tag=tag)
-    prompt = _lora_trigger(eng, prompt, lora)
-    prompt, negative = presets.build(prompt, negative, preset,
-                                    max_tokens=presets.CHUNK_BUDGET)
-    # 只有真的超过分段上限（77×2）才会丢词，这时才值得告警
-    ntok = presets.count(prompt)
-    if ntok > presets.CHUNK_BUDGET:
-        print(f"[warn] 正向提示词 {ntok} token，超过分段上限 "
-              f"{presets.CHUNK_BUDGET}，尾部会被截断")
-    pipe = eng.txt2img_pipe(model)
-    if distill:
-        eng.apply_distill(pipe, distill)
-        d = eng.DISTILL_DEFAULTS.get(distill, {})
-        if steps == 30:                   # 用默认步数说明用户没指定 → 换成蒸馏档位
-            steps = d.get("steps", steps)
-        if abs(cfg - 7.0) < 1e-6:
-            cfg = d.get("cfg", cfg)
-    eng.apply_lora(pipe, lora, lora_scale)
-    if seed < 0:
-        seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
-    neg = negative or NEG_DEFAULT
-    gen = torch.Generator("cuda").manual_seed(seed)
-    kw, clip_used = _text_kwargs(pipe, prompt, neg, clip_skip, model)
-    torch.cuda.reset_peak_memory_stats()
-    dt = _timer()
-    # **SDXL Refiner**：底模出 latent → refiner 接着精修最后一段去噪。
-    # 它不是"换个更大的模型"，而是把收尾的去噪交给专攻细节的权重，
-    # 所以对发丝/布料纹理的提升远大于对构图的提升。
-    use_refiner = bool(refiner) and model == "sdxl" and eng.has_refiner()
-    # 精修幅度 = 1 − 精修起点（与 UI 上那个滑块直接对应）。
-    # img2img 内部按 `int(steps × strength)` 取实际步数，所以 20 步 × 0.2 = 4 步。
-    refiner_strength = max(0.03, min(0.60, 1.0 - float(refiner_end)))
-    if refiner and model != "sdxl":
-        print(f"[warn] Refiner 只支持 SDXL（当前 {model}），已忽略")
-    if refiner and model == "sdxl" and not eng.has_refiner():
-        print("[warn] 没找到 SDXL refiner 权重（models/checkpoints/sdxl-refiner），已忽略")
+            clean_iso: int = 1, transparent: bool = False,
+            model: str = DEFAULT_MODEL, scope: str = "", tag: str = "w1"
+            ) -> Dict[str, Any]:
+    """文生图（Qwen-Image-2.1 原生 DiT）。
 
-    call_kw: Dict[str, Any] = dict(width=width, height=height,
-                                   num_inference_steps=steps,
-                                   guidance_scale=cfg, generator=gen, **kw)
-    # 注意：不能传 output_type="image"——新版 diffusers 已废弃它，会把输出换成
-    # numpy 数组（img.size 变成整数，调用方按 PIL 用就炸）。
-    out = _infer(eng, pipe, call_kw, label="w1")
-    img = out.images[0]
-    if use_refiner:
-        # refiner 是 img2img 管线：只接受图片（latent 是给「底模提前停」的
-        # 两段式用的，这里底模已经跑满，所以先解码成图再喂进去）。
-        rp = eng.refiner_pipe()
-        # refiner 的 embeds 要自己组装（见 Engine.refiner_embeds 的说明）：
-        # 直接传 prompt 会用底模那套 2048 维拼接，喂不进 refiner 的 1280 维 UNet。
-        pos_e, neg_e, pos_pool, neg_pool = eng.refiner_embeds(prompt, neg)
-        # **用 strength 表达精修幅度，不要用 denoising_start。**
-        #
-        # denoising_start 是「两段式」参数：底模 denoising_end 提前停、refiner
-        # 从那个时间点接着跑。这里底模已经跑满全部步数，再传 denoising_start=0.8
-        # 的语义就变成「把成品重新加噪到 80% 再只走 4 步」——实测出图糊成一团
-        # 灰雾（拉普拉斯方差 1826 → 727，颜色也从白底线稿变灰底）。
-        # 精修是「低幅度 refinement」，对应 img2img 的 strength：0.05~0.3。
-        img = _infer(eng, rp, dict(prompt_embeds=pos_e,
-                                   negative_prompt_embeds=neg_e,
-                                   pooled_prompt_embeds=pos_pool,
-                                   negative_pooled_prompt_embeds=neg_pool,
-                                   image=img,
-                                   strength=refiner_strength,
-                                   num_inference_steps=refiner_steps,
-                                   guidance_scale=refiner_cfg,
-                                   generator=gen),
-                     label="refiner").images[0]
-    seconds = dt()
-    width, height = img.size          # OOM 降档后以实际尺寸为准，别在 meta 里撒谎
-    if hires and hires > 1.0:
-        # 两段式：先在底座分辨率出结构，再低幅度放大补细节（见 _hires_fix）
-        img = _hires_fix(eng, img, scale=hires, strength=hires_strength,
-                         steps=hires_steps, cfg=cfg, kw=kw, model=model,
-                         seed=seed, lora=lora, lora_scale=lora_scale)
-        width, height = img.size
-    # 后处理之前的原图另存一份：图生图要拿它当源图（见 _save 的说明）
-    raw = img.copy() if (matte or pixel > 1 or palette) else None
-    matte_info: Dict[str, Any] = {}
-    img, edge, subjects = _postprocess(
-        img, eng, matte=matte, matte_backend=matte_backend, denoise=denoise,
-        pixel=pixel, palette=palette, clean_iso=clean_iso, info=matte_info)
-    return _save(img, _stamp(tag), "txt2img", {
-        "workflow": "w1", "prompt": prompt, "negative": negative or NEG_DEFAULT,
-        "width": width, "height": height, "steps": steps, "cfg": cfg, "seed": seed,
-        "lora": lora, "lora_scale": lora_scale if lora else None,
-        "pixel_block": pixel, "palette": palette, "matte": matte,
-        "matte_backend": matte_backend, "denoise": denoise, "clean_iso": clean_iso,
-        "matte_used": matte_info.get("backend"), "matte_fallback": matte_info.get("fallback"),
-        "edge_touch": edge, "model": model,
-        "clip_skip": clip_used,
-        "subjects": subjects,
-        "hires": hires if hires > 1.0 else None,
-        "hires_strength": hires_strength if hires > 1.0 else None,
-        "hires_steps": hires_steps if hires > 1.0 else None,
-        "distill": distill or None,
-        "refiner": bool(use_refiner), "refiner_cfg": refiner_cfg if use_refiner else None,
-        "refiner_steps": refiner_steps if use_refiner else None,
-        "refiner_end": refiner_end if use_refiner else None,
-        # 实际生效的幅度与步数：界面上的「精修步数」是**总步数**，
-        # img2img 只执行其中 strength 那一段（20 步 × 0.2 = 4 步）。
-        # 不写清楚的话，用户会以为跑了 20 步却还是没细节。
-        "refiner_strength": round(refiner_strength, 3) if use_refiner else None,
-        "refiner_steps_run": (max(1, round(refiner_steps * refiner_strength))
-                              if use_refiner else None),
-        "seconds": seconds, "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
-    }, raw=raw, scope=scope)
+    参数里没有 `lora` / `clip_skip` / `hires` / `distill` / `refiner`：那是 SD
+    时代的开关，Qwen 一个都不吃（不同主干、不同文本编码器、没有精修器）。
+    前端如果还传这些键，`app._run` 会按签名过滤掉并记进 `meta.params_ignored`。
+    """
+    return _qwen_txt2img(
+        eng, prompt=prompt, negative=negative, width=width, height=height,
+        steps=steps, seed=seed, transparent=transparent, pixel=pixel,
+        palette=palette, preset=preset, matte=matte,
+        matte_backend=matte_backend, denoise=denoise, clean_iso=clean_iso,
+        model=model, scope=scope, tag=tag)
 
 
 # ---------------- W2 图生图 ----------------
@@ -854,76 +563,23 @@ def _qwen_img2img(eng: Engine, *, init_image: str | Path, prompt: str,
 
 
 def img2img(eng: Engine, *, init_image: str | Path, prompt: str,
-            negative: Optional[str] = None, strength: float = 0.55, steps: int = 25,
-            cfg: float = 7.0, seed: int = -1, lora: Optional[str] = None,
-            lora_scale: float = 0.8, model: str = "sd15", clip_skip: int = 1,
+            negative: Optional[str] = None, steps: int = 24, cfg: float = 4.0,
+            seed: int = -1, model: str = DEFAULT_MODEL,
             preset: Optional[str] = None, pixel: int = 0, palette: int = 0,
             matte: bool = False, matte_backend: str = "auto", denoise: int = 1,
             clean_iso: int = 1, transparent: bool = False,
             scope: str = "", tag: str = "w2") -> Dict[str, Any]:
-    """在图生图里重画原图的**内容**（改姿势细节、换配色、加装饰），构图与轮廓保持。
+    """图生图 = **指令改图**：源图当参考，提示词当指令。
 
-    与 W1 的区别在于「底」是已有图，所以：
-    - 输出尺寸由源图决定，不接受 width/height（diffusers 也这么做）。
-    - `strength` 是重绘幅度：0.3 只动细节，0.6 明显改画风，0.85 基本重画。
-    - 后处理（抠图/像素化/量化）与 W1 完全同一套。源图**应当**是未经像素化的
-      原图（txt2img 会额外存 `<name>_raw.png`），拿成品精灵回炉会把色块糊掉。
-
-    **Qwen-Image-2.1 走的是「指令改图」**，不是 SD 那种加噪强度：它没有
-    strength 参数，改多少完全由提示词决定。所以同一张源图、同一个提示词，
-    SD 下调 strength 是渐变，Qwen 下是"照指令改"。别拿 strength 去预期它。
+    Qwen 没有 `strength`（加噪幅度）这个概念——改多少完全由提示词决定，
+    所以这里不接 strength。输出尺寸跟源图走（16 的倍数）。
     """
-    if eng.arch(model) == "qwen21":
-        return _qwen_img2img(
-            eng, init_image=init_image, prompt=prompt, negative=negative,
-            steps=steps, seed=seed, transparent=transparent, preset=preset,
-            pixel=pixel, palette=palette, matte=matte,
-            matte_backend=matte_backend, denoise=denoise,
-            clean_iso=clean_iso, model=model, scope=scope, tag=tag)
-    if preset is not None:
-        prompt = _lora_trigger(eng, prompt, lora)
-        prompt, negative = presets.build(prompt, negative, preset,
-                                    max_tokens=presets.CHUNK_BUDGET)
-    # 项目隔离：源图必须在本项目目录里。别的项目的产物（assets/projects/<别的>/…）
-    # 一律拒绝——项目之间互不可见。历史公共区（assets 根目录下的老文件）仍然可用。
-    if scope:
-        src_path = Path(init_image).resolve()
-        own = scope_dir(scope).resolve()
-        root = PROJECTS_DIR.resolve()
-        if str(src_path).startswith(str(root)) and not str(src_path).startswith(str(own)):
-            raise ValueError(
-                f"源图不属于当前项目：{src_path.name} 在别的项目目录里（项目之间相互隔离）")
-    pipe = eng.img2img_pipe(model)
-    eng.apply_lora(pipe, lora, lora_scale)
-    ref = Image.open(init_image).convert("RGB")
-    if seed < 0:
-        seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
-    neg = negative or NEG_DEFAULT
-    kw, clip_used = _text_kwargs(pipe, prompt, neg, clip_skip, model)
-    torch.cuda.reset_peak_memory_stats()
-    dt = _timer()
-    img = _infer(eng, pipe, dict(
-        image=ref, strength=strength, num_inference_steps=steps,
-        guidance_scale=cfg, generator=torch.Generator("cuda").manual_seed(seed),
-        **kw), shrink=False, label="w2").images[0]
-    seconds = dt()
-    raw = img.copy() if (matte or pixel > 1 or palette) else None
-    matte_info: Dict[str, Any] = {}
-    img, edge, subjects = _postprocess(
-        img, eng, matte=matte, matte_backend=matte_backend, denoise=denoise,
-        pixel=pixel, palette=palette, clean_iso=clean_iso, info=matte_info)
-    return _save(img, _stamp(tag), "img2img", {
-        "workflow": "w2", "prompt": prompt, "negative": neg,
-        "init_image": str(init_image), "strength": strength, "steps": steps,
-        "cfg": cfg, "seed": seed, "lora": lora,
-        "lora_scale": lora_scale if lora else None,
-        "pixel_block": pixel, "palette": palette, "matte": matte,
-        "matte_backend": matte_backend, "matte_used": matte_info.get("backend"),
-        "matte_fallback": matte_info.get("fallback"),
-        "edge_touch": edge, "subjects": subjects, "model": model,
-        "clip_skip": clip_used,
-        "seconds": seconds, "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
-    }, raw=raw, scope=scope)
+    return _qwen_img2img(
+        eng, init_image=init_image, prompt=prompt, negative=negative,
+        steps=steps, seed=seed, transparent=transparent, preset=preset,
+        pixel=pixel, palette=palette, matte=matte,
+        matte_backend=matte_backend, denoise=denoise,
+        clean_iso=clean_iso, model=model, scope=scope, tag=tag)
 
 
 # ---------------- W3 局部重绘 ----------------
@@ -994,68 +650,22 @@ def _outside_diff(src: Image.Image, out: Image.Image, mask: Image.Image) -> int:
 
 
 def inpaint(eng: Engine, *, image: str | Path, mask: str | Path, prompt: str,
-            negative: Optional[str] = None, strength: float = 0.9, steps: int = 25,
-            cfg: float = 7.5, seed: int = -1, model: str = "sd15", scope: str = "",
+            negative: Optional[str] = None, steps: int = 24, cfg: float = 4.0,
+            seed: int = -1, model: str = DEFAULT_MODEL, scope: str = "",
             feather: int = 4, match_color: bool = True,
             match_strength: float = 0.45, transparent: bool = False,
             tag: str = "w3") -> Dict[str, Any]:
-    """只重画 mask 区域，并把结果按羽化蒙版贴回——选区外像素逐点不变。
+    """局部重绘（**近似实现**）：整图指令改图 + 蒙版贴回。
 
-    **Qwen 底模下是近似实现**：没有 mask 接口，走「整图指令改图 + 蒙版贴回」。
-    `strength` 对它没有意义（Qwen 的改动力度由提示词决定），会被忽略。
+    选区外像素逐点不变是硬承诺（`meta.outside_max_diff` 恒为 0）；
+    选区内不保证只改那一点——Qwen 没有 mask 接口，改哪儿由提示词里的方位词决定。
     """
     eng.require(model, "inpaint")
-    if eng.arch(model) == "qwen21":
-        return _qwen_inpaint(
-            eng, image=image, mask=mask, prompt=prompt, negative=negative,
-            steps=steps, cfg=cfg, seed=seed, model=model, feather=feather,
-            match_color=match_color, match_strength=match_strength,
-            transparent=transparent, scope=scope, tag=tag)
-    pipe = eng.inpaint_pipe(model)
-    src = Image.open(image).convert("RGB")
-    msk = Image.open(mask).convert("L")
-    if msk.size != src.size:
-        msk = msk.resize(src.size, Image.NEAREST)
-    if seed < 0:
-        seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
-    # 关键：不显式传 width/height 时，diffusers 会用 unet.sample_size（512）覆盖，
-    # 输出尺寸就和源图不一致了（贴回时会 "images do not match"）。
-    w8, h8 = max(64, src.width // 8 * 8), max(64, src.height // 8 * 8)
-    torch.cuda.reset_peak_memory_stats()
-    dt = _timer()
-    raw = _infer(eng, pipe, dict(
-        prompt=prompt, negative_prompt=negative or NEG_DEFAULT, image=src,
-        mask_image=msk, strength=strength, num_inference_steps=steps,
-        guidance_scale=cfg, generator=torch.Generator("cuda").manual_seed(seed),
-        width=w8, height=h8), label="w3").images[0]
-    seconds = dt()
-    if raw.size != src.size:
-        raw = raw.resize(src.size, Image.LANCZOS)
-    composed = composite(src, raw, msk)
-    return _save(composed, _stamp(tag), "inpaint", {
-        "workflow": "w3", "prompt": prompt, "image": str(image), "mask": str(mask),
-        "strength": strength, "steps": steps, "cfg": cfg, "seed": seed, "model": model,
-        "raw": None,
-        "seconds": seconds, "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
-    }, scope=scope)
-
-
-def composite(src: Image.Image, gen: Image.Image, mask: Image.Image, feather: int = 3) -> Image.Image:
-    """把生成结果按蒙版贴回，**承诺选区外逐点不变**。
-
-    羽化必须「向内」：先做形态学腐蚀（MinFilter）再高斯模糊，模糊的扩散范围才不会
-    越过原始蒙版边界。反过来直接模糊会把选区外的像素一起吃掉。
-    """
-    from PIL import ImageFilter
-
-    m = mask.convert("L")
-    if feather > 0:
-        m = m.filter(ImageFilter.MinFilter(2 * feather + 1))   # 向内收缩 feather px
-        m = m.filter(ImageFilter.GaussianBlur(feather))        # 边缘软化，仍不越界
-    m = m.point(lambda v: 255 if v >= 128 else 0)
-    out = src.convert("RGBA").copy()
-    out.paste(gen.convert("RGBA"), (0, 0), m)
-    return out.convert("RGB")
+    return _qwen_inpaint(
+        eng, image=image, mask=mask, prompt=prompt, negative=negative,
+        steps=steps, cfg=cfg, seed=seed, model=model, feather=feather,
+        match_color=match_color, match_strength=match_strength,
+        transparent=transparent, scope=scope, tag=tag)
 
 
 # ---------------- WBG 抠图去背景 / 换背景 ----------------
@@ -1283,139 +893,29 @@ def _qwen_ai_repaint(eng: Engine, *, image: str | Path, mask: str | Path,
 
 
 def ai_repaint(eng: Engine, *, image: str | Path, mask: str | Path, prompt: str,
-               negative: Optional[str] = None, strength: float = 0.9,
-               steps: int = 25, cfg: float = 7.0, seed: int = -1,
-               model: str = "sd15", lora: Optional[str] = None,
-               lora_scale: float = 0.8, clip_skip: int = 1,
+               negative: Optional[str] = None, steps: int = 24, cfg: float = 4.0,
+               seed: int = -1, model: str = DEFAULT_MODEL,
                preset: Optional[str] = None,
                context: float = 0.35, expand: int = 8, feather: int = 4,
                match_color: bool = True, match_strength: float = 0.45,
                palette_snap: bool = False, palette_colors: int = 32,
                strategy: str = "whole",
                scope: str = "", tag: str = "w5") -> Dict[str, Any]:
-    """局部 AI 重绘：裁剪「选区+上下文」→ 交给通用模型重画 → 贴回原图。
+    """局部 AI 重绘（**近似实现**）。与 w3 同一个机制，多了色板吸附与裁剪策略。
 
-    **strength 的实测含义**（像素素材，768² crop，25 步）：
-      0.80 → 选区几乎没变（模型保留原样，重画等于没做）
-      0.90 → 改动开始明显
-      0.95 → 改动最明显，但硬边会留矩形拼接痕（要配合羽化）
-      1.00 → 整块重画，风格漂移最大
-    所以默认 0.90：够改得动，又不至于把选区整块重画。
-
-    **和 W3（专用 inpaint 权重）的区别**：W3 走 SD1.5 的 inpaint 微调权重，
-    只有 512 分辨率、也不能挂 LoRA；本工作流把选区裁出来放大，交给**任意底模**
-    （含像素 LoRA、SDXL）重画，再贴回去。所以：
-      - 能用 LoRA（像素素材必须用像素 LoRA 才像像素画）
-      - 小区域也能拿到足够的像素（放大到 512 再画）
-      - 选区外的像素**逐点不变**（羽化只向内 + 二值蒙版相乘）
-
-    代价是接缝需要收：羽化过渡 + 只在边界带做色彩校正 + 可选色板吸附。
+    `strategy`：`whole`（默认，整图作条件——实测唯一「指令被执行且脸不丢」的方案）
+    / `crop`（裁块重画，质量不合格，仅留作对照实验）。
     """
     eng.require(model, "ai_repaint")
-    if eng.arch(model) == "qwen21":
-        if strategy not in ("whole", "crop"):
-            raise ValueError(f"未知策略 {strategy}（可选 whole / crop）")
-        return _qwen_ai_repaint(
-            eng, image=image, mask=mask, prompt=prompt, negative=negative,
-            steps=steps, cfg=cfg, seed=seed, model=model, preset=preset,
-            context=context, expand=expand, feather=feather,
-            match_color=match_color, match_strength=match_strength,
-            palette_snap=palette_snap, palette_colors=palette_colors,
-            strategy=strategy, scope=scope, tag=tag)
-    if preset is not None:
-        prompt = _lora_trigger(eng, prompt, lora)
-        prompt, negative = presets.build(prompt, negative, preset,
-                                    max_tokens=presets.CHUNK_BUDGET)
-    src = Image.open(image).convert("RGBA")
-    msk = rp.load_mask(mask)
-    if msk.size != src.size:
-        # 尺寸不一致一定是换了源图但没重涂蒙版。缩放蒙版在语义上是错的
-        # （涂的地方和要改的地方对不上），所以明确报错而不是硬缩。
-        raise ValueError(
-            f"蒙版尺寸 {msk.size[0]}×{msk.size[1]} 与源图 "
-            f"{src.width}×{src.height} 不一致：换图后要重新涂抹")
-
-    # 提示词：用户正文 + 程序加的约束条款（都记进 meta，界面上可看）
-    body = (prompt or "").strip()
-    if not body:
-        raise ValueError("提示词是空的：先写一句要重绘成什么")
-    full_prompt = f"{body}, {AI_REPAINT_CONSTRAINT}"
-    neg = (negative or "").strip() or AI_REPAINT_NEGATIVE
-
-    # 1) 裁出「选区 + 上下文」
-    crop, crop_mask, box = rp.crop_region(src, msk, expand=expand, context=context)
-    target = rp.fit_size(crop.size)
-
-    # 2) 交给通用模型重画。用图生图而不是文生图：上下文已经在裁剪图里了，
-    #    模型要做的只是「在既有内容上改」，不是凭空重画。
-    pipe = eng.img2img_pipe(model)
-    eng.apply_lora(pipe, lora, lora_scale)
-    # **必须转 RGB**：RGBA 进 VaeImageProcessor 会变成 4 通道，UNet 首层按 4 通道
-    # 卷积 → 激活尺寸爆炸（实测 512² 直接 OOM，报 Tried to allocate 36.00 GiB）。
-    # alpha 的信息在贴回阶段用（composite 会混合 alpha），送模型不需要它。
-    #
-    # 但不能直接 convert("RGB")：那样透明区会变黑，模型会把背景也当内容重画。
-    # 用 flatten_rgb 把透明区填白（精灵素材大多是透明底）。
-    payload = rp.flatten_rgb(crop)
-    if payload.size != target:
-        payload = payload.resize(target, Image.LANCZOS)
-    if seed < 0:
-        seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
-    kw, clip_used = _text_kwargs(pipe, full_prompt, neg, clip_skip, model)
-    torch.cuda.reset_peak_memory_stats()
-    dt = _timer()
-    gen = _infer(eng, pipe, dict(
-        image=payload, strength=strength, num_inference_steps=steps,
-        guidance_scale=cfg,
-        generator=torch.Generator("cuda").manual_seed(seed), **kw),
-        shrink=False, label="w5").images[0]
-    seconds = dt()
-    if gen.size != crop.size:
-        gen = gen.resize(crop.size, Image.LANCZOS)
-
-    # 3) 贴回：羽化只向内 -> 选区外逐点不变
-    merged = rp.composite(crop, gen, crop_mask, feather_px=feather,
-                           match_color=match_color,
-                           match_strength=match_strength)
-
-    # 4) 色板吸附（像素素材专用）：把重绘区里「接近源色」的杂色吸回源图色板。
-    #    差得远的新颜色保留 —— 否则「要把这块改成红色」会被吸成灰。
-    palette_snapped = 0.0
-    if palette_snap:
-        merged, pal, palette_snapped = rp.snap_palette(
-            merged, src, crop_mask, colors=palette_colors)
-
-    out = src.copy()
-    out.paste(merged, box)
-
-    warnings: List[str] = []
-    min_side = min(box[2] - box[0], box[3] - box[1])
-    if feather > max(2, min_side // 4):
-        warnings.append(
-            f"羽化 {feather}px 相对选区偏大：改动会溢出选区边缘一圈，"
-            "想要干净边界就调小")
-    if palette_snap and palette_snapped < 0.02:
-        warnings.append("色板对齐几乎没有生效：新颜色离源图色板都太远")
-
-    return _save(out, _stamp(tag), "ai_repaint", {
-        "workflow": "w5", "scope": scope or "default",
-        "prompt": full_prompt, "prompt_body": body,
-        "constraint": AI_REPAINT_CONSTRAINT,
-        "negative": neg,
-        "image": str(image), "mask": str(mask),
-        "strength": strength, "steps": steps, "cfg": cfg, "seed": seed,
-        "model": model, "lora": lora,
-        "lora_scale": lora_scale if lora else None,
-        "clip_skip": clip_used,
-        "box": list(box), "crop_size": list(crop.size), "target_size": list(target),
-        "coverage": rp.mask_coverage(msk),
-        "context": context, "expand": expand, "feather": feather,
-        "match_color": bool(match_color), "match_strength": match_strength,
-        "palette_snap": bool(palette_snap), "palette_snapped": palette_snapped,
-        "warnings": warnings,
-        "seconds": seconds,
-        "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
-    }, scope=scope)
+    if strategy not in ("whole", "crop"):
+        raise ValueError(f"未知策略 {strategy}（可选 whole / crop）")
+    return _qwen_ai_repaint(
+        eng, image=image, mask=mask, prompt=prompt, negative=negative,
+        steps=steps, cfg=cfg, seed=seed, model=model, preset=preset,
+        context=context, expand=expand, feather=feather,
+        match_color=match_color, match_strength=match_strength,
+        palette_snap=palette_snap, palette_colors=palette_colors,
+        strategy=strategy, scope=scope, tag=tag)
 
 
 # ---------------- WPX 完美像素转换 ----------------
@@ -1682,131 +1182,32 @@ def _qwen_pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | P
 
 
 def pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | Path,
-                prompt: str, negative: Optional[str] = None,
-                width: int = 768, height: int = 768,
-                steps: int = 25, cfg: float = 7.0, seed: int = -1,
-                cn_scale: float = 1.0, ipa_scale: float = 0.8,
-                fill: float = 0.8, thr: float = 0.25,
-                ref_mode: str = "auto", bg: str = "white",
-                lora: Optional[str] = None, lora_scale: float = 0.8,
-                clip_skip: int = 1, preset: Optional[str] = None,
-                model: str = "sd15",
-                pixel: int = 0, palette: int = 0, matte: bool = False,
-                matte_backend: str = "auto", denoise: int = 1, clean_iso: int = 1,
-                scope: str = "", tag: str = "wpc") -> Dict[str, Any]:
-    """角色迁移：把**动作参考图**的姿态套到**角色图**上，生成角色做出该动作的图。
+               prompt: str, negative: Optional[str] = None,
+               width: int = 768, height: int = 768,
+               steps: int = 24, cfg: float = 4.0, seed: int = -1,
+               fill: float = 0.8, thr: float = 0.25,
+               ref_mode: str = "auto", bg: str = "white",
+               model: str = DEFAULT_MODEL,
+               pixel: int = 0, palette: int = 0, matte: bool = False,
+               matte_backend: str = "auto", denoise: int = 1, clean_iso: int = 1,
+               scope: str = "", tag: str = "wpc") -> Dict[str, Any]:
+    """角色迁移：把**动作参考图**的姿势套到**角色图**上。
 
-    三件套各管一件事：
-      - **ControlNet 条件图** ← 动作参考图：定姿态（硬约束）
-      - **IP-Adapter**        ← 角色图：定身份/外观（软约束）
-      - **LoRA**              ← 定画风（可选）
+    Qwen 走**双图条件**（角色图 + 姿态条件图进同一个 vision context），
+    所以没有 ControlNet / IP-Adapter 的强度旋钮（`cn_scale` / `ipa_scale` 已删）。
 
-    **参考模式**（ref_mode）决定「动作参考图」怎么变成条件图：
-      - ``pose``    真人照片 → 人体检测 → RTMPose → OpenPose 骨架。
-                    姿态语义最强：只保留关节位置，参考角色的衣服体型全丢掉。
-      - ``outline`` 任意素材 → 抠主体 → 剪影边缘 → canny 条件图。
-                    **游戏素材走这条路**：像素角色、怪物、机甲、非人形生物
-                    都能当动作参考（真人检测器认不出它们，实测 0 个框）。
-      - ``auto``    先试 pose，检测不到人体就自动降级到 outline（默认）。
-
-    **为什么骨架要归一化**：ControlNet OpenPose 是空间敏感的——条件图里人物站在
-    哪、占多大，生成的人就站在哪、占多大。参考图里的人物可能缩在角落，直接用
-    原始骨架会画出「角落小人」。所以先按检测到的人物框把关键点归一化（人物居中、
-    占画面 fill 比例），再渲染骨架图。
-
-    **为什么不直接用 W4**：W4 是「骨架序列 → 精灵帧」，没有角色参考图；这里
-    多了 IP-Adapter 这一路，是单帧的身份迁移。多帧批量请用 WSS（sprite_swap）。
+    ⚠️ 动作跟随的真实水平：上身跟得好，**腿部常被参考图的站姿覆盖**
+    （2026-10-30 实测，见 `_qwen_poseswap` 的对照表与 PLAN §2.8）。
     """
     eng.require(model, "pose_clone")
-    if eng.arch(model) == "qwen21":
-        # Qwen 走双图条件（角色图 + 骨架图），不需要 ControlNet / IP-Adapter，
-        # 也不吃 SD 的 LoRA 与提示词契约后缀——那条路在 Qwen 上是反效果。
-        return _qwen_pose_clone(
-            eng, pose_image=pose_image, char_image=char_image,
-            prompt=prompt, negative=negative,
-            width=width, height=height, steps=steps, cfg=cfg, seed=seed,
-            ref_mode=ref_mode, thr=thr, fill=fill,
-            pixel=pixel, palette=palette, matte=matte, matte_backend=matte_backend,
-            denoise=denoise, clean_iso=clean_iso, model=model, bg=bg,
-            scope=scope, tag=tag)
-    if preset is not None:
-        prompt = _lora_trigger(eng, prompt, lora)
-        prompt, negative = presets.build(prompt, negative, preset,
-                                    max_tokens=presets.CHUNK_BUDGET)
-    # 角色图已经给了身份，提示词只是补语义。空串会让 CLIP 的文本条件近乎无效，
-    # 画面容易退化成「一个模糊的人形」——所以给一句中性的兜底，而不是硬要用户写字。
-    prompt = (prompt or "").strip() or "a single character, full body, facing viewer"
-
-    ref = Image.open(pose_image).convert("RGB")
-    # 1) 动作参考图 → 条件图（骨架或轮廓）
-    extractor = eng.pose_extractor()
-    cond, used_mode, cond_info = refcond.build_condition(
-        ref, mode=ref_mode, size=max(width, height), extractor=extractor,
-        thr=thr, fill=fill, matte_dir=eng.matte_dir)
-    if used_mode == "pose":
-        pipe_cn = "openpose"
-    else:
-        pipe_cn = "canny"
-
-    # 2) 角色图 → IP-Adapter 参考
-    # **必须先做参考图预处理**（refprep.prepare_reference）：
-    #   - 透明区填白而不是黑（直接 convert("RGB") 会让透明区变黑，
-    #     实测 66.5% 的角色图是纯黑背景，IP-Adapter 会把黑色当成角色的
-    #     暗部，身份特征被污染）
-    #   - 裁到主体包围盒 + 居中留白（CLIP Vision 在 224² 上切 14×14 patch，
-    #     主体顶满画面时 patch 里只有局部纹理，编码不出整体身份）
-    #   - 像素画用最近邻缩放（LANCZOS 会把像素块糊成渐变）
-    char = refprep.prepare_reference(Image.open(char_image).convert("RGBA"), size=width)
-    # 预估值必须覆盖**实际要加载的量**，不能只留 2GB 余量：
-    # SD15 的 UNet+ControlNet+IP-Adapter+VAE 约 6~7GB、SDXL 约 13GB。
-    # 给 2GB 时，若 qwen 管线仍占着 16GB，检查会判"够用"而不驱逐，
-    # 硬挤进去后 _fit 降级到 cpu offload —— 每一步都在 CPU/GPU 间搬权重，
-    # 表现是「迁移中」转十几分钟、显存全满。
-    eng.ensure_headroom(need_gb=13.0 if eng.is_xl(model) else 7.0,
-                        keep=("pose",))
-    pipe = eng.pose_pipe(controlnet=pipe_cn, with_ipadapter=True, model=model)
-    eng.apply_lora(pipe, lora, lora_scale)
-    pipe.set_ip_adapter_scale(ipa_scale)
-    if seed < 0:
-        seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
-    neg = negative or NEG_DEFAULT
-    kw, clip_used = _text_kwargs(pipe, prompt, neg, clip_skip, model)
-    torch.cuda.reset_peak_memory_stats()
-    dt = _timer()
-    out = _infer(eng, pipe, dict(
-        image=cond.resize((width, height)), num_inference_steps=steps,
-        guidance_scale=cfg, controlnet_conditioning_scale=cn_scale,
-        ip_adapter_image=char,
-        generator=torch.Generator("cuda").manual_seed(seed),
-        width=width, height=height, **kw), label="wpc").images[0]
-    seconds = dt()
-    width, height = out.size
-    raw = out.copy() if (matte or pixel > 1 or palette) else None
-    matte_info: Dict[str, Any] = {}
-    out, edge, subjects = _postprocess(
-        out, eng, matte=matte, matte_backend=matte_backend, denoise=denoise,
-        pixel=pixel, palette=palette, clean_iso=clean_iso, info=matte_info)
-    return _save(out, _stamp(tag), "pose_clone", {
-        "workflow": "wpc", "scope": scope or "default",
-        "prompt": prompt, "negative": neg,
-        "pose_image": str(pose_image), "char_image": str(char_image),
-        "ref_mode": ref_mode, "ref_mode_used": used_mode,
-        "ref_fallback_from": cond_info.get("fallback_from"),
-        "ref_fallback_reason": cond_info.get("fallback_reason"),
-        "joints": cond_info.get("joints"), "fill": fill,
-        "width": width, "height": height,
-        "steps": steps, "cfg": cfg, "seed": seed,
-        "model": model,
-        "cn_scale": cn_scale, "ipa_scale": ipa_scale,
-        "lora": lora, "lora_scale": lora_scale if lora else None,
-        "clip_skip": clip_used,
-        "pixel_block": pixel, "palette": palette, "matte": matte,
-        "matte_used": matte_info.get("backend"),
-        "matte_fallback": matte_info.get("fallback"),
-        "edge_touch": edge, "subjects": subjects,
-        "seconds": seconds,
-        "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
-    }, raw=raw, scope=scope)
+    return _qwen_pose_clone(
+        eng, pose_image=pose_image, char_image=char_image,
+        prompt=prompt, negative=negative,
+        width=width, height=height, steps=steps, cfg=cfg, seed=seed,
+        ref_mode=ref_mode, thr=thr, fill=fill,
+        pixel=pixel, palette=palette, matte=matte, matte_backend=matte_backend,
+        denoise=denoise, clean_iso=clean_iso, model=model, bg=bg,
+        scope=scope, tag=tag)
 
 
 # ---------------- WSS 序列帧角色替换 ----------------
@@ -1954,67 +1355,25 @@ def sprite_swap(eng: Engine, *, sheet_image: str | Path, char_image: str | Path,
                 prompt: str = "", negative: Optional[str] = None,
                 cols: int = 0, rows: int = 0,
                 width: int = 768, height: int = 768,
-                steps: int = 25, cfg: float = 7.0, seed: int = -1,
-                cn_scale: float = 1.0, ipa_scale: float = 0.8,
+                steps: int = 24, cfg: float = 4.0, seed: int = -1,
                 ref_mode: str = "outline", mode: str = "generate",
                 engine_mode: str = "auto",
-                lora: Optional[str] = None, lora_scale: float = 0.8,
-                clip_skip: int = 1, preset: Optional[str] = None,
-                model: str = "sd15",
+                model: str = DEFAULT_MODEL,
                 matte: bool = True, matte_backend: str = "auto",
                 denoise: int = 1, clean_iso: int = 1,
                 palette: int = 32, keep_alpha: bool = False,
-                candidates: int = 2, gate_retries: int = 1,
+                candidates: int = 1, gate_retries: int = 1,
                 gate_seed_step: int = 1000,
-                vram_profile: str = "auto",
-                bg: str = "white",
+                vram_profile: str = "auto", bg: str = "white",
                 scope: str = "", tag: str = "wss") -> Dict[str, Any]:
-    """序列帧角色替换：把一段游戏动画里的角色换成目标角色，逐帧对齐后重新打包。
+    """序列帧角色替换（**近似实现**）：逐帧双图条件 → 缩放回格子 → 共享色板 → 打包。
 
-    这是用户最常见的产线场景：手上有一张**游戏动画序列帧**（精灵图），
-    想把里面的角色换成自己的角色，但动作必须一模一样。
-
-    流程：
-      1. 切帧：自动检测精灵图网格（或用 cols/rows 指定），逐格切出
-      2. 每帧生成：轮廓条件（动作）+ IP-Adapter（身份）→ 新角色帧
-      3. 对齐：按脚底锚点把每帧拉回同一落脚点，抑制模型自构图带来的漂移
-      4. 缩回原格子尺寸 + 共享色板量化（整段动画共用一套颜色）
-      5. 按原网格重新打包成精灵图
-
-    **为什么输出要缩回原格子尺寸**：序列帧是要塞回游戏里的，尺寸必须
-    和原帧一致（通常 32~128px）。在 768² 生成后缩回去，比在小尺寸上
-    生成靠谱得多——SD1.5 在 64² 上出图是糊的。
-
-    **共享色板**：逐帧各自量化会导致相邻帧颜色打架（第一帧的主色占满色位）。
-    这里整段动画共用一块色板，见 pixelfy.refine_batch。
-
-    **keep_alpha**：直接复用参考帧的 alpha（形状逐像素精确、帧间零漂移），
-    只换 RGB。适合「同体型换配色」的换皮；代价是参考角色的体型特征
-    （帽子、翅膀、武器）也会被保留。
-
-    **mode**：
-      - ``generate``（默认）跑模型：轮廓条件（动作）+ IP-Adapter（身份），
-        换成**体型不同**的角色。
-      - ``recolor``  不跑模型：纯确定性的明度重映射换皮，**帧间零漂移**、
-        毫秒级，保留原角色的一切体型特征只换配色。同体型换色首选。
-
-    **engine_mode** 决定用什么引擎生成：
-      - ``animatediff``（默认，若权重可用）：一次生成整段序列，靠 motion module
-        的**跨帧时序注意力**保证一致性。实测比逐帧又好又快。
-      - ``frame``：逐帧生成 + 多候选择优。不依赖 motion adapter 权重，
-        显存更省（4.5GB vs 13.1GB），但帧间一致性略差。
+    `mode`：`generate`（跑模型，逐帧） / `recolor`（确定性换色，毫秒级、帧间零漂移）。
+    `engine_mode` 是 SD 时代的 AnimateDiff 开关，Qwen 下恒为逐帧（参数保留兼容）。
+    `bg`：白底 / 深色底——白毛角色用白底会被抠图吃掉脸和腿，换 dark 更稳。
     """
-    # recolor 是纯确定性换色、**不跑模型**，任何底模都能用，所以不拦。
-    # 只有 generate 模式要 ControlNet + IP-Adapter 这套 SD 组件。
     if mode != "recolor":
         eng.require(model, "sprite_swap")
-    if preset is not None:
-        prompt = _lora_trigger(eng, prompt, lora)
-        prompt, negative = presets.build(prompt, negative, preset,
-                                    max_tokens=presets.CHUNK_BUDGET)
-    # 同 WPC：身份来自角色图（IP-Adapter），描述只是补语义；空串会让文本条件失效
-    prompt = (prompt or "").strip() or "a single character, full body, facing viewer"
-
     sheet = Image.open(sheet_image).convert("RGBA")
     if cols <= 0 or rows <= 0:
         detected = sheet_mod.detect_grid(sheet)
@@ -2026,218 +1385,18 @@ def sprite_swap(eng: Engine, *, sheet_image: str | Path, char_image: str | Path,
     frames = sheet_mod.split_sheet(sheet, cols, rows)
     if not frames:
         raise ValueError("精灵图里没有有效帧（整张是空的？）")
+    prompt = (prompt or "").strip() or "a single character, full body, facing viewer"
 
     if mode == "recolor":
         return _sprite_recolor(frames, char_image, cols, rows, palette=palette,
                                scope=scope, tag=tag, prompt=prompt)
-
-    if eng.arch(model) == "qwen21":
-        # Qwen 没有 AnimateDiff（motion module 是 SD 系组件），只能逐帧。
-        # 候选数强制 1：一帧 35s，默认 2 个候选会把 8 帧动画拖到 9 分钟。
-        return _qwen_sprite_swap(
-            eng, frames=frames, sheet_image=sheet_image, char_image=char_image,
-            cols=cols, rows=rows,
-            prompt=prompt, negative=negative, width=width, height=height,
-            steps=steps, cfg=cfg, seed=seed, ref_mode=ref_mode, model=model,
-            matte=matte, matte_backend=matte_backend, denoise=denoise,
-            palette=palette, keep_alpha=keep_alpha, candidates=1,
-            bg=bg, scope=scope, tag=tag)
-
-    # 引擎选择：AnimateDiff（时序注意力）还是逐帧（多候选）
-    if engine_mode == "auto":
-        engine_mode = "animatediff" if eng.animatediff_available() else "frame"
-    if engine_mode == "animatediff":
-        if not eng.animatediff_available():
-            raise ValueError(
-                "AnimateDiff 的 motion adapter 权重缺失（约 1.7GB）。\n"
-                "下载：python tools/fetch_animatediff.py\n"
-                "或改用逐帧模式（engine_mode='frame'，显存更省但帧间一致性略差）")
-
-    extractor = eng.pose_extractor()
-    pipe_cn = "openpose" if ref_mode == "pose" else "canny"
-    if engine_mode == "animatediff":
-        return _sprite_animatediff(
-            eng, frames, char_image, cols, rows,
-            # **不要在这里再传 preset**：prompt/negative 上面已经 build 过一次，
-            # 再 build 一遍会把契约后缀拼成两遍，白吃 15~20 个 token 的预算。
-            prompt=prompt, negative=negative, preset=None,
-            pipe_cn=pipe_cn, ref_mode=ref_mode, width=width, height=height,
-            steps=steps, cfg=cfg, seed=seed, cn_scale=cn_scale, ipa_scale=ipa_scale,
-            lora=lora, lora_scale=lora_scale, clip_skip=clip_skip,
-            matte=matte, matte_backend=matte_backend, denoise=denoise,
-            palette=palette, extractor=extractor, vram_profile=vram_profile,
-            model=model, scope=scope, tag=tag)
-
-    # 预估值必须覆盖**实际要加载的量**，不能只留 2GB 余量：
-    # SD15 的 UNet+ControlNet+IP-Adapter+VAE 约 6~7GB、SDXL 约 13GB。
-    # 给 2GB 时，若 qwen 管线仍占着 16GB，检查会判"够用"而不驱逐，
-    # 硬挤进去后 _fit 降级到 cpu offload —— 每一步都在 CPU/GPU 间搬权重，
-    # 表现是「迁移中」转十几分钟、显存全满。
-    eng.ensure_headroom(need_gb=13.0 if eng.is_xl(model) else 7.0,
-                        keep=("pose",))
-    pipe = eng.pose_pipe(controlnet=pipe_cn, with_ipadapter=True, model=model)
-    eng.apply_lora(pipe, lora, lora_scale)
-    pipe.set_ip_adapter_scale(ipa_scale)
-    if seed < 0:
-        seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
-    neg = negative or NEG_DEFAULT
-    kw, clip_used = _text_kwargs(pipe, prompt, neg, clip_skip, model)
-
-    char = refprep.prepare_reference(Image.open(char_image).convert("RGBA"), size=width)
-    char_ref_orig = Image.open(char_image).convert("RGBA")
-    torch.cuda.reset_peak_memory_stats()
-    total = _timer()
-
-    generated: List[Image.Image] = []
-    per_frame: List[float] = []
-    used_modes: List[str] = []
-    frame_scores: List[Dict[str, Any]] = []
-    attempts_used = 0
-    matte_info: Dict[str, Any] = {}
-
-    def _cut(img: Image.Image) -> Image.Image:
-        """抠图（候选评分前就要有 alpha 才能量剪影）。"""
-        if not matte:
-            return img.convert("RGBA")
-        cut_img = matte_mod.matte_auto(img.convert("RGB"), matte_backend,
-                                       eng.matte_dir, info=matte_info)
-        return matte_mod.despeckle(cut_img, denoise_iters=denoise)
-
-    # 显存守卫：整段序列共用一个候选数，所以在循环外算一次
-    cand_note = ""
-    if candidates > 1:
-        from . import vramopt
-        k, cand_note = vramopt.plan_candidates(eng.arch(model), max(width, height),
-                                               candidates, eng.free_gb())
-        if k == 0:
-            raise ValueError(cand_note)
-        if k < candidates:
-            print(f"[warn] {cand_note}")
-            candidates = k
-
-    for _c, _r, frame in frames:
-        cond, used_mode, _info = refcond.build_condition(
-            frame, mode=ref_mode, size=max(width, height), extractor=extractor,
-            matte_dir=eng.matte_dir)
-        used_modes.append(used_mode)
-        cond = cond.resize((width, height))
-
-        # **多候选择优**（业界标准做法）：同 seed 也会漂 20~30%，
-        # 所以每帧生成几个候选，按「动作贴合度 + 身份贴合度」挑最好的。
-        # 挑不出好的就用补提额度再试几轮。
-        dt = _timer()
-        cands: List[Tuple[Image.Image, Dict[str, Any]]] = []
-        prev = generated[-1] if generated else None
-        ref_area = int(framescore.subject_mask(frame.convert("RGBA")).sum())
-        want = max(1, candidates)
-        for k in range(want):
-            img = _infer(eng, pipe, dict(
-                image=cond, num_inference_steps=steps, guidance_scale=cfg,
-                controlnet_conditioning_scale=cn_scale,
-                ip_adapter_image=char,
-                generator=torch.Generator("cuda").manual_seed(seed + k * gate_seed_step),
-                width=width, height=height, **kw), label="wss").images[0]
-            cut_img = _cut(img)
-            ev = framescore.evaluate(cut_img, frame, char_ref_orig, prev=prev,
-                                    area_ref=ref_area)
-            cands.append((cut_img, ev))
-            if ev["passed"]:
-                break                      # 已经够好，不必再提
-        # 都没过闸门 → 用补提额度再试几轮
-        if not any(ev["passed"] for _i, ev in cands) and gate_retries > 0:
-            for k in range(gate_retries):
-                img = _infer(eng, pipe, dict(
-                    image=cond, num_inference_steps=steps, guidance_scale=cfg,
-                    controlnet_conditioning_scale=cn_scale,
-                    ip_adapter_image=char,
-                    generator=torch.Generator("cuda").manual_seed(
-                        seed + (len(cands) + k) * gate_seed_step),
-                    width=width, height=height, **kw), label="wss").images[0]
-                cut_img = _cut(img)
-                ev = framescore.evaluate(cut_img, frame, char_ref_orig, prev=prev,
-                                        area_ref=ref_area)
-                cands.append((cut_img, ev))
-                if ev["passed"]:
-                    break
-        best_img, best_ev, best_i = framescore.pick_best(cands)
-        frame_scores.append({**best_ev, "attempts": len(cands), "picked": best_i})
-        attempts_used += len(cands)
-        per_frame.append(dt())
-        generated.append(best_img)
-
-    cut: List[Image.Image] = list(generated)
-
-    if keep_alpha:
-        # 用参考帧的 alpha 覆盖：形状逐像素精确，帧间零漂移
-        for i, (_c, _r, frame) in enumerate(frames):
-            cut[i].putalpha(frame.getchannel("A"))
-
-    # 缩回原格子尺寸：序列帧要塞回游戏，尺寸必须和原帧一致。
-    #
-    # **必须从生成尺寸直接一步缩到位**：BOX 降采样会把每个像素格里的
-    # 多种颜色**混**在一起，边界就散了——像素画最忌讳这个。
-    # 正确做法是「按格采样，每格取一个代表色」。
-    # 参考帧本身是像素画（每格一色），所以格数是已知的：
-    #   生成图 768² → 原格 64²，比例 12:1，每 12×12 像素对应原图 1 格。
-    cell_w = max(f.width for _c, _r, f in frames)
-    cell_h = max(f.height for _c, _r, f in frames)
-    # 整段动画共享一套色板（逐帧各自量化会让相邻帧颜色打架）
-    refined = pxf.refine_batch(
-        [c.convert("RGB") for c in cut],
-        grid_snap=False,
-        target_size=(cell_w, cell_h),
-        colors=palette,
-    )
-    outs: List[Image.Image] = []
-    for item, src in zip(refined["items"], cut):
-        im = item["image"]
-        if src.mode == "RGBA":
-            im = im.convert("RGBA")
-            # alpha 跟着缩到格子尺寸（src 还是生成时的 768²）
-            a = src.getchannel("A").resize((cell_w, cell_h), Image.BILINEAR)
-            im.putalpha(a)
-            im = pxf.binarize_alpha(im)
-        outs.append(im)
-
-    # 帧间对齐：按脚底锚点拉回同一落脚点
-    aligned = pp.align_sequence(outs)
-
-    # 按原网格重新打包
-    meta = {
-        "workflow": "wss", "scope": scope or "default",
-        "mode": "generate", "engine_mode": "frame",
-        "prompt": prompt, "negative": neg,
-        "sheet_image": str(sheet_image), "char_image": str(char_image),
-        "grid": [cols, rows], "frames": len(aligned),
-        "cell": [cell_w, cell_h],
-        "ref_mode": ref_mode,
-        "ref_modes_used": sorted(set(used_modes)),
-        "model": model,
-        "width": width, "height": height,
-        "steps": steps, "cfg": cfg, "seed": seed,
-        "cn_scale": cn_scale, "ipa_scale": ipa_scale,
-        "lora": lora, "lora_scale": lora_scale if lora else None,
-        "clip_skip": clip_used,
-        "matte": matte, "matte_used": matte_info.get("backend"),
-        "matte_fallback": matte_info.get("fallback"),
-        "keep_alpha": keep_alpha,
-        "palette": palette,
-        "palette_size": len(refined["palette"]) if palette else 0,
-        # 逐帧评分（多候选择优的依据）
-        "candidates": max(1, candidates),
-        "candidates_note": cand_note or None,
-        "gate_retries": gate_retries,
-        "attempts": attempts_used,
-        "frame_scores": frame_scores,
-        "gate_passed": sum(1 for s in frame_scores if s["passed"]),
-        # 整段序列的一致性（产线据此判断要不要重跑）
-        **framescore.sequence_consistency(outs),
-        "per_frame_seconds": [round(s, 2) for s in per_frame],
-        "seconds_total": round(sum(per_frame), 2),
-        "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
-    }
-    return _pack_sprite_frames(aligned, frames, cols, rows, cell_w, cell_h,
-                              meta=meta, scope=scope, tag=tag)
+    return _qwen_sprite_swap(
+        eng, frames=frames, sheet_image=sheet_image, char_image=char_image,
+        cols=cols, rows=rows, prompt=prompt, negative=negative,
+        width=width, height=height, steps=steps, cfg=cfg, seed=seed,
+        ref_mode=ref_mode, model=model, matte=matte,
+        matte_backend=matte_backend, denoise=denoise, palette=palette,
+        keep_alpha=keep_alpha, candidates=1, bg=bg, scope=scope, tag=tag)
 
 
 def _pack_sprite_frames(aligned: Sequence[Image.Image], frames: Sequence[tuple],
@@ -2308,233 +1467,6 @@ def _sprite_recolor(frames: Sequence[tuple], char_image: str | Path,
         "palette_colors": [list(c) for c in pal],
         "seconds_total": 0.0,
         "deterministic": True,
-    }
-    return _pack_sprite_frames(aligned, frames, cols, rows, cell_w, cell_h,
-                              meta=meta, scope=scope, tag=tag)
-
-
-def _sprite_animatediff(eng: Engine, frames: Sequence[tuple], char_image: str | Path,
-                        cols: int, rows: int, *, prompt: str,
-                        negative: Optional[str] = None, preset: Optional[str] = None,
-                        pipe_cn: str = "canny", ref_mode: str = "outline",
-                        width: int = 768, height: int = 768, steps: int = 25,
-                        cfg: float = 7.0, seed: int = -1, cn_scale: float = 1.0,
-                        ipa_scale: float = 0.8, lora: Optional[str] = None,
-                        lora_scale: float = 0.8, clip_skip: int = 1,
-                        matte: bool = True, matte_backend: str = "auto",
-                        denoise: int = 1, palette: int = 32, extractor: Any = None,
-                        repair: bool = True, repair_candidates: int = 2,
-                        vram_profile: str = "auto", model: str = "sd15",
-                        scope: str = "", tag: str = "wss") -> Dict[str, Any]:
-    """AnimateDiff 路线：一次生成整段序列，靠时序注意力保证帧间一致。
-
-    **为什么这条更好**（本项目同素材实测，8 帧 512²）：
-
-        逐帧多候选    19.2s / 4.5GB / silhouette_drift 0.152 / 逐帧形状会漂
-        AnimateDiff    7.4s / 13.1GB / silhouette_drift **0.097** / 8 帧完全一致
-
-    原因：AnimateDiff 的 motion module 插在 UNet 的 ResNet/Attention 之后，
-    提供**跨帧时序注意力**——生成第 N 帧时会参考相邻帧的潜在表示。
-    这是架构级的约束，而「固定 seed」只是概率层面的。
-
-    **显存**：motion module 要额外一份 UNet 激活，基线 8 帧 512² 是 9.86GB。
-    引擎层开了两项优化（VAE 逐帧解码 + IP-Adapter encoder 用完即退）后
-    降到 **5.78GB**，16 帧是 **7.10GB**（实测，详见 workflows/vramopt.py）。
-
-    **自适应降级**：显存不够时按 `vram_profile` 降分辨率（帧数是用户给的
-    动画内容，不能砍）。降分辨率是最后手段——SD1.5 在低分辨率出图偏糊，
-    所以 meta 里会记录实际用的分辨率和降级原因。
-    """
-    if preset is not None:
-        prompt = _lora_trigger(eng, prompt, lora)
-        prompt, negative = presets.build(prompt, negative, preset,
-                                    max_tokens=presets.CHUNK_BUDGET)
-    neg = negative or NEG_DEFAULT
-    if seed < 0:
-        seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
-
-    n = len(frames)
-
-    # **显存规划**：装不下就降分辨率（帧数不能砍——那是用户的动画内容）。
-    from . import vramopt
-    n, size, vram_note = vramopt.plan_generation(n, max(width, height),
-                                                  profile=vram_profile)
-    width = height = size
-
-    # AnimateDiff 是显存大户（8 帧 5.8GB、32 帧 14.2GB）：先清场再加载，
-    # 别让闲置的文生图管线占着 2.6GB。
-    eng.drop_others(("animatediff",))
-    eng.ensure_headroom(need_gb=6.0, keep=("animatediff",))
-    pipe = eng.animatediff_pipe(controlnet=pipe_cn, with_ipadapter=True, model=model)
-    eng.apply_lora(pipe, lora, lora_scale)
-    pipe.set_ip_adapter_scale(ipa_scale)
-
-    # 条件帧序列：每一帧的轮廓条件
-    conds: List[Image.Image] = []
-    used_modes: List[str] = []
-    for _c, _r, frame in frames:
-        cond, used_mode, _info = refcond.build_condition(
-            frame, mode=ref_mode, size=max(width, height), extractor=extractor,
-            matte_dir=eng.matte_dir)
-        used_modes.append(used_mode)
-        conds.append(cond.resize((width, height)))
-
-    char = refprep.prepare_reference(Image.open(char_image).convert("RGBA"), size=width)
-    char_ref_orig = Image.open(char_image).convert("RGBA")
-
-    torch.cuda.reset_peak_memory_stats()
-    dt = _timer()
-    text_kw, clip_used = _text_kwargs(pipe, prompt, neg, clip_skip, model)
-    out = _infer(eng, pipe, dict(
-        conditioning_frames=conds,
-        controlnet_conditioning_scale=cn_scale,
-        ip_adapter_image=char,
-        num_frames=n,
-        num_inference_steps=steps,
-        guidance_scale=cfg,
-        generator=torch.Generator("cuda").manual_seed(seed),
-        height=height, width=width,
-        **text_kw), shrink=False, label="wss-animatediff")
-    seconds = dt()
-    raw_frames = [f.convert("RGB") for f in out.frames[0]]
-
-    # 后处理与逐帧路线完全一致：抠图 → 按格采样 → 共享色板
-    matte_info: Dict[str, Any] = {}
-    cut: List[Image.Image] = []
-    for g in raw_frames:
-        if matte:
-            c = matte_mod.matte_auto(g, matte_backend, eng.matte_dir, info=matte_info)
-            cut.append(matte_mod.despeckle(c, denoise_iters=denoise))
-        else:
-            cut.append(g.convert("RGBA"))
-
-    cell_w = max(f.width for _c, _r, f in frames)
-    cell_h = max(f.height for _c, _r, f in frames)
-
-    # **残缺帧补提**：AnimateDiff 的时序注意力是双刃剑——它让整段一致，
-    # 但某一帧的轮廓条件弱时，模型会画残缺，而时序注意力还会把错误
-    # 传播到邻帧。实测 8 帧里第 2 帧主体只剩 128px（正常 ~675px）。
-    #
-    # 补救：逐帧量出不合格的帧，用**逐帧方案**单独重生成那一帧顶上。
-    # 混合策略——好的帧保留 AnimateDiff 的时序一致性，坏的帧单独修。
-    # 参考面积按**最终格子尺寸**算（64²），不是生成尺寸（512²）。
-    # 判定的量必须和最终产物同尺度——512² 下算出的比值与 64² 下的不一样，
-    # 会漏判残缺帧（实测帧 6 在 64² 下 area_ratio=0.57 明显残缺，
-    # 在 512² 下却算成 0.97 看着正常）。
-    ref_areas = [int(framescore.subject_mask(frames[i][2].convert("RGBA")).sum())
-                 for i in range(n)]
-    # 缩到格子尺寸后再判定，量纲与最终产物一致
-    _cw = max(f.width for _c, _r, f in frames)
-    _ch = max(f.height for _c, _r, f in frames)
-    _small = [c.convert("RGB").resize((_cw, _ch), Image.BOX) for c in cut]
-    _small_rgba = []
-    for c, sm in zip(cut, _small):
-        im = sm.convert("RGBA")
-        im.putalpha(c.getchannel("A").resize((_cw, _ch), Image.BILINEAR))
-        _small_rgba.append(pxf.binarize_alpha(im))
-    scores = [framescore.evaluate(_small_rgba[i], frames[i][2], char_ref_orig,
-                                  area_ref=ref_areas[i])
-              for i in range(n)]
-    bad = [i for i in range(n) if not scores[i]["passed"]]
-    # 补提产出要同时有「原尺寸版」（供后处理）与「格子尺寸版」（供评分）
-    repaired_full: Dict[int, Image.Image] = {}
-    repaired: List[int] = []
-    if bad and repair:
-        # **直接用 AnimateDiff 管线跑单帧**（num_frames=1）：零额外显存。
-        # 单独 pose_pipe() 会再加载一整套 UNet/VAE/ControlNet/IP-Adapter
-        # （实测多占 3.23GB），而两条管线的权重完全重复。
-        # AnimateDiff 管线 num_frames=1 时 motion module 的时序注意力
-        # 退化成恒等映射，效果就是普通单帧生成。
-        fpipe = pipe
-        for i in bad:
-            cand: List[Tuple[Image.Image, Dict[str, Any], Image.Image]] = []
-            for k in range(max(1, repair_candidates)):
-                # **必须跑 2 帧，不能跑 1 帧**：AnimateDiff 的 motion module
-                # 在 num_frames=1 时输出畸形（实测 area_ratio 5.5——
-                # 主体膨胀了 5 倍，剪影 IoU 只有 0.17）；2 帧时
-                # motion module 的时序注意力正常工作（IoU 0.81~0.85）。
-                # 取 2 帧里的第一帧。
-                out = fpipe(
-                    prompt=prompt, negative_prompt=neg,
-                    conditioning_frames=[conds[i], conds[i]],
-                    controlnet_conditioning_scale=cn_scale,
-                    ip_adapter_image=char,
-                    num_frames=2,
-                    num_inference_steps=steps, guidance_scale=cfg,
-                    generator=torch.Generator("cuda").manual_seed(
-                        seed + 7919 * (i + 1) + k),
-                    height=height, width=width,
-                )
-                img = out.frames[0][0]
-                c = (matte_mod.matte_auto(img, matte_backend, eng.matte_dir, info=matte_info)
-                     if matte else img.convert("RGBA"))
-                c = matte_mod.despeckle(c, denoise_iters=denoise)
-                # 候选同样缩到格子尺寸再评分（与上面的判定同尺度）
-                _cs = c.convert("RGB").resize((_cw, _ch), Image.BOX).convert("RGBA")
-                _cs.putalpha(c.getchannel("A").resize((_cw, _ch), Image.BILINEAR))
-                _cs = pxf.binarize_alpha(_cs)
-                ev = framescore.evaluate(_cs, frames[i][2], char_ref_orig,
-                                        area_ref=ref_areas[i])
-                cand.append((c, ev, _cs))
-            # 挑最好的（评分用的格子尺寸版）
-            best_full, ev, _idx = max(
-                cand, key=lambda t: (t[1]["passed"], t[1]["score"]))
-            best_small = next(t[2] for t in cand if t[0] is best_full)
-            # 补提后仍不合格就别换（换成一个更差的更糟）
-            if ev["passed"] or ev["score"] > scores[i]["score"]:
-                cut[i] = best_full          # 原尺寸版，供后处理
-                _small_rgba[i] = best_small  # 格子尺寸版，供评分
-                scores[i] = ev
-                repaired.append(i)
-            # 补提帧的身份可能没跟上（IP-Adapter 在不同 seed 下会漂，
-            # 实测补提出来的帧会变成白色）。修法：**用整段动画的共享色板
-            # 重新上色**——从所有帧（含好的帧）汇总出色板，再把补提帧按明度
-            # 映射回去。这样补提帧的配色就与其它帧统一了。
-            if repaired and repaired[-1] == i and palette:
-                pal = pxf.extract_palette(
-                    [c.convert("RGB") for c in cut if c is not cut[i]] or
-                    [c.convert("RGB") for c in cut], palette)
-                cut[i] = pxf.recolor_by_luma(cut[i], pal, keep_alpha=True)
-
-    # **别把 RGBA 转成 RGB 再送进去**：convert("RGB") 会把透明区变成纯黑，
-    # 而序列帧的透明区常常占 70%+ ——色板会被背景黑吃掉大半色位（实测主体
-    # 只分到 2 色）。refine_batch 内部会按 alpha 排除透明像素再提色板。
-    refined = pxf.refine_batch([c.convert("RGBA") for c in cut], grid_snap=False,
-                               target_size=(cell_w, cell_h), colors=palette)
-    outs: List[Image.Image] = []
-    for item, src in zip(refined["items"], cut):
-        im = item["image"].convert("RGBA")
-        im.putalpha(src.getchannel("A").resize((cell_w, cell_h), Image.BILINEAR))
-        outs.append(pxf.binarize_alpha(im))
-    aligned = pp.align_sequence(outs)
-
-    frame_scores = [framescore.evaluate(aligned[i], frames[i][2], char_ref_orig,
-                                       area_ref=ref_areas[i])
-                    for i in range(len(aligned))]
-    meta = {
-        "workflow": "wss", "scope": scope or "default",
-        "mode": "generate", "engine_mode": "animatediff",
-        "prompt": prompt, "negative": neg,
-        "char_image": str(char_image),
-        "grid": [cols, rows], "frames": len(aligned), "cell": [cell_w, cell_h],
-        "ref_mode": ref_mode, "ref_modes_used": sorted(set(used_modes)),
-        "model": model,
-        "width": width, "height": height,
-        "vram_profile": vram_profile, "vram_note": vram_note,
-        "steps": steps, "cfg": cfg, "seed": seed,
-        "cn_scale": cn_scale, "ipa_scale": ipa_scale,
-        "lora": lora, "lora_scale": lora_scale if lora else None,
-        "clip_skip": clip_used,
-        "matte": matte, "matte_used": matte_info.get("backend"),
-        "matte_fallback": matte_info.get("fallback"),
-        "palette": palette,
-        "palette_size": len(refined["palette"]) if palette else 0,
-        "frame_scores": frame_scores,
-        "gate_passed": sum(1 for s in frame_scores if s["passed"]),
-        "repaired_frames": repaired,
-        **framescore.sequence_consistency(aligned),
-        "seconds_total": round(seconds, 2),
-        "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
     }
     return _pack_sprite_frames(aligned, frames, cols, rows, cell_w, cell_h,
                               meta=meta, scope=scope, tag=tag)
@@ -2807,237 +1739,39 @@ def _qwen_poseswap(eng: Engine, *, pose_images: Sequence[Path], prompt: str,
 
 def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
              negative: Optional[str] = None, ref_image: Optional[str | Path] = None,
-             lora: Optional[str] = None, lora_scale: float = 0.8,
-             ipa_scale: float = 0.8, cn_scale: float = 1.0, steps: int = 25,
-             cfg: float = 7.0, seed: int = 20261027, width: int = 768, height: int = 768,
+             steps: int = 24, cfg: float = 4.0, seed: int = 20261027,
+             width: int = 768, height: int = 768,
              cols: int = 8, pixel: int = 0, palette: int = 0,
              matte: bool = False, matte_backend: str = "auto", denoise: int = 1,
              clean_iso: int = 1, export: Optional[str] = None,
-             controlnet: str = "openpose", preset: Optional[str] = None,
-             model: str = "sd15",
+             controlnet: str = "openpose", model: str = DEFAULT_MODEL,
              candidates: int = 1, gate: bool = True, gate_min_points: int = 8,
-             gate_retries: int = 2, gate_seed_step: int = 1000,
-             clip_skip: int = 1, scope: str = "", distill: str = "",
-             bg: str = "white",
-             anim_name: str = "walk", fps: int = 10, tag: str = "w4") -> Dict[str, Any]:
-    """逐帧生成 -> 锚点对齐 -> 打包 sprite sheet。固定 seed 是跨帧一致的前提。
+             gate_retries: int = 1, gate_seed_step: int = 1000,
+             bg: str = "white", scope: str = "",
+             anim_name: str = "walk", fps: int = 10, tag: str = "w4"
+             ) -> Dict[str, Any]:
+    """姿态序列（**近似实现**）：一批骨架图 → 逐帧生成 → 归一/对齐 → 打包精灵图。
 
-    preset 为 None 表示不套契约（保持向后兼容）；w4 + LoRA 时建议显式传，
-    否则武侠 LoRA 会自己画水墨背景与题字，抠图抠不净。
+    `controlnet` 这个参数名沿用了 SD 时代，Qwen 只用来区分条件图类型：
+    `openpose` → 骨架图（灰度化后当参考图），其它 → 轮廓/剪影。
+    也没有 `cn_scale` / `ipa_scale`——Qwen 是双图条件，没有强度旋钮。
 
-    `candidates` / `gate`（批量挑帧 + 质量闸门）：
-      每帧默认生成 `candidates` 个候选（种子 seed, seed+gate_seed_step, ...），
-      用 quality.evaluate 打分后取最好的一个；候选里没有一个过闸门（检出关节
-      数 < gate_min_points，或有边被画布切断）时，再补提最多 `gate_retries` 次。
-      闸门的代价是每帧多花几十毫秒（姿态模型跑 CPU），换来的是不再往精灵图里
-      塞没画出手脚、或者脚被裁掉的废帧——这类帧以前只能人眼一张张挑。
-      姿态模型缺失时闸门自动关闭并告警，此时 candidates 仍然生效（只按分数挑，
-      分数里只剩占比/贴边/漂移三项）。
+    ⚠️ 动作幅度偏保守：腿部常被角色参考图的站姿覆盖（PLAN §2.8 有实测表）。
     """
     eng.require(model, "poseswap")
-    # 输入可以是目录 / 通配 / 列表：前端只传目录，CLI 传列表，同一套规则
     pose_images = norm_pose_inputs(pose_images)
     if not pose_images:
         raise ValueError("没有可用的骨架帧（目录里没有 png/jpg，或通配没匹配到）")
-    # cols<=0 表示"按帧数自动排一行"。以前直接传给 pack_sheet 会在
-    # `(len+cols-1)//cols` 上 ZeroDivisionError——前端把 0 当"自动"传，必须兜住。
+    # cols<=0 表示"按帧数自动排一行"（前端把 0 当"自动"传，必须兜住）
     if cols <= 0:
         cols = min(len(pose_images), 8)
-    if eng.arch(model) == "qwen21":
-        # Qwen 不吃 SD 的 preset 契约后缀（那是 CLIP 的词表游戏），也不吃 LoRA
-        return _qwen_poseswap(
-            eng, pose_images=pose_images, prompt=prompt, negative=negative,
-            ref_image=ref_image, steps=steps, cfg=cfg, seed=seed,
-            width=width, height=height, cols=cols, pixel=pixel, palette=palette,
-            matte=matte, matte_backend=matte_backend, denoise=denoise,
-            clean_iso=clean_iso, bg=bg, export=export, controlnet=controlnet,
-            model=model, candidates=candidates, gate=gate,
-            gate_min_points=gate_min_points, gate_retries=gate_retries,
-            gate_seed_step=gate_seed_step, scope=scope,
-            anim_name=anim_name, fps=fps, tag=tag)
-    negative = negative or NEG_DEFAULT
-    if preset is not None:
-        prompt = _lora_trigger(eng, prompt, lora)
-        prompt, negative = presets.build(prompt, negative, preset,
-                                    max_tokens=presets.CHUNK_BUDGET)
-    # 预估值必须覆盖**实际要加载的量**，不能只留 2GB 余量：
-    # SD15 的 UNet+ControlNet+IP-Adapter+VAE 约 6~7GB、SDXL 约 13GB。
-    # 给 2GB 时，若 qwen 管线仍占着 16GB，检查会判"够用"而不驱逐，
-    # 硬挤进去后 _fit 降级到 cpu offload —— 每一步都在 CPU/GPU 间搬权重，
-    # 表现是「迁移中」转十几分钟、显存全满。
-    eng.ensure_headroom(need_gb=13.0 if eng.is_xl(model) else 7.0,
-                        keep=("pose",))
-    pipe = eng.pose_pipe(controlnet=controlnet, with_ipadapter=ref_image is not None,
-                        model=model)
-    if distill:
-        eng.apply_distill(pipe, distill)
-        d = eng.DISTILL_DEFAULTS.get(distill, {})
-        if steps == 25:
-            steps = d.get("steps", steps)
-        if abs(cfg - 7.0) < 1e-6:
-            cfg = d.get("cfg", cfg)
-    eng.apply_lora(pipe, lora, lora_scale)
-    if ref_image is not None:
-        pipe.set_ip_adapter_scale(ipa_scale)
-        ref = Image.open(ref_image).convert("RGB").resize((width, height))
-    else:
-        ref = None
-
-    extractor = None
-    if gate:
-        extractor = eng.pose_extractor()
-        if extractor is None:
-            print("[warn] 质量闸门不可用（姿态模型或 onnxruntime 缺失），本次只按分数挑帧")
-    candidates = max(1, int(candidates))
-    # **显存守卫**：显存打满时不会报 OOM，但耗时能翻 3 倍（实测 sdxl 1024² 批量 2：
-    # 23.98GB，5.0s → 17.47s）。所以宁可提前把候选数降下来——候选只影响成品率，
-    # 不影响能不能跑，是显存不足时第一个该让步的东西。
-    cand_note = ""
-    if candidates > 1:
-        from . import vramopt
-        k, cand_note = vramopt.plan_candidates(eng.arch(model), max(width, height),
-                                               candidates, eng.free_gb())
-        if k == 0:
-            raise ValueError(cand_note)
-        if k < candidates:
-            print(f"[warn] {cand_note}")
-            candidates = k
-        else:
-            cand_note = ""
-    # 闸门不可用时不留补提额度：没有判据的重提等于烧显卡
-    retries = max(0, int(gate_retries)) if extractor is not None else 0
-    attempts_max = candidates + retries
-    # 文本参数每帧都一样，算一次就够（长文本会被分段编码，别再逐帧重算）
-    text_kw, clip_used = _text_kwargs(pipe, prompt, negative, clip_skip, model)
-
-    def _run(pose: Image.Image, seeds: Sequence[int]) -> List[Image.Image]:
-        """一次前向出 N 个候选（N=len(seeds)）。
-
-        **为什么批处理**：24GB 卡上单图只占 2.6~3.4GB，全程 batch=1 等于把
-        20GB 显存闲着。候选本来是串行的多次前向，合成一次 batch 后实测
-        512² 下 n=2 快 **1.75×**、n=4 快 **1.40×**（RTX 4090 / 8 步）。
-
-        **代价（如实记录）**：不同 batch 尺寸会走到不同的 conv 内核，
-        结果与"逐个生成"相差 1~4 级灰度（实测 mean abs diff 2.3~4.1/255），
-        **不是逐像素一致**。同配置重跑仍然完全一致（有测试钉着），
-        所以可复现性没有被破坏——变的是"跨配置对比"。
-        """
-        kwargs: Dict[str, Any] = dict(
-            image=pose,
-            num_inference_steps=steps, guidance_scale=cfg,
-            controlnet_conditioning_scale=cn_scale,
-            width=width, height=height,
-        )
-        if len(seeds) > 1:
-            kwargs["num_images_per_prompt"] = len(seeds)
-            kwargs["generator"] = [torch.Generator("cuda").manual_seed(s) for s in seeds]
-        else:
-            kwargs["generator"] = torch.Generator("cuda").manual_seed(seeds[0])
-        kwargs.update(text_kw)          # 短文本=字符串，长文本=分段 embeds
-        if ref is not None:
-            kwargs["ip_adapter_image"] = ref
-        return _infer(eng, pipe, kwargs, label="w4").images
-
-    def _score(outs: Sequence[Image.Image]):
-        """后处理 + 取出评分用的图。**闸门用像素化之前的图**（见 _postprocess）。"""
-        got = []
-        for raw in outs:
-            info: Dict[str, Any] = {}
-            img, _edge, _subj = _postprocess(
-                raw, eng, matte=matte, matte_backend=matte_backend, denoise=denoise,
-                pixel=pixel, palette=palette, clean_iso=clean_iso, info=info)
-            # 抠图后端信息要带回 meta（每次 _postprocess 都会重置 pre_pixel）
-            for k in ("backend", "fallback"):
-                if k in info:
-                    matte_info[k] = info[k]
-            gate_img = info.pop("pre_pixel", None) or img
-            got.append((img.convert("RGBA"), gate_img.convert("RGBA")))
-        return got
-
-    matte_info: Dict[str, Any] = {}
-    frames: List[Image.Image] = []
-    per_frame: List[float] = []
-    frame_scores: List[Dict[str, Any]] = []
-    attempts_used = 0
-    prev_gate: Optional[Image.Image] = None
-    torch.cuda.reset_peak_memory_stats()
-    for pose_path in pose_images:
-        pose = Image.open(pose_path).convert("RGB").resize((width, height))
-        prev = prev_gate                # 只在抠图后有意义，未抠图 drift 恒 0
-        best: Optional[tuple[Dict[str, Any], Image.Image, Image.Image]] = None
-        spent = 0.0
-        used = 0
-        # 两轮：先凑候选，都没过闸门再用补提额度。每轮一次批调用。
-        for round_seeds in (list(range(candidates)),
-                            list(range(candidates, attempts_max))):
-            round_seeds = [seed + i * gate_seed_step for i in round_seeds]
-            if not round_seeds:
-                continue
-            dt = _timer()
-            try:
-                outs = _run(pose, round_seeds)
-            except torch.OutOfMemoryError:
-                # 批量撑爆显存就退回逐个跑：慢一点，但别让任务失败
-                print("[warn] 批量候选 OOM，退回逐个生成")
-                torch.cuda.empty_cache()
-                outs = [img for s in round_seeds for img in _run(pose, [s])]
-            spent += dt()
-            used += len(round_seeds)
-            for cand, gate_img in _score(outs):
-                ev = quality.evaluate(gate_img, extractor, prev=prev,
-                                      min_points=gate_min_points)
-                if best is None or ev["score"] > best[0]["score"]:
-                    best = (ev, cand, gate_img)
-            # 候选已凑齐且挑中的过闸门 → 不动用补提额度
-            if used >= candidates and (extractor is None or best[0]["passed"]):
-                break
-        ev, frame, prev_gate = best
-        ev = {**ev, "attempts": used}
-        frame_scores.append(ev)
-        attempts_used += used
-        per_frame.append(round(spent, 2))
-        frames.append(frame)
-
-    aligned = pp.align_sequence(frames)
-    passed = sum(1 for s in frame_scores if s["passed"])
-    meta = {
-        "workflow": "w4", "scope": scope or "default", "prompt": prompt, "negative": negative or NEG_DEFAULT,
-        "ref_image": str(ref_image) if ref_image else None, "lora": lora,
-        "ipa_scale": ipa_scale if ref else None, "cn_scale": cn_scale,
-        "steps": steps, "cfg": cfg, "seed": seed, "frames": len(frames), "matte": matte,
-        "matte_used": matte_info.get("backend"), "matte_fallback": matte_info.get("fallback"),
-        "model": model, "distill": distill or None,
-        "clip_skip": clip_used,
-        "candidates": candidates, "candidates_note": cand_note or None,
-        "gate": bool(gate and extractor is not None),
-        "gate_min_points": gate_min_points,
-        "gate_retries": retries,
-        "attempts": attempts_used,
-        "gate_passed": passed,
-        "frame_scores": frame_scores,
-        "per_frame_seconds": per_frame,
-        "seconds_total": round(sum(per_frame), 2),
-        "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
-    }
-    name = _stamp(tag)
-    out_dir = scope_dir(scope)
-    fdir = out_dir / f"{name}_frames"
-    fdir.mkdir(parents=True, exist_ok=True)
-    for i, f in enumerate(aligned):
-        f.save(fdir / f"frame_{i:04d}.png")
-    sheet_path = out_dir / f"{name}_sheet.png"
-    info = pp.pack_sheet(aligned, sheet_path, cols=cols, sidecar=meta)
-    info.update(meta)
-    # 与 _save / _pack_sprite_frames 保持一致：结果里必须有 meta 嵌套。
-    # 前端 fetchJob 只读 `result.meta`，w4 以前把字段平铺在顶层，于是
-    # 前端拿不到 seed / seconds / candidates——接 w4 节点时就是这样踩空的。
-    info["meta"] = meta
-    info["url"] = f"/files/{sheet_path.relative_to(ASSETS).as_posix()}"
-    info["frames_dir"] = str(fdir)
-    Path(out_dir / f"{name}_sheet.png.json").write_text(
-        json.dumps(info, ensure_ascii=False, indent=2), "utf-8")
-    if export:
-        info["export"] = anim_mod.export_godot(
-            aligned, export, anim_name=anim_name, fps=fps, loop=True, cols=cols)
-    assetdb.append_line(ASSETS / "index.jsonl", {"sheet": info["sheet"], **meta})
-    return info
+    return _qwen_poseswap(
+        eng, pose_images=pose_images, prompt=prompt, negative=negative,
+        ref_image=ref_image, steps=steps, cfg=cfg, seed=seed,
+        width=width, height=height, cols=cols, pixel=pixel, palette=palette,
+        matte=matte, matte_backend=matte_backend, denoise=denoise,
+        clean_iso=clean_iso, bg=bg, export=export, controlnet=controlnet,
+        model=model, candidates=candidates, gate=gate,
+        gate_min_points=gate_min_points, gate_retries=gate_retries,
+        gate_seed_step=gate_seed_step, scope=scope,
+        anim_name=anim_name, fps=fps, tag=tag)

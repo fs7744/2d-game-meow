@@ -20,14 +20,14 @@ warnings.filterwarnings("ignore")
 ROOT = Path(__file__).resolve().parent.parent
 
 REQUIRED = {
-    "checkpoints/sd15/unet": "SD1.5 底座 UNet",
-    "checkpoints/sd15/text_encoder": "SD1.5 文本编码器",
-    "checkpoints/sd15-inpaint/unet": "SD1.5 局部重绘 UNet（W3）",
-    "controlnet/control_v11p_sd15_openpose.pth": "ControlNet OpenPose（W4）",
-    "controlnet/control_v11p_sd15_canny.pth": "ControlNet Canny（备用结构锁定）",
-    "controlnet/control_v11f1e_sd15_tile.pth": "ControlNet Tile（高清放大）",
-    "ipadapter/models": "IP-Adapter SD1.5（角色身份锁定）",
-    "pose_keypoint/dwpose": "DWPose ONNX（骨骼提取）",
+    "checkpoints/qwen-image-2.1/transformer": "Qwen-Image-2.1 主干（DiT）",
+    "checkpoints/qwen-image-2.1/text_encoder": "Qwen3-VL 文本编码器",
+    "checkpoints/qwen-image-2.1/vae": "VAE（原生 RGBA）",
+    # fp8 缓存：没有也能跑（退回 bf16），但峰值显存会从 11.4GB 涨到 16.6GB
+    "checkpoints/qwen-image-2.1/transformer-fp8": "transformer fp8 缓存（建议）",
+    "checkpoints/qwen-image-2.1/text_encoder-fp8": "文本编码器 fp8 缓存（建议）",
+    "pose_keypoint/dwpose": "DWPose ONNX（骨骼提取 / 质量闸门）",
+    "matte": "抠图模型目录（isnet / birefnet）",
 }
 
 

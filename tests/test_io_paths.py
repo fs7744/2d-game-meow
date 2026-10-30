@@ -152,13 +152,6 @@ def test_check_env_reports_json():
     assert isinstance(data["missing"], list)
 
 
-def test_apply_lora_none_is_idempotent(eng):
-    pipe = eng.txt2img_pipe()
-    eng.apply_lora(pipe, None)
-    eng.apply_lora(pipe, None)
-    assert eng.stats()["lora"] is None
-
-
 def test_apply_lora_missing_file_raises(eng, tmp_path):
     pipe = eng.txt2img_pipe()
     with pytest.raises(Exception):
