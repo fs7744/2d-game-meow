@@ -85,7 +85,8 @@ def main() -> int:
     src = pose if args.canvas == "pose" else ref
     # 骨架是 2:3 竖版，取它的比例当画布能让骨架 1:1 填满；取角色图（官方做法）
     # 时骨架只能缩在中间，模型会把它理解成"小幅度动作"。
-    scale = 1.5 if args.canvas == "pose" else 1.0
+    # 骨架已经把人物撑满时不要再放大（768² 的骨架 ×1.5 = 1152²，白费显存）
+    scale = max(1.0, 768 / max(src.size)) if args.canvas == "pose" else 1.0
     w = max(256, int(src.size[0] * scale) // 16 * 16)
     h = max(256, int(src.size[1] * scale) // 16 * 16)
 
