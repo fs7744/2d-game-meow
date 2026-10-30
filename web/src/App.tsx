@@ -823,10 +823,10 @@ export default function App() {
           { model: mdl, matteBackend, scope: currentId }, src)
         jobId = r.job_id
       } else if (node.kind === 'outfit' || node.kind === 'faceswap') {
-        // 换装/换脸：图1（基底）+ 图2（服装/脸）
+        // 换装/换脸：图1（基底）+ 图2..N（服装/脸，可多张）
         const basePath = sourcePathOf(node)
-        const refPath = charPathOf(node)
-        if (!basePath || !refPath) {
+        const refPaths = charPathsOf(node)
+        if (!basePath || refPaths.length === 0) {
           const isOutfit = node.kind === 'outfit'
           patchNode(id, { job: { id: 'error', status: 'failed',
             error: !basePath
@@ -836,9 +836,11 @@ export default function App() {
         }
         const r = node.kind === 'outfit'
           ? await submitOutfitSwap(node.params,
-            { model: mdl, matteBackend, scope: currentId }, basePath, refPath)
+            { model: mdl, matteBackend, scope: currentId },
+            basePath, refPaths[0], refPaths)
           : await submitFaceSwap(node.params,
-            { model: mdl, matteBackend, scope: currentId }, basePath, refPath)
+            { model: mdl, matteBackend, scope: currentId },
+            basePath, refPaths[0], refPaths)
         jobId = r.job_id
       } else if (node.kind === 'poseclone') {
         const posePath = sourcePathOf(node)
@@ -891,7 +893,8 @@ export default function App() {
           return
         }
         const r = await submitSpriteSwap(
-          node.params, { model: mdl, matteBackend, scope: currentId }, sheetPath, charPath)
+          node.params, { model: mdl, matteBackend, scope: currentId },
+          sheetPath, charPath, charPathsOf(node), node.params.ssEngine)
         jobId = r.job_id
       } else if (node.kind === 'poseswap') {
         // W4 的输入是一组骨架帧（目录），不是单张源图——所以不走 init 那条路

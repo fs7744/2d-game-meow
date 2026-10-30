@@ -851,6 +851,48 @@ epoch 51（ai-toolkit 0.13.19）——**它就是 V2**。
 
 512×768 硬拉到 768×768 会把腿压短，姿态同样只跟一半。
 
+#### ⚠️ ComfyUI LoRA 的 `img_mlp.gate_up` 会被**静默丢掉**（2026-10-31 修）
+
+ComfyUI 把 SwiGLU 的 gate 与 up 合成**一个** Linear：
+
+```python
+gate, up = self.gate_up(x).chunk(2, dim=-1)        # 权重 [2*intermediate, hidden]
+```
+
+diffusers 是**两个独立的** Linear（`QwenImage21SwiGLUFeedForward`）：
+`gate_layer` / `proj` / `out`，各 `[intermediate, hidden]`。键名对不上，
+`load_lora_weights` 只打一句 `unexpected keys found in the model` 就继续了。
+
+实测本机 **三个 LoRA 各丢 64/384 = 17% 的权重**：
+
+| LoRA | gate_up 键数 |
+|---|---|
+| `vnccs_pose`（V1/V2） | 64 |
+| `qwen21_anyangle` | 64 |
+| `qwen21_outpaint` | 64 |
+| `qwen21_lightning` | 0（它只 LoRA 了 attention） |
+
+拆法是**精确**的，不是近似：`up`（B，`[2*intermediate, rank]`）按行对半分，
+前半给 `gate_layer`、后半给 `proj`；`down`（A）两边**共用**，clone 成两份
+（safetensors 不允许两个键指向同一块内存）。`tools/convert_lora.py` 已支持，
+对已转换过的文件重跑一遍即可补回（它同时接受 `diffusion_model.` 与
+`transformer.` 两种前缀）。修完 384 → 448 个张量，日志里 `unexpected keys` 归零。
+
+#### 透明底：VNCCS 下**可用**（2026-10-31）
+
+之前"VNCCC 透明底会被控制信号干扰"是错的——那是 ControlNet 路线的问题，
+连坐到了 VNCCS。实测（`tools/verify_vnccs_alpha.py`，768²，25 步）：
+
+| 指标 | 数值 |
+|---|---|
+| 不透明占比 | 15.8% |
+| **主体占比** | **16.6%**（产线判据 5~60%） |
+| 半透明占比 | 2.1%（干净，不是雾） |
+| 全透明占比 | 83.3% |
+
+判据要看这四个数，**不要看像素差**："空白 vs 白底" 的平均差可能很大也可能很小，
+完全不反映内容是否存在（ControlNet 那次就被它骗过一次）。
+
 ### 2.16 生态侦察：HF 上 Qwen-Image-2.1 的可用资产
 
 之前记的「HF 下载被代理挡住」**不成立**：本机有可用代理
@@ -886,6 +928,34 @@ curl -x http://127.0.0.1:7897 -L -o out.safetensors \
 用 `lora_A/lora_B` 命名；diffusers 用 `transformer.` 前缀 + `lora.down/up`。
 两者**不能直接互换**，需要转换脚本（键名映射 + A/B 顺序）。
 只有 `lightx2v` 那个是 diffusers 原生格式，可以直接挂。
+
+除了前缀，**还有一个更隐蔽的**：ComfyUI 的 `img_mlp.gate_up` 是合并版
+SwiGLU，diffusers 里没有这个模块名，这部分权重会被**静默丢弃**（本机三个
+LoRA 各丢 17%）。详见 §2.16b 末尾那一节。
+
+### 2.16c 序列帧替换（wss）也走 VNCCS（2026-10-31）
+
+逐帧替换的老痛点是**帧间角色会漂**：8 帧跑下来可能换三次脸、换两套衣服，
+因为每帧都是独立采样、没有任何跨帧的约束。VNCCS 的 LoRA + 固定指令把
+"保留图 2 的角色"这件事变成了模型的显式任务，配上**同一个 seed 步进**，
+实测 4 帧（512²，25 步）全都是同一个角色的同一套服装。
+
+`gen.sprite_swap(..., engine="wvnccs")` 与旧路线的差别：
+
+| | `wpc`（旧） | `wvnccs` |
+|---|---|---|
+| 图序 | [角色, 轮廓/骨架] | **[骨架, 角色]** |
+| 指令 | 自写"The first image is..." | 官方 `replace the pose of <image 2>...` |
+| 条件图 | 灰度化 | **不灰度化**（LoRA 按彩色骨架训） |
+| 角色图 | `prepare_reference` 留白 12% | **`_vnccs_fit` 原图贴入** |
+| 步数 | 用默认值 | **下限 20**（LoRA 非少步蒸馏） |
+| LoRA 挂载 | 无 | **整段循环外挂一次**（逐帧 load/unload 每帧多读 152MB） |
+
+实测（512²，4 帧，25 步）：总 49.6s、单帧 10.8~16.2s、闸门 3/4、峰值 15.4GB。
+第一步慢是因为 LoRA 加载 + 首帧预热。
+
+**前端**：序列帧节点原来的「引擎」下拉写的是 AnimateDiff（§4.4，早已随 SD
+删除）和「显存档位」，都是死选项。已换成 VNCCS / 旧版，默认 VNCCS。
 
 ## 3. 之前验证过的结论（保留，仍然是事实）
 

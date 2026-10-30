@@ -54,13 +54,53 @@ FACE_PROMPT = (
 )
 
 
-def swap_prompt(kind: str, extra: str = "") -> str:
+def _ref_slots(n: int) -> str:
+    """把「图 2 起」的槽位写成一句自然语言：`<image2>`、`<image2> and <image3>`…"""
+    tags = [f"<image{i}>" for i in range(2, n + 2)]
+    if len(tags) == 1:
+        return tags[0]
+    return ", ".join(tags[:-1]) + " and " + tags[-1]
+
+
+def multi_swap_prompt(kind: str, n_refs: int) -> str:
+    """多张参考图时的指令。
+
+    为什么要单独写而不是简单拼：多给几张不说明白，模型会以为要**换几张不同的
+    衣服**（实测会出现上下身拼装）。所以显式说"这些是同一件服装/同一个人的
+    不同角度，请合成为一个"。
+    """
+    slots = _ref_slots(n_refs)
+    if kind == "outfit":
+        return (
+            f"Dress the character from <image1> in the outfit shown in {slots}. "
+            f"All of {slots} are the SAME garment seen from different angles or "
+            f"at different levels of detail — combine them into one consistent "
+            f"outfit, do not blend several different costumes. "
+            f"Keep the identity, face, hairstyle, body pose and background of "
+            f"<image1> unchanged. Output a single coherent image."
+        )
+    return (
+        f"Replace the head and face of the person in <image1> with the person "
+        f"shown in {slots}. All of {slots} are the SAME person from different "
+        f"angles — combine them into one consistent face, do not blend several "
+        f"different people. Keep the pose, body, clothing, camera framing and "
+        f"background of <image1> unchanged. Output a single coherent image."
+    )
+
+
+def swap_prompt(kind: str, extra: str = "", n_refs: int = 1) -> str:
     """组指令：内置的"谁管什么"模板 + 用户的补充要求。
 
     内置部分不要删——它是这个功能能用的原因。用户的补充接在后面，
     用来加细节（比如"外套改成皮夹克"）。
+
+    `n_refs` 是参考图张数（不含基底图）。为 1 时用最初的双图模板，
+    大于 1 时换成多图模板（显式声明"同一件服装/同一个人"）。
     """
-    base = OUTFIT_PROMPT if kind == "outfit" else FACE_PROMPT
+    if n_refs > 1:
+        base = multi_swap_prompt(kind, n_refs)
+    else:
+        base = OUTFIT_PROMPT if kind == "outfit" else FACE_PROMPT
     extra = (extra or "").strip()
     return f"{base} {extra}" if extra else base
 

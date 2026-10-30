@@ -149,7 +149,15 @@ export type GenParams = {
   ssPalette: number       // 序列帧替换：共享色板色数
   ssCandidates: number    // 序列帧替换：每帧生成几个候选再挑最好的
   ssGateRetries: number   // 序列帧替换：候选都不合格时补提几次
-  ssEngineMode: EngineMode // 序列帧替换：AnimateDiff 时序一致性 / 逐帧多候选
+  ssEngineMode: EngineMode // 序列帧替换：**已废弃**（AnimateDiff 随 SD 一起删了）
+  /** 序列帧替换的逐帧引擎：
+   *  - `wpc`    角色图 + 轮廓/骨架 + 自写指令（旧路线）
+   *  - `wvnccs` 逐帧挂 VNCCS LoRA、官方固定指令、条件图不灰度化。
+   *             **帧间角色一致性明显更好**（8 帧不会换脸换衣服），单帧更慢。
+   */
+  ssEngine?: 'wpc' | 'wvnccs'
+  /** 序列帧替换：VNCCS LoRA 权重（只在该引擎下生效） */
+  ssLoraScale?: number
   /**
    * 姿态序列（W4）：骨架帧**目录**。可以填目录，也可以填通配
    * （assets/_pose_walk_*.png）。后端展开并自然排序——帧名 frame_2 < frame_10，

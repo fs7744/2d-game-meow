@@ -1032,16 +1032,25 @@ def ai_repaint(eng: Engine, *, image: str | Path, mask: str | Path, prompt: str,
 # ---------------- WOUTFIT / WFACE 换装与换脸 ----------------
 
 def _swap_impl(eng: Engine, *, kind: str, base_image: str | Path,
-               ref_image: str | Path, prompt: str, negative: Optional[str],
-               width: int, height: int, steps: int, cfg: float, seed: int,
-               model: str, scope: str, tag: str) -> Dict[str, Any]:
-    """换装 / 换脸共用实现：两张图进同一个 vision context + 结构化指令。
+               ref_image: Optional[str | Path] = None,
+               ref_images: Optional[Sequence[str]] = None,
+               prompt: str = "", negative: Optional[str] = None,
+               width: int = 0, height: int = 0, steps: int = 16,
+               cfg: float = 1.0, seed: int = -1,
+               model: str = DEFAULT_MODEL,
+               scope: str = "", tag: str = "") -> Dict[str, Any]:
+    """换装 / 换脸共用实现：多张图进同一个 vision context + 结构化指令。
 
     **不需要任何专用权重**——Qwen 的多图条件会自己分配"谁是身份、谁是服装"，
     只要指令里写清楚每张图负责什么（`swap.OUTFIT_PROMPT` / `FACE_PROMPT`）。
+
+    参考图可以给多张（`ref_images`）：同一件服装的正面/背面/细节，或同一个人
+    的不同角度，都会让最终结果更稳。张数变化时指令模板也跟着换（`n_refs`），
+    否则模型会以为要换好几套衣服。
     """
+    ref_paths = _ref_image_list(ref_image, ref_images)
     base = Image.open(base_image).convert("RGBA")
-    ref = Image.open(ref_image).convert("RGBA")
+    refs = [Image.open(p).convert("RGBA") for p in ref_paths]
     if seed < 0:
         seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
 
@@ -1051,11 +1060,15 @@ def _swap_impl(eng: Engine, *, kind: str, base_image: str | Path,
 
     torch.cuda.reset_peak_memory_stats()
     dt = _timer()
-    full = swap_mod.swap_prompt(kind, prompt)
+    full = swap_mod.swap_prompt(kind, prompt, n_refs=len(refs))
     img = _qwen_call(
         eng, prompt=full, negative=(negative or QWEN_EDIT_NEG),
         width=w, height=h, steps=steps, seed=seed,
-        ref_image=[base, ref], model=model, label=tag, cfg=cfg)
+        # 图 1 = 基底，图 2..N = 参考（服装 / 人脸）
+        ref_image=[base, *refs], model=model, label=tag, cfg=cfg,
+        # 条件图的编码尺度要跟输出一致，否则默认 1024²：参考图的细节密度
+        # 比目标大一档，图 token 多 78%（见 _qwen_call 的第 3 条）
+        output_resolution=max(w, h))
     img = img.convert("RGBA")
     if img.size != (w, h):
         img = img.resize((w, h), Image.LANCZOS)
@@ -1064,7 +1077,8 @@ def _swap_impl(eng: Engine, *, kind: str, base_image: str | Path,
     return _save(img, _stamp(tag), wf, {
         "workflow": wf, "kind": kind,
         "prompt": full, "prompt_body": prompt, "negative": negative or QWEN_EDIT_NEG,
-        "base_image": str(base_image), "ref_image": str(ref_image),
+        "base_image": str(base_image), "ref_image": str(ref_paths[0]),
+        "ref_images": ref_paths, "n_refs": len(ref_paths),
         "width": w, "height": h, "steps": _eff_steps(eng, steps),
         "cfg": cfg, "seed": seed, "model": model,
         "backend": "qwen-multiref", "approx": False,
@@ -1074,7 +1088,9 @@ def _swap_impl(eng: Engine, *, kind: str, base_image: str | Path,
     }, scope=scope)
 
 
-def outfit_swap(eng: Engine, *, image: str | Path, outfit: str | Path,
+def outfit_swap(eng: Engine, *, image: str | Path,
+                outfit: Optional[str | Path] = None,
+                outfits: Optional[Sequence[str]] = None,
                 prompt: str = "", negative: Optional[str] = None,
                 width: int = 0, height: int = 0, steps: int = 16,
                 cfg: float = 1.0, seed: int = -1, model: str = DEFAULT_MODEL,
@@ -1083,15 +1099,20 @@ def outfit_swap(eng: Engine, *, image: str | Path, outfit: str | Path,
 
     保留图 1 的身份、姿势、背景；服装的剪裁/颜色/材质来自图 2。
     游戏素材用途：同一角色出不同装备/皮肤（商店套装、等级外观）。
+
+    `outfits` 可以给多张（同一套服装的正面/背面/细节），服装细节会更准。
     """
     eng.require(model, "outfit_swap")
     return _swap_impl(eng, kind="outfit", base_image=image, ref_image=outfit,
+                      ref_images=outfits,
                       prompt=prompt, negative=negative, width=width,
                       height=height, steps=steps, cfg=cfg, seed=seed,
                       model=model, scope=scope, tag=tag)
 
 
-def face_swap(eng: Engine, *, image: str | Path, face: str | Path,
+def face_swap(eng: Engine, *, image: str | Path,
+              face: Optional[str | Path] = None,
+              faces: Optional[Sequence[str]] = None,
               prompt: str = "", negative: Optional[str] = None,
               width: int = 0, height: int = 0, steps: int = 16,
               cfg: float = 1.0, seed: int = -1, model: str = DEFAULT_MODEL,
@@ -1100,9 +1121,12 @@ def face_swap(eng: Engine, *, image: str | Path, face: str | Path,
 
     保留图 1 的姿势、服装、场景；面部特征/发型/胡须来自图 2。
     游戏素材用途：同一套动作换主角脸（换主角、捏脸结果落图）。
+
+    `faces` 可以给多张（同一人的正脸/侧脸），五官会更稳定。
     """
     eng.require(model, "face_swap")
     return _swap_impl(eng, kind="face", base_image=image, ref_image=face,
+                      ref_images=faces,
                       prompt=prompt, negative=negative, width=width,
                       height=height, steps=steps, cfg=cfg, seed=seed,
                       model=model, scope=scope, tag=tag)
@@ -1431,7 +1455,8 @@ def _qwen_pose_clone(eng: Engine, *, pose_image: str | Path,
     out = _qwen_call(
         eng, prompt=instr, negative=negative or QWEN_NEG,
         ref_image=[*chars, cond], width=width, height=height, steps=steps,
-        cfg=cfg, seed=seed, model=model, label="wpc")
+        cfg=cfg, seed=seed, model=model, label="wpc",
+        output_resolution=max(width, height))
     seconds = dt()
     width, height = out.size
     raw = out.copy() if (matte or pixel > 1 or palette) else None
@@ -1655,13 +1680,16 @@ def vnccs_pose(eng: Engine, *, pose_image: str | Path,
 # ---------------- WSS 序列帧角色替换 ----------------
 
 def _qwen_sprite_swap(eng: Engine, *, frames: Sequence[tuple],
-                      sheet_image: str | Path, char_image: str | Path,
+                      sheet_image: str | Path,
+                      char_image: Optional[str | Path] = None,
+                      char_images: Optional[Sequence[str]] = None,
                       cols: int, rows: int, prompt: str, negative: Optional[str],
                       width: int, height: int, steps: int, cfg: float, seed: int,
                       ref_mode: str, model: str, matte: bool, matte_backend: str,
                       denoise: int, palette: int, keep_alpha: bool,
                       candidates: int, bg: str, scope: str,
-                      tag: str) -> Dict[str, Any]:
+                      tag: str, engine: str = "wpc",
+                      lora_scale: float = 1.0) -> Dict[str, Any]:
     """Qwen 版序列帧替换（WSS）：逐帧「角色图 + 轮廓/骨架」双图条件。
 
     与 SD 那条路的差别只有一处但很关键：**没有 ControlNet 硬约束**。
@@ -1672,16 +1700,35 @@ def _qwen_sprite_swap(eng: Engine, *, frames: Sequence[tuple],
     **成本**：单帧 35s 级别，所以 candidates 默认 1（SD 那边是 2）。
     4 帧动画 = 约 2.5 分钟；8 帧 = 5 分钟。这是「Qwen 换 SD」绕不开的代价。
     """
-    char = refprep.prepare_reference(Image.open(char_image).convert("RGBA"),
-                                     size=max(width, height))
-    char_orig = Image.open(char_image).convert("RGBA")
+    use_vnccs = (engine or "wpc").lower() in ("vnccs", "wvnccs")
+    char_paths = _ref_image_list(char_image, char_images)
+    char_orig = Image.open(char_paths[0]).convert("RGBA")
+    if use_vnccs:
+        # VNCCS 走"原图等比贴入"而不是 `prepare_reference` 的留白版本：
+        # 它的 LoRA 是按「骨架 / 角色图直接拼」训的，主体在画面里的占比
+        # 与训练分布一致才跟得准（留白 12% 会让角色显得比骨架小一号）。
+        chars = [_vnccs_fit(Image.open(p).convert("RGBA"), width, height)
+                 for p in char_paths]
+        if steps < 20:
+            # VNCCS LoRA 是按完整采样训的，不是少步蒸馏；步数不够时姿态和
+            # 细节会一起崩（实测参考值 25）。
+            steps = 20
+    else:
+        chars = [refprep.prepare_reference(Image.open(p).convert("RGBA"),
+                                           size=max(width, height))
+                 for p in char_paths]
     extractor = eng.pose_extractor()
     sem = (prompt or "").strip()
-    instr = ("The first image is the character reference: keep the same face, "
-             "hairstyle, outfit and colors. The second image is the target pose "
-             "(a skeleton or a silhouette). Redraw the same character in exactly "
-             "that pose, full body, centered, " + _qwen_backdrop(bg) + "."
-             + QWEN_FRAME_RULES)
+    if use_vnccs:
+        # 官方固定指令（图 1 骨架 / 图 2 角色）直接可用——wss 的语义与它一致。
+        # 只追加背景与帧规则的尾部约束，不重写主体指令。
+        instr = (f"{_VNCCS_TEMPLATE} {_qwen_backdrop(bg)}." + QWEN_FRAME_RULES)
+    else:
+        instr = ("The first image is the character reference: keep the same face, "
+                 "hairstyle, outfit and colors. The second image is the target pose "
+                 "(a skeleton or a silhouette). Redraw the same character in exactly "
+                 "that pose, full body, centered, " + _qwen_backdrop(bg) + "."
+                 + QWEN_FRAME_RULES)
     if sem:
         instr = f"{instr} {sem}"
     neg = (negative or "").strip() or QWEN_FRAME_NEG
@@ -1698,44 +1745,71 @@ def _qwen_sprite_swap(eng: Engine, *, frames: Sequence[tuple],
     matte_info: Dict[str, Any] = {}
     torch.cuda.reset_peak_memory_stats()
 
-    for _c, _r, frame in frames:
-        cond, used_mode, _info = refcond.build_condition(
-            frame, mode=ref_mode, size=max(width, height), extractor=extractor,
-            matte_dir=eng.matte_dir)
-        used_modes.append(used_mode)
-        # 灰度化：彩色骨架会把颜色抄进成品（见 _qwen_cond_image）
-        cond = _qwen_cond_image(cond.resize((width, height)))
-        ref_area = int(framescore.subject_mask(frame.convert("RGBA")).sum())
-        prev = generated[-1] if generated else None
-        dt = _timer()
+    # VNCCS 的 LoRA **在整段循环外挂一次**：逐帧反复 load/unload 每帧都要
+    # 重读 152MB 权重，8 帧就会多花一分多钟。
+    vnccs_pipe = None
+    if use_vnccs:
+        vnccs_pipe = eng.txt2img_pipe(model)
+        lora_file = eng.lora_dir() / f"{eng.VNCCS_LORA}.safetensors"
+        if not lora_file.is_file():
+            raise FileNotFoundError(
+                f"缺 VNCCS LoRA：{lora_file}\n"
+                f"下载 MIUProject/VNCCS_PoseStudio_QI2.1 的 V1，用 "
+                f"tools/convert_lora.py 转成 diffusers 格式后放到 models/lora/")
+        eng.apply_loras(vnccs_pipe, [{"name": eng.VNCCS_LORA,
+                                      "scale": float(lora_scale)}])
+    try:
+        for _c, _r, frame in frames:
+            cond, used_mode, _info = refcond.build_condition(
+                frame, mode=ref_mode, size=max(width, height),
+                extractor=extractor, matte_dir=eng.matte_dir)
+            used_modes.append(used_mode)
+            if use_vnccs:
+                # **不灰度化**：VNCCS LoRA 是按 PoseStudio 的彩色骨架训的，
+                # 灰度化会掉遵循度。等比贴入、不拉伸（拉伸会把腿压短）。
+                cond = _vnccs_fit(cond.convert("RGB"), width, height)
+            else:
+                # 灰度化：彩色骨架会把颜色抄进成品（见 _qwen_cond_image）
+                cond = _qwen_cond_image(cond.resize((width, height)))
+            ref_area = int(framescore.subject_mask(frame.convert("RGBA")).sum())
+            prev = generated[-1] if generated else None
+            dt = _timer()
 
-        def _gen(k: int) -> Tuple[Image.Image, Dict[str, Any]]:
-            raw = _qwen_call(
-                eng, prompt=instr, negative=neg, ref_image=[char, cond],
-                width=width, height=height, steps=steps, cfg=cfg,
-                seed=seed + k * 1000, model=model, label="wss")
-            info: Dict[str, Any] = {}
-            cut, _edge, _subj = _postprocess(
-                raw, eng, matte=matte, matte_backend=matte_backend,
-                denoise=denoise, pixel=0, palette=0, clean_iso=0, info=info)
-            for kk in ("backend", "fallback"):
-                if kk in info:
-                    matte_info[kk] = info[kk]
-            return cut, {}
+            def _gen(k: int, _cond=cond) -> Tuple[Image.Image, Dict[str, Any]]:
+                raw = _qwen_call(
+                    eng, prompt=instr, negative=neg,
+                    # 图序按引擎反转：VNCCS 是 [骨架, 角色]，旧路线是 [角色, 骨架]
+                    ref_image=([_cond, *chars] if use_vnccs
+                               else [*chars, _cond]),
+                    width=width, height=height, steps=steps, cfg=cfg,
+                    seed=seed + k * 1000, model=model, label="wss",
+                    output_resolution=max(width, height),
+                    fast_lora=not use_vnccs)   # LoRA 槽位归 VNCCS
+                info: Dict[str, Any] = {}
+                cut, _edge, _subj = _postprocess(
+                    raw, eng, matte=matte, matte_backend=matte_backend,
+                    denoise=denoise, pixel=0, palette=0, clean_iso=0, info=info)
+                for kk in ("backend", "fallback"):
+                    if kk in info:
+                        matte_info[kk] = info[kk]
+                return cut, {}
 
-        def _score(cut: Image.Image, _info: Dict[str, Any]) -> Dict[str, Any]:
-            return framescore.evaluate(cut, frame, char_orig, prev=prev,
-                                       area_ref=ref_area)
+            def _score(cut: Image.Image, _info: Dict[str, Any]) -> Dict[str, Any]:
+                return framescore.evaluate(cut, frame, char_orig, prev=prev,
+                                           area_ref=ref_area)
 
-        best_img, best_ev, _finfo, used, _nh = gate_mod.run_candidates(
-            generate=_gen, score=_score,
-            policy=gate_mod.GatePolicy(
-                candidates=candidates, retries=0, seed_step=1000,
-                stop_on_first_pass=True))
-        frame_scores.append({**best_ev, "attempts": used})
-        attempts_used += used
-        per_frame.append(dt())
-        generated.append(best_img)
+            best_img, best_ev, _finfo, used, _nh = gate_mod.run_candidates(
+                generate=_gen, score=_score,
+                policy=gate_mod.GatePolicy(
+                    candidates=candidates, retries=0, seed_step=1000,
+                    stop_on_first_pass=True))
+            frame_scores.append({**best_ev, "attempts": used})
+            attempts_used += used
+            per_frame.append(dt())
+            generated.append(best_img)
+    finally:
+        if vnccs_pipe is not None:
+            eng.unload_loras(vnccs_pipe)
 
     cut: List[Image.Image] = list(generated)
     if keep_alpha:
@@ -1773,13 +1847,17 @@ def _qwen_sprite_swap(eng: Engine, *, frames: Sequence[tuple],
         "mode": "generate", "engine_mode": "frame",
         "backend": "qwen-multiref", "approx": True, "bg": bg,
         "prompt": instr, "prompt_body": sem or None, "negative": neg,
-        "sheet_image": str(sheet_image), "char_image": str(char_image),
+        "sheet_image": str(sheet_image), "char_image": str(char_paths[0]),
+        "char_images": char_paths, "n_chars": len(char_paths),
         "grid": [cols, rows], "frames": len(aligned),
         "cell": [cell_w, cell_h],
         "ref_mode": ref_mode, "ref_modes_used": sorted(set(used_modes)),
         "model": model, "width": width, "height": height,
         "steps": _eff_steps(eng, steps), **_fast_meta(eng), "cfg": cfg, "seed": seed,
-        "cn_scale": None, "ipa_scale": None, "lora": None, "clip_skip": None,
+        "engine": "vnccs" if use_vnccs else "wpc",
+        "lora": (eng.VNCCS_LORA if use_vnccs else None),
+        "lora_scale": (float(lora_scale) if use_vnccs else None),
+        "cn_scale": None, "ipa_scale": None, "clip_skip": None,
         "matte": matte, "matte_used": matte_info.get("backend"),
         "matte_fallback": matte_info.get("fallback"),
         "keep_alpha": keep_alpha,
@@ -1798,7 +1876,9 @@ def _qwen_sprite_swap(eng: Engine, *, frames: Sequence[tuple],
                                meta=meta, scope=scope, tag=tag)
 
 
-def sprite_swap(eng: Engine, *, sheet_image: str | Path, char_image: str | Path,
+def sprite_swap(eng: Engine, *, sheet_image: str | Path,
+                char_image: Optional[str | Path] = None,
+                char_images: Optional[Sequence[str]] = None,
                 prompt: str = "", negative: Optional[str] = None,
                 cols: int = 0, rows: int = 0,
                 width: int = 768, height: int = 768,
@@ -1812,12 +1892,18 @@ def sprite_swap(eng: Engine, *, sheet_image: str | Path, char_image: str | Path,
                 candidates: int = 1, gate_retries: int = 1,
                 gate_seed_step: int = 1000,
                 vram_profile: str = "auto", bg: str = "white",
+                engine: str = "wpc", lora_scale: float = 1.0,
                 scope: str = "", tag: str = "wss") -> Dict[str, Any]:
     """序列帧角色替换（**近似实现**）：逐帧双图条件 → 缩放回格子 → 共享色板 → 打包。
 
     `mode`：`generate`（跑模型，逐帧） / `recolor`（确定性换色，毫秒级、帧间零漂移）。
     `engine_mode` 是 SD 时代的 AnimateDiff 开关，Qwen 下恒为逐帧（参数保留兼容）。
     `bg`：白底 / 深色底——白毛角色用白底会被抠图吃掉脸和腿，换 dark 更稳。
+    `engine`：
+      - `wpc`（默认，旧路线）—— 角色图 + 轮廓/骨架双图 + 自写指令
+      - `wvnccs` —— 逐帧挂 VNCCS LoRA，图序 [骨架, 角色]、官方固定指令、
+        条件图不灰度化、步数下限 20。**帧间角色一致性明显更好**（同一角色
+        跨 8 帧不会换脸换衣服），代价是单帧更慢（完整 25 步 + LoRA）。
     """
     if mode != "recolor":
         eng.require(model, "sprite_swap")
@@ -1839,11 +1925,13 @@ def sprite_swap(eng: Engine, *, sheet_image: str | Path, char_image: str | Path,
                                scope=scope, tag=tag, prompt=prompt)
     return _qwen_sprite_swap(
         eng, frames=frames, sheet_image=sheet_image, char_image=char_image,
+        char_images=char_images,
         cols=cols, rows=rows, prompt=prompt, negative=negative,
         width=width, height=height, steps=steps, cfg=cfg, seed=seed,
         ref_mode=ref_mode, model=model, matte=matte,
         matte_backend=matte_backend, denoise=denoise, palette=palette,
-        keep_alpha=keep_alpha, candidates=1, bg=bg, scope=scope, tag=tag)
+        keep_alpha=keep_alpha, candidates=1, bg=bg, scope=scope, tag=tag,
+        engine=engine, lora_scale=lora_scale)
 
 
 def _pack_sprite_frames(aligned: Sequence[Image.Image], frames: Sequence[tuple],

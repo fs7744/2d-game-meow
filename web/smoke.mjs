@@ -1328,14 +1328,14 @@ function check(name, cond, extra = '') {
   const modeSel = [...node.querySelectorAll('select')].find((s) =>
     [...s.options].some((o) => o.textContent.includes('换皮')))
   check('有 AI重绘/换皮 方式选择', !!modeSel)
-  // 引擎选择：AnimateDiff 时序一致性 / 逐帧多候选
+  // 逐帧引擎：VNCCS（帧间角色一致） / 旧版。
+  // AnimateDiff 与"显存档位"两个下拉已随 SD 一起删掉，别再写它们的断言。
   const engineSel = [...node.querySelectorAll('select')].find((s) =>
-    [...s.options].some((o) => o.textContent.includes('AnimateDiff')))
-  check('有 AnimateDiff/逐帧 引擎选择', !!engineSel)
-  // 显存档位：auto / low / medium / high
-  const vramSel = [...node.querySelectorAll('select')].find((s) =>
-    [...s.options].some((o) => o.textContent.includes('省显存')))
-  check('有显存档位选择', !!vramSel)
+    [...s.options].some((o) => o.value === 'wvnccs'))
+  check('有逐帧引擎选择（VNCCS/旧版）', !!engineSel)
+  check('引擎默认 VNCCS',
+    !!engineSel && engineSel.value === 'wvnccs',
+    engineSel ? engineSel.value : '')
 
   // 拖一个本地图进来 -> 序列帧源
   const viewport = doc.querySelector('.canvas-viewport')

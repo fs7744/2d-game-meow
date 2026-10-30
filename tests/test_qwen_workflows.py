@@ -30,7 +30,8 @@ def sandbox(monkeypatch, tmp_path):
 
     def fake_qwen(eng, *, prompt, negative, width, height, steps, seed,
                   ref_image=None, transparent=False, model="qwen-image-2.1",
-                  label="w1", cfg=4.0, output_resolution=None):
+                  label="w1", cfg=4.0, output_resolution=None,
+                  fast=False, fast_lora=True):
         calls.append({"prompt": prompt, "width": width, "height": height,
                       "ref": ref_image, "output_resolution": output_resolution,
                       "steps": steps, "cfg": cfg})
@@ -61,16 +62,18 @@ def _mask(tmp_path, size=(256, 256)):
 # ---------------- 能力表 ----------------
 
 def test_qwen_supports_every_workflow(eng):
-    """Qwen 现在支持 13 个工作流。
+    """Qwen 现在支持 14 个工作流。
 
-    比最初的 10 个多出的三个是 2026-10-30 加的（RunComfy 调研的产物）：
+    比最初的 10 个多出四个，都是 2026-10-30/31 加的（RunComfy 调研的产物）：
     `outpaint`（扩图，靠 Outpaint LoRA）、`outfit_swap`（换装）、
-    `face_swap`（换脸）——后两个是「两图 + 结构化指令」，不需要新权重。
+    `face_swap`（换脸）后两个是「两图 + 结构化指令」，不需要新权重；
+    `vnccs_pose`（姿态迁移，挂 VNCCS LoRA + 官方双图指令，不用 ControlNet）。
     """
     got = set(eng.workflows_of("qwen-image-2.1"))
     assert got == {"txt2img", "img2img", "inpaint", "poseswap", "matte",
                    "ai_repaint", "pixelify", "pose_clone", "sprite_swap",
-                   "topixel", "outpaint", "outfit_swap", "face_swap"}
+                   "topixel", "outpaint", "outfit_swap", "face_swap",
+                   "vnccs_pose"}
     # require() 不该再对 Qwen 抛错——它曾经是「Qwen 不支持 ControlNet 类节点」的闸门
     for wf in got:
         eng.require("qwen-image-2.1", wf)
@@ -600,3 +603,88 @@ def test_cfg_reaches_the_model_call(eng, sandbox):
                   seed=1, preset="none", pixel=0, palette=0, scope="t")
     assert r["meta"]["cfg"] == 1.0
     assert r["meta"]["true_cfg"] is False
+
+
+# ---------------- 多张参考图 ----------------
+
+def test_ref_image_list_merges_single_and_many():
+    """`char_image`（旧字段）与 `char_images`（新字段）要能合并。
+
+    前端老版本只传单张，新版本传数组；两边都给时以数组为准——数组里
+    已经包含第一张了，重复合并会让同一张图在条件里出现两次。
+    """
+    # 只给多张
+    assert g._ref_image_list(None, ["a.png", "b.png"]) == ["a.png", "b.png"]
+    # 只给单张（旧客户端）
+    assert g._ref_image_list("a.png", None) == ["a.png"]
+    assert g._ref_image_list("a.png", []) == ["a.png"]
+    # 都给：以数组为准
+    assert g._ref_image_list("a.png", ["a.png", "b.png"]) == ["a.png", "b.png"]
+    # 空的要报错，不能静默出一张无条件的图
+    with pytest.raises(ValueError):
+        g._ref_image_list(None, [])
+    # 超过上限要报错（Qwen 实测 10 张还能跑，这里收在 6 张）
+    with pytest.raises(ValueError, match=r"最多"):
+        g._ref_image_list(None, [f"{i}.png" for i in range(g.MAX_REF_IMAGES + 1)])
+
+
+def test_multi_swap_prompt_declares_the_same_garment():
+    """多张服装图时必须显式说「这是同一件」。
+
+    只把 `<image3> <image4>` 拼进去、不说清是同一件，模型会当成
+    好几套衣服，实测出现上下身拼装。
+    """
+    one = g.swap_mod.swap_prompt("outfit", n_refs=1)
+    assert "<image3>" not in one and "<image2>" in one
+
+    three = g.swap_mod.swap_prompt("outfit", n_refs=3)
+    assert "<image4>" in three
+    assert "SAME garment" in three
+    assert "do not blend several different costumes" in three
+
+    # 换脸同理：多张是同一个人
+    two = g.swap_mod.swap_prompt("face", n_refs=2)
+    assert "<image3>" in two
+    assert "SAME person" in two
+
+    # 用户的补充要求要接在后面
+    extra = g.swap_mod.swap_prompt("outfit", "外套改成皮夹克", n_refs=2)
+    assert extra.endswith("外套改成皮夹克")
+
+
+# ---------------- 逐帧引擎（wss / VNCCS） ----------------
+
+def test_sprite_swap_exposes_engine_switch():
+    """`sprite_swap` 要把 `engine` 接住，否则前端传了会被 app.py 当成多余键丢掉。"""
+    import inspect
+    params = inspect.signature(g.sprite_swap).parameters
+    assert "engine" in params
+    assert params["engine"].default == "wpc"      # 默认仍走旧路线
+    assert "lora_scale" in params
+    # vnccs_pose 本身就是 VNCCS 路线，不需要 engine 开关，但要能调 LoRA 权重
+    assert "lora_scale" in inspect.signature(g.vnccs_pose).parameters
+    # 多图：姿态迁移两条路 + 换装 + 换脸都要接得住
+    assert "char_images" in inspect.signature(g.vnccs_pose).parameters
+    assert "char_images" in inspect.signature(g.pose_clone).parameters
+    assert "outfits" in inspect.signature(g.outfit_swap).parameters
+    assert "faces" in inspect.signature(g.face_swap).parameters
+
+
+def test_vnccs_lora_must_exist(eng):
+    """VNCCS 引擎依赖 models/lora 下的权重，缺了要给明确报错而不是静默降级。
+
+    这条不加载模型——只确认 `Engine.VNCCS_LORA` 指的文件在磁盘上，
+    以及缺文件时抛的是 FileNotFoundError（信息里带下载地址）。
+    """
+    assert eng.VNCCS_LORA == "vnccs_pose"
+    lora = eng.lora_dir() / f"{eng.VNCCS_LORA}.safetensors"
+    assert lora.is_file(), f"缺 VNCCS LoRA：{lora}"
+    # 权重里不该再有 gate_up（ComfyUI 的合并版 SwiGLU，diffusers 认不得）
+    from safetensors import safe_open
+    with safe_open(str(lora), framework="pt") as f:
+        keys = list(f.keys())
+    assert not [k for k in keys if "gate_up" in k], \
+        "gate_up 没拆干净：这部分权重会被 load_lora_weights 静默丢掉"
+    # 拆分后每块应该有 gate_layer 与 proj 两组
+    assert [k for k in keys if "img_mlp.gate_layer" in k]
+    assert [k for k in keys if "img_mlp.proj." in k]

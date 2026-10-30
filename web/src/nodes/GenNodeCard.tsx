@@ -687,6 +687,64 @@ export default function GenNodeCard({
 
 
   /** 源图区：图生图与抠图节点共用（连线接上来的源，或直接拖一张图） */
+  /** 「额外参考图」列表：角色迁移与换装/换脸共用。角色迁移里是同一角色的
+   *  不同角度，换装/换脸里是同一套服装/同一个人的不同角度——模型看到多
+   *  张会更稳，指令里也会显式声明"这是同一件/同一人"（swap.multi_swap_prompt）。 */
+  const extraRefBox = (
+      <div className="pc-extra">
+        <div className="pc-extra-head">
+          额外参考图
+          <span className="pc-extra-count">
+            {(node.charSources ?? []).length}/{MAX_CHAR_SOURCES - 1}
+          </span>
+        </div>
+        {(node.charSources ?? []).map((c, i) => (
+          <div className="pc-extra-row" key={i}>
+            <select
+              value={c.nodeId ?? ''}
+              onChange={(e) => {
+                const next = [...(node.charSources ?? [])]
+                next[i] = e.target.value ? { nodeId: e.target.value } : {}
+                onPatch({ charSources: next.filter((x) => x.nodeId) })
+              }}
+            >
+              <option value="">（选参考图）</option>
+              {sourceOptions.map((o) => (
+                <option key={o.id} value={o.id}>{o.label}</option>
+              ))}
+            </select>
+            <button
+              className="pc-extra-del"
+              title="移除这张"
+              onClick={() => {
+                const next = [...(node.charSources ?? [])]
+                next.splice(i, 1)
+                onPatch({ charSources: next })
+              }}
+            >
+              ×
+            </button>
+          </div>
+        ))}
+        {(node.charSources ?? []).length < MAX_CHAR_SOURCES - 1 && (
+          <button
+            className="pc-extra-add"
+            onClick={() => onPatch({
+              charSources: [...(node.charSources ?? []), {}],
+            })}
+          >
+            + 追加参考图
+          </button>
+        )}
+        <div className="src-note">
+          {(node.charSources ?? []).length
+            ? '同一角色的不同角度一起喂，发型和服装细节更稳'
+            : '可选：加一张侧面或细节图，身份会更稳（最多 '
+              + (MAX_CHAR_SOURCES - 1) + ' 张）'}
+        </div>
+      </div>
+  )
+
   const sourceBox = (
     <div className="src-box">
       {/*
@@ -1206,6 +1264,9 @@ export default function GenNodeCard({
               </div>
             </div>
           </div>
+
+          {/* 序列帧也可以给多张角色图：正面 + 侧面，逐帧复用同一组 */}
+          {extraRefBox}
           <label className="bg-mode" title={hint('方式')}>
             方式
             <select
@@ -1220,28 +1281,20 @@ export default function GenNodeCard({
             <label className="bg-mode" title={hint('引擎')}>
               引擎
               <select
-                value={p.ssEngineMode}
-                onChange={(e) => setParam('ssEngineMode', e.target.value as typeof p.ssEngineMode)}
+                value={p.ssEngine ?? 'wvnccs'}
+                onChange={(e) => setParam('ssEngine', e.target.value as 'wpc' | 'wvnccs')}
               >
-                <option value="auto">自动（优先 AnimateDiff）</option>
-                <option value="animatediff">AnimateDiff（帧间更稳）</option>
-                <option value="frame">逐帧多候选（更省显存）</option>
+                <option value="wvnccs">VNCCS（帧间角色一致 · 推荐）</option>
+                <option value="wpc">旧版（单帧更快 · 易换脸）</option>
               </select>
             </label>
           )}
-          {p.ssMode === 'generate' && p.ssEngineMode !== 'frame' && (
-            <label className="bg-mode" title={hint('显存')}>
-              显存
-              <select
-                value={p.ssVramProfile}
-                onChange={(e) => setParam('ssVramProfile', e.target.value as typeof p.ssVramProfile)}
-              >
-                <option value="auto">自动（不够就降分辨率）</option>
-                <option value="low">省显存（384²）</option>
-                <option value="medium">平衡（512²）</option>
-                <option value="high">高质量（512²，最多 32 帧）</option>
-              </select>
-            </label>
+          {p.ssMode === 'generate' && (p.ssEngine ?? 'wvnccs') === 'wvnccs' && (
+            <div className="src-note pc-warn">
+              逐帧挂 VNCCS LoRA：单帧更慢（25 步起步），换来整段动画里角色
+              不换脸、不换衣服。角色外观一定要写进提示词——模型会让 prompt
+              压过参考图。
+            </div>
           )}
           {p.ssMode === 'generate' && (
             <div className="prompt-wrap">
@@ -1314,7 +1367,7 @@ export default function GenNodeCard({
               />
               <b>{p.ssPalette > 0 ? '色' : '关'}</b>
             </label>
-            {p.ssMode === 'generate' && p.ssEngineMode !== 'animatediff' && (
+            {p.ssMode === 'generate' && (
               <>
                 <label className="strength" title={hint('候选')}>
                   <span>候选</span>
@@ -1349,14 +1402,6 @@ export default function GenNodeCard({
                   超了不会报错，只会静默变慢（显存打满时耗时能翻 3 倍）。
                 </div>
               </>
-            )}
-            {p.ssMode === 'generate' && p.ssEngineMode !== 'frame' && (
-              <div className="src-note">
-                AnimateDiff 一次生成整段，靠时序注意力锁住帧间一致性——
-                实测 8 帧比逐帧方案快 2.6× 且漂移少 36%。
-                显存已优化（VAE 逐帧解码 + 参考图编码器用完即退）：
-                8 帧 5.8GB、16 帧 7.1GB，比基线省 41%。
-              </div>
             )}
             <div className="src-note">
               源图是精灵图：横向排了几帧就填几列，纵向排了几帧就填几行；
@@ -1478,6 +1523,10 @@ export default function GenNodeCard({
               </div>
             </div>
           </div>
+
+          {/* 换装/换脸也可以给多张：同一件套的背面/细节，或同一个人的正脸/侧脸 */}
+          {extraRefBox}
+
           <div className="prompt-wrap">
             <textarea
               className="prompt" rows={2}
@@ -1549,65 +1598,7 @@ export default function GenNodeCard({
             </div>
           </div>
 
-          {/* 额外角色参考图：同一角色的正面/侧面/细节图，能明显提升身份一致度 */}
-          <div className="pc-extra">
-            <div className="pc-extra-head">
-              额外参考图
-              <span className="pc-extra-count">
-                {(node.charSources ?? []).length}/{MAX_CHAR_SOURCES - 1}
-              </span>
-            </div>
-            {(node.charSources ?? []).map((c, i) => (
-              <div className="pc-extra-row" key={i}>
-                <select
-                  value={c.nodeId ?? ''}
-                  onChange={(e) => {
-                    const next = [...(node.charSources ?? [])]
-                    next[i] = e.target.value ? { nodeId: e.target.value } : {}
-                    onPatch({ charSources: next.filter((x) => x.nodeId) })
-                  }}
-                >
-                  <option value="">（选参考图）</option>
-                  {sourceOptions.map((o) => (
-                    <option key={o.id} value={o.id}>{o.label}</option>
-                  ))}
-                </select>
-                <button
-                  className="pc-extra-del"
-                  title="移除这张"
-                  onClick={() => {
-                    const next = [...(node.charSources ?? [])]
-                    next.splice(i, 1)
-                    onPatch({ charSources: next })
-                  }}
-                >
-                  ×
-                </button>
-              </div>
-            ))}
-            {(node.charSources ?? []).length < MAX_CHAR_SOURCES - 1 && (
-              <button
-                className="pc-extra-add"
-                onClick={() => onPatch({
-                  charSources: [...(node.charSources ?? []), {}],
-                })}
-              >
-                + 追加参考图
-              </button>
-            )}
-            <div className="src-note">
-              {(node.charSources ?? []).length
-                ? '同一角色的不同角度一起喂，发型和服装细节更稳'
-                : '可选：加一张侧面或细节图，身份会更稳（最多 '
-                  + (MAX_CHAR_SOURCES - 1) + ' 张）'}
-            </div>
-            {node.params.pcEngine === 'wvnccs' && (
-              <div className="src-note pc-warn">
-                提示词里要写清角色外观（发色/发饰/服装/配色）——
-                模型会让提示词**压过**角色图，写错了等于换了个角色
-              </div>
-            )}
-          </div>
+          {extraRefBox}
 
           <div className="prompt-wrap">
             <textarea

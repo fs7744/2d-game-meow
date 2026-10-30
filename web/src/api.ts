@@ -288,9 +288,12 @@ export function submitOutfitSwap(
   opts: SubmitOpts,
   image: string,
   outfit: string,
+  /** 额外的服装参考图（同一套的背面/细节），细节会更准 */
+  outfits?: string[],
 ) {
   return post('woutfit', {
     image, outfit,
+    outfits: outfits && outfits.length > 1 ? outfits : undefined,
     prompt: params.prompt,
     negative: params.negative || undefined,
     width: params.width, height: params.height,
@@ -305,9 +308,12 @@ export function submitFaceSwap(
   opts: SubmitOpts,
   image: string,
   face: string,
+  /** 额外的人脸参考图（正脸/侧脸），五官更稳 */
+  faces?: string[],
 ) {
   return post('wface', {
     image, face,
+    faces: faces && faces.length > 1 ? faces : undefined,
     prompt: params.prompt,
     negative: params.negative || undefined,
     width: params.width, height: params.height,
@@ -373,6 +379,9 @@ export function submitVnccsPose(
     // 步数**不低于 20**：官方示例是 25，实测少步会把姿态和细节一起崩掉
     // （VNCCS LoRA 是按 25 步的完整采样训的，不是少步蒸馏）。
     steps: Math.max(20, params.steps),
+    // 透明底在 VNCCS 下**是可用的**（实测主体 16.6%、半透明 2.1%、背景全透），
+    // 不像 ControlNet 那条路会被控制信号压成半透膜。
+    transparent: params.transparent === true || undefined,
     cfg: params.cfg,
     seed: params.seed,
     model: opts.model || 'qwen-image-2.1',
@@ -546,10 +555,19 @@ export function submitSpriteSwap(
   opts: SubmitOpts,
   sheetImage: string,
   charImage: string,
+  /** 额外角色参考图（正面/侧面），逐帧复用同一组，身份更稳 */
+  charImages?: string[],
+  /**
+   * 逐帧引擎：
+   * - `wpc`（旧）—— 角色图 + 轮廓/骨架 + 自写指令
+   * - `wvnccs` —— 逐帧挂 VNCCS LoRA，帧间角色一致性明显更好（不换脸不换衣）
+   */
+  engine?: 'wpc' | 'wvnccs',
 ) {
   return post('wss', {
     sheet_image: sheetImage,
     char_image: charImage,
+    char_images: charImages && charImages.length > 1 ? charImages : undefined,
     prompt: params.prompt,
     negative: params.negative || undefined,
     preset: params.preset,
@@ -567,6 +585,8 @@ export function submitSpriteSwap(
     gate_retries: params.ssGateRetries,
     // 引擎：animatediff=时序注意力（帧间更稳），frame=逐帧多候选（更省显存）
     engine_mode: params.ssEngineMode,
+    // 逐帧引擎选 VNCCS 时会自动把步数提到 20 以上（LoRA 不是少步蒸馏）
+    engine: engine || undefined,
     vram_profile: params.ssVramProfile,
     width: params.width,
     height: params.height,
