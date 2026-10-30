@@ -1007,3 +1007,23 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
   width: 46px; height: 46px; object-fit: contain;
   background: #08080b; border: 1px solid var(--line);
 }
+
+/* ---------------- 侧栏 LoRA 面板 ----------------
+   LoRA 是**全局状态**：挂上后对所有生成生效，所以放在侧栏而不是节点里。
+   （节点级的微调要等 LoRA 参数走通生成链路再说。） */
+.lora-row {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px; color: var(--muted); padding: 2px 0;
+}
+.lora-row input[type='checkbox'] { flex: 0 0 auto; }
+.lora-name {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-family: var(--mono); font-size: 10px;
+}
+.lora-size { flex: 0 0 auto; font-family: var(--mono); font-size: 9px; color: var(--muted-2); }
+.lora-scale {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 10px; color: var(--muted); margin-top: 4px;
+}
+.lora-scale input[type='range'] { flex: 1; min-width: 0; height: 16px; }
+.lora-scale b { font-family: var(--mono); font-weight: 400; color: var(--cyan); min-width: 30px; }

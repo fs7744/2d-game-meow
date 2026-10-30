@@ -11,6 +11,7 @@ import {
   submitPixelify, submitPoseClone,
   submitPoseSeq,
   submitSpriteSwap, submitTxt2Img, uploadImage, extractPose,
+  fetchLoras, applyLoras, type QwenLora, type ActiveLora,
 } from './api'
 import ConfirmDialog from './components/ConfirmDialog'
 import Lightbox from './components/Lightbox'
@@ -247,6 +248,32 @@ export default function App() {
   // 不能按名字判断——底模名可以是任意目录名。
   const [caps, setCaps] = useState<Record<string, ModelCaps>>({})
   const [matteBackend, setMatteBackend] = useState('auto')
+  // Qwen LoRA：全局状态（挂上后对所有生成生效）
+  const [loras, setLoras] = useState<QwenLora[]>([])
+  const [activeLoras, setActiveLoras] = useState<ActiveLora[]>([])
+
+  // LoRA 列表：启动时拉一次
+  const reloadLoras = useCallback(() => {
+    fetchLoras().then((r) => {
+      setLoras(r.items)
+      setActiveLoras(r.active)
+    }).catch(() => setLoras([]))
+  }, [])
+
+  /** 挂载 / 卸载 LoRA（全局状态：挂上后对所有生成生效）。 */
+  const changeLoras = useCallback(async (items: { name: string; scale: number }[]) => {
+    try {
+      const r = await applyLoras(items)
+      setActiveLoras(r.items)
+      setNotice(items.length
+        ? `已挂载 LoRA：${items.map((x) => x.name).join('、')}`
+        : '已卸载全部 LoRA')
+      window.setTimeout(() => setNotice(''), 4000)
+    } catch (e) {
+      setNotice(`LoRA 操作失败：${e instanceof Error ? e.message : '未知错误'}`)
+      window.setTimeout(() => setNotice(''), 6000)
+    }
+  }, [])
   const [uploadMsg, setUploadMsg] = useState('')
   const [notice, setNotice] = useState('')          // 底模切换之类的一次性提示
   const [pendingDelete, setPendingDelete] = useState<GenNode | null>(null)
@@ -262,6 +289,7 @@ export default function App() {
     fetchPoseDirs().then(setPoseDirs).catch(() => setPoseDirs([]))
   }, [])
   useEffect(() => { reloadPoseDirs() }, [reloadPoseDirs])
+  useEffect(() => { reloadLoras() }, [reloadLoras])
 
   useEffect(() => {
     fetchModels().then((m) => {
@@ -986,6 +1014,9 @@ export default function App() {
           onRemoveFav={removeFavorite}
           matteBackend={matteBackend}
           onMatteBackend={setMatteBackend}
+          loras={loras}
+          activeLoras={activeLoras}
+          onLorasChange={(items) => void changeLoras(items)}
         />
         <Canvas
           nodes={nodes}

@@ -309,6 +309,62 @@ export async function extractPose(path: string): Promise<PoseExtract> {
   return r.json() as Promise<PoseExtract>
 }
 
+/** /loras 返回的一个 Qwen LoRA（只含 diffusers 原生格式的） */
+export type QwenLora = {
+  name: string
+  file: string
+  size_mb: number
+  tensors: number
+}
+
+/** 当前生效的 LoRA */
+export type ActiveLora = { name: string; scale: number; adapter?: string }
+
+/**
+ * 可用的 Qwen LoRA + 当前生效的。
+ *
+ * **只列 diffusers 原生格式的**（key 前缀 `transformer.`）——ComfyUI 格式
+ * （`diffusion_model.` + `lora_A/B`）挂上去会**静默不生效**，比报错更坏。
+ * 转换：`python tools/convert_lora.py in.safetensors out.safetensors`
+ */
+export async function fetchLoras(): Promise<{ items: QwenLora[]; active: ActiveLora[] }> {
+  const r = await fetch(`${base}/loras`)
+  if (!r.ok) return { items: [], active: [] }
+  const j = await r.json()
+  return {
+    items: Array.isArray(j.items) ? j.items : [],
+    active: Array.isArray(j.active) ? j.active : [],
+  }
+}
+
+/**
+ * 挂载 LoRA（状态式：一直生效，直到下次 apply 或 unload）。
+ * 传空数组 = 卸载全部。
+ */
+export async function applyLoras(
+  items: { name: string; scale: number }[],
+): Promise<{ active: string[]; items: ActiveLora[] }> {
+  const r = await fetch(`${base}/loras/apply`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ items }),
+  })
+  if (!r.ok) {
+    let msg = `HTTP ${r.status}`
+    try {
+      const j = await r.json()
+      if (j?.detail) msg = String(j.detail)
+    } catch { /* 响应不是 JSON，用状态码兜底 */ }
+    throw new Error(msg)
+  }
+  return r.json()
+}
+
+/** 卸载全部 LoRA，回到基座模型 */
+export async function unloadLoras(): Promise<void> {
+  await fetch(`${base}/loras/unload`, { method: 'POST' })
+}
+
 export type PoseDir = { path: string; count: number; sample: string[]; name: string }
 
 /** 可当 W4 输入的骨架帧目录（后端扫 assets 下两层） */

@@ -116,23 +116,31 @@ function makeFetch() {
         }),
       }
     }
-    if (String(url).endsWith('/loras')) {
+    if (String(url).endsWith('/loras/apply')) {
+      const items = JSON.parse(init.body || '{}').items || []
       return {
         ok: true,
         json: async () => ({
-          count: 4,
+          active: items.map((x) => `qwen_${x.name}`),
+          items: items.map((x) => ({ name: x.name, scale: x.scale, adapter: `qwen_${x.name}` })),
+        }),
+      }
+    }
+    if (String(url).endsWith('/loras/unload')) {
+      return { ok: true, json: async () => ({ active: [], items: [] }) }
+    }
+    if (String(url).endsWith('/loras')) {
+      // Qwen LoRA：只列 diffusers 原生格式的（engine.available_loras）
+      return {
+        ok: true,
+        json: async () => ({
           items: [
-            { name: 'Illustrious_PixelArt_Shader_M_01_epoch_4',
-              label: '像素着色器 Pixelizer（真像素 · 推荐）',
-              trigger: 'PixelArt_IL_One_Token_style_M_01', scale: 1,
-              preset: 'anime', note: '真像素', base: 'sdxl' },
-            { name: 'wuxia_v2', label: '武侠 Wuxia V2', trigger: 'wuxia',
-              scale: 0.8, preset: 'wuxia', note: '水墨武侠', base: 'sd15' },
-            { name: 'guofeng', label: '国风插画', trigger: 'guofeng, chinese style',
-              scale: 0.7, preset: null, note: '工笔重彩', base: 'sd15' },
-            { name: 'xuer_wuxia', label: '隐藏项', trigger: '', scale: 0.8,
-              preset: null, hidden: true },
+            { name: 'qwen21_anyangle', file: 'models/lora/qwen21_anyangle.safetensors',
+              size_mb: 114, tensors: 384 },
+            { name: 'qwen21_lightning', file: 'models/lora/qwen21_lightning.safetensors',
+              size_mb: 64, tensors: 256 },
           ],
+          active: [],
         }),
       }
     }
@@ -513,9 +521,10 @@ function check(name, cond, extra = '') {
 
   check('侧栏存在', !!doc.querySelector('.rail'))
   const titles = [...doc.querySelectorAll('.rail-sec-title')].map((x) => x.textContent)
-  // 底模选择已移到每个节点自己的卡头上，侧栏不再有「底模」分组
-  check('四个菜单分组：项目/节点/收藏/设置（选模型在节点卡头上）',
-    JSON.stringify(titles) === JSON.stringify(['项目', '节点', '提示词收藏', '设置']),
+  // 底模选择已移到每个节点自己的卡头上，侧栏不再有「底模」分组；
+  // 「LoRA」是新增的（Qwen 现在支持 LoRA，见 engine.available_loras）
+  check('五个菜单分组：项目/节点/收藏/LoRA/设置',
+    JSON.stringify(titles) === JSON.stringify(['项目', '节点', '提示词收藏', 'LoRA', '设置']),
     JSON.stringify(titles))
 
   // 分组可折叠
@@ -1898,6 +1907,34 @@ function check(name, cond, extra = '') {
     && (doc.querySelector('.toast')?.textContent || '').includes('右侧'),
     doc.querySelector('.toast')?.textContent)
   check('从图片提取场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 39) 侧栏 LoRA 面板：列出可用 LoRA、勾选即挂载
+{
+  const { dom, errors } = await boot('?demo=1')
+  const doc = dom.window.document
+  const win = dom.window
+  await new Promise((r) => setTimeout(r, 600))
+  const rows = [...doc.querySelectorAll('.lora-row')]
+  check('侧栏列出可用的 Qwen LoRA', rows.length === 2, String(rows.length))
+  check('LoRA 行显示名称与体积',
+    (rows[0]?.textContent || '').includes('qwen21_anyangle')
+    && (rows[0]?.textContent || '').includes('114MB'),
+    rows[0]?.textContent)
+  const cb = rows[0]?.querySelector('input[type=checkbox]')
+  check('LoRA 有勾选框', !!cb)
+  cb?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 400))
+  const apply = calls.find((c) => c.url.endsWith('/loras/apply'))
+  check('勾选后调用了 /loras/apply', !!apply, apply?.url)
+  if (apply) {
+    const body = JSON.parse(apply.body)
+    check('apply 请求带 LoRA 名与强度',
+      body.items?.length === 1 && body.items[0].name === 'qwen21_anyangle',
+      JSON.stringify(body))
+  }
+  check('LoRA 面板无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 

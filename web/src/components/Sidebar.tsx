@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from 'react'
 import type { FavoritePrompt } from '../types'
+import type { QwenLora, ActiveLora } from '../api'
 import type { ProjectMeta } from '../store/projects'
 
 type Props = {
@@ -20,6 +21,12 @@ type Props = {
   matteBackend: string
   onMatteBackend: (v: string) => void
   scanning?: boolean
+  /** 可用的 Qwen LoRA（只含 diffusers 原生格式的） */
+  loras: QwenLora[]
+  /** 当前生效的 LoRA */
+  activeLoras: ActiveLora[]
+  /** 挂载 / 卸载 LoRA（状态式：一直生效直到下次改） */
+  onLorasChange: (items: { name: string; scale: number }[]) => void
 }
 
 const MATTE_LABEL: Record<string, string> = {
@@ -99,6 +106,7 @@ function ProjectRow({
 export default function Sidebar({
   favs, onAddNode, canApply, onApplyFav, onRemoveFav,
   matteBackend, onMatteBackend,
+  loras, activeLoras, onLorasChange,
   projects, currentProject, onSwitchProject, onCreateProject, onRenameProject, onDeleteProject,
 }: Props) {
   const [collapsed, setCollapsed] = useState(false)
@@ -363,6 +371,58 @@ export default function Sidebar({
                 </button>
               </div>
             ))
+          )}
+        </Section>
+
+        <Section icon="◈" title="LoRA" count={loras.length}>
+          {loras.length === 0 ? (
+            <div className="src-note">
+              没有可用的 LoRA。Qwen 的 LoRA 要**diffusers 原生格式**
+              （ComfyUI 格式挂上去会静默不生效）。
+              转换：<code>python tools/convert_lora.py in.safetensors out.safetensors</code>
+            </div>
+          ) : (
+            <>
+              {loras.map((l) => {
+                const act = activeLoras.find((a) => a.name === l.name)
+                return (
+                  <label className="lora-row" key={l.name}>
+                    <input
+                      type="checkbox"
+                      checked={!!act}
+                      onChange={(e) => {
+                        const next = e.target.checked
+                          ? [...activeLoras.filter((a) => a.name !== l.name),
+                            { name: l.name, scale: act?.scale ?? 0.8 }]
+                          : activeLoras.filter((a) => a.name !== l.name)
+                        onLorasChange(next.map((x) => ({ name: x.name, scale: x.scale })))
+                      }}
+                    />
+                    <span className="lora-name" title={l.file}>{l.name}</span>
+                    <span className="lora-size">{l.size_mb}MB</span>
+                  </label>
+                )
+              })}
+              {activeLoras.length > 0 && (
+                <>
+                  <label className="lora-scale">
+                    <span>强度</span>
+                    <input
+                      type="range" min={0.1} max={1.5} step={0.05}
+                      value={activeLoras[0].scale}
+                      onChange={(e) => {
+                        const sc = Number(e.target.value)
+                        onLorasChange(activeLoras.map((x) => ({ name: x.name, scale: sc })))
+                      }}
+                    />
+                    <b>{activeLoras[0].scale.toFixed(2)}</b>
+                  </label>
+                  <div className="src-note">
+                    挂上的 LoRA 对**所有**生成生效（全局状态），直到在这里取消。
+                  </div>
+                </>
+              )}
+            </>
           )}
         </Section>
 
