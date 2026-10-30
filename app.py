@@ -100,6 +100,7 @@ def _run(job_id: str, workflow: str, params: Dict[str, Any]) -> None:
               "topixel": gen.image_to_pixel,
               "wout": gen.outpaint,
               "woutfit": gen.outfit_swap, "wface": gen.face_swap,
+              "wvnccs": gen.vnccs_pose,
               # 旧名保留：早期只用于动漫人物
               "wap": gen.image_to_pixel}[workflow]
         # **按目标函数的签名过滤参数**：Qwen-only 之后 lora / clip_skip /
@@ -361,7 +362,7 @@ def submit(job: Job) -> Dict[str, Any]:
     # 白名单**必须与 `_run` 的分发表同步**：漏一个就是 400，而错误信息里
     # 又列不出来（用户会以为功能没做）。加新工作流时两处一起改。
     allowed = ("w1", "w2", "w3", "w4", "wbg", "w5", "wpx", "wpc",
-               "wss", "topixel", "wap",
+               "wss", "topixel", "wap", "wvnccs",
                # 2026-10-30 新增
                "wout", "woutfit", "wface")
     if job.workflow not in allowed:

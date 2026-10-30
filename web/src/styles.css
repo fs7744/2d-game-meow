@@ -1027,3 +1027,84 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
 }
 .lora-scale input[type='range'] { flex: 1; min-width: 0; height: 16px; }
 .lora-scale b { font-family: var(--mono); font-weight: 400; color: var(--cyan); min-width: 30px; }
+
+/* ---- 角色迁移：引擎选择 + 额外参考图 ---- */
+.pc-engine,
+.pc-extra {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, .03);
+  border: 1px solid rgba(255, 255, 255, .07);
+}
+.pc-engine {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.pc-engine-label {
+  font-size: 11px;
+  opacity: .65;
+  white-space: nowrap;
+}
+.pc-engine select {
+  flex: 1 1 140px;
+  min-width: 0;
+}
+.pc-engine .src-note,
+.pc-extra .src-note {
+  flex: 1 1 100%;
+}
+.pc-extra-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  opacity: .65;
+  margin-bottom: 4px;
+}
+.pc-extra-count {
+  font-variant-numeric: tabular-nums;
+}
+.pc-extra-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+.pc-extra-row select {
+  flex: 1;
+  min-width: 0;
+}
+.pc-extra-del {
+  width: 22px;
+  height: 22px;
+  line-height: 1;
+  border-radius: 4px;
+  cursor: pointer;
+  background: rgba(255, 255, 255, .06);
+  border: 1px solid rgba(255, 255, 255, .12);
+  color: inherit;
+}
+.pc-extra-del:hover {
+  background: rgba(255, 90, 90, .22);
+  border-color: rgba(255, 90, 90, .5);
+}
+.pc-extra-add {
+  width: 100%;
+  padding: 3px 0;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 11px;
+  background: rgba(255, 255, 255, .05);
+  border: 1px dashed rgba(255, 255, 255, .2);
+  color: inherit;
+}
+.pc-extra-add:hover {
+  background: rgba(255, 255, 255, .1);
+}
+.pc-warn {
+  color: #f0b46a;
+  opacity: .9;
+}

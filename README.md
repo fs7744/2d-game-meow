@@ -197,6 +197,11 @@ LoRA 是 `MIUProject/VNCCS_PoseStudio_QI2.1`（152MB，ComfyUI 格式，
 **要保角色一致性走 VNCCS；只要结构、不在乎外观才用 ControlNet Union。**
 验证脚本 `tools/verify_vnccs_pose.py`，细节见 `docs/PLAN-QWEN-ONLY.md` §2.16b。
 
+**已接入产品**：角色迁移节点上多了「引擎」下拉（默认 VNCCS，可切回旧版）
+和「额外参考图」列表——同一角色的正面/侧面/细节图可以一起喂（最多 5 张
+附加，后端上限 6 张），身份会更稳。载荷字段：`char_images`（数组，第一张
+同时写进 `char_image` 保持旧客户端兼容）。
+
 
 ### 3. 像素画的散落杂色（已做清洗，但未根除）
 
@@ -306,6 +311,7 @@ Qwen 后期的修复一起带走（蒙版贴回、尺度归一、fp8 编码器�
 | LoRA | ✅ | **Qwen 自己的 LoRA 能挂**（fp8 量化后也行，实测只慢 1.1s）。但必须是 diffusers 原生格式，ComfyUI 格式要先转 |
 | **扩图** | ✅ | 中性灰 padding + Outpaint LoRA + 原图贴回；无接缝、无灰块 |
 | **换装 / 换脸** | ✅ | 两图 + `<image1>/<image2>` 结构化指令，不需要专用权重 |
+| **姿态迁移（VNCCS）** | ✅ **推荐** | 角色迁移节点的默认引擎：专用 LoRA + 双图指令，画风/发型/服装一致，头不丢、不多腿。25 步，画布按骨架比例自动定 |
 | **ControlNet Union** | ✅ **能硬压结构** | 8 种条件 + 蒙版 inpaint，7.55GB，峰值 18.7GB。双流注入；**竖版画布 + 详述 prompt** 下出完整角色，姿态逐点对应 |
 | Refiner / AnimateDiff | ❌ | 主干与文本编码器都不同，一点都不通用 |
 

@@ -117,7 +117,7 @@ function common(params: GenParams, opts: SubmitOpts) {
 
 async function post(
   workflow: 'w1' | 'w2' | 'w3' | 'w4' | 'w5' | 'wbg' | 'wpx' | 'wpc' | 'wss'
-    | 'topixel' | 'wap' | 'wout' | 'woutfit' | 'wface',
+    | 'topixel' | 'wap' | 'wout' | 'woutfit' | 'wface' | 'wvnccs',
   params: Record<string, unknown>,
 ) {
   const r = await fetch(`${base}/generate`, {
@@ -321,10 +321,13 @@ export function submitPoseClone(
   opts: SubmitOpts,
   poseImage: string,
   charImage: string,
+  /** 额外的角色参考图（正面/侧面/细节）。第一张仍走 char_image 保持兼容 */
+  charImages?: string[],
 ) {
   return post('wpc', {
     pose_image: poseImage,
     char_image: charImage,
+    char_images: charImages && charImages.length > 1 ? charImages : undefined,
     prompt: params.prompt,
     negative: params.negative || undefined,
     width: params.width,
@@ -339,6 +342,43 @@ export function submitPoseClone(
     // 参考模式：auto=先试骨架，认不出人自动降级到轮廓
     ref_mode: params.pcRefMode,
     bg: params.bgTone,
+  })
+}
+
+/**
+ * 姿态迁移（VNCCS 路线）：挂专用 LoRA + 双图指令，**不用 ControlNet**。
+ *
+ * 与 `submitPoseClone` 的区别：那边是"角色图 + 姿态条件图"的自写指令，
+ * 这边是官方工作流的固定模板 `replace the pose of <image 2> with the pose of
+ * <image 1>`，图序相反（骨架在前），并且挂 VNCCS LoRA。实测保角色一致性
+ * 好得多（画风不变、头不丢、不会多腿），代价是姿态精度略低。
+ *
+ * `width/height` 不传时后端按**骨架比例**自动定画布——方形画布会把人物
+ * 撑满、头顶出画面。
+ */
+export function submitVnccsPose(
+  params: GenParams,
+  opts: SubmitOpts,
+  poseImage: string,
+  charImages: string[],
+) {
+  return post('wvnccs', {
+    pose_image: poseImage,
+    char_images: charImages,
+    prompt: params.prompt,
+    negative: params.negative || undefined,
+    // **不传 width/height**：让后端按骨架比例自动定画布。传死 768 会变成
+    // 方形画布，模型把人物撑满、头顶出画面（实测过，这是"头丢了"的元凶）。
+    // 想手动指定时由后端 `_vnccs_canvas_size(pose, w, h)` 接住。
+    // 步数**不低于 20**：官方示例是 25，实测少步会把姿态和细节一起崩掉
+    // （VNCCS LoRA 是按 25 步的完整采样训的，不是少步蒸馏）。
+    steps: Math.max(20, params.steps),
+    cfg: params.cfg,
+    seed: params.seed,
+    model: opts.model || 'qwen-image-2.1',
+    scope: opts.scope || undefined,
+    pixel: 0,
+    palette: 0,
   })
 }
 

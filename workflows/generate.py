@@ -297,7 +297,7 @@ def _qwen_call(eng: Engine, *, prompt: str, negative: str, width: int, height: i
                transparent: bool = False, model: str = "qwen-image-2.1",
                label: str = "w1", cfg: float = 1.0,
                output_resolution: Optional[int] = None,
-               fast: bool = False) -> Image.Image:
+               fast: bool = False, fast_lora: bool = True) -> Image.Image:
     """Qwen 单次推理。带 ref_image 就走「指令改图」，不带就是文生图。
 
     三个**必须**记住的点（都是实测踩出来的）：
@@ -324,7 +324,11 @@ def _qwen_call(eng: Engine, *, prompt: str, negative: str, width: int, height: i
     #
     # **状态式**（与 LoRA 同一套）：`fast` 由调用方写进 `eng.fast_mode`，
     # 这样不必把它穿过每条工作流的参数链。
-    if fast or getattr(eng, "fast_mode", False):
+    #
+    # `fast_lora=False` 让调用方**独占 LoRA 槽位**：VNCCS 姿态迁移要挂自己的
+    # LoRA，被这里再挂一个 Lightning 会把它顶掉（两个 adapter 同时生效也会
+    # 让姿态遵循度崩掉）。
+    if fast_lora and (fast or getattr(eng, "fast_mode", False)):
         eng.apply_loras(pipe, [{"name": FAST_LORA, "scale": 1.0}])
         steps = min(int(steps), FAST_STEPS)
     gen = torch.Generator("cuda").manual_seed(int(seed))
@@ -1342,15 +1346,44 @@ def image_to_pixel(eng: Engine, *,
 anime_to_pixel = image_to_pixel
 
 
+# ---------------- 多张参考图 ----------------
+
+#: 一条工作流最多吃几张参考图。Qwen 的多图上限实测 10 张仍可用（512²/8 步
+#: 12.3s / 14.1GB），但再多没有收益、显存还会涨，这里收在 6 张。
+MAX_REF_IMAGES = 6
+
+
+def _ref_image_list(single, many) -> list[str]:
+    """把「单张 + 多张」两种传法统一成列表。
+
+    前端老版本只传 `char_image`，新版本传 `char_images`；两者都给时以
+    `char_images` 为准（前端在数组里已经把第一张写进去了）。
+    """
+    out = [str(p) for p in (many or []) if p]
+    if not out and single:
+        out = [str(single)]
+    if not out:
+        raise ValueError("缺少参考图：char_image / char_images 至少给一张")
+    if len(out) > MAX_REF_IMAGES:
+        raise ValueError(
+            f"参考图最多 {MAX_REF_IMAGES} 张，收到 {len(out)} 张")
+    return out
+
+
 # ---------------- WPC 角色迁移 ----------------
 
-def _qwen_pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | Path,
-                     prompt: str, negative: Optional[str],
-                     width: int, height: int, steps: int, cfg: float, seed: int,
-                     ref_mode: str, thr: float, fill: float,
-                     pixel: int, palette: int, matte: bool, matte_backend: str,
-                     denoise: int, clean_iso: int, model: str, bg: str,
-                     scope: str, tag: str) -> Dict[str, Any]:
+def _qwen_pose_clone(eng: Engine, *, pose_image: str | Path,
+                     char_image: Optional[str | Path] = None,
+                     prompt: str = "", negative: Optional[str] = None,
+                     width: int = 768, height: int = 768,
+                     steps: int = 16, cfg: float = 1.0, seed: int = -1,
+                     ref_mode: str = "auto", thr: float = 0.25, fill: float = 0.8,
+                     pixel: int = 0, palette: int = 0, matte: bool = False,
+                     matte_backend: str = "auto",
+                     denoise: int = 1, clean_iso: int = 1,
+                     model: str = DEFAULT_MODEL, bg: str = "white",
+                     scope: str = "", tag: str = "wpc",
+                     char_images: Optional[Sequence[str]] = None) -> Dict[str, Any]:
     """Qwen-Image-2.1 版角色迁移：**双图条件**（角色图 + 姿态条件图）。
 
     为什么不用 SD 那套 ControlNet + IP-Adapter：
@@ -1375,7 +1408,10 @@ def _qwen_pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | P
         thr=thr, fill=fill, matte_dir=eng.matte_dir)
     # 灰度化：Qwen 会把条件图当视觉参考，彩色骨架的关节色会被抄进成品
     cond = _qwen_cond_image(cond)
-    char = refprep.prepare_reference(Image.open(char_image).convert("RGBA"), size=width)
+    # 多张角色图：正面 + 侧面 + 细节图一起喂，能显著提升身份一致度
+    char_paths = _ref_image_list(char_image, char_images)
+    chars = [refprep.prepare_reference(Image.open(p).convert("RGBA"), size=width)
+             for p in char_paths]
 
     sem = (prompt or "").strip()
     instr = (
@@ -1394,7 +1430,7 @@ def _qwen_pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | P
     dt = _timer()
     out = _qwen_call(
         eng, prompt=instr, negative=negative or QWEN_NEG,
-        ref_image=[char, cond], width=width, height=height, steps=steps,
+        ref_image=[*chars, cond], width=width, height=height, steps=steps,
         cfg=cfg, seed=seed, model=model, label="wpc")
     seconds = dt()
     width, height = out.size
@@ -1424,8 +1460,9 @@ def _qwen_pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | P
     }, raw=raw, scope=scope)
 
 
-def pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | Path,
-               prompt: str, negative: Optional[str] = None,
+def pose_clone(eng: Engine, *, pose_image: str | Path,
+               char_image: Optional[str | Path] = None,
+               prompt: str = "", negative: Optional[str] = None,
                width: int = 768, height: int = 768,
                steps: int = 16, cfg: float = 1.0, seed: int = -1,
                fill: float = 0.8, thr: float = 0.25,
@@ -1433,7 +1470,8 @@ def pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | Path,
                model: str = DEFAULT_MODEL,
                pixel: int = 0, palette: int = 0, matte: bool = False,
                matte_backend: str = "auto", denoise: int = 1, clean_iso: int = 1,
-               scope: str = "", tag: str = "wpc") -> Dict[str, Any]:
+               scope: str = "", tag: str = "wpc",
+               char_images: Optional[Sequence[str]] = None) -> Dict[str, Any]:
     """角色迁移：把**动作参考图**的姿势套到**角色图**上。
 
     Qwen 走**双图条件**（角色图 + 姿态条件图进同一个 vision context），
@@ -1445,12 +1483,173 @@ def pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | Path,
     eng.require(model, "pose_clone")
     return _qwen_pose_clone(
         eng, pose_image=pose_image, char_image=char_image,
+        char_images=char_images,
         prompt=prompt, negative=negative,
         width=width, height=height, steps=steps, cfg=cfg, seed=seed,
         ref_mode=ref_mode, thr=thr, fill=fill,
         pixel=pixel, palette=palette, matte=matte, matte_backend=matte_backend,
         denoise=denoise, clean_iso=clean_iso, model=model, bg=bg,
         scope=scope, tag=tag)
+
+
+# ---------------- WVNC 姿态迁移（VNCCS PoseStudio LoRA 路线） ----------------
+
+#: VNCCS 官方工作流里的固定指令（逐字）。
+#:
+#: `image 1` = 骨架、`image 2` = 角色图。这个顺序不能反——社区那个
+#: "完美保持角色一致性"的效果，一半来自这句指令 + 专用 LoRA。
+_VNCCS_TEMPLATE = ("replace the pose of <image 2> with the pose of <image 1>. "
+                   "keep the character of <image 2>")
+
+
+def _vnccs_fit(im: Image.Image, w: int, h: int) -> Image.Image:
+    """等比缩到框内、居中贴白底。
+
+    **不能硬拉**：512×768 的骨架拉成方形会把腿压短，实测姿态只跟一半
+    （双腿交叉退化成双腿收窄）。
+    """
+    r = min(w / im.width, h / im.height)
+    nw, nh = max(1, round(im.width * r)), max(1, round(im.height * r))
+    canvas = Image.new("RGB", (w, h), (255, 255, 255))
+    canvas.paste(im.resize((nw, nh), Image.LANCZOS),
+                 ((w - nw) // 2, (h - nh) // 2))
+    return canvas
+
+
+def _vnccs_canvas_size(pose: Image.Image, width: int, height: int) -> tuple[int, int]:
+    """画布尺寸。默认**取骨架的比例**，不走官方"取角色图"。
+
+    官方示例取角色图尺寸，前提是"角色图与骨架同为竖版"。我们的角色图常是
+    方形立绘、骨架是竖版，取方形时骨架只能缩在中间，模型会理解成"小幅度
+    动作"——实测交叉腿会退化成收窄。按骨架比例铺满才跟得住（PLAN §2.16b）。
+    """
+    if width and height:
+        return max(256, width // 32 * 32), max(256, height // 32 * 32)
+    scale = max(1.0, 768 / max(pose.size))
+    return (max(256, int(pose.size[0] * scale) // 32 * 32),
+            max(256, int(pose.size[1] * scale) // 32 * 32))
+
+
+def _qwen_vnccs(eng: Engine, *, pose_image: str | Path,
+                char_image: Optional[str | Path] = None,
+                prompt: str = "", negative: Optional[str] = None,
+                width: int = 0, height: int = 0, steps: int = 25,
+                cfg: float = 1.0, seed: int = -1,
+                lora_scale: float = 1.0, transparent: bool = False,
+                model: str = DEFAULT_MODEL,
+                pixel: int = 0, palette: int = 0, matte: bool = False,
+                matte_backend: str = "auto", denoise: int = 1, clean_iso: int = 1,
+                scope: str = "", tag: str = "wvnc",
+                char_images: Optional[Sequence[str]] = None) -> Dict[str, Any]:
+    """VNCCS 路线的姿态迁移：**专用 LoRA + 双图指令**，不用 ControlNet。
+
+    这条路线是照 MIUProject 官方 ComfyUI 工作流复刻的（`VNCCS_PoseStudio_QI2.1.json`，
+    14 个节点里没有任何 ControlNet）。相比 `_qwen_pose_clone`：
+      - 图序相反：[骨架, 角色]（那边是 [角色, 条件]）
+      - prompt 用官方固定模板，而不是自己写的"The first image is..."
+      - 挂 VNCCS LoRA（1.0）
+      - 条件图**不灰度化**（LoRA 是按 PoseStudio 的彩色骨架训的）
+      - 25 步、cfg=1（官方值），不挂 Lightning
+
+    实测（768×1152）：画风与参考图一致、服装发型全保住、姿态能跟住。
+    代价是姿态精度不如 ControlNet 的硬约束。
+    """
+    pose = Image.open(pose_image).convert("RGB")
+    char_paths = _ref_image_list(char_image, char_images)
+    chars = [Image.open(p).convert("RGB") for p in char_paths]
+    w, h = _vnccs_canvas_size(pose, width, height)
+
+    instr = _VNCCS_TEMPLATE
+    sem = (prompt or "").strip()
+    if sem:
+        # **身份描述必须与参考图一致**：模型会让 prompt 压过参考图。
+        # 实测照着别的角色写描述，出来就真成了那个角色（连画风都换）。
+        instr = f"{instr}\n{sem}"
+
+    pipe = eng.txt2img_pipe(model)
+    lora_file = eng.lora_dir() / f"{eng.VNCCS_LORA}.safetensors"
+    if not lora_file.is_file():
+        raise FileNotFoundError(
+            f"缺 VNCCS LoRA：{lora_file}\n"
+            f"下载 MIUProject/VNCCS_PoseStudio_QI2.1 的 V1，用 "
+            f"tools/convert_lora.py 转成 diffusers 格式后放到 models/lora/")
+
+    if seed < 0:
+        seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
+
+    torch.cuda.reset_peak_memory_stats()
+    dt = _timer()
+    eng.apply_loras(pipe, [{"name": eng.VNCCS_LORA, "scale": float(lora_scale)}])
+    try:
+        out = _qwen_call(
+            eng, prompt=instr, negative=negative or "",
+            # **顺序：骨架在前、角色在后**（官方 image 1 / image 2）
+            ref_image=[_vnccs_fit(pose, w, h),
+                       *[_vnccs_fit(c, w, h) for c in chars]],
+            width=w, height=h, steps=steps, cfg=cfg, seed=seed,
+            model=model, label="wvnc", transparent=transparent,
+            output_resolution=max(w, h),
+            fast_lora=False,          # LoRA 槽位归 VNCCS
+        )
+    finally:
+        eng.unload_loras(pipe)
+    seconds = dt()
+
+    raw = out.copy() if (matte or pixel > 1 or palette) else None
+    matte_info: Dict[str, Any] = {}
+    out, edge, subjects = _postprocess(
+        out, eng, matte=matte, matte_backend=matte_backend, denoise=denoise,
+        pixel=pixel, palette=palette, clean_iso=clean_iso, info=matte_info)
+    # `_postprocess` 的 info 里有 `pre_pixel`（PIL Image），整个展开进 meta
+    # 会在写 sidecar 时 `json.dumps` 报 "Object of type Image is not
+    # serializable"。只挑可序列化的几个键（其它工作流也这么做）。
+    safe_info = {k: matte_info[k] for k in ("backend", "fallback")
+                 if k in matte_info}
+    return _save(out, _stamp(tag), "vnccs_pose", {
+        "workflow": "wvnccs", "scope": scope or "default",
+        "prompt": instr, "negative": negative or "",
+        "pose_image": str(pose_image), "char_image": str(char_image),
+        "backend": "qwen-vnccs-lora", "lora": eng.VNCCS_LORA,
+        "lora_scale": float(lora_scale),
+        "canvas": [w, h], "steps": steps, "cfg": cfg, "seed": seed,
+        "transparent": bool(transparent),
+        "seconds": round(seconds, 2),
+        "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
+        "edge_px": edge, "subjects": subjects,
+        **({"raw": str(_save(raw, _stamp(tag), "raw", {"role": "pre_post"},
+                             scope=scope)["path"])} if raw is not None else {}),
+        **safe_info,
+    }, scope=scope)
+
+
+def vnccs_pose(eng: Engine, *, pose_image: str | Path,
+               char_image: Optional[str | Path] = None,
+               char_images: Optional[Sequence[str]] = None,
+               prompt: str = "", negative: Optional[str] = None,
+               width: int = 0, height: int = 0,
+               steps: int = 25, cfg: float = 1.0, seed: int = -1,
+               lora_scale: float = 1.0, transparent: bool = False,
+               model: str = DEFAULT_MODEL,
+               pixel: int = 0, palette: int = 0, matte: bool = False,
+               matte_backend: str = "auto", denoise: int = 1, clean_iso: int = 1,
+               scope: str = "", tag: str = "wvnc") -> Dict[str, Any]:
+    """姿态迁移（VNCCS 路线）：把骨架图的动作套到角色图上，**保住角色一致性**。
+
+    `width` / `height` 留 0 表示按**骨架的比例**自动定画布（推荐）。手动指定时
+    记得用竖版（如 768×1152），方形画布会让模型把人物撑满、头顶出画面。
+
+    `prompt` 里要写**与角色图一致**的外观描述（发色、发饰、服装、配色），
+    模型会让 prompt 压过参考图；写错了等于换了个角色。
+    """
+    eng.require(model, "vnccs_pose")
+    return _qwen_vnccs(
+        eng, pose_image=pose_image, char_image=char_image,
+        char_images=char_images,
+        prompt=prompt, negative=negative, width=width, height=height,
+        steps=steps, cfg=cfg, seed=seed, lora_scale=lora_scale,
+        transparent=transparent, model=model,
+        pixel=pixel, palette=palette, matte=matte, matte_backend=matte_backend,
+        denoise=denoise, clean_iso=clean_iso, scope=scope, tag=tag)
 
 
 # ---------------- WSS 序列帧角色替换 ----------------

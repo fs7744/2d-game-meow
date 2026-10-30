@@ -5,7 +5,7 @@ import MaskPreview from '../components/MaskPreview'
 import SkeletonEditor, { defaultSkeleton } from '../components/SkeletonEditor'
 import type { ModelCaps, PoseDir } from '../api'
 import { fileNameOf } from '../fileName'
-import type { GenNode, GenParams } from '../types'
+import { MAX_CHAR_SOURCES, type GenNode, type GenParams } from '../types'
 import { GEN_STYLES, styleFromParams } from '../genStyles'
 
 /**
@@ -281,7 +281,7 @@ export const TALL_MAX = 1400
 export type NodePatch = Partial<
   Pick<GenNode,
     'x' | 'y' | 'w' | 'h' | 'params' | 'view' | 'job' | 'source' | 'image'
-    | 'charSource' | 'skeleton'>
+    | 'charSource' | 'charSources' | 'skeleton'>
 >
 
 /**
@@ -1527,10 +1527,88 @@ export default function GenNodeCard({
                 ))}
               </select>
               <div className="src-note">
-                {charThumb ? '角色外观由这张图决定（IP-Adapter）' : '缺角色图'}
+                {charThumb ? '第一张角色图（身份来源）' : '缺角色图'}
               </div>
             </div>
           </div>
+
+          {/* 迁移引擎：两条路线的差别见 api.ts 的 submitVnccsPose 注释 */}
+          <div className="pc-engine">
+            <label className="pc-engine-label">引擎</label>
+            <select
+              value={node.params.pcEngine ?? 'wvnccs'}
+              onChange={(e) => setParam('pcEngine', e.target.value as 'wpc' | 'wvnccs')}
+            >
+              <option value="wvnccs">VNCCS（保角色 · 推荐）</option>
+              <option value="wpc">旧版（姿态更硬 · 外观易飘）</option>
+            </select>
+            <div className="src-note">
+              {node.params.pcEngine === 'wvnccs'
+                ? '专用 LoRA + 双图指令：画风/发型/服装一致，头不丢、不多腿；姿态精度略逊'
+                : '自写指令的软引导：姿态贴得更紧，但画风和细节容易跑；方形画布下容易丢头'}
+            </div>
+          </div>
+
+          {/* 额外角色参考图：同一角色的正面/侧面/细节图，能明显提升身份一致度 */}
+          <div className="pc-extra">
+            <div className="pc-extra-head">
+              额外参考图
+              <span className="pc-extra-count">
+                {(node.charSources ?? []).length}/{MAX_CHAR_SOURCES - 1}
+              </span>
+            </div>
+            {(node.charSources ?? []).map((c, i) => (
+              <div className="pc-extra-row" key={i}>
+                <select
+                  value={c.nodeId ?? ''}
+                  onChange={(e) => {
+                    const next = [...(node.charSources ?? [])]
+                    next[i] = e.target.value ? { nodeId: e.target.value } : {}
+                    onPatch({ charSources: next.filter((x) => x.nodeId) })
+                  }}
+                >
+                  <option value="">（选参考图）</option>
+                  {sourceOptions.map((o) => (
+                    <option key={o.id} value={o.id}>{o.label}</option>
+                  ))}
+                </select>
+                <button
+                  className="pc-extra-del"
+                  title="移除这张"
+                  onClick={() => {
+                    const next = [...(node.charSources ?? [])]
+                    next.splice(i, 1)
+                    onPatch({ charSources: next })
+                  }}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+            {(node.charSources ?? []).length < MAX_CHAR_SOURCES - 1 && (
+              <button
+                className="pc-extra-add"
+                onClick={() => onPatch({
+                  charSources: [...(node.charSources ?? []), {}],
+                })}
+              >
+                + 追加参考图
+              </button>
+            )}
+            <div className="src-note">
+              {(node.charSources ?? []).length
+                ? '同一角色的不同角度一起喂，发型和服装细节更稳'
+                : '可选：加一张侧面或细节图，身份会更稳（最多 '
+                  + (MAX_CHAR_SOURCES - 1) + ' 张）'}
+            </div>
+            {node.params.pcEngine === 'wvnccs' && (
+              <div className="src-note pc-warn">
+                提示词里要写清角色外观（发色/发饰/服装/配色）——
+                模型会让提示词**压过**角色图，写错了等于换了个角色
+              </div>
+            )}
+          </div>
+
           <div className="prompt-wrap">
             <textarea
               className="prompt"

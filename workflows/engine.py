@@ -347,6 +347,16 @@ class Engine:
     #: 标准权重不认识中性灰 padding 的语义，**扩图必须挂它**。
     OUTPAINT_LORA = "qwen21_outpaint"
 
+    #: 姿态迁移用的 VNCCS PoseStudio LoRA（MIUProject，152MB，默认格式已转 diffusers）。
+    #:
+    #: 这是"完美保角色一致性"那条路的**全部秘密**：官方 ComfyUI 工作流里
+    #: 一个 ControlNet 节点都没有，就是「这张 LoRA + 双图 + 一句固定指令」。
+    #: 指令见 `generate._VNCCS_TEMPLATE`。
+    #:
+    #: 与 `FAST_LORA` 不能同时挂（`_qwen_call` 的 `fast_lora=False` 会跳过
+    #: Lightning），也不要和 Outpaint 混用。
+    VNCCS_LORA = "vnccs_pose"
+
     def set_fast_mode(self, on: bool) -> Dict[str, Any]:
         """开关快速模式（挂/卸 Lightning + 后续生成步数压到 8）。
 
@@ -552,7 +562,7 @@ class Engine:
         "qwen21": frozenset({
             "txt2img", "img2img", "inpaint", "poseswap", "matte",
             "ai_repaint", "pixelify", "pose_clone", "sprite_swap", "topixel",
-            "outpaint", "outfit_swap", "face_swap",
+            "outpaint", "outfit_swap", "face_swap", "vnccs_pose",
         }),
     }
 
@@ -585,6 +595,7 @@ class Engine:
         "pixelify": "像素转换", "pose_clone": "角色迁移",
         "sprite_swap": "序列帧替换", "topixel": "转像素",
         "outpaint": "扩图", "outfit_swap": "换装", "face_swap": "换脸",
+        "vnccs_pose": "姿态迁移(VNCCS)",
     }
 
     def supports(self, model: str, workflow: str) -> bool:

@@ -51,10 +51,18 @@ export type NodeSource = { nodeId?: string; path?: string }
 
 /**
  * 角色迁移节点的两个输入：
- *   source     —— 动作参考图（真人照片，用来提骨架）
- *   charSource —— 角色图（用来定身份，外观由 IP-Adapter 带过去）
+ *   source      —— 动作参考图（真人照片，用来提骨架）
+ *   charSource  —— 角色图（**第一张**，身份来源）
+ *   charSources —— 额外的角色图（正面/侧面/细节图一起喂，提升身份一致度）
+ *
+ * 为什么要有数组：Qwen 的多图条件是"同一个 vision context"，多给几张同一
+ * 角色的不同角度，模型对发型、服装细节的把握明显更稳。后端 `_ref_image_list`
+ * 会把 `charSources` 归一成列表，`charSource` 作为兼容旧数据的单张兜底。
  */
 export type NodeCharSource = { nodeId?: string; path?: string }
+
+/** 一个节点最多挂几张角色参考图（与后端 MAX_REF_IMAGES 保持一致）。 */
+export const MAX_CHAR_SOURCES = 6
 
 /**
  * GET /models 的 recommend 字段：这个底模在**精灵管线**上的推荐采样参数。
@@ -120,6 +128,13 @@ export type GenParams = {
   apMatte: boolean        // 先抠背景（像素精灵通常要透明底）
   pcFill: number          // 角色迁移：人物在画布里占的高度比例
   pcRefMode: RefMode      // 角色迁移：动作参考图的解释方式（自动/骨架/轮廓/已画好的骨架图）
+  /** 角色迁移引擎：
+   *  - `wpc`    旧路线：角色图 + 姿态条件图 + 自写指令。姿态跟得紧，外观容易飘。
+   *  - `wvnccs` 官方 VNCCS 工作流复刻：专用 LoRA + 固定指令 `replace the pose of
+   *             <image 2> with the pose of <image 1>`。实测保角色一致性好得多
+   *             （画风不变、头不丢、不多腿），代价是姿态精度略低。
+   */
+  pcEngine?: 'wpc' | 'wvnccs'
   twoStage: boolean       // 姿态序列：两阶段（先出姿态草图再换皮），动作更准但慢一倍
   bgTone: BgTone          // 逐帧生成用的底色：white=白底（默认）/ dark=深色底（白毛角色用）
   ssCols: number          // 序列帧替换：精灵图列数（0 = 自动检测）
@@ -208,8 +223,10 @@ export type GenNode = {
   params: GenParams
   view: NodeView
   source?: NodeSource
-  /** 角色迁移节点：角色图（身份来源） */
+  /** 角色迁移节点：角色图（身份来源，第一张） */
   charSource?: NodeCharSource
+  /** 角色迁移节点：额外角色图（多角度参考）。空数组等同于只给 charSource */
+  charSources?: NodeCharSource[]
   image?: NodeImage
   /** 骨骼编辑器节点：关节坐标 + 方位角（导出过图时 image 上还有产物路径） */
   skeleton?: SkeletonState

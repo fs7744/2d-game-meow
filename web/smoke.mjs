@@ -1279,11 +1279,23 @@ function check(name, cond, extra = '') {
   await new Promise((r) => setTimeout(r, 250))
   const sub = calls.filter((c) => c.url.endsWith('/generate')).pop()
   const body = JSON.parse(sub.body)
-  check('提交 workflow=wpc', body.workflow === 'wpc', body.workflow)
-  check('带上了动作参考图与角色图两个路径',
+  // 默认引擎是 VNCCS（保角色一致性更好）：走 wvnccs + char_images 数组
+  check('默认走 VNCCS 引擎', body.workflow === 'wvnccs', body.workflow)
+  check('带上了骨架图与角色图（多图数组）',
     typeof body.params.pose_image === 'string' && body.params.pose_image.length > 0 &&
-    typeof body.params.char_image === 'string' && body.params.char_image.length > 0,
-    JSON.stringify({ p: body.params.pose_image, c: body.params.char_image }))
+    Array.isArray(body.params.char_images) && body.params.char_images.length > 0,
+    JSON.stringify({ p: body.params.pose_image, c: body.params.char_images }))
+
+  // 引擎下拉存在，且能选到旧路线（旧路径的载荷由后端 pytest 覆盖：
+  // 这里再点一次生成拿不到新请求——首次生成后节点处于 running，按钮是禁用的）
+  const engineSel = pcNode.querySelector('.pc-engine select')
+  check('节点上有引擎下拉', !!engineSel)
+  check('引擎下拉有旧路线选项',
+    !!engineSel && [...engineSel.options].some((o) => o.value === 'wpc'),
+    engineSel ? [...engineSel.options].map((o) => o.value).join(',') : '')
+  check('额外参考图入口存在',
+    !!pcNode.querySelector('.pc-extra'),
+    pcNode.querySelector('.pc-extra') ? '有' : '没有')
   // 双图条件没有强度旋钮：这两个键不该出现在载荷里
   check('不带姿态/身份强度（双图条件没有强度旋钮）',
     body.params.cn_scale === undefined && body.params.ipa_scale === undefined,

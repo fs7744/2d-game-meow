@@ -12,15 +12,15 @@ import {
   submitPoseSeq,
   submitSpriteSwap, submitTxt2Img, uploadImage, extractPose,
   fetchLoras, applyLoras, setFastMode, type QwenLora, type ActiveLora,
-  submitOutpaint, submitOutfitSwap, submitFaceSwap,
+  submitOutpaint, submitOutfitSwap, submitFaceSwap, submitVnccsPose,
 } from './api'
 import ConfirmDialog from './components/ConfirmDialog'
 import Lightbox from './components/Lightbox'
 import type { PoseDir } from './api'
 import type { ModelCaps } from './api'
 import type {
-  FavoritePrompt, GenNode, GenParams, ModelRecommend, NodeImage, NodeKind,
-  NodeSource, Viewport,
+  FavoritePrompt, GenNode, GenParams, ModelRecommend, NodeImage, NodeCharSource,
+  NodeKind, NodeSource, Viewport,
 } from './types'
 import type { NodePatch } from './nodes/GenNodeCard'
 import { styleFromParams } from './genStyles'
@@ -110,6 +110,9 @@ const DEFAULT_PARAMS: GenParams = {
   pcFill: 0.8,
   // 参考模式默认 auto：先试骨架，认不出人体自动降级到轮廓（游戏素材走这条路）
   pcRefMode: 'auto',
+  // 角色迁移默认走 VNCCS 引擎：保角色一致性好得多（画风不变、头不丢、不多腿）。
+  // 需要 models/lora/vnccs_pose.safetensors，缺了会在提交时给明确提示。
+  pcEngine: 'wvnccs',
   // 两阶段（先出姿态草图再换皮）：动作更准，代价是每帧多一次生成
   twoStage: false,
   // 底色：默认白底；角色本身偏白（白毛/白甲）时改 dark，抠图才不会啃掉脸
@@ -750,6 +753,27 @@ export default function App() {
     return up.job?.path || up.job?.raw
   }, [])
 
+  /** 一个节点上所有的角色参考图：`charSource` 是第一张，`charSources` 是额外的。
+   *  多给几张同一角色的不同角度，模型对发型/服装细节的把握明显更稳。 */
+  const charPathsOf = useCallback((n: GenNode): string[] => {
+    const pick = (c?: NodeCharSource): string | undefined => {
+      if (!c) return undefined
+      if (c.path) return c.path
+      const up = c.nodeId
+        ? nodesRef.current.find((x) => x.id === c.nodeId)
+        : undefined
+      if (!up) return undefined
+      if (up.kind === 'image') return up.image?.path
+      return up.job?.path || up.job?.raw
+    }
+    const out: string[] = []
+    for (const c of [n.charSource, ...(n.charSources ?? [])]) {
+      const p = pick(c)
+      if (p && !out.includes(p)) out.push(p)
+    }
+    return out
+  }, [])
+
   const generate = useCallback(async (id: string) => {
     const node = nodesRef.current.find((n) => n.id === id)
     if (!node) return
@@ -818,8 +842,8 @@ export default function App() {
         jobId = r.job_id
       } else if (node.kind === 'poseclone') {
         const posePath = sourcePathOf(node)
-        const charPath = charPathOf(node)
-        if (!posePath || !charPath) {
+        const charPaths = charPathsOf(node)
+        if (!posePath || charPaths.length === 0) {
           patchNode(id, {
             job: { id: 'error', status: 'failed',
               error: !posePath
@@ -842,8 +866,17 @@ export default function App() {
             `viewing direction: ${viewPhrase(upNode?.skeleton?.azimuth ?? 0)}`]
             .filter(Boolean).join('. ')
         }
-        const r = await submitPoseClone(
-          pcParams, { model: mdl, matteBackend, scope: currentId }, posePath, charPath)
+        // 两条引擎：
+        //   wpc    —— 角色图 + 姿态条件图，自写指令（旧路线，姿态硬、外观容易飘）
+        //   wvnccs —— 官方 VNCCS 工作流复刻：专用 LoRA + 固定指令，
+        //             保角色一致性明显更好（画风不变、头不丢、不多腿）
+        const r = node.params.pcEngine === 'wvnccs'
+          ? await submitVnccsPose(
+              pcParams, { model: mdl, matteBackend, scope: currentId },
+              posePath, charPaths)
+          : await submitPoseClone(
+              pcParams, { model: mdl, matteBackend, scope: currentId },
+              posePath, charPaths[0], charPaths)
         jobId = r.job_id
       } else if (node.kind === 'spriteswap') {
         const sheetPath = sourcePathOf(node)
