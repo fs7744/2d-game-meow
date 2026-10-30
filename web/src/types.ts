@@ -119,6 +119,7 @@ export type GenParams = {
   apMatte: boolean        // 先抠背景（像素精灵通常要透明底）
   pcFill: number          // 角色迁移：人物在画布里占的高度比例
   pcRefMode: RefMode      // 角色迁移：动作参考图的解释方式（自动/骨架/轮廓/已画好的骨架图）
+  twoStage: boolean       // 姿态序列：两阶段（先出姿态草图再换皮），动作更准但慢一倍
   bgTone: BgTone          // 逐帧生成用的底色：white=白底（默认）/ dark=深色底（白毛角色用）
   ssCols: number          // 序列帧替换：精灵图列数（0 = 自动检测）
   ssRows: number          // 序列帧替换：精灵图行数（0 = 自动检测）

@@ -593,7 +593,10 @@ function check(name, cond, extra = '') {
   check('提交 workflow=w2', body.workflow === 'w2', body.workflow)
   check('带 init_image 绝对路径', typeof body.params.init_image === 'string'
     && body.params.init_image.includes('out.png'), body.params.init_image)
-  check('带 strength', typeof body.params.strength === 'number', String(body.params.strength))
+  // Qwen 没有 strength 语义（走「指令改图」）。多发这个键后端会丢掉它，
+  // 但每张产物都会挂一条 params_ignored 警告 —— 所以前端不该发。
+  check('不带 strength（Qwen 没有这个参数）',
+    body.params.strength === undefined, String(body.params.strength))
   check('不带 width/height（由源图决定）',
     body.params.width === undefined && body.params.height === undefined)
   check('提交带上了项目作用域（scope）',
@@ -1203,9 +1206,13 @@ function check(name, cond, extra = '') {
   check('两个源各有一个下拉', node?.querySelectorAll('.src-box select').length === 2,
     String(node?.querySelectorAll('.src-box select').length))
   check('没有源图时不能提交', node?.querySelector('.gen-btn')?.disabled === true)
-  check('有姿态/身份/占高三档参数',
-    node?.querySelectorAll('.adv .strength input[type=range]').length === 3,
+  // 姿态/身份两根 SD 强度滑块已随 SD 删除，只剩「占高」
+  check('只剩「占高」一根滑块（姿态/身份强度已删除）',
+    node?.querySelectorAll('.adv .strength input[type=range]').length === 1,
     String(node?.querySelectorAll('.adv .strength input[type=range]').length))
+  check('不再有「姿态」「身份」两个滑块',
+    ![...(node?.querySelectorAll('.adv .strength span') || [])]
+      .some((s) => /^(姿态|身份)$/.test((s.textContent || '').trim())))
 
   // 拖一个本地图进来 -> 动作参考图（第一个源）
   const viewport = doc.querySelector('.canvas-viewport')
@@ -1260,8 +1267,9 @@ function check(name, cond, extra = '') {
     typeof body.params.pose_image === 'string' && body.params.pose_image.length > 0 &&
     typeof body.params.char_image === 'string' && body.params.char_image.length > 0,
     JSON.stringify({ p: body.params.pose_image, c: body.params.char_image }))
-  check('带上了姿态/身份强度',
-    typeof body.params.cn_scale === 'number' && typeof body.params.ipa_scale === 'number',
+  // 双图条件没有强度旋钮：这两个键不该出现在载荷里
+  check('不带姿态/身份强度（双图条件没有强度旋钮）',
+    body.params.cn_scale === undefined && body.params.ipa_scale === undefined,
     JSON.stringify({ cn: body.params.cn_scale, ipa: body.params.ipa_scale }))
 
   check('角色迁移场景无脚本错误', errors.length === 0, errors[0] || '')

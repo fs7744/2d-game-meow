@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "smoke": "node check-hints.mjs && node smoke.mjs",
+    "smoke": "npm run build && node check-hints.mjs && node smoke.mjs",
     "check:hints": "node check-hints.mjs"
   },
   "dependencies": {

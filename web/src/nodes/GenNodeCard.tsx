@@ -991,6 +991,44 @@ export default function GenNodeCard({
               </div>
             </div>
           </div>
+          <div className="src-box char-box">
+            <span
+              className="conn in char"
+              data-port="char"
+              title="角色图（身份来源，可选）：把上游节点的输出点拖到这里"
+            />
+            <div className="src-thumb" title="角色图（身份来源）">
+              {charThumb ? (
+                <img src={charThumb} alt="角色" draggable={false} />
+              ) : (
+                <span>无角色</span>
+              )}
+            </div>
+            <div className="src-side">
+              <select
+                value={node.charSource?.nodeId ?? ''}
+                onChange={(e) =>
+                  onPatch({
+                    charSource: e.target.value
+                      ? { nodeId: e.target.value }
+                      : undefined,
+                  })
+                }
+              >
+                <option value="">（选角色图，可选）</option>
+                {sourceOptions.map((o) => (
+                  <option key={o.id} value={o.id}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+              <div className="src-note">
+                {charThumb
+                  ? '给了角色图：帧间身份更一致，但它也会「抢姿态」（动作偏保守）'
+                  : '不选也能跑：角色只靠文字描述，帧间身份可能漂'}
+              </div>
+            </div>
+          </div>
           <div className="prompt-wrap">
             <textarea
               className="prompt"
@@ -1002,6 +1040,21 @@ export default function GenNodeCard({
           </div>
           <details className="adv">
             <summary>更多设置</summary>
+            <label
+              className="check"
+              title={'两阶段：先用骨架出一张姿态草图，再用角色图把它换皮。\n'
+                + '实测姿态偏差 102px → 77px（动作更准），代价是每帧多一次生成'
+                + '（33s → 50s），而且服装细节会漂（白袍可能被画成金甲）。\n'
+                + '需要先在上面选一个角色图。'}
+            >
+              <input
+                type="checkbox"
+                checked={p.twoStage}
+                disabled={!charThumb}
+                onChange={(e) => setParam('twoStage', e.target.checked)}
+              />
+              两阶段（动作更准，慢一倍）
+            </label>
             {/* 底色：逐帧生成时用。白毛/白甲角色配白底，抠图会把脸和腿当成
                 背景一起吃掉（实测白猫骑士丢头顶+胸口，或丢两条腿）。 */}
             <label className="bg-mode" title={'生成时的底色。\n'
@@ -2251,6 +2304,69 @@ export default function GenNodeCard({
                 />
               </label>
               <div className="row">
+                {/* 透明背景：Qwen-Image-2.1 原生 RGBA。跟「抠图」不是一回事——
+                    抠图是生成后用分割模型切一遍（发丝/细剑常被切断），
+                    这个是让模型直接画 alpha，边界更干净。 */}
+                <label
+                  className="check"
+                  title={hint('透明背景')}
+                >
+                  <input
+                    type="checkbox"
+                    checked={p.transparent && canTransparent}
+                    disabled={!canTransparent}
+                    onChange={(e) => setParam('transparent', e.target.checked)}
+                  />
+                  透明背景（原生 RGBA）
+                  {!canTransparent && <span className="dim"> 仅 Qwen-Image</span>}
+                </label>
+                {canTransparent && p.transparent && (
+                  <p className="src-note">
+                    模型直接输出 alpha，不用再抠图；此时「抠图」会被跳过。
+                  </p>
+                )}
+                {/* 像素块 / 色数**只在「自定义」风格下暴露**：
+                    平时由产出风格一档决定（用户不用算「768² 配 6px = 128 有效像素」），
+                    填错不报错、只是出图看着不对，所以默认藏起来。 */}
+                {styleOf(p) === 'custom' && (
+                  <>
+                    <label className="check" title={hint('像素化')}>
+                      <input
+                        type="checkbox"
+                        checked={p.pixel > 1}
+                        onChange={(e) => setParam('pixel',
+                          e.target.checked ? (p.pixel > 1 ? p.pixel : 6) : 0)}
+                      />
+                      像素化
+                    </label>
+                    <label title={hint('像素块')}>
+                      像素块
+                      <input
+                        type="number"
+                        min={0}
+                        max={16}
+                        value={p.pixel}
+                        disabled={p.pixel <= 1}
+                        // max 挡不住手输，所以 onChange 也要夹一下：曾经手输 64，
+                        // 512/64 = 8px 有效像素，出图细节全被抹平
+                        onChange={(e) => setParam('pixel',
+                          Math.min(16, Math.max(0, Number(e.target.value) || 0)))}
+                      />
+                      <b>{p.pixel > 1 ? `${effPx}px` : '关'}</b>
+                    </label>
+                    <label title={hint('色数')}>
+                      色数
+                      <input
+                        type="number"
+                        min={0}
+                        max={64}
+                        value={p.palette}
+                        onChange={(e) => setParam('palette',
+                          Math.min(64, Math.max(0, Number(e.target.value) || 0)))}
+                      />
+                    </label>
+                  </>
+                )}
               </div>
               {/* 极端值直接说后果：这类设置不会报错，只是出图"看着不对"，
                   而用户会归因为模型不行（实测有人填了 64/4 → 8px 有效像素）。 */}

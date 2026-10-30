@@ -983,8 +983,8 @@ def image_to_pixel(eng: Engine, *,
                    pre_enhance: float = 1.0,
                    edge_rebuild: bool = True,
                    source_width: int = 1024, source_height: int = 1024,
-                   steps: int = 28, cfg: float = 8.0, seed: int = -1,
-                   model: str = "sdxl-anime", clip_skip: int = 2,
+                   steps: int = 24, cfg: float = 4.0, seed: int = -1,
+                   model: str = DEFAULT_MODEL,
                    matte: bool = True, matte_backend: str = "auto",
                    transparent: bool = False,
                    scope: str = "", tag: str = "wap") -> Dict[str, Any]:
@@ -994,17 +994,19 @@ def image_to_pixel(eng: Engine, *,
     （网格对齐 + 色板量化 + 轮廓描边），与前一步出什么图无关。只在"没有源图、
     需要先生成"时才会用到动漫底模。
 
-    为什么这样比「让 SD 直接画像素」好（本项目实测）：
+    为什么分两步（先出大图、再像素化）：
 
-        SD 直接画（像素 LoRA + pixel=6）  构图常裁到腿、颜色是连续渐变、
-                                          输出 768² 但有效像素只有 128
-        动漫大图 → 像素化                全身完整、1px 描边清晰、
-                                          输出就是原生 128²/192²
+        让模型直接画像素   构图常裁到腿、颜色是连续渐变，
+                           输出 768² 但有效像素只有 128
+        先出大图 → 像素化  全身完整、1px 描边清晰，
+                           输出就是原生 128²/192²
 
     根因是**两种能力互相打架**：像素风要求极简色块和硬边，而人物结构
     （脸、手、持握武器）需要足够的分辨率理解。让模型一次做两件事，它会在
-    两者之间妥协。分开做则各取所长：动漫底模负责「画对」，像素化负责
-    「压成像素」。
+    两者之间妥协。分开做则各取所长：模型负责「画对」，像素化负责「压成像素」。
+
+    **Qwen 这边不用像素 LoRA**：它直接就能画出像样的像素风（实测 768²/24 步
+    出 16-bit 猫骑士），所以「先出图」那一步默认不像素化，像素化只在这一步做。
 
     `init_image` 给了就直接转（任何图都行）；没给就用 `prompt` 先出图再转。
     后者默认走动漫底模，用户只写角色描述就能一步拿到像素精灵。
@@ -1037,13 +1039,14 @@ def image_to_pixel(eng: Engine, *,
             raise ValueError(
                 "需要 prompt 或 init_image 之一："
                 "要么描述角色（先出动漫图再转像素），要么给一张现成的图")
-        if model != "sdxl-anime" and "anime" not in model and eng.arch(model) != "qwen21":
+        if model != DEFAULT_MODEL:
             # 用户可能选了别的底模；提示一次但不阻止（有人就想用自己的底模）
-            print(f"[warn] 底模 {model} 不是动漫专模，动漫人物质量可能不如 sdxl-anime")
+            print(f"[warn] 底模 {model} 不是本工作台的默认底模，"
+                  f"人物质量可能不如 {DEFAULT_MODEL}")
         r = txt2img(eng, prompt=prompt, negative=negative, preset="anime",
                     width=source_width, height=source_height,
                     steps=steps, cfg=cfg, seed=seed, model=model,
-                    clip_skip=clip_skip, matte=matte,
+                    matte=matte,
                     matte_backend=matte_backend, transparent=transparent,
                     tag=f"{tag}_src", scope=scope)
         src_path = Path(r["file"])
@@ -1078,7 +1081,6 @@ def image_to_pixel(eng: Engine, *,
         "generated": init_image is None,
         "prompt": prompt, "negative": negative,
         "model": model if init_image is None else None,
-        "clip_skip": clip_skip if init_image is None else None,
         "seed": seed,
         "target": list(size), "colors_requested": int(colors),
         "palette": [list(c) for c in res["palette"]] if res["palette"] else [],
@@ -1580,7 +1582,8 @@ def _qwen_poseswap(eng: Engine, *, pose_images: Sequence[Path], prompt: str,
                    export: Optional[str], controlnet: str, model: str,
                    candidates: int, gate: bool, gate_min_points: int,
                    gate_retries: int, gate_seed_step: int, scope: str,
-                   anim_name: str, fps: int, tag: str) -> Dict[str, Any]:
+                   anim_name: str, fps: int, two_stage: bool = False,
+                   tag: str = "w4") -> Dict[str, Any]:
     """Qwen 版姿态序列（W4）：逐帧「骨架图当参考 + 指令」软引导。
 
     **它是近似实现**：SD 那条路是 ControlNet 硬约束（每个关节都钉住），
@@ -1597,8 +1600,16 @@ def _qwen_poseswap(eng: Engine, *, pose_images: Sequence[Path], prompt: str,
         去掉角色图（只给骨架+文字） 67px         腿真的迈开（代价：身份漂移）
 
     原因是**参考图在抢姿态**：角色图里是站姿，模型优先照抄它。所以这里的产出
-    动作偏保守——上身会跟，腿部常被参考图的站姿覆盖。真要精确动作，只能走
-    「先用骨架出姿态 → 再用角色迁移贴身份」的两段式（2× 成本），尚未验证。
+    动作偏保守——上身会跟，腿部常被参考图的站姿覆盖。
+
+    **两阶段模式**（`two_stage=True`）把「定姿态」与「定身份」拆开：
+    先只给骨架出一张草图（姿态准、身份只是个「差不多的角色」），
+    再拿「角色图 + 草图」做一次指令改图把身份换回来。
+    实测（3 帧 × 768²/24 步）姿态偏差 **102px → 77px（-25%）**，
+    代价是每帧多一次生成（33s → 50s）。角色图放**前面**那版配色一致度最高
+    （0.49 vs 现状 0.46），采纳。
+    代价里的另一项：白袍会被画成金甲（白袍像素占比 0.11 → 0.04），
+    也就是**服装细节会漂**。要精确动作就开，要保服装就别开。
 
     **成本**：28s 级别的单帧成本，所以默认 candidates=1、补提上限压到 1。
     """
@@ -1618,6 +1629,21 @@ def _qwen_poseswap(eng: Engine, *, pose_images: Sequence[Path], prompt: str,
     # 用户正文追加在最后：身份/姿态/构图是必须的，风格词是补充。
     instr = f"{head} {sem}".strip() if sem else head
 
+    # ---- 两阶段模式的两条指令 ----
+    # 阶段 1：只给骨架，靠文字描述角色（不喂角色图 → 没人抢姿态）
+    solo_instr = ("This image is a body skeleton showing a pose. Draw "
+                  + (sem or "a single character")
+                  + " in exactly that pose, full body, centered, "
+                  + _qwen_backdrop(bg) + "." + QWEN_FRAME_RULES)
+    # 阶段 2：角色图在前（它是「画谁」）、草图在后（它是「怎么站」）
+    reskin_instr = (
+        "The first image is the character reference: keep exactly the same "
+        "face, hairstyle, outfit, armor and colors. The second image is a "
+        "rough draft showing the target body pose. Redraw the character from "
+        "the first image in exactly the pose of the second image, full body, "
+        "centered, " + _qwen_backdrop(bg) + "." + QWEN_FRAME_RULES)
+    use_two_stage = bool(two_stage) and char is not None
+
     if seed < 0:
         seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
     candidates = max(1, int(candidates))
@@ -1634,6 +1660,11 @@ def _qwen_poseswap(eng: Engine, *, pose_images: Sequence[Path], prompt: str,
     frame_scores: List[Dict[str, Any]] = []
     attempts_used = 0
     prev_gate: Optional[Image.Image] = None
+    # **非人形主体**（史莱姆、机甲、道具）：DWPose 一个关节都检不出来，
+    # 闸门永远过不了 —— 这时补提就是纯烧钱（每帧 25~30s 白花）。
+    # 一旦某帧「画面里有前景、但关节数为 0」，就判定这个角色不是人形：
+    # 关掉后续所有补提，并在 meta 里写清楚原因，不让它看起来像「生成失败」。
+    non_humanoid = False
     torch.cuda.reset_peak_memory_stats()
 
     for pose_path in pose_images:
@@ -1647,13 +1678,28 @@ def _qwen_poseswap(eng: Engine, *, pose_images: Sequence[Path], prompt: str,
         for round_seeds in (list(range(candidates)),
                             list(range(candidates, attempts_max))):
             for i in round_seeds:
-                if used >= attempts_max:
+                # 上限动态：判定为非人形后立刻不再补提
+                if used >= (candidates if non_humanoid else attempts_max):
                     break
                 dt = _timer()
-                raw = _qwen_call(
-                    eng, prompt=instr, negative=neg, ref_image=refs,
-                    width=width, height=height, steps=steps, cfg=cfg,
-                    seed=seed + i * gate_seed_step, model=model, label="w4")
+                sd = seed + i * gate_seed_step
+                if use_two_stage:
+                    # 阶段 1：只有骨架 + 文字（没人跟它抢姿态）
+                    draft = _qwen_call(
+                        eng, prompt=solo_instr, negative=neg, ref_image=cond,
+                        width=width, height=height, steps=steps, cfg=cfg,
+                        seed=sd, model=model, label="w4-draft")
+                    # 阶段 2：角色图在前、草图在后 → 换回身份，姿态保住
+                    raw = _qwen_call(
+                        eng, prompt=reskin_instr, negative=neg,
+                        ref_image=[char, draft],
+                        width=width, height=height, steps=steps, cfg=cfg,
+                        seed=sd, model=model, label="w4-reskin")
+                else:
+                    raw = _qwen_call(
+                        eng, prompt=instr, negative=neg, ref_image=refs,
+                        width=width, height=height, steps=steps, cfg=cfg,
+                        seed=sd, model=model, label="w4")
                 info: Dict[str, Any] = {}
                 img, _edge, _subj = _postprocess(
                     raw, eng, matte=matte, matte_backend=matte_backend,
@@ -1677,6 +1723,11 @@ def _qwen_poseswap(eng: Engine, *, pose_images: Sequence[Path], prompt: str,
                               "reject": f"前景有 {_subj} 块（头/手与身体分离）"}
                 spent += dt()
                 used += 1
+                # 画面里有东西却检不出关节 → 不是人形，别再为它重提
+                if not non_humanoid and ev.get("points", 0) == 0                         and ev.get("coverage", 0.0) > 0.01:
+                    non_humanoid = True
+                    print("[warn] 主体不是人形（DWPose 检不出关节）："
+                          "关闭补提，后续帧只出 1 次")
                 if best is None or ev["score"] > best[0]["score"]:
                     best = (ev, img.convert("RGBA"), gate_img.convert("RGBA"))
                 if extractor is not None and ev["passed"] and used >= candidates:
@@ -1706,10 +1757,15 @@ def _qwen_poseswap(eng: Engine, *, pose_images: Sequence[Path], prompt: str,
         "matte": matte, "matte_used": matte_info.get("backend"),
         "matte_fallback": matte_info.get("fallback"),
         "model": model, "distill": None,
+        "two_stage": use_two_stage,
         "candidates": candidates, "candidates_note": None,
         "gate": bool(gate and extractor is not None),
         "gate_min_points": gate_min_points, "gate_retries": retries,
         "attempts": attempts_used, "gate_passed": passed,
+        # 非人形时 gate_passed 必然是 0，这不是失败，得说清楚
+        "gate_non_humanoid": non_humanoid,
+        "gate_note": ("主体不是人形：DWPose 检不出关节，闸门不适用，"
+                      "已跳过补提" if non_humanoid else None),
         "frame_scores": frame_scores,
         "pixel_block": pixel, "palette": palette,
         "per_frame_seconds": per_frame,
@@ -1748,6 +1804,7 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
              candidates: int = 1, gate: bool = True, gate_min_points: int = 8,
              gate_retries: int = 1, gate_seed_step: int = 1000,
              bg: str = "white", scope: str = "",
+             two_stage: bool = False,
              anim_name: str = "walk", fps: int = 10, tag: str = "w4"
              ) -> Dict[str, Any]:
     """姿态序列（**近似实现**）：一批骨架图 → 逐帧生成 → 归一/对齐 → 打包精灵图。
@@ -1757,6 +1814,8 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
     也没有 `cn_scale` / `ipa_scale`——Qwen 是双图条件，没有强度旋钮。
 
     ⚠️ 动作幅度偏保守：腿部常被角色参考图的站姿覆盖（PLAN §2.8 有实测表）。
+    `two_stage=True` 走两段式（先出姿态草图再换皮），实测姿态偏差 102px → 77px，
+    代价是每帧多一次生成（33s → 50s）。
     """
     eng.require(model, "poseswap")
     pose_images = norm_pose_inputs(pose_images)
@@ -1771,7 +1830,7 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
         width=width, height=height, cols=cols, pixel=pixel, palette=palette,
         matte=matte, matte_backend=matte_backend, denoise=denoise,
         clean_iso=clean_iso, bg=bg, export=export, controlnet=controlnet,
-        model=model, candidates=candidates, gate=gate,
+        model=model, candidates=candidates, gate=gate, two_stage=two_stage,
         gate_min_points=gate_min_points, gate_retries=gate_retries,
         gate_seed_step=gate_seed_step, scope=scope,
         anim_name=anim_name, fps=fps, tag=tag)

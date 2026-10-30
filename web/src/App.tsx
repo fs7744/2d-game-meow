@@ -103,6 +103,8 @@ const DEFAULT_PARAMS: GenParams = {
   pcFill: 0.8,
   // 参考模式默认 auto：先试骨架，认不出人体自动降级到轮廓（游戏素材走这条路）
   pcRefMode: 'auto',
+  // 两阶段（先出姿态草图再换皮）：动作更准，代价是每帧多一次生成
+  twoStage: false,
   // 底色：默认白底；角色本身偏白（白毛/白甲）时改 dark，抠图才不会啃掉脸
   bgTone: 'white',
   // 序列帧替换：0 = 自动检测精灵图网格
@@ -785,7 +787,10 @@ export default function App() {
           })
           return
         }
-        const r = await submitPoseSeq(node.params, { model: mdl, matteBackend, scope: currentId }, dir)
+        // 角色图（可选）：不传就只靠提示词描述角色
+        const charPath = charPathOf(node)
+        const r = await submitPoseSeq(
+          node.params, { model: mdl, matteBackend, scope: currentId }, dir, charPath)
         jobId = r.job_id
       } else if (node.kind === 'pixelify') {
         const r = await submitPixelify(

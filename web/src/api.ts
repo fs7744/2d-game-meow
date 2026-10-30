@@ -330,9 +330,13 @@ export function submitPoseSeq(
   params: GenParams,
   opts: SubmitOpts,
   poseDir: string,
+  charImage?: string,
 ) {
   return post('w4', {
     pose_images: poseDir,
+    // 角色图（可选）：给了它帧间身份更一致，但也会「抢姿态」——
+    // 想两全就开 two_stage（先出姿态草图，再拿角色图换皮）。
+    ref_image: charImage || undefined,
     prompt: params.prompt,
     negative: params.negative || undefined,
     preset: params.preset,
@@ -353,6 +357,8 @@ export function submitPoseSeq(
     gate_retries: params.ssGateRetries,
     // 底色：白毛角色用白底会被抠图吃掉，dark 有对比才抠得干净
     bg: params.bgTone,
+    // 两阶段：每帧两次生成（草图 + 换皮），姿态更准
+    two_stage: params.twoStage || undefined,
   })
 }
 

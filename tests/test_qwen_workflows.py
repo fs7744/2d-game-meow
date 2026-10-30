@@ -336,3 +336,145 @@ def test_qwen_workflows_never_touch_sd_pipelines(eng, sandbox, tmp_path,
     g.poseswap(eng, pose_images=_skeleton(tmp_path), prompt="cat knight",
                steps=8, model="qwen-image-2.1", width=256, height=256,
                matte=False, candidates=1, gate=False, scope="t")
+
+
+# ---------------- 非人形主体：闸门不该空转 ----------------
+#
+# 史莱姆、机甲、道具这类主体，DWPose 一个关节都检不出来。原来的逻辑是
+# 「闸门没过就补提一次」——对人形有意义（没画好就重来），对非人形则是
+# 纯烧钱：每帧 25~30s 白花，而且最后 meta 里 gate_passed=0 看起来像生成失败。
+
+def test_poseswap_skips_retries_for_non_humanoid(eng, sandbox, tmp_path,
+                                                  monkeypatch):
+    from workflows import quality
+
+    pose_dir = tmp_path / "poses"
+    pose_dir.mkdir()
+    for i in range(2):
+        Image.new("RGB", (256, 256), (255, 255, 255)).save(pose_dir / f"p{i}.png")
+
+    # 姿态提取器：假装能跑，但一个关节也检不出（史莱姆就是这样）
+    class _NoPoints:
+        def visible_points(self, img, thr=0.25):
+            return {}
+
+    monkeypatch.setattr(eng, "pose_extractor", lambda: _NoPoints())
+
+    # 评估结果：画面里有前景（coverage 0.2），但关节数为 0
+    monkeypatch.setattr(quality, "evaluate",
+                        lambda img, extractor=None, prev=None, min_points=8:
+                        {"points": 0, "coverage": 0.2, "edge": [], "drift": 0.0,
+                         "score": 1.0, "passed": False})
+
+    r = g.poseswap(eng, pose_images=list(pose_dir.glob("*.png")),
+                   prompt="a blue slime monster", steps=4, width=256, height=256,
+                   matte=False, candidates=1, gate=True, gate_retries=1,
+                   scope="t")
+    meta = r["meta"]
+
+    assert meta["gate_non_humanoid"] is True
+    assert "不是人形" in (meta["gate_note"] or "")
+    # 2 帧 × 只出 1 次 = 2 次模型调用；补提被关掉了
+    assert len(sandbox["calls"]) == 2, f"仍在补提：{len(sandbox['calls'])} 次调用"
+    assert meta["attempts"] == 2
+
+
+def test_poseswap_keeps_retries_for_humanoid(eng, sandbox, tmp_path,
+                                             monkeypatch):
+    """人形主体仍然保留补提（别把这个优化做过头）。"""
+    from workflows import quality
+
+    pose_dir = tmp_path / "poses"
+    pose_dir.mkdir()
+    for i in range(2):
+        Image.new("RGB", (256, 256), (255, 255, 255)).save(pose_dir / f"p{i}.png")
+
+    class _Points:
+        def visible_points(self, img, thr=0.25):
+            return {k: (0.5, 0.5) for k in range(14)}
+
+    monkeypatch.setattr(eng, "pose_extractor", lambda: _Points())
+    monkeypatch.setattr(quality, "evaluate",
+                        lambda img, extractor=None, prev=None, min_points=8:
+                        {"points": 14, "coverage": 0.2, "edge": [], "drift": 0.0,
+                         "score": 1.0, "passed": True})
+
+    r = g.poseswap(eng, pose_images=list(pose_dir.glob("*.png")),
+                   prompt="a cat knight", steps=4, width=256, height=256,
+                   matte=False, candidates=1, gate=True, gate_retries=1,
+                   scope="t")
+    meta = r["meta"]
+    assert meta["gate_non_humanoid"] is False
+    assert meta["gate_note"] is None
+    # 闸门一次就过 → 每帧只出 1 次
+    assert len(sandbox["calls"]) == 2
+
+
+# ---------------- 两阶段：先出姿态草图，再换皮 ----------------
+
+def test_poseswap_two_stage_calls_model_twice(eng, sandbox, tmp_path):
+    """两阶段模式：每帧两次模型调用（草图 + 换皮），且角色图排在前面。"""
+    pose_dir = tmp_path / "poses"
+    pose_dir.mkdir()
+    Image.new("RGB", (256, 256), (255, 255, 255)).save(pose_dir / "p0.png")
+    char = tmp_path / "char.png"
+    Image.new("RGBA", (256, 256), (40, 170, 200, 255)).save(char)
+
+    r = g.poseswap(eng, pose_images=[pose_dir / "p0.png"], ref_image=char,
+                   prompt="a cat knight", steps=4, width=256, height=256,
+                   matte=False, candidates=1, gate=False, two_stage=True,
+                   scope="t")
+    assert r["meta"]["two_stage"] is True
+    assert len(sandbox["calls"]) == 2, "两阶段应该每帧两次模型调用"
+    # 第二次调用：角色图在前、草图在后（顺序是有讲究的，见 PLAN §2.8）
+    reskin = sandbox["calls"][1]
+    assert isinstance(reskin["ref"], list) and len(reskin["ref"]) == 2
+
+
+def test_poseswap_two_stage_falls_back_without_ref(eng, sandbox, tmp_path):
+    """没有角色参考图时，两阶段无从谈起（没有身份可换），自动退回单阶段。"""
+    pose_dir = tmp_path / "poses"
+    pose_dir.mkdir()
+    Image.new("RGB", (256, 256), (255, 255, 255)).save(pose_dir / "p0.png")
+
+    r = g.poseswap(eng, pose_images=[pose_dir / "p0.png"],
+                   prompt="a cat knight", steps=4, width=256, height=256,
+                   matte=False, candidates=1, gate=False, two_stage=True,
+                   scope="t")
+    assert r["meta"]["two_stage"] is False
+    assert len(sandbox["calls"]) == 1
+
+
+# ---------------- 两阶段：先出姿态草图，再换皮 ----------------
+
+def test_poseswap_two_stage_calls_model_twice(eng, sandbox, tmp_path):
+    """两阶段模式：每帧两次模型调用（草图 + 换皮），且角色图排在前面。"""
+    pose_dir = tmp_path / "poses"
+    pose_dir.mkdir()
+    Image.new("RGB", (256, 256), (255, 255, 255)).save(pose_dir / "p0.png")
+    char = tmp_path / "char.png"
+    Image.new("RGBA", (256, 256), (40, 170, 200, 255)).save(char)
+
+    r = g.poseswap(eng, pose_images=[pose_dir / "p0.png"], ref_image=char,
+                   prompt="a cat knight", steps=4, width=256, height=256,
+                   matte=False, candidates=1, gate=False, two_stage=True,
+                   scope="t")
+    assert r["meta"]["two_stage"] is True
+    assert len(sandbox["calls"]) == 2, "两阶段应该每帧两次模型调用"
+    # 第二次调用：角色图在前、草图在后（顺序是有讲究的，见 PLAN §2.8）
+    reskin = sandbox["calls"][1]
+    assert isinstance(reskin["ref"], list) and len(reskin["ref"]) == 2
+
+
+def test_poseswap_two_stage_falls_back_without_ref(eng, sandbox, tmp_path):
+    """没有角色参考图时，两阶段无从谈起（没有身份可换），自动退回单阶段。"""
+    pose_dir = tmp_path / "poses"
+    pose_dir.mkdir()
+    Image.new("RGB", (256, 256), (255, 255, 255)).save(pose_dir / "p0.png")
+
+    r = g.poseswap(eng, pose_images=[pose_dir / "p0.png"],
+                   prompt="a cat knight", steps=4, width=256, height=256,
+                   matte=False, candidates=1, gate=False, two_stage=True,
+                   scope="t")
+    assert r["meta"]["two_stage"] is False
+    assert len(sandbox["calls"]) == 1
