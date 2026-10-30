@@ -1,4 +1,4 @@
-import type { GenParams, JobState, LoraInfo, ModelRecommend } from './types'
+import type { GenParams, JobState, ModelRecommend } from './types'
 
 const base = ''                                   // 生产同源；开发由 vite proxy 转发
 
@@ -108,13 +108,6 @@ function common(params: GenParams, opts: SubmitOpts) {
     // 底模与抠图后端是全局设置，不在节点参数里
     model: opts.model || 'qwen-image-2.1',
     matte_backend: opts.matteBackend || 'auto',
-    // 空串表示不挂 LoRA；后端会把名字解析成绝对路径
-    ...loraPayload(params),
-    // SDXL Refiner：只有 SDXL 有意义，后端会校验
-    refiner: params.refiner || undefined,
-    refiner_cfg: params.refinerCfg,
-    refiner_steps: params.refinerSteps,
-    refiner_end: params.refinerEnd,
     // 透明背景：只有 Qwen-Image-2.1 原生支持（VAE 第 4 通道）。
     // 后端会在这个字段为真时给提示词加双段式声明，否则 alpha 不会激活。
     transparent: params.transparent || undefined,
@@ -136,23 +129,6 @@ async function post(
   return r.json() as Promise<SubmitResult>
 }
 
-/**
- * LoRA 提交参数。多个时传**数组**：`lora=[a, b]`、`lora_scale=[0.8, 0.5]`。
- *
- * 只挂一个是常态，所以空的时候发 undefined（后端照旧走"不挂"分支）；
- * 挂了就一律发数组——单个也发数组，避免前端分两条路径写代码。
- */
-function loraPayload(params: GenParams) {
-  const items = [
-    ...(params.lora ? [{ name: params.lora, scale: params.loraScale }] : []),
-    ...(params.extraLoras || []).filter((x) => x.name),
-  ]
-  if (!items.length) return { lora: undefined, lora_scale: undefined }
-  return {
-    lora: items.map((x) => x.name),
-    lora_scale: items.map((x) => Number.isFinite(x.scale) ? x.scale : 0.8),
-  }
-}
 
 export function submitTxt2Img(params: GenParams, opts: SubmitOpts = {}) {
   return post('w1', { ...common(params, opts), width: params.width, height: params.height })
@@ -190,7 +166,6 @@ export function submitInpaint(
     cfg: params.cfg,
     seed: params.seed,
     preset: params.preset,
-    ...loraPayload(params),
     model: opts.model || 'qwen-image-2.1',
     scope: opts.scope || undefined,
   })
@@ -217,7 +192,6 @@ export function submitAiRepaint(
     seed: params.seed,
     preset: params.preset,
     clip_skip: params.clipSkip,
-    ...loraPayload(params),
     model: opts.model || 'qwen-image-2.1',
     scope: opts.scope || undefined,
     context: params.rpContext,
@@ -304,7 +278,6 @@ export function submitPoseClone(
     seed: params.seed,
     preset: params.preset,
     clip_skip: params.clipSkip,
-    ...loraPayload(params),
     model: opts.model || 'qwen-image-2.1',
     scope: opts.scope || undefined,
     cn_scale: params.pcCnScale,
@@ -369,7 +342,6 @@ export function submitPoseSeq(
     prompt: params.prompt,
     negative: params.negative || undefined,
     preset: params.preset,
-    ...loraPayload(params),
     model: opts.model || 'qwen-image-2.1',
     scope: opts.scope || undefined,
     width: params.width,
@@ -410,7 +382,6 @@ export function submitSpriteSwap(
     prompt: params.prompt,
     negative: params.negative || undefined,
     preset: params.preset,
-    ...loraPayload(params),
     model: opts.model || 'qwen-image-2.1',
     scope: opts.scope || undefined,
     // 0 = 后端自动检测精灵图网格
@@ -631,31 +602,6 @@ export async function fetchModels(): Promise<ModelList> {
   const current = (typeof j.current === 'string' && available.includes(j.current))
     ? j.current : (available[0] || 'qwen-image-2.1')
   return { current, available, recommend, arch, caps, refiner }
-}
-
-/**
- * 扫描 models/lora 并把缺的配置补进 loras.json。
- *
- * 读的是 safetensors 头部、不加载权重，所以十几毫秒就回来了。
- * 后端**只补不覆盖**：手写的 label/scale/note 不会被自动值顶掉。
- */
-export async function scanLoras(): Promise<{ message: string; count: number }> {
-  const r = await fetch(`${base}/loras/scan`, { method: 'POST' })
-  if (!r.ok) throw new Error(`扫描失败：HTTP ${r.status}`)
-  const j = await r.json()
-  return { message: String(j.message || ''), count: Number(j.count) || 0 }
-}
-
-export async function fetchLoras(baseModel?: string): Promise<LoraInfo[]> {
-  const r = await fetch(`${base}/loras`)
-  if (!r.ok) throw new Error(`HTTP ${r.status}`)
-  const j = await r.json()
-  const items: LoraInfo[] = Array.isArray(j.items) ? j.items : []
-  // SD1.5 的 LoRA 装在 SDXL 上完全无效，会静默出废图 —— 按基座直接过滤掉。
-  // **比的是架构不是底模名**：`sdxl-anime` 的架构是 sdxl，按名字比会把挂在它
-  // 上面的 SDXL LoRA 全过滤掉（实测切到 sdxl-anime 后 LoRA 下拉只剩「不挂」）。
-  return items.filter(
-    (x) => !x.hidden && (!baseModel || (x.base || 'sd15') === baseModel))
 }
 
 export async function health(): Promise<{ ok: boolean; device?: string }> {

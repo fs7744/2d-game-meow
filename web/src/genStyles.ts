@@ -22,10 +22,6 @@ export type GenStyle = {
    *  1024 配 8 = 128 有效像素，换 768 就变成 96，档位必须自洽。 */
   width?: number
   height?: number
-  /** 这一档需要的 LoRA（键名 = models/lora 下的文件名 stem）。
-   *  触发词不用管：后端会从 loras.json 读出来自动前置。 */
-  lora?: string
-  loraScale?: number
   /** 这一档建议的底模；选了档位就自动切过去，避免用户漏掉。 */
   model?: string
   note: string
@@ -45,11 +41,9 @@ export const GEN_STYLES: GenStyle[] = [
   {
     v: 'spriteIll', label: '像素精灵·Illustrious（真像素）',
     preset: 'anime', pixel: 8, palette: 32, width: 1024, height: 1024,
-    lora: 'Illustrious_PixelArt_Shader_M_01_epoch_4', loraScale: 1,
-    model: 'sdxl-anime',
-    note: '自动切 sdxl-anime 底模 + 挂 Pixelizer（触发词后端自动补）。'
-      + '实测可交付 89%、硬边 0.407（产线真精灵帧 0.447，不挂 LoRA 只有 0.198）。'
-      + '提示词用 danbooru tag，必须带 solo 与 full body——它只管像素化，不管构图。',
+    note: '像素块 8（1024÷8 = 128 有效像素）+ anime 契约。'
+      + 'SD 时代这一档还要挂 Pixelizer LoRA 并切 sdxl-anime 底模；'
+      + 'Qwen 之后 LoRA 与底模切换都已经删掉，只剩参数档位。',
   },
   {
     v: 'pixel8', label: '像素·8-bit 粗颗粒',
@@ -89,16 +83,11 @@ export const GEN_STYLES: GenStyle[] = [
  * 用显式的档位字段兜住。
  */
 export function styleFromParams(
-  preset: Preset, pixel: number, palette: number, lora: string = '',
+  preset: Preset, pixel: number, palette: number,
 ): string {
   const hit = GEN_STYLES.find(
     (x) => x.v !== 'custom' && x.preset === preset
-      && x.pixel === pixel && x.palette === palette
-      // LoRA **只在档位自己声明了才作为判据**（它是那一档的必备装备）。
-      // 对没声明 LoRA 的档位（像素精灵 / 动漫立绘 / 水墨…）不能比：用户
-      // 手动挂了个风格 LoRA，参数其实和档位一致，比下去会全都判成
-      // 「自定义参数」——实测「水墨国风」这条就永远选不进去。
-      && (x.lora === undefined || x.lora === lora),
+      && x.pixel === pixel && x.palette === palette,
   )
   return hit ? hit.v : 'custom'
 }

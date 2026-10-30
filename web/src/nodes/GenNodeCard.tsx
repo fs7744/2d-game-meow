@@ -5,7 +5,7 @@ import MaskPreview from '../components/MaskPreview'
 import SkeletonEditor, { defaultSkeleton } from '../components/SkeletonEditor'
 import type { ModelCaps, PoseDir } from '../api'
 import { fileNameOf } from '../fileName'
-import type { GenNode, GenParams, LoraInfo } from '../types'
+import type { GenNode, GenParams } from '../types'
 import { GEN_STYLES, styleFromParams } from '../genStyles'
 
 /**
@@ -305,9 +305,6 @@ type Props = {
   onDelete: () => void
   favorited: boolean
   onToggleFavorite: () => void
-  loras: LoraInfo[]
-  /** 这个节点的底模架构（sd15 / sdxl / qwen21）：LoRA 按它过滤，不能按全局默认 */
-  loraBase?: string
   model: string
   /** 切底模：产出风格档位可能要求特定底模（如「像素精灵·Illustrious」要 sdxl-anime）。
    *  keepNodes=true 表示参数由档位负责，别套推荐值（否则会覆盖刚 patch 的 LoRA/尺寸）。 */
@@ -317,7 +314,6 @@ type Props = {
   /** 可当 W4 输入的骨架帧目录（后端扫出来的） */
   poseDirs?: PoseDir[]
   /** 本机是否装了 SDXL refiner 权重（没有就别让人勾） */
-  hasRefiner?: boolean
   /** 当前底模支不支持原生透明背景（只有 Qwen-Image-2.1 支持） */
   canTransparent?: boolean
   /** 可用底模清单（底模是节点级的，这里给下拉用） */
@@ -362,13 +358,15 @@ type Props = {
  *  2. 记录的档位与实际参数一致 → 用它（正常路径）。
  *  3. 其余一律按参数反推。
  *
- * 第 3 条是为了**不骗人**：切底模（动漫底模会改 preset/pixel/palette）或挂
- * LoRA（LoRA 自带契约）之后参数被外部改掉，`genStyle` 却停在旧值——只信它
- * 就会显示「像素精灵」而参数实际是动漫立绘。
+ * 第 3 条是为了**不骗人**：切底模（动漫底模会改 preset/pixel/palette）之后
+ * 参数被外部改掉，`genStyle` 却停在旧值——只信它就会显示「像素精灵」而参数
+ * 实际是动漫立绘。
  */
-/** 取文件名 stem：lora 字段可能是名字，也可能是绝对路径。 */
-function loraStem(v: string): string {
-  return (v || '').split(/[\\/]/).pop()!.replace(/\.safetensors$/i, '')
+function styleOf(p: GenParams): string {
+  if (p.genStyle === 'custom') return 'custom'
+  const byParams = styleFromParams(p.preset, p.pixel, p.palette)
+  if (p.genStyle && byParams === p.genStyle) return p.genStyle
+  return byParams
 }
 
 /**
@@ -400,12 +398,6 @@ function shortModel(m: string): string {
   return map[m] || m
 }
 
-function styleOf(p: GenParams): string {
-  if (p.genStyle === 'custom') return 'custom'
-  const byParams = styleFromParams(p.preset, p.pixel, p.palette, loraStem(p.lora))
-  if (p.genStyle && byParams === p.genStyle) return p.genStyle
-  return byParams
-}
 
 export default function GenNodeCard({
   node,
@@ -418,13 +410,10 @@ export default function GenNodeCard({
   onDelete,
   favorited,
   onToggleFavorite,
-  loras,
-  loraBase,
   model,
   onModel,
   maxCandidates,
   poseDirs,
-  hasRefiner,
   canTransparent,
   nodesModels,
   modelCaps,
@@ -445,18 +434,6 @@ export default function GenNodeCard({
 }: Props) {
   const dragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null)
   const p = node.params
-  /**
-   * LoRA 是**按节点底模**过滤的，不是按全局默认。
-   *
-   * 之前在 App 里 fetchLoras(arch[全局model]) 一次拉完，节点改成节点级底模后
-   * 就对不上了：节点切到 SDXL，下拉里仍全是 SD1.5 的 LoRA（装上去是废图），
-   * 而档位要挂的 SDXL LoRA 又根本不在列表里，value 落空。
-   * 现在 App 拉全量，每个节点按自己的 arch 过滤。
-   */
-  const visibleLoras = loraBase
-    ? loras.filter((l) => (l.base || 'sd15') === loraBase)
-    : loras
-  const loraInfo = loras.find((l) => l.name === p.lora)
   const job = node.job
   const busy = job?.status === 'queued' || job?.status === 'running'
   const hasImage = !!job?.url
@@ -709,61 +686,6 @@ export default function GenNodeCard({
     window.addEventListener('pointerup', up)
   }
 
-  /**
-   * 选 LoRA：同时把「推荐强度」和「匹配的提示词契约」一起带过来。
-   * 不这么做的话，挂着武侠 LoRA 却仍在用像素契约，两边打架、两头不到位。
-   */
-  const extras = p.extraLoras || []
-  const setExtras = (next: { name: string; scale: number }[]) =>
-    onPatch({ params: { ...p, extraLoras: next } })
-
-  /**
-   * 选 LoRA：同时把「推荐强度」和「匹配的提示词契约」一起带过来。
-   * 不这么做的话，挂着武侠 LoRA 却仍在用像素契约，两边打架、两头不到位。
-   *
-   * `slot` 指定是主槽（-1）还是叠加的第几个。副槽只带强度，不改
-   * preset / 抠图 / clip skip —— 那几项是"这个 LoRA 的训练约定"，
-   * 让第二个 LoRA 覆盖第一个的约定只会更乱。
-   */
-  const chooseLora = (name: string, slot = -1) => {
-    const info = loras.find((l) => l.name === name)
-    if (slot >= 0) {
-      const next = extras.map((x, i) => (i === slot
-        ? { name, scale: info?.scale ?? x.scale } : x))
-      setExtras(next)
-      return
-    }
-    const next = { ...p, lora: name }
-    if (info) {
-      next.loraScale = info.scale
-      if (info.preset && p.preset === 'sprite') next.preset = info.preset
-      // 注册表声明的「必须抠图 / 推荐 clip skip」一起带过来：像素 LoRA 都会画彩色底，
-      // 不勾抠图就没法用；这两项用户基本不会自己想到要改
-      if (typeof info.matte === 'boolean') next.matte = info.matte
-      if (typeof info.clip_skip === 'number') next.clipSkip = info.clip_skip
-    }
-    onPatch({ params: next })
-  }
-
-  /** 叠加一个 LoRA。上限 4 个：再多效果互相抵消，而且显存里堆叠的副本也变多。 */
-  const addExtra = () => {
-    if (extras.length >= 4) return
-    setExtras([...extras, { name: '', scale: 0.8 }])
-  }
-  const removeExtra = (i: number) => setExtras(extras.filter((_, k) => k !== i))
-  const setExtraScale = (i: number, v: number) =>
-    setExtras(extras.map((x, k) => (k === i ? { ...x, scale: v } : x)))
-
-  /** 触发词缺了等于白装 LoRA，所以给个一键补入，已包含则不重复加。 */
-  const addTrigger = () => {
-    const t = (loraInfo?.trigger || '').trim()
-    if (!t) return
-    const lower = p.prompt.toLowerCase()
-    const missing = t.split(',').map((x) => x.trim()).filter(Boolean)
-      .filter((x) => !lower.includes(x.toLowerCase()))
-    if (!missing.length) return
-    setParam('prompt', `${missing.join(', ')}, ${p.prompt}`.replace(/^, /, ''))
-  }
 
   /** 源图区：图生图与抠图节点共用（连线接上来的源，或直接拖一张图） */
   const sourceBox = (
@@ -2409,20 +2331,6 @@ export default function GenNodeCard({
                   // 「16-bit 档」会变成 1024÷6=170 有效像素，跟档位说明对不上。
                   if (st.width !== undefined) patch.width = st.width
                   if (st.height !== undefined) patch.height = st.height
-                  // LoRA 是「档位的装备」：
-                  //  · 目标档位自带 LoRA → 挂上
-                  //  · 目标档位不带，而当前这个 LoRA 是**上一个档位挂上的** → 摘掉
-                  //    （不摘的话参数永远比不中任何档位，下拉立刻弹回「自定义」，
-                  //     而且之后每一档都弹回去——等于进了 Illustrious 档就出不来）
-                  //  · 用户自己手动选的 LoRA（不属于任何档位）→ 保留，别抢
-                  const cur = GEN_STYLES.find((x) => x.v === styleOf(p))
-                  const owned = cur?.lora && cur.lora === loraStem(p.lora)
-                  if (st.lora !== undefined) {
-                    patch.lora = st.lora
-                    patch.loraScale = st.loraScale ?? 0.8
-                  } else if (owned) {
-                    patch.lora = ''
-                  }
                   setParams(patch)
                   // 底模不属于节点参数（是全局状态）：档位要求 sdxl-anime 就切过去，
                   // 否则用户漏一步就白挂 LoRA——Illustrious 的 LoRA 挂 SD1.5 会直接报错
@@ -2464,105 +2372,7 @@ export default function GenNodeCard({
                   onChange={(e) => setParam('negative', e.target.value)}
                 />
               </label>
-              <label className="block" title={hint('LoRA')}>
-                LoRA
-                <select value={p.lora} onChange={(e) => chooseLora(e.target.value)}>
-                  <option value="">不挂（纯底模）</option>
-                  {visibleLoras.map((l) => (
-                    <option key={l.name} value={l.name}>
-                      {l.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              {/* LoRA 列表按**这个节点自己的底模架构**过滤，所以 Qwen 底下
-                  本来就只剩「不挂」。但空列表不解释的话用户会以为扫坏了。 */}
-              {!visibleLoras.length && (
-                <p className="src-note">
-                  当前底模下没有可用 LoRA：Qwen-Image 不吃 SD 的 LoRA（不同的主干与
-                  文本编码器），能挂的只有它自己的微调。
-                </p>
-              )}
-              {loraInfo && (
-                <div className="lora-box">
-                  <div className="lora-trigger">
-                    <span>
-                      触发词 <b>{loraInfo.trigger || '（无）'}</b>
-                    </span>
-                    {loraInfo.trigger && (
-                      <button className="mini" title="补进提示词开头" onClick={addTrigger}>
-                        + 填入
-                      </button>
-                    )}
-                  </div>
-                  {loraInfo.note && <p className="lora-note">{loraInfo.note}</p>}
-                </div>
-              )}
-              {/* 叠加多个 LoRA：效果线性叠加（A1111 的 <lora:a:0.8> <lora:b:0.5>）。
-                  常见组合是「风格 + 角色」——单个 LoRA 很难同时给两样。 */}
-              <div className="lora-stack">
-                <div className="stack-head">
-                  <span>叠加 LoRA</span>
-                  <button
-                    className="mini"
-                    onClick={addExtra}
-                    disabled={!visibleLoras.length || extras.length >= 4}
-                    title="再加一个 LoRA（与主 LoRA 线性叠加）"
-                  >
-                    + 叠加
-                  </button>
-                </div>
-                {extras.map((it, i) => (
-                  <div className="stack-row" key={i}>
-                    <select
-                      value={it.name}
-                      onChange={(e) => chooseLora(e.target.value, i)}
-                      title="选择要叠加的 LoRA（必须与主 LoRA 同架构）"
-                    >
-                      <option value="">（选一个）</option>
-                      {visibleLoras.map((l) => (
-                        <option key={l.name} value={l.name}>{l.label}</option>
-                      ))}
-                    </select>
-                    <input
-                      type="number"
-                      step={0.05}
-                      min={0}
-                      max={1.5}
-                      value={it.scale}
-                      disabled={!it.name}
-                      onChange={(e) => setExtraScale(i, Number(e.target.value))}
-                      title="这个 LoRA 的强度"
-                    />
-                    <button
-                      className="mini"
-                      onClick={() => removeExtra(i)}
-                      title="移除这一层"
-                    >
-                      ×
-                    </button>
-                  </div>
-                ))}
-                {!!extras.length && (
-                  <p className="stack-note">
-                    强度各自独立；总强度过高会过拟合（构图僵、出伪影），
-                    叠两层时建议都在 0.5~0.8。
-                  </p>
-                )}
-              </div>
               <div className="row">
-                <label title={hint('LoRA 强度')}>
-                  LoRA 强度
-                  <input
-                    type="number"
-                    step={0.05}
-                    min={0}
-                    max={1.5}
-                    value={p.loraScale}
-                    disabled={!p.lora}
-                    onChange={(e) => setParam('loraScale', Number(e.target.value))}
-                  />
-                </label>
                 <label title={isQwenModel
                   ? 'Qwen 的引导强度是固定的 true_cfg_scale=4.0，这个框不生效'
                   : hint('CFG')}>
@@ -2594,68 +2404,6 @@ export default function GenNodeCard({
                 {canTransparent && p.transparent && (
                   <p className="src-note">
                     模型直接输出 alpha，不用再抠图；此时「抠图」会被跳过。
-                  </p>
-                )}
-                <label className="check" title={hint('精修')}>
-                  <input
-                    type="checkbox"
-                    checked={p.refiner}
-                    disabled={model !== 'sdxl' || !hasRefiner}
-                    onChange={(e) => setParam('refiner', e.target.checked)}
-                  />
-                  应用 Refiner 精修
-                </label>
-                {p.refiner && (
-                  <div className="lora-stack">
-                    <label className="strength" title={hint('精修强度')}>
-                      <span>精修强度</span>
-                      <input
-                        type="range"
-                        min={1}
-                        max={12}
-                        step={0.5}
-                        value={p.refinerCfg}
-                        onChange={(e) => setParam('refinerCfg', Number(e.target.value))}
-                      />
-                      <b>{p.refinerCfg}</b>
-                    </label>
-                    <label className="strength" title={hint('精修步数')}>
-                      <span>精修步数</span>
-                      <input
-                        type="number"
-                        min={5}
-                        max={60}
-                        value={p.refinerSteps}
-                        onChange={(e) => setParam('refinerSteps',
-                          Math.min(60, Math.max(5, Number(e.target.value) || 20)))}
-                      />
-                      <b>步</b>
-                    </label>
-                    <label className="strength" title={hint('精修起点')}>
-                      <span>精修起点</span>
-                      <input
-                        type="range"
-                        min={0.4}
-                        max={0.95}
-                        step={0.05}
-                        value={p.refinerEnd}
-                        onChange={(e) => setParam('refinerEnd', Number(e.target.value))}
-                      />
-                      <b>
-                        {p.refinerEnd.toFixed(2)}
-                        <em className="sub-val">
-                          ≈{Math.max(1, Math.round(p.refinerSteps * (1 - p.refinerEnd)))} 步
-                        </em>
-                      </b>
-                    </label>
-                  </div>
-                )}
-                {model !== 'sdxl' && (
-                  <p className="src-note">Refiner 只支持 SDXL；SD1.5 底模下不可用。</p>
-                )}
-                {model === 'sdxl' && !hasRefiner && (
-                  <p className="src-note">
-                    本机没有 refiner 权重（models/checkpoints/sdxl-refiner），勾了也不会生效。
                   </p>
                 )}
                 {/* 像素块 / 色数**只在「自定义」风格下暴露**：

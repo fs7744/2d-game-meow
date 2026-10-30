@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ModelCaps, PoseDir } from '../api'
 import { fileNameOf } from '../fileName'
-import type { GenNode, LoraInfo, ModelRecommend, Viewport } from '../types'
+import type { GenNode, ModelRecommend, Viewport } from '../types'
 import GenNodeCard, { NODE_W, PORT_CHAR_Y, PORT_SRC_Y, type NodePatch } from '../nodes/GenNodeCard'
 
 /** 连线指向节点的哪个输入：source（源图/动作参考）还是 charSource（角色图） */
@@ -15,7 +15,6 @@ type Props = {
   /** W4 可用的骨架帧目录 */
   poseDirs?: PoseDir[]
   /** 本机是否装了 SDXL refiner 权重 */
-  hasRefiner?: boolean
   /** 当前底模是否支持原生透明背景 */
   canTransparent?: boolean
   /** 可用底模清单（节点各自选，不再是全局唯一） */
@@ -27,7 +26,6 @@ type Props = {
   /** 各底模的推荐参数（候选上限要按**节点自己的**底模算，不能用全局的） */
   recommend?: Record<string, ModelRecommend>
   /** 底模名 → 架构（sd15 / sdxl / qwen21），节点据此过滤自己的 LoRA 列表 */
-  modelArch?: Record<string, string>
   /** 给单个节点换底模（keepParams=true 时只改底模，不套推荐参数） */
   onNodeModel?: (id: string, next: string, keepParams?: boolean) => void
   selectedId: string | null
@@ -40,7 +38,6 @@ type Props = {
   onDelete: (id: string) => void
   isFavorite: (text: string) => boolean
   onToggleFavorite: (id: string) => void
-  loras: LoraInfo[]
   onDropType: (type: string, world: { x: number; y: number }) => void
   onSpawnImg2Img: (id: string) => void
   /** 骨骼编辑器导出 PNG（Blob），由 App 上传并挂到节点上 */
@@ -64,13 +61,11 @@ export default function Canvas({
   model,
   maxCandidates,
   poseDirs,
-  hasRefiner,
   canTransparent,
   models,
   modelCaps,
   defaultModel,
   recommend,
-  modelArch,
   onNodeModel,
   selectedId,
   viewport,
@@ -82,7 +77,6 @@ export default function Canvas({
   onDelete,
   isFavorite,
   onToggleFavorite,
-  loras,
   onDropType,
   onSpawnImg2Img,
   onExportSkeleton,
@@ -484,8 +478,6 @@ export default function Canvas({
             onDelete={() => onDelete(n.id)}
             favorited={isFavorite(n.params.prompt)}
             onToggleFavorite={() => onToggleFavorite(n.id)}
-            loras={loras}
-            loraBase={modelArch?.[n.params.model || model] || (n.params.model || model)}
             model={n.params.model || model}
             onModel={(m, opts) => onNodeModel?.(n.id, m, opts?.keepNodes)}
             nodesModels={models}
@@ -494,7 +486,6 @@ export default function Canvas({
             maxCandidates={recommend?.[n.params.model || model]?.max_candidates
               ?? maxCandidates}
             poseDirs={poseDirs}
-            hasRefiner={hasRefiner}
             canTransparent={
               // 按**这个节点自己的底模**判断，不是全局默认——一张画布上
               // 可能一个节点用 Qwen、另一个用 SDXL。modelCaps 缺失时退回

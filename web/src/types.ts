@@ -143,20 +143,6 @@ export type GenParams = {
    */
   psDir: string
   ssVramProfile: VramProfile // 序列帧替换：显存档位（auto 自动降分辨率）
-  lora: string            // LoRA 名（后端解析成路径）；空串表示不挂
-  loraScale: number
-  /**
-   * 叠加的额外 LoRA（在 lora 之上）。多个 LoRA 会**线性叠加**，
-   * 这是 A1111 里 `<lora:a:0.8> <lora:b:0.5>` 的等价物。
-   * 常见组合：风格 LoRA（像素）+ 角色 LoRA。
-   */
-  extraLoras?: { name: string; scale: number }[]
-  /** SDXL Refiner：底模出 latent 后再走一遍精修，对发丝/布料纹理提升最大 */
-  refiner: boolean
-  refinerCfg: number
-  refinerSteps: number
-  /** 精修从去噪过程的哪一段接手（0.8 = 最后 20%） */
-  refinerEnd: number
   /**
    * 透明背景：只有 Qwen-Image-2.1 原生支持（VAE 第 4 通道）。
    *
@@ -177,21 +163,6 @@ export type GenParams = {
   model: string
 }
 
-/** 后端 /loras 返回的条目 */
-export type LoraInfo = {
-  name: string
-  label: string
-  trigger: string
-  scale: number
-  preset: Preset | null
-  matte?: boolean | null  // 选中时联动勾选「抠图」；null/缺失表示不改
-  clip_skip?: number | null
-  base?: string          // 适配的底模；缺失按 sd15 处理
-  note?: string
-  source?: string
-  size_mb?: number
-  hidden?: boolean
-}
 
 export type JobStatus = 'queued' | 'running' | 'done' | 'failed'
 

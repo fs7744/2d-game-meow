@@ -1,14 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Canvas, { type LinkField } from './canvas/Canvas'
 import Sidebar from './components/Sidebar'
-import TrainPanel from './components/TrainPanel'
 import { hasPrompt, loadPrompts, removePrompt, savePrompts, togglePrompt } from './store/prompts'
 import {
   loadStore, makeProject, metaOf, saveStore, type Project, type ProjectMeta,
 } from './store/projects'
 import {
-  deleteAssets, fetchJob, fetchLoras, fetchModels, health, submitAiRepaint, submitImg2Img,
-  fetchPoseDirs, scanLoras, submitToPixel, submitInpaint, submitMatte,
+  deleteAssets, fetchJob, fetchModels, health, submitAiRepaint, submitImg2Img,
+  fetchPoseDirs, submitToPixel, submitInpaint, submitMatte,
   submitPixelify, submitPoseClone,
   submitPoseSeq,
   submitSpriteSwap, submitTxt2Img, uploadImage, extractPose,
@@ -18,7 +17,7 @@ import Lightbox from './components/Lightbox'
 import type { PoseDir } from './api'
 import type { ModelCaps } from './api'
 import type {
-  FavoritePrompt, GenNode, GenParams, LoraInfo, ModelRecommend, NodeImage, NodeKind,
+  FavoritePrompt, GenNode, GenParams, ModelRecommend, NodeImage, NodeKind,
   NodeSource, Viewport,
 } from './types'
 import type { NodePatch } from './nodes/GenNodeCard'
@@ -127,13 +126,6 @@ const DEFAULT_PARAMS: GenParams = {
   ssVramProfile: 'auto',
   // 姿态序列（w4）的输入：骨架帧目录（也接受通配，如 assets/_pose_walk_*.png）
   psDir: '',
-  lora: '',
-  loraScale: 0.8,
-  extraLoras: [],
-  refiner: false,
-  refinerCfg: 6,
-  refinerSteps: 20,
-  refinerEnd: 0.8,
   // 透明底默认关：只有 Qwen 底模支持，SD 系列开了会被后端忽略，
   // 默认打开会让用户误以为选 SD 时也能出透明图
   transparent: false,
@@ -191,7 +183,7 @@ function makeNode(
 /** 切换底模时会跟着改的参数。只动采样，不动 prompt / lora 这些创作内容。 */
 const REC_KEYS = ['width', 'height', 'steps', 'cfg', 'pixel', 'palette'] as const
 
-function pickRec(rec?: ModelRecommend, lora: string = ''): Partial<GenParams> {
+function pickRec(rec?: ModelRecommend): Partial<GenParams> {
   if (!rec) return {}
   const out: Partial<GenParams> = {
     width: rec.width, height: rec.height, steps: rec.steps,
@@ -205,11 +197,8 @@ function pickRec(rec?: ModelRecommend, lora: string = ''): Partial<GenParams> {
   // **档位要跟着参数一起改**。只改参数不改 genStyle 的话，切到动漫底模后
   // 参数已经是「动漫立绘」（pixel/palette 归零），下拉却还停在「像素精灵」——
   // 显示与实物不一致，用户会以为下拉坏了（真踩过）。
-  // 反推档位时要带上 LoRA：档位可能自带 LoRA（「像素精灵·Illustrious」），
-  // 只看 preset/pixel/palette 会把它误判成普通像素档
-  const stem = (lora || '').split(/[\\/]/).pop()!.replace(/\.safetensors$/i, '')
   out.genStyle = styleFromParams(
-    out.preset ?? 'sprite', out.pixel ?? 0, out.palette ?? 0, stem)
+    out.preset ?? 'sprite', out.pixel ?? 0, out.palette ?? 0)
   return out
 }
 
@@ -252,19 +241,13 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [device, setDevice] = useState<string>('')
   const [favs, setFavs] = useState<FavoritePrompt[]>(() => loadPrompts())
-  const [loras, setLoras] = useState<LoraInfo[]>([])
-  const [trainOpen, setTrainOpen] = useState(false)
   const [models, setModels] = useState<string[]>(['qwen-image-2.1'])
   // 每个底模的推荐采样参数，由后端 /models 给出（见 types.ts 的 ModelRecommend）
   const [recommend, setRecommend] = useState<Record<string, ModelRecommend>>({})
-  // 底模名 → 架构：过滤 LoRA 要用架构，不能拿目录名比（sdxl-anime 的架构是 sdxl）
-  const [arch, setArch] = useState<Record<string, string>>({})
+  // 底模名 → 架构（Qwen-only 之后恒为 qwen21）
   const [model, setModel] = useState<string>('qwen-image-2.1')
   // W4 的输入是"一组骨架帧"，后端扫 assets 给出可选目录，前端只做下拉
   const [poseDirs, setPoseDirs] = useState<PoseDir[]>([])
-  const [scanning, setScanning] = useState(false)
-  // 本机有没有 SDXL refiner 权重（后端 /models 给的）
-  const [hasRefiner, setHasRefiner] = useState(false)
   // 底模能力表（透明底 / 指令改图 / LoRA）。当前底模支不支持透明底由它决定，
   // 不能按名字判断——底模名可以是任意目录名。
   const [caps, setCaps] = useState<Record<string, ModelCaps>>({})
@@ -278,36 +261,6 @@ export default function App() {
 
   useEffect(() => savePrompts(favs), [favs])
 
-  // LoRA 拉**全量**：底模是节点级的，一张画布上可能同时有 SD1.5 与 SDXL 节点，
-  // 在 App 层按全局底模过滤会让其中一个节点的下拉全是错的。
-  // 各节点拿到全量后按自己的 arch 过滤（见 GenNodeCard.visibleLoras）。
-  const reloadLoras = useCallback(() => {
-    fetchLoras().then(setLoras).catch(() => setLoras([]))
-  }, [])
-
-  useEffect(() => { reloadLoras() }, [reloadLoras])
-
-  /**
-   * 扫描 models/lora 补配置。
-   *
-   * 为什么值得做成按钮：新放的 LoRA 没有配置就是哑巴——没有触发词、没有 base，
-   * 选上去可能报 size mismatch，而用户不知道那是架构不对。
-   * 扫描会读 safetensors 头部把 base / rank / 触发词识别出来，并把不可用的
-   * （视频 LoRA、Flux LoRA、重复文件）标成隐藏而不是留在下拉里当陷阱。
-   */
-  const onScanLoras = useCallback(async () => {
-    setScanning(true)
-    try {
-      const r = await scanLoras()
-      reloadLoras()
-      setNotice(r.message.split('\n')[0] + `（共 ${r.count} 个）`)
-    } catch (e) {
-      setNotice(e instanceof Error ? e.message : String(e))
-    } finally {
-      setScanning(false)
-    }
-  }, [reloadLoras])
-
   // 骨架目录一次拉完即可（后端 20ms 扫完 assets 两层）；失败就空列表，
   // 节点里仍然可以手填路径，功能不因这个接口挂掉而消失。
   const reloadPoseDirs = useCallback(() => {
@@ -319,8 +272,6 @@ export default function App() {
     fetchModels().then((m) => {
       setModels(m.available)
       setRecommend(m.recommend)
-      setArch(m.arch)
-      setHasRefiner(m.refiner)
       setCaps(m.caps)
       // **跟随后端给的默认底模**（/models 的 current = engine.DEFAULT_MODEL）。
       //
@@ -496,7 +447,7 @@ export default function App() {
       const rec = recRef.current[modelRef.current]
       // 骨骼编辑器不跑模型，别把采样参数写进去（没意义，还会误导）
       if (rec && kind !== 'poseedit') {
-        node.params = { ...node.params, ...pickRec(rec, node.params.lora) }
+        node.params = { ...node.params, ...pickRec(rec) }
       }
       setSelectedId(node.id)
       return [...list, node]
@@ -532,7 +483,7 @@ export default function App() {
         return { ...n, params: { ...n.params, ...patch } }
       }
       if (rec && (n.kind ?? 'gen') === 'gen' && (!oldRec || matchesRec(n.params, oldRec))) {
-        Object.assign(patch, pickRec(rec, n.params.lora))
+        Object.assign(patch, pickRec(rec))
       }
       // 角色迁移切到 Qwen：换一套适配参数。
       // 1024² 是 Qwen **文生图**的推荐，但角色迁移是「改图」路线（双图条件），
@@ -1012,9 +963,6 @@ export default function App() {
           </span>
         </div>
         <div className="spacer" />
-        <button className="train-btn" onClick={() => setTrainOpen(true)} title="训练自己的 LoRA">
-          训练 LoRA
-        </button>
         <span className={`gpu ${device && !device.includes('未连接') ? 'ok' : 'bad'}`} title={device}>
           {device || '连接中…'}
         </span>
@@ -1029,7 +977,6 @@ export default function App() {
 
       <main className="stage">
         <Sidebar
-          loras={loras}
           favs={favs}
           projects={projectMeta}
           currentProject={currentId}
@@ -1043,18 +990,14 @@ export default function App() {
           onRemoveFav={removeFavorite}
           matteBackend={matteBackend}
           onMatteBackend={setMatteBackend}
-          onScanLoras={onScanLoras}
-          scanning={scanning}
         />
         <Canvas
           nodes={nodes}
           model={model}
           maxCandidates={recommend[model]?.max_candidates}
           poseDirs={poseDirs}
-          hasRefiner={hasRefiner}
           models={models}
           modelCaps={caps}
-          modelArch={arch}
           recommend={recommend}
           defaultModel={model}
           onNodeModel={setNodeModel}
@@ -1068,7 +1011,6 @@ export default function App() {
           onDelete={requestDelete}
           isFavorite={isFavorite}
           onToggleFavorite={toggleFavorite}
-          loras={loras}
           onDropType={(t, world) => addNode(t, world)}
           onSpawnImg2Img={spawnImg2Img}
           onExportSkeleton={(id, blob) => void exportSkeleton(id, blob)}
@@ -1145,9 +1087,6 @@ export default function App() {
         )
       })()}
 
-      {trainOpen && (
-        <TrainPanel onClose={() => setTrainOpen(false)} onTrained={reloadLoras} />
-      )}
     </div>
   )
 }

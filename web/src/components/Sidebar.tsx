@@ -1,9 +1,8 @@
 import { useState, type ReactNode } from 'react'
-import type { FavoritePrompt, LoraInfo } from '../types'
+import type { FavoritePrompt } from '../types'
 import type { ProjectMeta } from '../store/projects'
 
 type Props = {
-  loras: LoraInfo[]
   favs: FavoritePrompt[]
   projects: ProjectMeta[]
   currentProject: string
@@ -20,8 +19,6 @@ type Props = {
   onRemoveFav: (id: string) => void
   matteBackend: string
   onMatteBackend: (v: string) => void
-  /** 扫描 models/lora 补配置（读 safetensors 头部，不加载权重） */
-  onScanLoras?: () => void
   scanning?: boolean
 }
 
@@ -100,9 +97,8 @@ function ProjectRow({
  * 占满、互相挤压。改成一条可收起的侧栏后，画布的可视区域稳定了，也能放下设置。
  */
 export default function Sidebar({
-  loras, favs, onAddNode, canApply, onApplyFav, onRemoveFav,
+  favs, onAddNode, canApply, onApplyFav, onRemoveFav,
   matteBackend, onMatteBackend,
-  onScanLoras, scanning,
   projects, currentProject, onSwitchProject, onCreateProject, onRenameProject, onDeleteProject,
 }: Props) {
   const [collapsed, setCollapsed] = useState(false)
@@ -380,19 +376,6 @@ export default function Sidebar({
             </select>
           </label>
 
-          <div className="rail-stat">
-            LoRA {loras.length} 个
-            {onScanLoras && (
-              <button
-                className="rail-scan"
-                disabled={scanning}
-                onClick={onScanLoras}
-                title="扫描 models/lora 下的权重，把缺的配置补进 loras.json（只补不覆盖手写内容）"
-              >
-                {scanning ? '扫描中…' : '扫描'}
-              </button>
-            )}
-          </div>
         </Section>
       </div>
     </aside>
