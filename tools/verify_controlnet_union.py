@@ -63,6 +63,8 @@ def main() -> int:
                     help="只在采样的前这个比例内注入（1.0 = 全程）")
     ap.add_argument("--decay", default="none", choices=["none", "sigma", "linear"],
                     help="注入强度随时间衰减的方式")
+    ap.add_argument("--head-cut", type=float, default=0.0,
+                    help="顶部这个比例的图像行不注入控制（0.25 左右能把头部交给模型自由画）")
     args = ap.parse_args()
     args.scales = ([float(x) for x in args.scales.split(",") if x.strip()]
                    if args.scales.strip() else [args.scale])
@@ -158,7 +160,8 @@ def main() -> int:
     def run(label: str, inject: bool, scale: float = 1.0) -> Image.Image:
         inj = None
         if inject:
-            inj = cnu.ControlInjection(tr, branch, scale=scale)
+            inj = cnu.ControlInjection(tr, branch, scale=scale,
+                                       head_cut=args.head_cut)
             inj.set_condition(ctrl_lat)
             print(f"  注入已挂：{len(inj.layers)} 个点 {inj.layers}", flush=True)
         try:

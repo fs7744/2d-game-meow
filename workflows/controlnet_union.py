@@ -347,10 +347,17 @@ class ControlInjection:
     """
 
     def __init__(self, transformer, branch: ControlNetUnionBranch,
-                 scale: float = 1.0):
+                 scale: float = 1.0, head_cut: float = 0.0):
         self.transformer = transformer
         self.branch = branch
         self.scale = float(scale)
+        #: 图像网格顶部这个比例的行**不注入**控制（0 = 不裁）。
+        #:
+        #: 实测：骨架图里头部只有几个点（或一个色块），控制信号会把头部区域
+        #: 推向"无内容"——身体、四肢、比例都对，唯独头整个消失（透明底时能
+        #: 看到那块完全透明）。而 base 在没有控制时画头是好的，所以把顶部
+        #: 这几行让给它，姿态仍然由身体部分钉住。
+        self.head_cut = float(head_cut)
         self._handles: list = []
         self._tokens: torch.Tensor | None = None
         self._stream: torch.Tensor | None = None
@@ -453,6 +460,7 @@ class ControlInjection:
                 if skip.device != output.device:
                     self._device_mismatch += 1
                     skip = skip.to(output.device)
+                skip = self._cut_head(skip)
                 return output + skip.to(output.dtype) * self.scale
 
             # `prepend=True`（torch≥2.6）：抢在 accelerate 的 cpu-offload
@@ -463,6 +471,29 @@ class ControlInjection:
             except TypeError:                 # 老 torch 没有 prepend/with_kwargs
                 h = blocks[layer_idx].register_forward_hook(_hook)
             self._handles.append(h)
+
+    def _cut_head(self, skip: torch.Tensor) -> torch.Tensor:
+        """把图像网格顶部 `head_cut` 比例的行清零（不给头部任何控制）。
+
+        skip 是 `[B, L, D]`，L = 文本 token + 图像 token（图像在末尾）。
+        图像部分是 side×side 的行优先网格，所以"顶部几行"= 头部区域。
+        """
+        if self.head_cut <= 0 or self._tokens is None:
+            return skip
+        n_img = int(self._tokens.shape[1])
+        n_txt = skip.shape[1] - n_img
+        if n_txt < 0:
+            return skip
+        side = int(round(n_img ** 0.5))
+        if side * side != n_img:      # 非方形（不该发生），不裁更安全
+            return skip
+        rows = int(side * min(self.head_cut, 1.0))
+        if rows <= 0:
+            return skip
+        b, _, d = skip.shape
+        img = skip[:, n_txt:].reshape(b, side, side, d).clone()
+        img[:, :rows] = 0
+        return torch.cat([skip[:, :n_txt], img.reshape(b, n_img, d)], dim=1)
 
     def remove(self) -> None:
         """卸掉所有 hook（一定要在生成结束后调，否则会污染后续无控制的生成）。"""
