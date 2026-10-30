@@ -9,7 +9,10 @@
 
 ---
 
-## 0. 总览：十个工作流现在都能在 Qwen 上跑
+## 0. 总览：十三个工作流现在都能在 Qwen 上跑
+
+原计划的十个之外，2026-10-30 又从 RunComfy 的 Qwen 工作流里补了三个
+（扩图 / 换装 / 换脸，见 §2.14）。
 
 | # | 工作流 | Qwen 实现方式 | 性质 | 实测状态 |
 |---|---|---|---|---|
@@ -23,6 +26,9 @@
 | wbg | 抠图 | 不跑模型 | 原生 | ✅ |
 | wpx | 像素转换 | 不跑模型 | 原生 | ✅ |
 | wap | 转像素 | 不跑模型 | 原生 | ✅ |
+| **wout** | **扩图** | 中性灰 padding + Outpaint LoRA + 原图贴回 | 原生 | ✅ 无接缝、无灰块 |
+| **woutfit** | **换装** | 两图 + `<image1>/<image2>` 结构化指令 | 原生 | ✅ 服装来自图 2、人还是图 1 |
+| **wface** | **换脸** | 同上（保留/替换的角色反过来） | 原生 | ✅ 脸像图 2、姿势场景是图 1 |
 
 「近似」的定义：**该工作流原本依赖的硬约束在 Qwen 上不存在**，改用软引导或
 后处理凑出同类产物。后端 `engine._APPROX` 是唯一判据，`/models` 的
@@ -491,7 +497,143 @@ ComfyUI 生态的价值在于「把能力拼成工作流」，而我们做的是
 - 普通：14.1s（24 步）
 - 快速：8.5s（8 步 + Lightning）→ **-40%**
 
-### 2.14 生态侦察：HF 上 Qwen-Image-2.1 的可用资产
+### 2.14 三个新工作流：扩图 / 换装 / 换脸（Qwen 从 10 个变 13 个）
+
+RunComfy 那 10 个工作流里还有三件值得做的，已全部落地。
+
+#### 扩图（`wout`）
+
+游戏素材刚需：方形背景 → 16:9 横版、地图块延展、立绘左右留白。
+
+做法（ComfyUI 的 Outpaint 方案）：
+1. 源图贴到更大画布，空白填**中性灰 #808080**
+   —— 灰色本身就是"这里要补内容"的信号；填别的颜色会**污染新区域色调**
+2. 挂 **Outpaint LoRA**（`ausboss/Qwen-Image-2.1-Outpaint-LoRA`，152MB，
+   ComfyUI 格式，已用 `tools/convert_lora.py` 转好）
+3. 提示词**必须**以 LoRA 触发句开头（`outpaint.OUTPAINT_TRIGGER`）：
+   `Outpaint the image: replace the solid gray areas with a seamless
+   continuation of the scene, keeping the existing picture unchanged.`
+4. `blend=True` 时把**原图区域**软边贴回（扩图的语义是"扩展"，原图不该变）
+
+实测（8 步）：森林场景 768² → 右扩 50% 成 1152×768，14s。
+右侧延续了森林/地面/雾气，**无灰块残留、无可见接缝**。
+
+**坑**：画布尺寸必须对齐 **32**（不是 16）。管线里
+`multiple_of = vae_scale_factor * 2 = 32`，不是 32 的倍数它只 warn 一句就
+**静默 resize**——于是 meta 里记的画布尺寸是假的、下游算的偏移全错。
+
+#### 换装（`woutfit`）/ 换脸（`wface`）
+
+两者本质相同：**两图 + 结构化指令**，不需要任何专用权重——
+Qwen 的多图条件会自己分配"谁是身份、谁是服装"。
+
+关键是两点：
+- 指令里写清楚**每张图管什么**（`swap.OUTFIT_PROMPT` / `FACE_PROMPT`）
+- 用**官方的多图引用语法** `<image1>` / `<image2>`（管线会自动插占位符），
+  比"第一张图"这种自然语言描述更稳
+
+| | 图1（基底） | 图2（参考） | 保留 | 替换 |
+|---|---|---|---|---|
+| 换装 | 人物 | 服装 | 身份/姿势/背景 | 剪裁/颜色/材质 |
+| 换脸 | 场景人物 | 身份肖像 | 姿势/服装/背景 | 脸/发型/胡须 |
+
+实测（16 步，各 ~8.8s）：
+- 换装：人物穿上红皮夹克（含金扣），身份、姿势、场景全部保留
+- 换脸：头变成银发绿眼，灰色 T 恤/短裤/姿势/场景全部保留
+
+#### 多图上限（10 张）
+
+| 张数 | 耗时(8 步) | 峰值 |
+|---|---|---|
+| 2 | 10.2s | 12.6GB |
+| 4 | 13.5s | 15.2GB |
+| 8 | 18.2s | 21.3GB（接近 24G 上限）|
+| **10** | **12.3s** | **14.1GB** ✅ |
+
+10 张能跑通的关键：**条件图编码分辨率可以与输出分辨率解耦**
+（`output_resolution=448` 而输出仍是 768²）。默认 768 编码时 8 张就到
+21.3GB，10 张会超。这条以后做「多角色同框 / 场景拼装」要用到。
+
+### 2.15 ControlNet Union：结构已 100% 对齐，待权重到位跑端到端
+
+`alibaba-pai/Qwen-Image-2.1-Fun-Controlnet-Union`（7.2GB）是**专为 2.1** 的
+控制分支（不是 pixelforge 那个 20B 专用的 union）。它覆盖 8 种结构条件
+（Canny / Depth / Grayscale / HED / Lineart / MLSD / Pose / Scribble）
+**且支持蒙版 inpaint**。
+
+#### 关键结论：不需要 VideoX-Fun 的代码
+
+官方参考实现是 VideoX-Fun 的 `config/qwenimage21/qwenimage21_control.yaml`，
+但**权重是纯 safetensors，结构能从 key 名和形状完全推出来**。我写了
+`workflows/controlnet_union.py` 并做了**逐 key 验证**：
+
+```
+官方 key 数: 180        模块 key 数: 180
+缺: （无）              多: （无）        形状不匹配: （无）
+skip 数: 16             每个形状: (1, 2304, 4096)
+✅ 100% 对齐官方权重
+```
+
+3 个必须踩准的对齐点：
+1. `img_mlp` 的命名是 `proj / gate_layer / out`，与 diffusers 的
+   `QwenImage21SwiGLUFeedForward` **逐字一致**（不是 `gate_up` 那种合并式）
+2. `12288 = 4096 × 3` → `mlp_ratio = 3.0`
+3. `norm_q/norm_k` 形状是 `[128]`（head_dim），不是 `[4096]`
+4. `before_proj` **只有 block 0 有**（不是每块都有）——第一版放顶层就错了
+
+#### 注入方式：forward hook，不改 diffusers 源码
+
+```python
+inj = ControlInjection(transformer, branch, scale=1.0)
+inj.set_condition(control_latents)   # [1, 129, H/16, W/16]
+... 跑 pipe(...) ...
+inj.remove()                          # 必须卸，否则污染后续生成
+```
+
+- 注入点 = `[0, 2, 4, …, 30]`（16 个，与官方 `control_layers` 一致）
+- `set_condition` **只算一次**：control skips 不依赖 timestep，整条采样链复用
+- hook 里有形状防御：skip 的 token 数与 hidden 不一致时**直接报错**，
+  不让它静默错位（control 条件图分辨率必须与目标 latent 对齐）
+
+#### 129 通道怎么组装
+
+```
+control_in = cat([ control_latents(64),        # 条件图的 VAE latent
+                   mask(1),                    # inpaint 蒙版；纯控制时全 0
+                   masked_image_latents(64) ], # 被遮住的图；纯控制时全 0
+                 dim=1)
+```
+
+- **纯结构控制**（pose/canny/depth）：只给 `control`，另两个通道填 0
+  （官方文档：zero-pads the mask / masked-image channels）
+- **inpaint**：control = 原图，mask = 涂抹区，masked-image = 原图（区外置灰）
+- **可叠加**：同时给控制图和 mask，重绘区同时听提示词和结构
+
+#### 状态
+
+- ✅ 结构验证通过（`workflows/controlnet_union.py`，180 key 全对）
+- ✅ 注入代码写完（`ControlInjection`，未改 diffusers 一行）
+- ⏳ **端到端待权重到位**：7.2GB 走代理约 0.7MB/s，需要 3 小时左右。
+  下载命令：
+
+```bash
+curl -L -C - -x http://127.0.0.1:7897 \
+  -o models/controlnet/qwen21_union.safetensors \
+  "https://hf-mirror.com/alibaba-pai/Qwen-Image-2.1-Fun-Controlnet-Union/resolve/main/Qwen-Image-2.1-Fun-Controlnet-Union.safetensors"
+```
+
+- ⚠️ **显存待确认**：base fp8（6.7GB）+ control 分支 bf16（7.2GB）≈ 14GB，
+  加 VAE 与激活后 24G 卡是否够用要实测。不够的话要把 control 分支也 fp8 化
+  （`tools/make_qwen_fp8.py` 的同一套做法）。
+
+#### 它对我们的价值
+
+- **姿态硬约束**：w4 姿态序列 / wss 序列帧替换的短板正是"姿态只能软引导"，
+  union 的 Pose 条件能把它变成硬约束
+- **真 inpaint 的第二条路**：现在的 `qwen_mask` 是采样器级近似，
+  union 的 mask 通道是**训练过的**那条路，质量可能更好（待对比）
+
+### 2.16 生态侦察：HF 上 Qwen-Image-2.1 的可用资产
 
 之前记的「HF 下载被代理挡住」**不成立**：本机有可用代理
 **`http://127.0.0.1:7897`**，加上它之后 `huggingface.co` 直连也能通，
