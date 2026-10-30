@@ -109,6 +109,8 @@ const DEFAULT_PARAMS: GenParams = {
   pcFill: 0.8,
   // 参考模式默认 auto：先试骨架，认不出人体自动降级到轮廓（游戏素材走这条路）
   pcRefMode: 'auto',
+  // 底色：默认白底；角色本身偏白（白毛/白甲）时改 dark，抠图才不会啃掉脸
+  bgTone: 'white',
   // 序列帧替换：0 = 自动检测精灵图网格
   ssCols: 0,
   ssRows: 0,

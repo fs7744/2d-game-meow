@@ -312,6 +312,7 @@ export function submitPoseClone(
     fill: params.pcFill,
     // 参考模式：auto=先试骨架，认不出人自动降级到轮廓
     ref_mode: params.pcRefMode,
+    bg: params.bgTone,
   })
 }
 
@@ -386,6 +387,8 @@ export function submitPoseSeq(
     // 多候选择优 + 闸门：w4 的默认值就是开着的，这里把用户设定透传
     candidates: params.ssCandidates,
     gate_retries: params.ssGateRetries,
+    // 底色：白毛角色用白底会被抠图吃掉，dark 有对比才抠得干净
+    bg: params.bgTone,
   })
 }
 
@@ -415,6 +418,7 @@ export function submitSpriteSwap(
     rows: params.ssRows > 0 ? params.ssRows : undefined,
     mode: params.ssMode,
     ref_mode: params.ssRefMode,
+    bg: params.bgTone,
     cn_scale: params.ssCnScale,
     ipa_scale: params.ssIpaScale,
     palette: params.ssPalette,

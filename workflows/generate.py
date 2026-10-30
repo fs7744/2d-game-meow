@@ -1606,7 +1606,7 @@ def _qwen_pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | P
                      width: int, height: int, steps: int, cfg: float, seed: int,
                      ref_mode: str, thr: float, fill: float,
                      pixel: int, palette: int, matte: bool, matte_backend: str,
-                     denoise: int, clean_iso: int, model: str,
+                     denoise: int, clean_iso: int, model: str, bg: str,
                      scope: str, tag: str) -> Dict[str, Any]:
     """Qwen-Image-2.1 版角色迁移：**双图条件**（角色图 + 姿态条件图）。
 
@@ -1635,7 +1635,9 @@ def _qwen_pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | P
         "The first image is the character reference: keep the same face, hairstyle, "
         "outfit and colors. The second image is the pose condition (a body skeleton "
         "or silhouette). Redraw the same character in exactly that pose, "
-        "full body, centered, clean simple background.")
+        "full body, centered, "
+        + ("clean simple black background" if (bg or "").lower() == "dark"
+           else "clean simple background") + ".")
     if sem:
         instr += " " + sem
 
@@ -1658,7 +1660,7 @@ def _qwen_pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | P
         "workflow": "wpc", "scope": scope or "default",
         "prompt": instr, "negative": negative or QWEN_NEG,
         "pose_image": str(pose_image), "char_image": str(char_image),
-        "backend": "qwen-multiref",
+        "backend": "qwen-multiref", "bg": bg,
         "ref_mode": ref_mode, "ref_mode_used": used_mode,
         "ref_fallback_from": cond_info.get("fallback_from"),
         "ref_fallback_reason": cond_info.get("fallback_reason"),
@@ -1681,7 +1683,7 @@ def pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | Path,
                 steps: int = 25, cfg: float = 7.0, seed: int = -1,
                 cn_scale: float = 1.0, ipa_scale: float = 0.8,
                 fill: float = 0.8, thr: float = 0.25,
-                ref_mode: str = "auto",
+                ref_mode: str = "auto", bg: str = "white",
                 lora: Optional[str] = None, lora_scale: float = 0.8,
                 clip_skip: int = 1, preset: Optional[str] = None,
                 model: str = "sd15",
@@ -1721,7 +1723,8 @@ def pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | Path,
             width=width, height=height, steps=steps, cfg=cfg, seed=seed,
             ref_mode=ref_mode, thr=thr, fill=fill,
             pixel=pixel, palette=palette, matte=matte, matte_backend=matte_backend,
-            denoise=denoise, clean_iso=clean_iso, model=model, scope=scope, tag=tag)
+            denoise=denoise, clean_iso=clean_iso, model=model, bg=bg,
+            scope=scope, tag=tag)
     if preset is not None:
         prompt = _lora_trigger(eng, prompt, lora)
         prompt, negative = presets.build(prompt, negative, preset,
@@ -1810,7 +1813,7 @@ def _qwen_sprite_swap(eng: Engine, *, frames: Sequence[tuple],
                       width: int, height: int, steps: int, cfg: float, seed: int,
                       ref_mode: str, model: str, matte: bool, matte_backend: str,
                       denoise: int, palette: int, keep_alpha: bool,
-                      candidates: int, scope: str,
+                      candidates: int, bg: str, scope: str,
                       tag: str) -> Dict[str, Any]:
     """Qwen 版序列帧替换（WSS）：逐帧「角色图 + 轮廓/骨架」双图条件。
 
@@ -1830,7 +1833,7 @@ def _qwen_sprite_swap(eng: Engine, *, frames: Sequence[tuple],
     instr = ("The first image is the character reference: keep the same face, "
              "hairstyle, outfit and colors. The second image is the target pose "
              "(a skeleton or a silhouette). Redraw the same character in exactly "
-             "that pose, full body, centered, plain white background."
+             "that pose, full body, centered, " + _qwen_backdrop(bg) + "."
              + QWEN_FRAME_RULES)
     if sem:
         instr = f"{instr} {sem}"
@@ -1916,7 +1919,7 @@ def _qwen_sprite_swap(eng: Engine, *, frames: Sequence[tuple],
     meta = {
         "workflow": "wss", "scope": scope or "default",
         "mode": "generate", "engine_mode": "frame",
-        "backend": "qwen-multiref", "approx": True,
+        "backend": "qwen-multiref", "approx": True, "bg": bg,
         "prompt": instr, "prompt_body": sem or None, "negative": neg,
         "sheet_image": str(sheet_image), "char_image": str(char_image),
         "grid": [cols, rows], "frames": len(aligned),
@@ -1960,6 +1963,7 @@ def sprite_swap(eng: Engine, *, sheet_image: str | Path, char_image: str | Path,
                 candidates: int = 2, gate_retries: int = 1,
                 gate_seed_step: int = 1000,
                 vram_profile: str = "auto",
+                bg: str = "white",
                 scope: str = "", tag: str = "wss") -> Dict[str, Any]:
     """序列帧角色替换：把一段游戏动画里的角色换成目标角色，逐帧对齐后重新打包。
 
@@ -2033,7 +2037,7 @@ def sprite_swap(eng: Engine, *, sheet_image: str | Path, char_image: str | Path,
             steps=steps, cfg=cfg, seed=seed, ref_mode=ref_mode, model=model,
             matte=matte, matte_backend=matte_backend, denoise=denoise,
             palette=palette, keep_alpha=keep_alpha, candidates=1,
-            scope=scope, tag=tag)
+            bg=bg, scope=scope, tag=tag)
 
     # 引擎选择：AnimateDiff（时序注意力）还是逐帧（多候选）
     if engine_mode == "auto":
@@ -2579,13 +2583,27 @@ def norm_pose_inputs(src: str | Path | Sequence[str | Path]) -> List[Path]:
 QWEN_POSE_INSTR = {
     "skeleton": ("The images are: first the character reference, then a body skeleton "
                  "showing the target pose. Redraw the same character in exactly that "
-                 "pose, full body, centered, plain white background."),
+                 "pose, full body, centered, {bg}."),
     "outline": ("The images are: first the character reference, then the silhouette "
                 "of the target pose. Redraw the same character in exactly that pose, "
-                "full body, centered, plain white background."),
+                "full body, centered, {bg}."),
     "solo": ("This image is a body skeleton showing a pose. Draw a single character "
-             "in exactly that pose, full body, centered, plain white background."),
+             "in exactly that pose, full body, centered, {bg}."),
 }
+
+# 逐帧的底色。**白毛/白甲的角色不要用白底**：分割模型分不出主体与背景，
+# 会把额头、脸颊、甚至整条腿判成背景（实测白猫骑士：丢头顶+胸口，或丢两条腿）。
+# 换成深色底后，色键与语义分割都有可靠信号。
+QWEN_BACKDROPS = {
+    "white": "plain white background",
+    "dark": "plain solid black background",
+}
+
+
+def _qwen_backdrop(bg: str) -> str:
+    """把 bg 参数翻成提示词里的背景短语（未知值按原文用，方便自定义）。"""
+    return QWEN_BACKDROPS.get((bg or "white").strip().lower(),
+                              (bg or "").strip() or QWEN_BACKDROPS["white"])
 
 # 构图约束：**必须有**。Qwen 的软引导下，只写「full body, centered」实测会画出
 # 拇指大的小人（前景占比 2%，低于精灵产线 5% 的下限），而且帧与帧的尺度互相
@@ -2622,7 +2640,7 @@ def _qwen_poseswap(eng: Engine, *, pose_images: Sequence[Path], prompt: str,
                    negative: Optional[str], ref_image: Optional[str | Path],
                    steps: int, cfg: float, seed: int, width: int, height: int,
                    cols: int, pixel: int, palette: int, matte: bool,
-                   matte_backend: str, denoise: int, clean_iso: int,
+                   matte_backend: str, denoise: int, clean_iso: int, bg: str,
                    export: Optional[str], controlnet: str, model: str,
                    candidates: int, gate: bool, gate_min_points: int,
                    gate_retries: int, gate_seed_step: int, scope: str,
@@ -2638,7 +2656,7 @@ def _qwen_poseswap(eng: Engine, *, pose_images: Sequence[Path], prompt: str,
     SD 时代那套「一帧出 4 个候选再挑」在这里等于把 8 帧动画变成 20 分钟。
     """
     kind = "skeleton" if controlnet == "openpose" else "outline"
-    head = QWEN_POSE_INSTR[kind] + QWEN_FRAME_RULES
+    head = QWEN_POSE_INSTR[kind].format(bg=_qwen_backdrop(bg)) + QWEN_FRAME_RULES
     sem = (prompt or "").strip()
     neg = (negative or "").strip() or QWEN_FRAME_NEG
 
@@ -2734,7 +2752,7 @@ def _qwen_poseswap(eng: Engine, *, pose_images: Sequence[Path], prompt: str,
         "prompt": instr, "prompt_body": sem or None, "negative": neg,
         "ref_image": str(ref_image) if ref_image else None,
         "backend": "qwen-pose-ref", "approx": True,
-        "condition": kind, "cn_scale": None, "ipa_scale": None,
+        "condition": kind, "bg": bg, "cn_scale": None, "ipa_scale": None,
         "lora": None, "lora_scale": None, "clip_skip": None,
         "steps": steps, "cfg": cfg, "seed": seed, "frames": len(frames),
         "width": width, "height": height,
@@ -2785,6 +2803,7 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
              candidates: int = 1, gate: bool = True, gate_min_points: int = 8,
              gate_retries: int = 2, gate_seed_step: int = 1000,
              clip_skip: int = 1, scope: str = "", distill: str = "",
+             bg: str = "white",
              anim_name: str = "walk", fps: int = 10, tag: str = "w4") -> Dict[str, Any]:
     """逐帧生成 -> 锚点对齐 -> 打包 sprite sheet。固定 seed 是跨帧一致的前提。
 
@@ -2816,7 +2835,7 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
             ref_image=ref_image, steps=steps, cfg=cfg, seed=seed,
             width=width, height=height, cols=cols, pixel=pixel, palette=palette,
             matte=matte, matte_backend=matte_backend, denoise=denoise,
-            clean_iso=clean_iso, export=export, controlnet=controlnet,
+            clean_iso=clean_iso, bg=bg, export=export, controlnet=controlnet,
             model=model, candidates=candidates, gate=gate,
             gate_min_points=gate_min_points, gate_retries=gate_retries,
             gate_seed_step=gate_seed_step, scope=scope,

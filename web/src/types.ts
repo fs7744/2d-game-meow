@@ -17,6 +17,9 @@ export type SkeletonState = {
 }
 
 /** 角色迁移 / 序列帧替换：动作参考图的解释方式 */
+/** 逐帧生成用的底色。白毛/白甲角色用白底会被抠图吃掉，换 dark 更稳 */
+export type BgTone = 'white' | 'dark'
+
 export type RefMode = 'auto' | 'pose' | 'outline' | 'skeleton'
 
 /** 序列帧替换：怎么处理角色 */
@@ -122,6 +125,7 @@ export type GenParams = {
   pcIpaScale: number      // 角色迁移：IP-Adapter 身份强度（越大越像角色图）
   pcFill: number          // 角色迁移：人物在画布里占的高度比例
   pcRefMode: RefMode      // 角色迁移：动作参考图的解释方式（自动/骨架/轮廓/已画好的骨架图）
+  bgTone: BgTone          // 逐帧生成用的底色：white=白底（默认）/ dark=深色底（白毛角色用）
   ssCols: number          // 序列帧替换：精灵图列数（0 = 自动检测）
   ssRows: number          // 序列帧替换：精灵图行数（0 = 自动检测）
   ssMode: SwapMode        // 序列帧替换：AI 重绘 还是 确定性换皮

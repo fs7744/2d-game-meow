@@ -800,7 +800,13 @@ export default function GenNodeCard({
             </option>
           ))}
         </select>
-        {isI2I && (
+        {isI2I && (isQwenModel ? (
+          /* Qwen 的图生图是**指令改图**：没有 strength 语义，改多少全看提示词。
+             留个滑块在这儿只会让人以为调小就改得少（实际完全无效）。 */
+          <p className="src-note">
+            Qwen 走「指令改图」：改成什么样由提示词决定，没有重绘幅度可调。
+          </p>
+        ) : (
           <label className="strength" title={hint('重绘')}>
             <span>重绘</span>
             <input
@@ -813,7 +819,7 @@ export default function GenNodeCard({
             />
             <b>{p.strength.toFixed(2)}</b>
           </label>
-        )}
+        ))}
         <div className="src-note">
           {sourceNode?.kind === 'image'
             ? '用这张本地图'
@@ -1093,6 +1099,20 @@ export default function GenNodeCard({
           </div>
           <details className="adv">
             <summary>更多设置</summary>
+            {/* 底色：逐帧生成时用。白毛/白甲角色配白底，抠图会把脸和腿当成
+                背景一起吃掉（实测白猫骑士丢头顶+胸口，或丢两条腿）。 */}
+            <label className="bg-mode" title={'生成时的底色。\n'
+              + '角色偏白（白毛、白甲）时白底会让抠图分不清主体与背景，'
+              + '选「深色底」靠对比度抠更干净。深色系角色反过来仍用白底。'}>
+              底色
+              <select
+                value={p.bgTone}
+                onChange={(e) => setParam('bgTone', e.target.value as typeof p.bgTone)}
+              >
+                <option value="white">白底（默认）</option>
+                <option value="dark">深色底（白毛角色）</option>
+              </select>
+            </label>
             <label className="strength" title={hint('列')}>
               <span>列</span>
               <input
@@ -1320,29 +1340,45 @@ export default function GenNodeCard({
                     <option value="pose">骨架（真人照片）</option>
                   </select>
                 </label>
-                <label className="strength" title={hint('动作')}>
-                  <span>动作</span>
-                  <input
-                    type="range"
-                    min={0.2}
-                    max={1.5}
-                    step={0.05}
-                    value={p.ssCnScale}
-                    onChange={(e) => setParam('ssCnScale', Number(e.target.value))}
-                  />
-                  <b>{p.ssCnScale.toFixed(2)}</b>
-                </label>
-                <label className="strength" title={hint('身份')}>
-                  <span>身份</span>
-                  <input
-                    type="range"
-                    min={0}
-                    max={1.5}
-                    step={0.05}
-                    value={p.ssIpaScale}
-                    onChange={(e) => setParam('ssIpaScale', Number(e.target.value))}
-                  />
-                  <b>{p.ssIpaScale.toFixed(2)}</b>
+                {/* 动作/身份两根滑块是 SD 的 ControlNet + IP-Adapter 强度。
+                    Qwen 走双图条件，两张图一起进 vision context，没有强度旋钮。 */}
+                {!isQwenModel && (
+                  <>
+                    <label className="strength" title={hint('动作')}>
+                      <span>动作</span>
+                      <input
+                        type="range"
+                        min={0.2}
+                        max={1.5}
+                        step={0.05}
+                        value={p.ssCnScale}
+                        onChange={(e) => setParam('ssCnScale', Number(e.target.value))}
+                      />
+                      <b>{p.ssCnScale.toFixed(2)}</b>
+                    </label>
+                    <label className="strength" title={hint('身份')}>
+                      <span>身份</span>
+                      <input
+                        type="range"
+                        min={0}
+                        max={1.5}
+                        step={0.05}
+                        value={p.ssIpaScale}
+                        onChange={(e) => setParam('ssIpaScale', Number(e.target.value))}
+                      />
+                      <b>{p.ssIpaScale.toFixed(2)}</b>
+                    </label>
+                  </>
+                )}
+                <label className="bg-mode" title={'生成时的底色：角色偏白（白毛、白甲）时，白底会让抠图把脸和腿一起判成背景；选「深色底」靠对比度抠更干净。深色系角色反过来仍用白底。'}>
+                  底色
+                  <select
+                    value={p.bgTone}
+                    onChange={(e) => setParam('bgTone', e.target.value as typeof p.bgTone)}
+                  >
+                    <option value="white">白底</option>
+                    <option value="dark">深色底</option>
+                  </select>
                 </label>
               </>
             )}
@@ -1560,6 +1596,21 @@ export default function GenNodeCard({
             <div className="src-note">
               参考模式「自动」会先试骨架，认不出人体就改用轮廓——游戏像素素材也能用
             </div>
+            {/* 底色：白毛/白甲角色配白底，抠图会把脸和腿当成背景一起吃掉
+                （实测白猫骑士丢头顶+胸口，或丢两条腿）。换深底就靠对比度抠。 */}
+            <label className="bg-mode" title={'生成时的底色。\n'
+              + '角色本身偏白（白毛、白甲）时白底会让抠图分不清主体与背景，'
+              + '把脸/腿一起判成背景 —— 这种情况选「深色底」，靠对比度抠干净。\n'
+              + '深色系角色（黑袍、黑甲）反过来仍用白底。'}>
+              底色
+              <select
+                value={p.bgTone}
+                onChange={(e) => setParam('bgTone', e.target.value as typeof p.bgTone)}
+              >
+                <option value="white">白底（默认）</option>
+                <option value="dark">深色底（白毛角色）</option>
+              </select>
+            </label>
           </details>
           {hasImage && (
             <div
@@ -1843,18 +1894,26 @@ export default function GenNodeCard({
               onChange={(e) => setParam('prompt', e.target.value)}
             />
           </div>
-          <label className="strength" title={hint('重绘')}>
-            <span>重绘</span>
-            <input
-              type="range"
-              min={0.1}
-              max={1}
-              step={0.05}
-              value={p.strength}
-              onChange={(e) => setParam('strength', Number(e.target.value))}
-            />
-            <b>{p.strength.toFixed(2)}</b>
-          </label>
+          {isQwenModel ? (
+            <p className="src-note">
+              Qwen 没有重绘幅度，改成什么样由提示词里的指令决定。它是
+              <b>近似实现</b>：整图作条件、蒙版只负责贴回——选区外保证逐点不变，
+              选区内不保证只改那一点（猜偏的部分会被蒙版裁掉，表现是「改得不够」）。
+            </p>
+          ) : (
+            <label className="strength" title={hint('重绘')}>
+              <span>重绘</span>
+              <input
+                type="range"
+                min={0.1}
+                max={1}
+                step={0.05}
+                value={p.strength}
+                onChange={(e) => setParam('strength', Number(e.target.value))}
+              />
+              <b>{p.strength.toFixed(2)}</b>
+            </label>
+          )}
           <details className="adv">
             <summary>更多设置</summary>
             <label className="strength" title={hint('上下文')}>
@@ -2014,18 +2073,26 @@ export default function GenNodeCard({
               onChange={(e) => setParam('prompt', e.target.value)}
             />
           </div>
-          <label className="strength" title={hint('重绘')}>
-            <span>重绘</span>
-            <input
-              type="range"
-              min={0.1}
-              max={1}
-              step={0.05}
-              value={p.strength}
-              onChange={(e) => setParam('strength', Number(e.target.value))}
-            />
-            <b>{p.strength.toFixed(2)}</b>
-          </label>
+          {isQwenModel ? (
+            <p className="src-note">
+              Qwen 没有重绘幅度，改成什么样由提示词里的指令决定。它是
+              <b>近似实现</b>：整图作条件、蒙版只负责贴回——选区外保证逐点不变，
+              选区内不保证只改那一点（猜偏的部分会被蒙版裁掉，表现是「改得不够」）。
+            </p>
+          ) : (
+            <label className="strength" title={hint('重绘')}>
+              <span>重绘</span>
+              <input
+                type="range"
+                min={0.1}
+                max={1}
+                step={0.05}
+                value={p.strength}
+                onChange={(e) => setParam('strength', Number(e.target.value))}
+              />
+              <b>{p.strength.toFixed(2)}</b>
+            </label>
+          )}
           {hasImage && (
             <div
               className="preview"
@@ -2495,12 +2562,15 @@ export default function GenNodeCard({
                     onChange={(e) => setParam('loraScale', Number(e.target.value))}
                   />
                 </label>
-                <label title={hint('CFG')}>
+                <label title={isQwenModel
+                  ? 'Qwen 的引导强度是固定的 true_cfg_scale=4.0，这个框不生效'
+                  : hint('CFG')}>
                   CFG
                   <input
                     type="number"
                     step={0.5}
                     value={p.cfg}
+                    disabled={isQwenModel}
                     onChange={(e) => setParam('cfg', Number(e.target.value) || 7.5)}
                   />
                 </label>
@@ -2629,19 +2699,18 @@ export default function GenNodeCard({
                     </label>
                   </>
                 )}
-                <label title="1=最后一层（默认）；2=跳过最后一层，多数动漫/像素 LoRA 的训练设置">
+                <label title={isQwenModel
+                  ? 'Qwen 的文本编码器是 Qwen3-VL，没有「跳过几层」这个概念'
+                  : model === 'sdxl'
+                    ? 'SDXL 不支持 clip skip（两个文本编码器要一起改），切回 SD1.5 才生效'
+                    : '1 = 最后一层（默认）；2 = 跳过最后一层，多数动漫/像素 LoRA 的训练设置'}>
                   跳过层
                   <input
                     type="number"
                     min={1}
                     max={4}
                     value={p.clipSkip}
-                    disabled={model === 'sdxl'}
-                    // 灰掉要给原因：SDXL 有两个文本编码器 + pooled embeds，
-                    // clip skip 不是"改个层号"就能对的事，后端会直接忽略
-                    title={model === 'sdxl'
-                      ? 'SDXL 不支持 clip skip（两个文本编码器要一起改），切回 SD1.5 才生效'
-                      : '1 = 最后一层（默认）；2 = 跳过最后一层，多数动漫/像素 LoRA 的训练设置'}
+                    disabled={model === 'sdxl' || isQwenModel}
                     onChange={(e) => setParam('clipSkip', Number(e.target.value) || 1)}
                   />
                 </label>
