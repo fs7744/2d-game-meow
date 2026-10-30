@@ -478,3 +478,97 @@ def test_poseswap_two_stage_falls_back_without_ref(eng, sandbox, tmp_path):
                    scope="t")
     assert r["meta"]["two_stage"] is False
     assert len(sandbox["calls"]) == 1
+
+
+# ---------------- 真 CFG：时间翻倍的那一半 ----------------
+#
+# 实测（2026-10-30）：768²/24 步的总耗时里 DiT 前向占 86%，而
+# `true_cfg_scale > 1 且给了负向词` 时管线每个 step 跑**两遍** transformer
+# （有条件 + 无条件）→ 24 步 = 48 次前向。关掉后 21.1s → 13.6s（-36%），
+# 6 个提示词的画质对照没有下降（assets/_cfg_ab/cmp.png）。
+
+def test_negative_prompt_only_sent_with_true_cfg(eng, monkeypatch):
+    """真 CFG 关着时**不能**传负向词——传了就会触发双次前向。
+
+    这里直接调 `_qwen_call`（而不是走 monkeypatch 掉的假实现），
+    用一个假管线把 kwargs 截下来看。
+    """
+    seen = {}
+
+    class FakePipe:
+        def __call__(self, **kw):
+            seen.clear()
+            seen.update(kw)
+
+            class _Out:
+                images = [Image.new("RGBA", (16, 16))]
+            return _Out()
+
+    monkeypatch.setattr(eng, "txt2img_pipe",
+                        lambda model="qwen-image-2.1": FakePipe())
+
+    g._qwen_call(eng, prompt="x", negative="no blur", width=256, height=256,
+                 steps=8, seed=1, cfg=1.0)
+    assert "negative_prompt" not in seen
+    assert seen["true_cfg_scale"] == 1.0
+
+    g._qwen_call(eng, prompt="x", negative="no blur", width=256, height=256,
+                 steps=8, seed=1, cfg=4.0)
+    assert seen["negative_prompt"] == "no blur"
+    assert seen["true_cfg_scale"] == 4.0
+
+
+def test_cfg_reaches_the_model_call(eng, sandbox):
+    """cfg 必须真的传到推理层——以前 txt2img 的 cfg 参数根本没往下传
+    （内部实现 `_qwen_txt2img` 的签名里压根没有 cfg，meta 里写死 4.0）。"""
+    r = g.txt2img(eng, prompt="a cat", width=256, height=256, steps=8,
+                  seed=1, preset="none", pixel=0, palette=0, scope="t")
+    assert r["meta"]["cfg"] == 1.0
+    assert r["meta"]["true_cfg"] is False
+
+
+# ---------------- 真 CFG：时间翻倍的那一半 ----------------
+#
+# 实测（2026-10-30）：768²/24 步的总耗时里 DiT 前向占 86%，而
+# `true_cfg_scale > 1 且给了负向词` 时管线每个 step 跑**两遍** transformer
+# （有条件 + 无条件）→ 24 步 = 48 次前向。关掉后 21.1s → 13.6s（-36%），
+# 6 个提示词的画质对照没有下降（assets/_cfg_ab/cmp.png）。
+
+def test_negative_prompt_only_sent_with_true_cfg(eng, monkeypatch):
+    """真 CFG 关着时**不能**传负向词——传了就会触发双次前向。
+
+    这里直接调 `_qwen_call`（而不是走 monkeypatch 掉的假实现），
+    用一个假管线把 kwargs 截下来看。
+    """
+    seen = {}
+
+    class FakePipe:
+        def __call__(self, **kw):
+            seen.clear()
+            seen.update(kw)
+
+            class _Out:
+                images = [Image.new("RGBA", (16, 16))]
+            return _Out()
+
+    monkeypatch.setattr(eng, "txt2img_pipe",
+                        lambda model="qwen-image-2.1": FakePipe())
+
+    g._qwen_call(eng, prompt="x", negative="no blur", width=256, height=256,
+                 steps=8, seed=1, cfg=1.0)
+    assert "negative_prompt" not in seen
+    assert seen["true_cfg_scale"] == 1.0
+
+    g._qwen_call(eng, prompt="x", negative="no blur", width=256, height=256,
+                 steps=8, seed=1, cfg=4.0)
+    assert seen["negative_prompt"] == "no blur"
+    assert seen["true_cfg_scale"] == 4.0
+
+
+def test_cfg_reaches_the_model_call(eng, sandbox):
+    """cfg 必须真的传到推理层——以前 txt2img 的 cfg 参数根本没往下传
+    （内部实现 `_qwen_txt2img` 的签名里压根没有 cfg，meta 里写死 4.0）。"""
+    r = g.txt2img(eng, prompt="a cat", width=256, height=256, steps=8,
+                  seed=1, preset="none", pixel=0, palette=0, scope="t")
+    assert r["meta"]["cfg"] == 1.0
+    assert r["meta"]["true_cfg"] is False

@@ -188,8 +188,10 @@ def _infer(eng: Engine, pipe, kw: Dict[str, Any], *, shrink: bool = True,
 QWEN_ALPHA_HEAD = "This is an RGBA image with transparency. "
 QWEN_ALPHA_TAIL = " The image has alpha channel and the background is transparent."
 
-# Qwen 的负向词：**不能为空**（空了 true_cfg 静默失效，见 _qwen_call）。
-# 内容也别照搬 SD 那套——它不理解 "16-bit pixel art" 这类风格词，
+# Qwen 的负向词：**只在真 CFG 打开时才传**（cfg > 1，见 _qwen_call）。
+# 原因：真 CFG 会让 transformer 前向翻倍（时间 +40%），而实测单次前向
+# 的画质并不差——所以默认 cfg=1.0，这个负向词默认不参与计算。
+# 内容别照搬 SD 那套——它不理解 "16-bit pixel art" 这类风格词，
 # 但认得出质量词与常见的构图失败。
 QWEN_NEG = ("blurry, low quality, worst quality, jpeg artifacts, "
             "watermark, signature, text, deformed, extra limbs, bad anatomy, "
@@ -267,14 +269,15 @@ def sanitize_alpha(img: Image.Image) -> Image.Image:
 def _qwen_call(eng: Engine, *, prompt: str, negative: str, width: int, height: int,
                steps: int, seed: int, ref_image: Optional[Image.Image] = None,
                transparent: bool = False, model: str = "qwen-image-2.1",
-               label: str = "w1", cfg: float = 4.0,
+               label: str = "w1", cfg: float = 1.0,
                output_resolution: Optional[int] = None) -> Image.Image:
     """Qwen 单次推理。带 ref_image 就走「指令改图」，不带就是文生图。
 
     三个**必须**记住的点（都是实测踩出来的）：
-      1. `true_cfg_scale` 只有配 `negative_prompt` 才生效——管线里的判据是
-         `do_true_cfg = true_cfg_scale > 1 and has_neg_prompt`，不传负向时
-         CFG 静默失效（cfg=1 与 cfg=4 输出逐字节相同）。
+      1. **真 CFG 的代价是时间翻倍**：管线在 `true_cfg_scale > 1` 且给了负向词时
+         每个 step 跑两遍 transformer（有条件 + 无条件）。实测 768²/24 步：
+         21.5s（真 CFG）vs 13.0s（单次前向），DiT 前向占 86% 的总时间。
+         画质对照（6 个提示词）没掉，所以默认走单次前向（cfg=1.0）。
       2. 尺寸必须是 16 的倍数（VAE 下采样 + patchify）。不是的话 diffusers
          只 warn 一句就静默改尺寸，最后 meta 里记的尺寸是假的。
       3. **`output_resolution` 必须显式传成目标边长**。管线的默认值是 1024，
@@ -291,7 +294,6 @@ def _qwen_call(eng: Engine, *, prompt: str, negative: str, width: int, height: i
     gen = torch.Generator("cuda").manual_seed(int(seed))
     kw: Dict[str, Any] = dict(
         prompt=full,
-        negative_prompt=negative or QWEN_NEG,
         width=w, height=h,
         num_inference_steps=max(8, min(int(steps), 60)),
         true_cfg_scale=float(cfg),
@@ -299,6 +301,16 @@ def _qwen_call(eng: Engine, *, prompt: str, negative: str, width: int, height: i
         # 条件图分辨率与目标对齐（见上第 3 点）
         output_resolution=int(output_resolution or max(w, h)),
     )
+    # **负向词只在真 CFG 打开时才传**。
+    # 真 CFG（true_cfg_scale > 1）会让管线每个 step 跑两遍 transformer
+    # （有条件 + 无条件）——24 步就是 48 次前向，实测占 86% 的时间。
+    # cfg = 1.0 时只有一次前向（21.5s → 13.0s，快 40%），实测画质不掉
+    # （6 个提示词对照见 assets/_cfg_ab/cmp.png）。
+    # 不传负向词，就不会有「双次前向」这件事——不依赖 diffusers 内部的
+    # do_true_cfg 判定，行为自己说得清。
+    if float(cfg) > 1.0:
+        kw["negative_prompt"] = negative or QWEN_NEG
+
     if ref_image is not None:
         # 参考图统一缩放到目标尺寸：管线对多图原生支持，但单图这条路径
         # 不走 resize 的话会把原图尺寸带进 latent token 计算
@@ -428,7 +440,8 @@ def _qwen_txt2img(eng: Engine, *, prompt: str, negative: Optional[str],
                   width: int, height: int, steps: int, seed: int,
                   transparent: bool, pixel: int, palette: int, preset: str,
                   matte: bool, matte_backend: str, denoise: int, clean_iso: int,
-                  model: str, scope: str, tag: str) -> Dict[str, Any]:
+                  cfg: float = 1.0, model: str, scope: str,
+                  tag: str) -> Dict[str, Any]:
     """Qwen 文生图。
 
     **透明底时不能用 SD 那套契约后缀**：SPRITE_SUFFIX 里写着 "flat plain
@@ -455,7 +468,8 @@ def _qwen_txt2img(eng: Engine, *, prompt: str, negative: Optional[str],
     dt = _timer()
     img = _qwen_call(eng, prompt=prompt, negative=(negative or ""),
                      width=width, height=height, steps=steps, seed=seed,
-                     transparent=transparent, model=model, label="w1")
+                     transparent=transparent, model=model, label="w1",
+                     cfg=cfg)
     seconds = dt()
     width, height = img.size
     # 透明底的原图自带 alpha，再跑抠图会把 alpha 当背景重算一遍，纯属浪费
@@ -467,8 +481,8 @@ def _qwen_txt2img(eng: Engine, *, prompt: str, negative: Optional[str],
     return _save(img2, _stamp(tag), "txt2img", {
         "workflow": "w1", "prompt": _qwen_prompt(prompt, transparent),
         "negative": negative or QWEN_NEG,
-        "width": width, "height": height, "steps": steps, "cfg": 4.0,
-        "true_cfg": 4.0, "seed": seed,
+        "width": width, "height": height, "steps": steps,
+        "cfg": float(cfg), "true_cfg": float(cfg), "seed": seed,
         "lora": None, "lora_scale": None,
         "pixel_block": pixel, "palette": palette, "matte": matte,
         "matte_backend": matte_backend, "denoise": denoise, "clean_iso": clean_iso,
@@ -476,6 +490,8 @@ def _qwen_txt2img(eng: Engine, *, prompt: str, negative: Optional[str],
         "alpha_reused": info.get("alpha_reused"),
         "prompt_bg_stripped": stripped or None,
         "edge_touch": edge, "model": model, "clip_skip": None,
+        # 真 CFG 开着时每个 step 跑两遍 transformer（时间翻倍）
+        "true_cfg": bool(float(cfg) > 1.0),
         "subjects": subjects, "transparent": transparent,
         "hires": None, "distill": None, "refiner": False,
         "seconds": seconds,
@@ -486,7 +502,7 @@ def _qwen_txt2img(eng: Engine, *, prompt: str, negative: Optional[str],
 # ---------------- W1 文生图 ----------------
 
 def txt2img(eng: Engine, *, prompt: str, negative: Optional[str] = None,
-            width: int = 768, height: int = 768, steps: int = 24, cfg: float = 4.0,
+            width: int = 768, height: int = 768, steps: int = 24, cfg: float = 1.0,
             seed: int = -1, pixel: int = 0, palette: int = 0, preset: str = "sprite",
             matte: bool = False, matte_backend: str = "auto", denoise: int = 1,
             clean_iso: int = 1, transparent: bool = False,
@@ -503,7 +519,7 @@ def txt2img(eng: Engine, *, prompt: str, negative: Optional[str] = None,
         steps=steps, seed=seed, transparent=transparent, pixel=pixel,
         palette=palette, preset=preset, matte=matte,
         matte_backend=matte_backend, denoise=denoise, clean_iso=clean_iso,
-        model=model, scope=scope, tag=tag)
+        cfg=cfg, model=model, scope=scope, tag=tag)
 
 
 # ---------------- W2 图生图 ----------------
@@ -512,7 +528,7 @@ def _qwen_img2img(eng: Engine, *, init_image: str | Path, prompt: str,
                   negative: Optional[str], steps: int, seed: int,
                   transparent: bool, preset: Optional[str], pixel: int,
                   palette: int, matte: bool, matte_backend: str, denoise: int,
-                  clean_iso: int, model: str, scope: str,
+                  clean_iso: int, cfg: float = 1.0, model: str, scope: str,
                   tag: str) -> Dict[str, Any]:
     """Qwen 指令改图：源图当参考，提示词当指令。
 
@@ -540,7 +556,8 @@ def _qwen_img2img(eng: Engine, *, init_image: str | Path, prompt: str,
     img = _qwen_call(eng, prompt=prompt, negative=(negative or ""),
                      width=ref_img.width, height=ref_img.height,
                      steps=steps, seed=seed, ref_image=ref_img,
-                     transparent=transparent, model=model, label="w2")
+                     transparent=transparent, model=model, label="w2",
+                     cfg=cfg)
     seconds = dt()
     # **raw 一律存**：它是「后处理之前的原图」，前端图生图节点的
     # 「用原图（未像素化），保留细节」指的就是它。以前只在 pixel>1 或 palette>0
@@ -555,7 +572,7 @@ def _qwen_img2img(eng: Engine, *, init_image: str | Path, prompt: str,
         "workflow": "w2", "prompt": _qwen_prompt(prompt, transparent),
         "negative": negative or QWEN_NEG,
         "init_image": str(init_image), "strength": None, "steps": steps,
-        "cfg": 4.0, "true_cfg": 4.0, "seed": seed, "lora": None,
+        "cfg": float(cfg), "true_cfg": float(cfg), "seed": seed, "lora": None,
         "lora_scale": None,
         "pixel_block": pixel, "palette": palette, "matte": matte,
         "matte_backend": matte_backend, "matte_used": info.get("backend"),
@@ -568,7 +585,7 @@ def _qwen_img2img(eng: Engine, *, init_image: str | Path, prompt: str,
 
 
 def img2img(eng: Engine, *, init_image: str | Path, prompt: str,
-            negative: Optional[str] = None, steps: int = 24, cfg: float = 4.0,
+            negative: Optional[str] = None, steps: int = 24, cfg: float = 1.0,
             seed: int = -1, model: str = DEFAULT_MODEL,
             preset: Optional[str] = None, pixel: int = 0, palette: int = 0,
             matte: bool = False, matte_backend: str = "auto", denoise: int = 1,
@@ -584,7 +601,7 @@ def img2img(eng: Engine, *, init_image: str | Path, prompt: str,
         steps=steps, seed=seed, transparent=transparent, preset=preset,
         pixel=pixel, palette=palette, matte=matte,
         matte_backend=matte_backend, denoise=denoise,
-        clean_iso=clean_iso, model=model, scope=scope, tag=tag)
+        clean_iso=clean_iso, cfg=cfg, model=model, scope=scope, tag=tag)
 
 
 # ---------------- W3 局部重绘 ----------------
@@ -655,7 +672,7 @@ def _outside_diff(src: Image.Image, out: Image.Image, mask: Image.Image) -> int:
 
 
 def inpaint(eng: Engine, *, image: str | Path, mask: str | Path, prompt: str,
-            negative: Optional[str] = None, steps: int = 24, cfg: float = 4.0,
+            negative: Optional[str] = None, steps: int = 24, cfg: float = 1.0,
             seed: int = -1, model: str = DEFAULT_MODEL, scope: str = "",
             feather: int = 4, match_color: bool = True,
             match_strength: float = 0.45, transparent: bool = False,
@@ -898,7 +915,7 @@ def _qwen_ai_repaint(eng: Engine, *, image: str | Path, mask: str | Path,
 
 
 def ai_repaint(eng: Engine, *, image: str | Path, mask: str | Path, prompt: str,
-               negative: Optional[str] = None, steps: int = 24, cfg: float = 4.0,
+               negative: Optional[str] = None, steps: int = 24, cfg: float = 1.0,
                seed: int = -1, model: str = DEFAULT_MODEL,
                preset: Optional[str] = None,
                context: float = 0.35, expand: int = 8, feather: int = 4,
@@ -988,7 +1005,7 @@ def image_to_pixel(eng: Engine, *,
                    pre_enhance: float = 1.0,
                    edge_rebuild: bool = True,
                    source_width: int = 1024, source_height: int = 1024,
-                   steps: int = 24, cfg: float = 4.0, seed: int = -1,
+                   steps: int = 24, cfg: float = 1.0, seed: int = -1,
                    model: str = DEFAULT_MODEL,
                    matte: bool = True, matte_backend: str = "auto",
                    transparent: bool = False,
@@ -1191,7 +1208,7 @@ def _qwen_pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | P
 def pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | Path,
                prompt: str, negative: Optional[str] = None,
                width: int = 768, height: int = 768,
-               steps: int = 24, cfg: float = 4.0, seed: int = -1,
+               steps: int = 24, cfg: float = 1.0, seed: int = -1,
                fill: float = 0.8, thr: float = 0.25,
                ref_mode: str = "auto", bg: str = "white",
                model: str = DEFAULT_MODEL,
@@ -1367,7 +1384,7 @@ def sprite_swap(eng: Engine, *, sheet_image: str | Path, char_image: str | Path,
                 prompt: str = "", negative: Optional[str] = None,
                 cols: int = 0, rows: int = 0,
                 width: int = 768, height: int = 768,
-                steps: int = 24, cfg: float = 4.0, seed: int = -1,
+                steps: int = 24, cfg: float = 1.0, seed: int = -1,
                 ref_mode: str = "outline", mode: str = "generate",
                 engine_mode: str = "auto",
                 model: str = DEFAULT_MODEL,
@@ -1806,7 +1823,7 @@ def _qwen_poseswap(eng: Engine, *, pose_images: Sequence[Path], prompt: str,
 
 def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
              negative: Optional[str] = None, ref_image: Optional[str | Path] = None,
-             steps: int = 24, cfg: float = 4.0, seed: int = 20261027,
+             steps: int = 24, cfg: float = 1.0, seed: int = 20261027,
              width: int = 768, height: int = 768,
              cols: int = 8, pixel: int = 0, palette: int = 0,
              matte: bool = False, matte_backend: str = "auto", denoise: int = 1,

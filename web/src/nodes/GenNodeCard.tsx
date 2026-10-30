@@ -34,9 +34,10 @@ const PARAM_HINTS: Record<string, { what: string; effect: string; rec: string }>
     rec: 'SD1.5 用 30、SDXL 用 24。用了蒸馏（lcm）可降到 4~8',
   },
   CFG: {
-    what: '提示词服从度（classifier-free guidance）',
-    effect: '低=自由但容易跑题；高=听话但僵硬、过饱和、易出伪影',
-    rec: '6.5~7.5。蒸馏模型要 1.0~2.0（高了必糊）',
+    what: '真 CFG 强度（classifier-free guidance）',
+    effect: '大于 1 时管线每个步跑两遍 transformer（有条件 + 无条件），'
+      + '时间翻倍，负向词这时才生效；等于 1 只跑一遍，快 40%',
+    rec: '1.0（默认，快）。要更强的负向约束再往上调，注意时间按倍数涨',
   },
   种子: {
     what: '随机种子。-1 表示每次随机',
@@ -2304,6 +2305,17 @@ export default function GenNodeCard({
                 />
               </label>
               <div className="row">
+                <label title={hint('CFG')}>
+                  CFG
+                  <input
+                    type="number"
+                    step={0.5}
+                    min={1}
+                    max={8}
+                    value={p.cfg}
+                    onChange={(e) => setParam('cfg', Math.max(1, Number(e.target.value) || 1))}
+                  />
+                </label>
                 {/* 透明背景：Qwen-Image-2.1 原生 RGBA。跟「抠图」不是一回事——
                     抠图是生成后用分割模型切一遍（发丝/细剑常被切断），
                     这个是让模型直接画 alpha，边界更干净。 */}
