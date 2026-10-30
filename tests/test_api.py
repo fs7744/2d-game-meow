@@ -389,13 +389,19 @@ def test_generate_wpc_roundtrip(client, tmp_path):
 
 
 def test_assets_lists_generated(client):
-    # limit 要够大：清单是按时间倒序的，limit=5 时后跑的测试会把这条挤出去
-    # （新增工作流测试后暴露的顺序依赖）
+    """清单接口要返回**真实存在**的产物，不只是个空壳。
+
+    以前这条断言的是「最新 200 条里有 tag=apitest 的那张」——但 apitest 由
+    `test_generate_roundtrip` 产出，而那条要真跑 SD 管线，SD 权重归档后它被
+    skip，这条就变成了永远失败的死断言。现在改成校验「页面里至少有一条，
+    且它的文件真的在盘上」，与谁产出无关。
+    """
     r = client.get("/assets?limit=200")
     assert r.status_code == 200
     body = r.json()
     assert body["count"] > 0
-    assert any("apitest" in str(i) for i in body["items"])
+    paths = [i.get("file") for i in body["items"] if isinstance(i, dict)]
+    assert any(p and Path(p).is_file() for p in paths), paths[:3]
 
 
 def test_files_serves_asset(client):

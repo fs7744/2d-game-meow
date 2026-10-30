@@ -309,3 +309,30 @@ def test_strip_bg_words_removes_conflicts():
     # 没有冲突词就不该动
     same, hit2 = g._strip_bg_words("a cat, golden armor")
     assert not hit2 and same == "a cat, golden armor"
+
+
+# ---------------- 边界：Qwen 路径不许碰 SD 管线 ----------------
+#
+# engine.py 里还留着 SD 时代的管线方法（inpaint_pipe / pose_pipe / controlnet /
+# apply_lora / refiner_pipe / animatediff_pipe），它们是回退路径的一部分。
+# 这条测试把「Qwen 运行态下走不到」变成可执行的断言：全换成 raise，
+# 四个 Qwen 工作流照跑——一旦哪天有人把 SD 分支接回主路径，这里立刻红。
+
+def test_qwen_workflows_never_touch_sd_pipelines(eng, sandbox, tmp_path,
+                                                 monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("Qwen 路径调用了 SD 管线方法")
+
+    for name in ("inpaint_pipe", "pose_pipe", "controlnet", "apply_lora",
+                 "refiner_pipe", "animatediff_pipe", "apply_distill",
+                 "ipa_weight"):
+        monkeypatch.setattr(eng, name, boom, raising=False)
+
+    src, msk = _src(tmp_path), _mask(tmp_path)
+    g.inpaint(eng, image=src, mask=msk, prompt="green armor", steps=8,
+              model="qwen-image-2.1", scope="t")
+    g.ai_repaint(eng, image=src, mask=msk, prompt="green armor", steps=8,
+                 model="qwen-image-2.1", scope="t")
+    g.poseswap(eng, pose_images=_skeleton(tmp_path), prompt="cat knight",
+               steps=8, model="qwen-image-2.1", width=256, height=256,
+               matte=False, candidates=1, gate=False, scope="t")

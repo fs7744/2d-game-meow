@@ -691,6 +691,25 @@ class Engine:
         return pipe
 
 
+    # ===================================================================== #
+    # ⚠️ LEGACY：SD 时代（Qwen-only 运行态下**走不到**，但保留作回退路径）
+    #
+    # 下面这一段全是「只有 SD1.5 / SDXL 才用得上」的管线：
+    #   inpaint_pipe / controlnet / ipa_weight / pose_pipe / _attach_ipa
+    #   animatediff_available / animatediff_pipe / distill_available / apply_distill
+    #   apply_lora / refiner_path / has_refiner / refiner_pipe / refiner_embeds
+    #
+    # 为什么还留着：权重只是**移到** models/_archive/sd/，挪回来 + `git checkout sd`
+    # 就能回到 SD 时代；删掉它们等于把回退路径也删了。
+    #
+    # 为什么单独标出来：Qwen-only 下读代码的人会把它们当成活代码。判据很简单——
+    # `engine.arch(model) == "qwen21"` 的分支在所有工作流里都提前 return 了，
+    # 这些方法一次都不会被调用（`tests/test_qwen_workflows.py` 里有断言钉着：
+    # 把 SD 管线方法换成 raise，四个 Qwen 工作流照样跑通）。
+    #
+    # 真要删（不可逆，需要明确确认）时按 docs/PLAN-QWEN-ONLY.md §5 的清单来。
+    # ===================================================================== #
+
     def inpaint_pipe(self, model: str = DEFAULT_MODEL):
         """W3 局部重绘。
 
