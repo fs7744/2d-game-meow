@@ -1,7 +1,8 @@
-"""底模自选：SD1.5 / SDXL。"""
+"""底模自选：Qwen-Image-2.1（SD 已归档，相关断言按权重存在与否跳过）。"""
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 import pytest
 from PIL import Image, ImageDraw
@@ -9,14 +10,24 @@ from PIL import Image, ImageDraw
 from workflows.engine import Engine
 from workflows import generate as g
 
+# SD 权重已归档到 models/_archive/sd/：真跑 SD 管线的用例在权重不在时跳过
+# （恢复权重后自动重新生效，不是删测试）
+_SD_WEIGHTS = (Path(__file__).resolve().parent.parent / "models" / "checkpoints"
+               / "sd15" / "model_index.json").is_file()
+requires_sd = pytest.mark.skipif(
+    not _SD_WEIGHTS,
+    reason="SD 权重已归档到 models/_archive/sd/（恢复后自动恢复）")
+
 
 def test_available_models_lists_roots(root, eng):
     from workflows.engine import BASE_MODELS
 
     have = eng.available_models()
-    assert "sd15" in have                       # 产线主链路必须有
+    assert have, "至少要有一个底模可用"
     for m in have:
         assert m in BASE_MODELS
+    if _SD_WEIGHTS:
+        assert "sd15" in have                   # 产线主链路必须有
 
 
 def test_unknown_model_rejected(eng):
@@ -28,30 +39,35 @@ def test_models_endpoint(client, eng):
     r = client.get("/models")
     assert r.status_code == 200
     body = r.json()
-    assert "sd15" in body["available"]
+    assert body["available"], "至少要有 qwen-image-2.1"
+    if _SD_WEIGHTS:
+        assert "sd15" in body["available"]
 
     # 前端靠这个端点决定下拉内容：没下载的不能出现，否则选了却跑不动
     for m in body["available"]:
         assert (eng.root / "checkpoints" / m / "model_index.json").exists(), m
 
-    # 每个底模都要带推荐参数：SDXL 推荐 768 而不是 1024。
-    # 实测 1024² 反而更差（角色占比大 → 更易顶边，可交付率 92%→75%），
-    # 前端若按"SDXL 就该 1024"填表单，用户会稳定拿到更差的结果。
+    # 每个底模都要带推荐参数。
     #
-    # **例外：动漫底模**（底模名在 Engine.MODEL_RECOMMEND 里的）是反过来的——
-    # 它们是在 Danbooru 高分辨率插画上训的，1024² 才出细节；而且
-    # pixel/palette 必须是 0：动漫立绘要保画质，像素化是给精灵的，
-    # 把插画压成 6px 格子等于毁掉它。
+    # **Qwen 是例外**：它不是像素管线（pixel/palette 归零，直接出像素风），
+    # 尺寸默认 768² 而不是 1024²——它是逐帧路线，1024² 的图 token 是 768²
+    # 的 1.78 倍，而精灵成品最后要缩到 32~128px，多出来的细节看不见。
     from workflows.engine import Engine as _E
 
+    arch = body["arch"]
     rec = body["recommend"]
     for m in body["available"]:
         r = rec[m]
         if m in _E.MODEL_RECOMMEND:
+            # 动漫底模：1024² 才出细节，且**不能**像素化
             assert r["width"] == 1024 and r["height"] == 1024, r
             assert r["pixel"] == 0 and r["palette"] == 0, r
-            # 动漫底模要带上 clip_skip 与 preset，前端靠它们自动填表单
             assert r["clip_skip"] == 2 and r["preset"] == "anime", r
+        elif arch[m] == "qwen21":
+            assert r["width"] == 768 and r["height"] == 768, r
+            assert r["pixel"] == 0 and r["palette"] == 0, r
+            # 步数下限实测：12 步出糊块，24 步才完整（见 PLAN §2.6）
+            assert r["steps"] >= 20, r
         else:
             assert r["width"] == 768 and r["height"] == 768, r
             assert r["pixel"] > 1 and r["palette"] > 1
@@ -59,7 +75,16 @@ def test_models_endpoint(client, eng):
         # 24GB，不报 OOM 但耗时翻 3.5 倍——这个上限得由后端给，不能让用户猜。
         assert 1 <= r["max_candidates"] <= 6, r
 
+    # 能力表：Qwen 十个工作流全开，其中四个是近似实现
+    qwen = [m for m in body["available"] if arch[m] == "qwen21"]
+    for m in qwen:
+        caps = body["caps"][m]
+        assert len(caps["workflows"]) == 10, caps
+        assert set(caps["approx"]) == {"inpaint", "ai_repaint", "poseswap",
+                                       "sprite_swap"}, caps
 
+
+@requires_sd
 def test_txt2img_model_echoed(eng):
     r = g.txt2img(eng, prompt="blue slime", width=256, height=256, steps=6,
                   seed=1, preset="none", tag="model_sd15")

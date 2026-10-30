@@ -551,6 +551,13 @@ export type ModelCaps = {
    * 选上它就是必崩，不如直接不列出来。
    */
   workflows: string[]
+  /**
+   * workflows 里哪些是**近似实现**：硬约束在这个底模上不存在，靠软引导或
+   * 后处理凑出同样的产物（例：Qwen 没有 mask 接口 → 局部重绘 = 整图指令改图
+   * + 蒙版贴回；没有 ControlNet → 姿态序列靠骨架图软引导）。
+   * 节点上要打标，用户据此判断能不能拿它替代 SD 的那条路。
+   */
+  approx?: string[]
 }
 
 export type ModelList = {
@@ -566,6 +573,14 @@ export type ModelList = {
   refiner: boolean
 }
 
+/** 全部工作流名（与后端 engine._ARCH_WORKFLOWS 同一套词）。老后端不给
+ *  workflows 时按它兜底，前端至少不会把节点锁死。 */
+const ALL_WF = ['txt2img', 'img2img', 'inpaint', 'poseswap', 'matte',
+  'ai_repaint', 'pixelify', 'pose_clone', 'sprite_swap', 'topixel']
+
+/** Qwen 上属于「近似实现」的工作流（老后端不给 approx 时兜底） */
+const QWEN_APPROX = ['inpaint', 'ai_repaint', 'poseswap', 'sprite_swap']
+
 export async function fetchModels(): Promise<ModelList> {
   const r = await fetch(`${base}/models`)
   // 后端不可达时退回 Qwen 单档（SD 权重已归档）：宁可少显示，也不要让下拉是空的
@@ -577,8 +592,7 @@ export async function fetchModels(): Promise<ModelList> {
       caps: {
         'qwen-image-2.1': {
           transparent: true, instruction: true, lora: false,
-          workflows: ['txt2img', 'img2img', 'matte', 'pixelify', 'topixel',
-            'pose_clone'],
+          workflows: ALL_WF, approx: QWEN_APPROX,
         },
       },
       refiner: false,
@@ -592,8 +606,6 @@ export async function fetchModels(): Promise<ModelList> {
   // 老后端没有 arch 字段：按名字兜底（含 xl 就是 sdxl），至少不比以前差
   const arch: Record<string, string> = {}
   const caps: Record<string, ModelCaps> = {}
-  const ALL_WF = ['txt2img', 'img2img', 'inpaint', 'poseswap', 'matte',
-    'ai_repaint', 'pixelify', 'pose_clone', 'sprite_swap', 'topixel']
   for (const m of available) {
     arch[m] = (j.arch && j.arch[m])
       || (/qwen/i.test(m) ? 'qwen21' : /xl/i.test(m) ? 'sdxl' : 'sd15')
@@ -605,9 +617,9 @@ export async function fetchModels(): Promise<ModelList> {
       instruction: c.instruction ?? isQwen,
       lora: c.lora ?? !isQwen,
       workflows: Array.isArray(c.workflows) ? c.workflows
-        // 老后端不给 workflows：qwen 只留不依赖 SD 组件的
-        : isQwen ? ['txt2img', 'img2img', 'matte', 'pixelify', 'topixel',
-          'pose_clone'] : ALL_WF,
+        // 老后端不给 workflows：qwen 现在十个全支持（近似的那几个见 approx）
+        : ALL_WF,
+      approx: Array.isArray(c.approx) ? c.approx : (isQwen ? QWEN_APPROX : []),
     }
   }
   const refiner = j.refiner === true

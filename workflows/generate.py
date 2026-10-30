@@ -412,15 +412,22 @@ def sanitize_alpha(img: Image.Image) -> Image.Image:
 def _qwen_call(eng: Engine, *, prompt: str, negative: str, width: int, height: int,
                steps: int, seed: int, ref_image: Optional[Image.Image] = None,
                transparent: bool = False, model: str = "qwen-image-2.1",
-               label: str = "w1", cfg: float = 4.0) -> Image.Image:
+               label: str = "w1", cfg: float = 4.0,
+               output_resolution: Optional[int] = None) -> Image.Image:
     """Qwen 单次推理。带 ref_image 就走「指令改图」，不带就是文生图。
 
-    两个**必须**记住的点（都是实测踩出来的）：
+    三个**必须**记住的点（都是实测踩出来的）：
       1. `true_cfg_scale` 只有配 `negative_prompt` 才生效——管线里的判据是
          `do_true_cfg = true_cfg_scale > 1 and has_neg_prompt`，不传负向时
          CFG 静默失效（cfg=1 与 cfg=4 输出逐字节相同）。
       2. 尺寸必须是 16 的倍数（VAE 下采样 + patchify）。不是的话 diffusers
          只 warn 一句就静默改尺寸，最后 meta 里记的尺寸是假的。
+      3. **`output_resolution` 必须显式传成目标边长**。管线的默认值是 1024，
+         它决定「条件图被缩放到多大再编码」——于是 768² 的出图配 1024² 的
+         参考图token：参考图的尺度比目标大一档（模型看到的细节密度对不上），
+         图 token 也多 78%。实测（768²/8 步）：改图 16.28s / 20.14GB →
+         对齐后 14.75s / 18.75GB，且输出不是同一个采样点（平均差 6.15/255），
+         对齐后的那张构图更贴原图。
     """
     pipe = eng.txt2img_pipe(model)
     w = max(256, int(width) // 16 * 16)
@@ -434,6 +441,8 @@ def _qwen_call(eng: Engine, *, prompt: str, negative: str, width: int, height: i
         num_inference_steps=max(8, min(int(steps), 60)),
         true_cfg_scale=float(cfg),
         generator=gen,
+        # 条件图分辨率与目标对齐（见上第 3 点）
+        output_resolution=int(output_resolution or max(w, h)),
     )
     if ref_image is not None:
         # 参考图统一缩放到目标尺寸：管线对多图原生支持，但单图这条路径
@@ -450,6 +459,114 @@ def _qwen_call(eng: Engine, *, prompt: str, negative: str, width: int, height: i
             kw["image"] = ref_image.convert("RGB").resize((w, h), Image.LANCZOS)
     out = _infer(eng, pipe, kw, label=label)
     return sanitize_alpha(out.images[0].convert("RGBA"))
+
+
+# ---- Qwen 的「局部重绘」公共件（w3 / w5 共用） ----
+
+# 局部编辑的负向词：重点是「别画蛇添足」与「别出新脸」。
+QWEN_EDIT_NEG = (
+    "seam, visible seam, color banding, ghosting, duplicate limbs, extra characters, "
+    "changed face, different character, text, watermark, signature, blurry"
+)
+
+# 约束条款。Qwen 看不懂 SD 的契约后缀，但**认得出整句自然语言指令**，
+# 所以这里写成人话，而不是逗号堆叠的关键词。
+QWEN_EDIT_RULES = (
+    "Keep the character's face, hairstyle, body proportions, pose, art style and "
+    "everything outside that area exactly the same. Do not add new objects, do not "
+    "redraw the background, no visible seam."
+)
+
+
+def _qwen_work_size(size: tuple[int, int], *, cap: int = 1024,
+                    lo: int = 512) -> tuple[int, int]:
+    """把源图尺寸夹到 Qwen 的划算区间（16 的倍数，长边 ≤ cap）。
+
+    为什么要有上限：Qwen 的开销随面积涨，1024² 的图 token 是 768² 的 1.78 倍，
+    而像素素材原生只有 32~128px——放大到 1024 并不会多出细节，只会把
+    「按 1024 画的笔触」再缩回去，白烧一倍显存与时间。
+    """
+    w, h = size
+    f = min(1.0, cap / max(1, max(w, h)))
+    def snap(v: float) -> int:
+        # **向下取整到 16 的倍数**：向上取整会让「不缩放」的图反而被放大 1~15px，
+        # 白白多算 token。宁可少 15px 也不放大（像素素材放大不会多出信息）。
+        return max(16, int(v * f) // 16 * 16)
+    return snap(w), snap(h)
+
+
+def _region_words(mask: Image.Image) -> str:
+    """把蒙版位置翻译成一句方位词（top-left / middle-center …）。
+
+    **为什么需要**：Qwen 没有 mask 通道，模型只能从提示词知道「改哪里」。
+    只给「把盔甲改成绿色」时它会挑最像盔甲的地方——常常整件重画。
+    按蒙版包围盒的中心补一句方位，等于把「这里」说清楚，实测能明显减少
+    选区外的改动（配合蒙版贴回后，选区外本来就保证逐点不变）。
+    """
+    bb = mask.getbbox()
+    if bb is None:
+        raise ValueError("蒙版是空的：先涂出要重绘的区域")
+    cx = (bb[0] + bb[2]) / 2.0 / mask.width
+    cy = (bb[1] + bb[3]) / 2.0 / mask.height
+    vert = "top" if cy < 0.35 else ("bottom" if cy > 0.65 else "middle")
+    horz = "left" if cx < 0.35 else ("right" if cx > 0.65 else "center")
+    return f"{vert}-{horz}"
+
+
+def _qwen_edit_prompt(body: str, region: str) -> str:
+    body = (body or "").strip().rstrip(".")
+    return (f"Edit this image: {body}. Apply the change only to the {region} area; "
+            f"{QWEN_EDIT_RULES}")
+
+
+def _qwen_local_edit(eng: Engine, *, src: Image.Image, mask: Image.Image,
+                     body: str, negative: Optional[str], steps: int, cfg: float,
+                     seed: int, model: str,
+                     label: str) -> tuple[Image.Image, tuple[int, int], str, str]:
+    """整图做条件 + 指令改图，返回 (生成图[源图尺寸], 工作尺寸, 指令, 方位)。
+
+    **为什么整图而不是裁剪块**：裁剪块只有 400px 左右，放大到 768² 后模型会把
+    它当新图重画——实测脸被抹掉、且「盔甲改翠绿」这条指令根本没执行
+    （选区外像素差 0，但选区内是另一个人）。整图做条件时模型看到完整角色，
+    身份与画风都在 vision context 里，只需要执行局部指令。
+    代价是整图编码比裁剪块贵（768² vs 448²），换来的是「能用」。
+    """
+    region = _region_words(mask)
+    prompt = _qwen_edit_prompt(body, region)
+    work = _qwen_work_size(src.size)
+    # 透明区填白：直接 convert("RGB") 会变黑，模型会把黑块当成内容重画
+    payload = rp.flatten_rgb(src)
+    if work != src.size:
+        payload = payload.resize(work, Image.LANCZOS)
+    gen = _qwen_call(
+        eng, prompt=prompt, negative=negative or QWEN_EDIT_NEG,
+        width=work[0], height=work[1], steps=steps, seed=seed,
+        ref_image=payload, model=model, label=label, cfg=cfg)
+    gen = gen.convert("RGB")
+    if gen.size != src.size:
+        gen = gen.resize(src.size, Image.LANCZOS)
+    return gen, work, prompt, region
+
+
+def _restore_alpha(out: Image.Image, src: Image.Image) -> Image.Image:
+    """源图有透明底、而生成图整张不透明时，把源图的 alpha 还回去。
+
+    Qwen 只有在提示词里写了「RGBA / transparent background」才会出透明通道；
+    局部重绘不写（写了反而会把选区画成透明洞）。于是透明素材重绘后，
+    选区里会多出一圈白底。判据用「生成图完全没有透明像素」——它说明模型
+    这次根本没打算画透明，alpha 不可信，沿用源图的最稳。
+    """
+    if src.mode != "RGBA" or out.mode != "RGBA":
+        return out
+    a_out = np.asarray(out.getchannel("A"))
+    a_src = np.asarray(src.getchannel("A"))
+    if a_out.min() > 250 and a_src.min() < 250:
+        # 复制一份再改：in-place 修改会让调用方手里的生成图被悄悄换掉
+        out = out.copy()
+        out.putalpha(src.getchannel("A"))
+    return out
+
+
 
 
 def _qwen_txt2img(eng: Engine, *, prompt: str, negative: Optional[str],
@@ -762,12 +879,89 @@ def img2img(eng: Engine, *, init_image: str | Path, prompt: str,
 
 # ---------------- W3 局部重绘 ----------------
 
+def _qwen_inpaint(eng: Engine, *, image: str | Path, mask: str | Path, prompt: str,
+                  negative: Optional[str], steps: int, cfg: float, seed: int,
+                  model: str, feather: int, match_color: bool,
+                  match_strength: float, transparent: bool,
+                  scope: str, tag: str) -> Dict[str, Any]:
+    """Qwen 版局部重绘：整图指令改图 + 蒙版贴回。
+
+    **它不是真 inpaint**（Qwen 三条编辑管线都没有 mask / mask_image / strength
+    参数，见 PLAN 的 C 段实测），所以承诺要分开写：
+
+      · 选区**外**：逐点不变。这是硬承诺——贴回用「只向内羽化 + 二值蒙版相乘」，
+        和 SD 那条路是同一个 `repaint.composite`。
+      · 选区**内**：模型按指令重画，但**不保证只改那一点**。它看不到蒙版，
+        只能从提示词里的方位词猜到要改哪儿；猜偏了的部分会被蒙版裁掉，
+        表现是「改得不够」而不是「改到外面」。
+    """
+    src = Image.open(image).convert("RGBA")
+    msk = rp.load_mask(mask)
+    if msk.size != src.size:
+        raise ValueError(
+            f"蒙版尺寸 {msk.size[0]}×{msk.size[1]} 与源图 "
+            f"{src.width}×{src.height} 不一致：换图后要重新涂抹")
+    body = (prompt or "").strip()
+    if not body:
+        raise ValueError("提示词是空的：先写一句这块区域要变成什么")
+
+    if seed < 0:
+        seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
+    torch.cuda.reset_peak_memory_stats()
+    dt = _timer()
+    gen, work, full_prompt, region = _qwen_local_edit(
+        eng, src=src, mask=msk, body=body, negative=negative, steps=steps,
+        cfg=cfg, seed=seed, model=model, label="w3")
+    out = rp.composite(src, gen.convert("RGBA"), msk, feather_px=feather,
+                       match_color=match_color, match_strength=match_strength)
+    if not transparent:
+        out = _restore_alpha(out, src)
+    seconds = dt()
+    # 自检：承诺写进 meta，别让用户去猜「到底有没有溢出」
+    diff = _outside_diff(src, out, msk)
+    return _save(out, _stamp(tag), "inpaint", {
+        "workflow": "w3", "prompt": full_prompt, "prompt_body": body,
+        "negative": negative or QWEN_EDIT_NEG,
+        "image": str(image), "mask": str(mask),
+        "strength": None, "steps": steps, "cfg": cfg, "seed": seed,
+        "model": model, "backend": "qwen-edit", "approx": True,
+        "region": region, "work_size": list(work),
+        "coverage": rp.mask_coverage(msk), "feather": feather,
+        "match_color": bool(match_color), "match_strength": match_strength,
+        "outside_max_diff": diff,
+        "seconds": seconds,
+        "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
+    }, scope=scope)
+
+
+def _outside_diff(src: Image.Image, out: Image.Image, mask: Image.Image) -> int:
+    """蒙版外最大像素差。正常恒为 0；非 0 说明贴回漏了（值得报警而不是沉默）。"""
+    a = np.asarray(src.convert("RGB"), dtype=np.int16)
+    b = np.asarray(out.convert("RGB"), dtype=np.int16)
+    m = np.asarray(mask.convert("L")) > 127
+    if not (~m).any():
+        return 0
+    return int(np.abs(a - b)[~m].max())
+
+
 def inpaint(eng: Engine, *, image: str | Path, mask: str | Path, prompt: str,
             negative: Optional[str] = None, strength: float = 0.9, steps: int = 25,
             cfg: float = 7.5, seed: int = -1, model: str = "sd15", scope: str = "",
+            feather: int = 4, match_color: bool = True,
+            match_strength: float = 0.45, transparent: bool = False,
             tag: str = "w3") -> Dict[str, Any]:
-    """只重画 mask 区域，并把结果按羽化蒙版贴回——选区外像素逐点不变。"""
+    """只重画 mask 区域，并把结果按羽化蒙版贴回——选区外像素逐点不变。
+
+    **Qwen 底模下是近似实现**：没有 mask 接口，走「整图指令改图 + 蒙版贴回」。
+    `strength` 对它没有意义（Qwen 的改动力度由提示词决定），会被忽略。
+    """
     eng.require(model, "inpaint")
+    if eng.arch(model) == "qwen21":
+        return _qwen_inpaint(
+            eng, image=image, mask=mask, prompt=prompt, negative=negative,
+            steps=steps, cfg=cfg, seed=seed, model=model, feather=feather,
+            match_color=match_color, match_strength=match_strength,
+            transparent=transparent, scope=scope, tag=tag)
     pipe = eng.inpaint_pipe(model)
     src = Image.open(image).convert("RGB")
     msk = Image.open(mask).convert("L")
@@ -929,6 +1123,108 @@ AI_REPAINT_NEGATIVE = (
 )
 
 
+def _qwen_ai_repaint(eng: Engine, *, image: str | Path, mask: str | Path,
+                     prompt: str, negative: Optional[str], steps: int, cfg: float,
+                     seed: int, model: str, preset: Optional[str],
+                     context: float, expand: int, feather: int,
+                     match_color: bool, match_strength: float,
+                     palette_snap: bool, palette_colors: int, strategy: str,
+                     scope: str, tag: str) -> Dict[str, Any]:
+    """Qwen 版局部 AI 重绘。两种策略：
+
+      · ``whole``（默认）：**整图做条件**，模型看得到完整角色 → 身份与画风
+        都在 context 里。这是本项目实测唯一「指令被执行且脸不丢」的方案。
+      · ``crop``：裁「选区 + 上下文」放大后改图（SD 那条路的老方案）。
+        对 Qwen 不推荐：裁剪块放大到 768² 后会被当成**新图**重画，
+        实测脸被抹掉、指令不执行（见 docs/PLAN-QWEN-ONLY.md 的 A 段）。
+        保留它是为了对照实验，默认不启用。
+    """
+    src = Image.open(image).convert("RGBA")
+    msk = rp.load_mask(mask)
+    if msk.size != src.size:
+        raise ValueError(
+            f"蒙版尺寸 {msk.size[0]}×{msk.size[1]} 与源图 "
+            f"{src.width}×{src.height} 不一致：换图后要重新涂抹")
+    body = (prompt or "").strip()
+    if not body:
+        raise ValueError("提示词是空的：先写一句要重绘成什么")
+    if preset and preset != "none":
+        body, negative = presets.build(body, negative, preset,
+                                       max_tokens=presets.CHUNK_BUDGET)
+    if seed < 0:
+        seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
+
+    torch.cuda.reset_peak_memory_stats()
+    dt = _timer()
+    if strategy == "crop":
+        # 老方案：裁剪块 → 改图 → 贴回裁剪块 → 贴回原图
+        crop, crop_mask, box = rp.crop_region(src, msk, expand=expand,
+                                              context=context)
+        target = rp.fit_size(crop.size)
+        payload = rp.flatten_rgb(crop).resize(target, Image.LANCZOS)
+        region = _region_words(msk)
+        full_prompt = _qwen_edit_prompt(body, region)
+        gen = _qwen_call(
+            eng, prompt=full_prompt, negative=negative or QWEN_EDIT_NEG,
+            width=target[0], height=target[1], steps=steps, seed=seed,
+            ref_image=payload, model=model, label="w5", cfg=cfg)
+        gen = gen.convert("RGB").resize(crop.size, Image.LANCZOS)
+        merged = rp.composite(crop, gen.convert("RGBA"), crop_mask,
+                              feather_px=feather, match_color=match_color,
+                              match_strength=match_strength)
+        out = src.copy()
+        out.paste(merged, box)
+        work = target
+    else:
+        box = list(msk.getbbox() or (0, 0, src.width, src.height))
+        gen, work, full_prompt, region = _qwen_local_edit(
+            eng, src=src, mask=msk, body=body, negative=negative, steps=steps,
+            cfg=cfg, seed=seed, model=model, label="w5")
+        out = rp.composite(src, gen.convert("RGBA"), msk, feather_px=feather,
+                           match_color=match_color,
+                           match_strength=match_strength)
+        out = _restore_alpha(out, src)
+
+    # 色板吸附（像素素材专用）：把重绘区里「接近源色」的杂色吸回源图色板，
+    # 差得远的新颜色保留——否则「要把这块改成红色」会被吸成灰。
+    palette_snapped = 0.0
+    if palette_snap:
+        out, _pal, palette_snapped = rp.snap_palette(
+            out, src, msk, colors=palette_colors)
+
+    warnings: List[str] = []
+    min_side = min(box[2] - box[0], box[3] - box[1]) if strategy == "crop" \
+        else min(src.width, src.height)
+    if strategy == "crop" and feather > max(2, min_side // 4):
+        warnings.append(
+            f"羽化 {feather}px 相对选区偏大：改动会溢出选区边缘一圈，"
+            "想要干净边界就调小")
+    if palette_snap and palette_snapped < 0.02:
+        warnings.append("色板对齐几乎没有生效：新颜色离源图色板都太远")
+    seconds = dt()
+    return _save(out, _stamp(tag), "ai_repaint", {
+        "workflow": "w5", "scope": scope or "default",
+        "prompt": full_prompt, "prompt_body": body, "constraint": QWEN_EDIT_RULES,
+        "negative": negative or QWEN_EDIT_NEG,
+        "image": str(image), "mask": str(mask),
+        "strength": None, "steps": steps, "cfg": cfg, "seed": seed,
+        "model": model, "lora": None, "lora_scale": None, "clip_skip": None,
+        "backend": "qwen-edit", "approx": True, "strategy": strategy,
+        "region": region, "work_size": list(work),
+        "box": [int(x) for x in box],
+        "coverage": rp.mask_coverage(msk),
+        "context": context if strategy == "crop" else None,
+        "expand": expand if strategy == "crop" else None,
+        "feather": feather,
+        "match_color": bool(match_color), "match_strength": match_strength,
+        "palette_snap": bool(palette_snap), "palette_snapped": palette_snapped,
+        "outside_max_diff": _outside_diff(src, out, msk),
+        "warnings": warnings,
+        "seconds": seconds,
+        "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
+    }, scope=scope)
+
+
 def ai_repaint(eng: Engine, *, image: str | Path, mask: str | Path, prompt: str,
                negative: Optional[str] = None, strength: float = 0.9,
                steps: int = 25, cfg: float = 7.0, seed: int = -1,
@@ -938,6 +1234,7 @@ def ai_repaint(eng: Engine, *, image: str | Path, mask: str | Path, prompt: str,
                context: float = 0.35, expand: int = 8, feather: int = 4,
                match_color: bool = True, match_strength: float = 0.45,
                palette_snap: bool = False, palette_colors: int = 32,
+               strategy: str = "whole",
                scope: str = "", tag: str = "w5") -> Dict[str, Any]:
     """局部 AI 重绘：裁剪「选区+上下文」→ 交给通用模型重画 → 贴回原图。
 
@@ -958,6 +1255,16 @@ def ai_repaint(eng: Engine, *, image: str | Path, mask: str | Path, prompt: str,
     代价是接缝需要收：羽化过渡 + 只在边界带做色彩校正 + 可选色板吸附。
     """
     eng.require(model, "ai_repaint")
+    if eng.arch(model) == "qwen21":
+        if strategy not in ("whole", "crop"):
+            raise ValueError(f"未知策略 {strategy}（可选 whole / crop）")
+        return _qwen_ai_repaint(
+            eng, image=image, mask=mask, prompt=prompt, negative=negative,
+            steps=steps, cfg=cfg, seed=seed, model=model, preset=preset,
+            context=context, expand=expand, feather=feather,
+            match_color=match_color, match_strength=match_strength,
+            palette_snap=palette_snap, palette_colors=palette_colors,
+            strategy=strategy, scope=scope, tag=tag)
     if preset is not None:
         prompt = _lora_trigger(eng, prompt, lora)
         prompt, negative = presets.build(prompt, negative, preset,
@@ -1262,6 +1569,8 @@ def _qwen_pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | P
         # skeleton 模式输入就是画好的骨架，别再初始化 DWPose / FasterRCNN
         extractor=None if ref_mode == 'skeleton' else eng.pose_extractor(),
         thr=thr, fill=fill, matte_dir=eng.matte_dir)
+    # 灰度化：Qwen 会把条件图当视觉参考，彩色骨架的关节色会被抄进成品
+    cond = _qwen_cond_image(cond)
     char = refprep.prepare_reference(Image.open(char_image).convert("RGBA"), size=width)
 
     sem = (prompt or "").strip()
@@ -1438,6 +1747,145 @@ def pose_clone(eng: Engine, *, pose_image: str | Path, char_image: str | Path,
 
 # ---------------- WSS 序列帧角色替换 ----------------
 
+def _qwen_sprite_swap(eng: Engine, *, frames: Sequence[tuple],
+                      sheet_image: str | Path, char_image: str | Path,
+                      cols: int, rows: int, prompt: str, negative: Optional[str],
+                      width: int, height: int, steps: int, cfg: float, seed: int,
+                      ref_mode: str, model: str, matte: bool, matte_backend: str,
+                      denoise: int, palette: int, keep_alpha: bool,
+                      candidates: int, scope: str,
+                      tag: str) -> Dict[str, Any]:
+    """Qwen 版序列帧替换（WSS）：逐帧「角色图 + 轮廓/骨架」双图条件。
+
+    与 SD 那条路的差别只有一处但很关键：**没有 ControlNet 硬约束**。
+    SD 是「轮廓条件钉死形状 + IP-Adapter 定身份」，两个约束各管一半；
+    Qwen 是两张图一起进 vision context，由模型自己分配谁管身份、谁管动作。
+    实测 3 帧骨架条件 DWPose 18/18、零贴边，动作贴合度够精灵产线用。
+
+    **成本**：单帧 35s 级别，所以 candidates 默认 1（SD 那边是 2）。
+    4 帧动画 = 约 2.5 分钟；8 帧 = 5 分钟。这是「Qwen 换 SD」绕不开的代价。
+    """
+    char = refprep.prepare_reference(Image.open(char_image).convert("RGBA"),
+                                     size=max(width, height))
+    char_orig = Image.open(char_image).convert("RGBA")
+    extractor = eng.pose_extractor()
+    sem = (prompt or "").strip()
+    instr = ("The first image is the character reference: keep the same face, "
+             "hairstyle, outfit and colors. The second image is the target pose "
+             "(a skeleton or a silhouette). Redraw the same character in exactly "
+             "that pose, full body, centered, plain white background."
+             + QWEN_FRAME_RULES)
+    if sem:
+        instr = f"{instr} {sem}"
+    neg = (negative or "").strip() or QWEN_FRAME_NEG
+
+    if seed < 0:
+        seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
+    candidates = max(1, int(candidates))
+
+    generated: List[Image.Image] = []
+    per_frame: List[float] = []
+    used_modes: List[str] = []
+    frame_scores: List[Dict[str, Any]] = []
+    attempts_used = 0
+    matte_info: Dict[str, Any] = {}
+    torch.cuda.reset_peak_memory_stats()
+
+    for _c, _r, frame in frames:
+        cond, used_mode, _info = refcond.build_condition(
+            frame, mode=ref_mode, size=max(width, height), extractor=extractor,
+            matte_dir=eng.matte_dir)
+        used_modes.append(used_mode)
+        # 灰度化：彩色骨架会把颜色抄进成品（见 _qwen_cond_image）
+        cond = _qwen_cond_image(cond.resize((width, height)))
+        ref_area = int(framescore.subject_mask(frame.convert("RGBA")).sum())
+        prev = generated[-1] if generated else None
+        dt = _timer()
+        cands: List[Tuple[Image.Image, Dict[str, Any]]] = []
+        for k in range(candidates):
+            raw = _qwen_call(
+                eng, prompt=instr, negative=neg, ref_image=[char, cond],
+                width=width, height=height, steps=steps, cfg=cfg,
+                seed=seed + k * 1000, model=model, label="wss")
+            info: Dict[str, Any] = {}
+            cut, _edge, _subj = _postprocess(
+                raw, eng, matte=matte, matte_backend=matte_backend,
+                denoise=denoise, pixel=0, palette=0, clean_iso=0, info=info)
+            for kk in ("backend", "fallback"):
+                if kk in info:
+                    matte_info[kk] = info[kk]
+            ev = framescore.evaluate(cut, frame, char_orig, prev=prev,
+                                    area_ref=ref_area)
+            cands.append((cut, ev))
+            if ev["passed"]:
+                break
+        best_img, best_ev, best_i = framescore.pick_best(cands)
+        frame_scores.append({**best_ev, "attempts": len(cands), "picked": best_i})
+        attempts_used += len(cands)
+        per_frame.append(dt())
+        generated.append(best_img)
+
+    cut: List[Image.Image] = list(generated)
+    if keep_alpha:
+        # 用参考帧的 alpha 覆盖：形状逐像素精确，帧间零漂移。
+        # **alpha 要缩到生成尺寸**——参考帧是格子尺寸（64²），生成图是 768²，
+        # 直接 putalpha 会抛 "images do not match"。
+        for i, (_c, _r, frame) in enumerate(frames):
+            cut[i].putalpha(
+                frame.getchannel("A").resize(cut[i].size, Image.NEAREST))
+    else:
+        # 尺度归一：逐帧的人物大小由模型自己决定，帧间能差几倍
+        cut = pp.normalize_sequence(cut)
+
+    # 缩回原格子尺寸：序列帧要塞回游戏，尺寸必须和原帧一致。
+    # 用 pixelfy 的「按格采样」而不是 BOX 降采样——后者会把一格里的多种颜色
+    # 混在一起，边界变脏（同 SD 路径的结论）。
+    cell_w = max(f.width for _c, _r, f in frames)
+    cell_h = max(f.height for _c, _r, f in frames)
+    refined = pxf.refine_batch(
+        [c.convert("RGB") for c in cut],
+        grid_snap=False, target_size=(cell_w, cell_h), colors=palette)
+    outs: List[Image.Image] = []
+    for item, src in zip(refined["items"], cut):
+        im = item["image"]
+        if src.mode == "RGBA":
+            im = im.convert("RGBA")
+            a = src.getchannel("A").resize((cell_w, cell_h), Image.BILINEAR)
+            im.putalpha(a)
+            im = pxf.binarize_alpha(im)
+        outs.append(im)
+
+    aligned = pp.align_sequence(outs)
+    meta = {
+        "workflow": "wss", "scope": scope or "default",
+        "mode": "generate", "engine_mode": "frame",
+        "backend": "qwen-multiref", "approx": True,
+        "prompt": instr, "prompt_body": sem or None, "negative": neg,
+        "sheet_image": str(sheet_image), "char_image": str(char_image),
+        "grid": [cols, rows], "frames": len(aligned),
+        "cell": [cell_w, cell_h],
+        "ref_mode": ref_mode, "ref_modes_used": sorted(set(used_modes)),
+        "model": model, "width": width, "height": height,
+        "steps": steps, "cfg": cfg, "seed": seed,
+        "cn_scale": None, "ipa_scale": None, "lora": None, "clip_skip": None,
+        "matte": matte, "matte_used": matte_info.get("backend"),
+        "matte_fallback": matte_info.get("fallback"),
+        "keep_alpha": keep_alpha,
+        "palette": palette,
+        "palette_size": len(refined["palette"]) if palette else 0,
+        "candidates": candidates, "candidates_note": None,
+        "gate_retries": 0, "attempts": attempts_used,
+        "frame_scores": frame_scores,
+        "gate_passed": sum(1 for s in frame_scores if s["passed"]),
+        **framescore.sequence_consistency(outs),
+        "per_frame_seconds": [round(s, 2) for s in per_frame],
+        "seconds_total": round(sum(per_frame), 2),
+        "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
+    }
+    return _pack_sprite_frames(aligned, frames, cols, rows, cell_w, cell_h,
+                               meta=meta, scope=scope, tag=tag)
+
+
 def sprite_swap(eng: Engine, *, sheet_image: str | Path, char_image: str | Path,
                 prompt: str = "", negative: Optional[str] = None,
                 cols: int = 0, rows: int = 0,
@@ -1517,6 +1965,18 @@ def sprite_swap(eng: Engine, *, sheet_image: str | Path, char_image: str | Path,
     if mode == "recolor":
         return _sprite_recolor(frames, char_image, cols, rows, palette=palette,
                                scope=scope, tag=tag, prompt=prompt)
+
+    if eng.arch(model) == "qwen21":
+        # Qwen 没有 AnimateDiff（motion module 是 SD 系组件），只能逐帧。
+        # 候选数强制 1：一帧 35s，默认 2 个候选会把 8 帧动画拖到 9 分钟。
+        return _qwen_sprite_swap(
+            eng, frames=frames, sheet_image=sheet_image, char_image=char_image,
+            cols=cols, rows=rows,
+            prompt=prompt, negative=negative, width=width, height=height,
+            steps=steps, cfg=cfg, seed=seed, ref_mode=ref_mode, model=model,
+            matte=matte, matte_backend=matte_backend, denoise=denoise,
+            palette=palette, keep_alpha=keep_alpha, candidates=1,
+            scope=scope, tag=tag)
 
     # 引擎选择：AnimateDiff（时序注意力）还是逐帧（多候选）
     if engine_mode == "auto":
@@ -2057,6 +2517,204 @@ def norm_pose_inputs(src: str | Path | Sequence[str | Path]) -> List[Path]:
     return out
 
 
+# Qwen 上的姿态条件只能靠「图 + 指令」软引导（没有 ControlNet），
+# 所以指令必须把「第二张图是什么、要照着做」说清楚，否则模型会把它当画风参考。
+QWEN_POSE_INSTR = {
+    "skeleton": ("The images are: first the character reference, then a body skeleton "
+                 "showing the target pose. Redraw the same character in exactly that "
+                 "pose, full body, centered, plain white background."),
+    "outline": ("The images are: first the character reference, then the silhouette "
+                "of the target pose. Redraw the same character in exactly that pose, "
+                "full body, centered, plain white background."),
+    "solo": ("This image is a body skeleton showing a pose. Draw a single character "
+             "in exactly that pose, full body, centered, plain white background."),
+}
+
+# 构图约束：**必须有**。Qwen 的软引导下，只写「full body, centered」实测会画出
+# 拇指大的小人（前景占比 2%，低于精灵产线 5% 的下限），而且帧与帧的尺度互相
+# 差 3 倍。把「占画面高度」写成具体数字后，尺度才稳定（配合
+# postprocess.normalize_sequence 做确定性兜底）。
+QWEN_FRAME_RULES = (" The figure must fill about 75% of the image height, standing "
+                    "with the feet near the bottom of the frame.")
+
+# 逐帧路线的负向：除了通用质量词，重点是「缺件/散架」——实测 Qwen 在骨架上
+# 偶尔会把人头画丢，或者把帽子/手画成浮空的一块。
+QWEN_FRAME_NEG = (QWEN_NEG + ", floating parts, detached head, disconnected limbs, "
+                  "extra head, missing head, two characters")
+
+
+def _qwen_cond_image(img: Image.Image) -> Image.Image:
+    """把条件图统一成「白底 + 深色线条」。
+
+    **为什么必须做**（实测踩出来的）：OpenPose 骨架是**黑底 + 彩色**的
+    （`tools/make_pose.render` 用一组彩色画肢体和关节点）。Qwen 把它当**视觉
+    参考**而不是控制信号，于是会顺手把颜色抄进成品——实测有一帧真的画了个
+    「红色小帽子」浮在头顶，那其实是骨架图上红色的鼻子关节点。
+
+    转灰度 + 反相到白底之后，模型只能读到「线在哪」，抄不到颜色。
+    亮度均值判方向：黑底骨架会被反相，用户自己画的浅底骨架保持原样。
+    """
+    g = img.convert("L")
+    if float(np.asarray(g, dtype=np.float32).mean()) < 110:
+        from PIL import ImageOps
+        g = ImageOps.invert(g)
+    return g.convert("RGB")
+
+
+def _qwen_poseswap(eng: Engine, *, pose_images: Sequence[Path], prompt: str,
+                   negative: Optional[str], ref_image: Optional[str | Path],
+                   steps: int, cfg: float, seed: int, width: int, height: int,
+                   cols: int, pixel: int, palette: int, matte: bool,
+                   matte_backend: str, denoise: int, clean_iso: int,
+                   export: Optional[str], controlnet: str, model: str,
+                   candidates: int, gate: bool, gate_min_points: int,
+                   gate_retries: int, gate_seed_step: int, scope: str,
+                   anim_name: str, fps: int, tag: str) -> Dict[str, Any]:
+    """Qwen 版姿态序列（W4）：逐帧「骨架图当参考 + 指令」软引导。
+
+    **它是近似实现**：SD 那条路是 ControlNet 硬约束（每个关节都钉住），
+    这里只能是「第二张图是骨架 + 指令说照着这个姿势画」。实测 3 帧
+    DWPose 18/18 全中、零贴边，姿势一致性够用；但没有硬约束意味着
+    复杂动作（跳跃、交叉腿）仍可能跑偏，闸门不过就补提。
+
+    **成本**：35s 级别的单帧成本，所以默认 candidates=1、补提上限压到 1。
+    SD 时代那套「一帧出 4 个候选再挑」在这里等于把 8 帧动画变成 20 分钟。
+    """
+    kind = "skeleton" if controlnet == "openpose" else "outline"
+    head = QWEN_POSE_INSTR[kind] + QWEN_FRAME_RULES
+    sem = (prompt or "").strip()
+    neg = (negative or "").strip() or QWEN_FRAME_NEG
+
+    char = None
+    if ref_image is not None:
+        char = refprep.prepare_reference(Image.open(ref_image).convert("RGBA"),
+                                         size=max(width, height))
+        head = head.replace(
+            "The images are: first the character reference, then ",
+            "The first image is the character reference: keep the same face, "
+            "hairstyle, outfit and colors. The second image is ")
+    # 用户正文追加在最后：身份/姿态/构图是必须的，风格词是补充。
+    instr = f"{head} {sem}".strip() if sem else head
+
+    if seed < 0:
+        seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
+    candidates = max(1, int(candidates))
+    extractor = eng.pose_extractor() if gate else None
+    if gate and extractor is None:
+        print("[warn] 质量闸门不可用（姿态模型缺失），本次只按分数挑帧")
+    # 35s/帧的前提下，补提额度必须收紧：没有判据的重提就是烧掉一分钟
+    retries = max(0, min(1, int(gate_retries))) if extractor is not None else 0
+    attempts_max = candidates + retries
+
+    matte_info: Dict[str, Any] = {}
+    frames: List[Image.Image] = []
+    per_frame: List[float] = []
+    frame_scores: List[Dict[str, Any]] = []
+    attempts_used = 0
+    prev_gate: Optional[Image.Image] = None
+    torch.cuda.reset_peak_memory_stats()
+
+    for pose_path in pose_images:
+        cond = _qwen_cond_image(
+            Image.open(pose_path).convert("RGB").resize((width, height),
+                                                        Image.LANCZOS))
+        refs: Any = [char, cond] if char is not None else cond
+        best: Optional[tuple[Dict[str, Any], Image.Image, Image.Image]] = None
+        spent = 0.0
+        used = 0
+        for round_seeds in (list(range(candidates)),
+                            list(range(candidates, attempts_max))):
+            for i in round_seeds:
+                if used >= attempts_max:
+                    break
+                dt = _timer()
+                raw = _qwen_call(
+                    eng, prompt=instr, negative=neg, ref_image=refs,
+                    width=width, height=height, steps=steps, cfg=cfg,
+                    seed=seed + i * gate_seed_step, model=model, label="w4")
+                info: Dict[str, Any] = {}
+                img, _edge, _subj = _postprocess(
+                    raw, eng, matte=matte, matte_backend=matte_backend,
+                    denoise=denoise, pixel=pixel, palette=palette,
+                    clean_iso=clean_iso, info=info)
+                for k in ("backend", "fallback"):
+                    if k in info:
+                        matte_info[k] = info[k]
+                gate_img = info.pop("pre_pixel", None) or img
+                ev = quality.evaluate(gate_img.convert("RGBA"), extractor,
+                                      prev=prev_gate,
+                                      min_points=gate_min_points)
+                # **单主体判据**：Qwen 偶尔会把头画丢、把帽子画成浮空的一块。
+                # 这种帧 DWPose 照样能检出 16 个关节（躯干还在），闸门放它过去；
+                # 但前景连通域数会变成 2+，这才是「缺件」的直接证据。
+                if _subj is not None:
+                    ev["blobs"] = _subj
+                    if _subj > 1 and ev["passed"]:
+                        ev = {**ev, "passed": False,
+                              "score": ev["score"] - 20.0,
+                              "reject": f"前景有 {_subj} 块（头/手与身体分离）"}
+                spent += dt()
+                used += 1
+                if best is None or ev["score"] > best[0]["score"]:
+                    best = (ev, img.convert("RGBA"), gate_img.convert("RGBA"))
+                if extractor is not None and ev["passed"] and used >= candidates:
+                    break
+            if used >= candidates and (extractor is None or best[0]["passed"]):
+                break
+        ev, frame, prev_gate = best
+        frame_scores.append({**ev, "attempts": used})
+        attempts_used += used
+        per_frame.append(round(spent, 2))
+        frames.append(frame)
+
+    # 尺度归一：Qwen 没有 ControlNet，逐帧「人物占多大」是模型自己决定的
+    # （实测同一段 3 帧能差 3 倍，最小的那帧前景只占 2%，直接被产线判废）。
+    frames = pp.normalize_sequence(frames)
+    aligned = pp.align_sequence(frames)
+    passed = sum(1 for s in frame_scores if s["passed"])
+    meta = {
+        "workflow": "w4", "scope": scope or "default",
+        "prompt": instr, "prompt_body": sem or None, "negative": neg,
+        "ref_image": str(ref_image) if ref_image else None,
+        "backend": "qwen-pose-ref", "approx": True,
+        "condition": kind, "cn_scale": None, "ipa_scale": None,
+        "lora": None, "lora_scale": None, "clip_skip": None,
+        "steps": steps, "cfg": cfg, "seed": seed, "frames": len(frames),
+        "width": width, "height": height,
+        "matte": matte, "matte_used": matte_info.get("backend"),
+        "matte_fallback": matte_info.get("fallback"),
+        "model": model, "distill": None,
+        "candidates": candidates, "candidates_note": None,
+        "gate": bool(gate and extractor is not None),
+        "gate_min_points": gate_min_points, "gate_retries": retries,
+        "attempts": attempts_used, "gate_passed": passed,
+        "frame_scores": frame_scores,
+        "pixel_block": pixel, "palette": palette,
+        "per_frame_seconds": per_frame,
+        "seconds_total": round(sum(per_frame), 2),
+        "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
+    }
+    name = _stamp(tag)
+    out_dir = scope_dir(scope)
+    fdir = out_dir / f"{name}_frames"
+    fdir.mkdir(parents=True, exist_ok=True)
+    for i, f in enumerate(aligned):
+        f.save(fdir / f"frame_{i:04d}.png")
+    sheet_path = out_dir / f"{name}_sheet.png"
+    info = pp.pack_sheet(aligned, sheet_path, cols=cols, sidecar=meta)
+    info.update(meta)
+    info["meta"] = meta
+    info["url"] = f"/files/{sheet_path.relative_to(ASSETS).as_posix()}"
+    info["frames_dir"] = str(fdir)
+    Path(out_dir / f"{name}_sheet.png.json").write_text(
+        json.dumps(info, ensure_ascii=False, indent=2), "utf-8")
+    if export:
+        info["export"] = anim_mod.export_godot(
+            aligned, export, anim_name=anim_name, fps=fps, loop=True, cols=cols)
+    assetdb.append_line(ASSETS / "index.jsonl", {"sheet": info["sheet"], **meta})
+    return info
+
+
 def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
              negative: Optional[str] = None, ref_image: Optional[str | Path] = None,
              lora: Optional[str] = None, lora_scale: float = 0.8,
@@ -2094,6 +2752,18 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
     # `(len+cols-1)//cols` 上 ZeroDivisionError——前端把 0 当"自动"传，必须兜住。
     if cols <= 0:
         cols = min(len(pose_images), 8)
+    if eng.arch(model) == "qwen21":
+        # Qwen 不吃 SD 的 preset 契约后缀（那是 CLIP 的词表游戏），也不吃 LoRA
+        return _qwen_poseswap(
+            eng, pose_images=pose_images, prompt=prompt, negative=negative,
+            ref_image=ref_image, steps=steps, cfg=cfg, seed=seed,
+            width=width, height=height, cols=cols, pixel=pixel, palette=palette,
+            matte=matte, matte_backend=matte_backend, denoise=denoise,
+            clean_iso=clean_iso, export=export, controlnet=controlnet,
+            model=model, candidates=candidates, gate=gate,
+            gate_min_points=gate_min_points, gate_retries=gate_retries,
+            gate_seed_step=gate_seed_step, scope=scope,
+            anim_name=anim_name, fps=fps, tag=tag)
     negative = negative or NEG_DEFAULT
     if preset is not None:
         prompt = _lora_trigger(eng, prompt, lora)

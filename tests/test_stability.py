@@ -6,10 +6,18 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 import torch
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# SD 权重已归档（models/_archive/sd/）：跨进程复现那条要真跑 SD 管线，
+# 权重不在就跳过；搬回来自动恢复（不是删测试）。
+_SD_WEIGHTS = (ROOT / "models" / "checkpoints" / "sd15" / "model_index.json").is_file()
+requires_sd = pytest.mark.skipif(
+    not _SD_WEIGHTS,
+    reason="SD 权重已归档到 models/_archive/sd/（恢复后自动恢复）")
 
 _GEN_SNIPPET = """
 import hashlib, sys
@@ -73,6 +81,7 @@ def test_free_releases_pipeline_and_controlnet(root):
     assert after - base < 128, f"free 后仍残留 {after - base:.0f}MB（ControlNet 未释放？）"
 
 
+@requires_sd
 def test_same_seed_identical_across_processes(tmp_path):
     """换进程重跑（模型重新加载）后，同 seed 必须逐像素一致——产线可复现的前提。"""
     code = _GEN_SNIPPET.format(root=str(ROOT))

@@ -514,6 +514,14 @@ export default function GenNodeCard({
   const isQwenModel = !!modelCaps?.[model]?.instruction
   /** 本节点跑的工作流名（和 /models 的 caps.workflows 同一套词） */
   const wf = WORKFLOW_OF[node.kind] || ''
+  /**
+   * 这个底模跑本节点的工作流是**近似实现**吗。
+   *
+   * 「近似」= 原生硬约束不存在，靠软引导或后处理凑（Qwen：没有 mask 接口 →
+   * 局部重绘是「整图指令改图 + 蒙版贴回」；没有 ControlNet → 姿态靠骨架图软引导）。
+   * 必须在卡头上标出来：不标的话用户会拿它当 SD 同款用，然后怪「改了没生效」。
+   */
+  const isApprox = !!(modelCaps?.[model]?.approx || []).includes(wf)
   /** 图片节点不跑模型，不显示底模下拉 */
   const modelAble = !isImg && !!wf
   /**
@@ -992,6 +1000,19 @@ export default function GenNodeCard({
               <option key={m} value={m}>{shortModel(m)}</option>
             ))}
           </select>
+          {isApprox && (
+            <span
+              className="node-model-approx"
+              title={'这个底模跑这个节点是「近似实现」：\n'
+                + '它没有该工作流原本依赖的硬约束（Qwen 没有 mask 接口、'
+                + '也没有 ControlNet），改由「整图指令改图 + 蒙版贴回」或'
+                + '「骨架图当参考 + 指令」实现。\n'
+                + '· 局部重绘：选区外保证逐点不变，选区内不保证只改那一点\n'
+                + '· 姿态/序列帧：姿势是软引导，复杂动作可能跑偏（靠质量闸门补提）'}
+            >
+              近似
+            </span>
+          )}
           {usableModels.length < (nodesModels?.length ?? 0) && (
             <span
               className="node-model-note"

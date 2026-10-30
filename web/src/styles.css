@@ -543,6 +543,17 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
   flex: 0 0 auto; font-size: 10px; color: var(--muted-2); cursor: help;
 }
 /*
+ * 「近似实现」标记：这个底模跑该工作流时**没有原生硬约束**，靠软引导 + 后处理凑。
+ * 必须可见——否则用户会拿 Qwen 的局部重绘去期待 SD inpaint 那种「涂哪改哪」。
+ */
+.node-model-approx {
+  flex: 0 0 auto; font-size: 10px; line-height: 1.4;
+  padding: 0 4px; border-radius: 3px; cursor: help;
+  color: #ffd08a; background: rgba(255, 176, 66, 0.16);
+  border: 1px solid rgba(255, 176, 66, 0.35);
+  white-space: nowrap;
+}
+/*
  * 锁了高度的节点：正文区吃掉剩余高度并自己滚动。
  * 不加 overflow 的后果是内容顶着卡片底边溢出（CSS 默认 overflow:visible），
  * 看起来像节点没变小、只是被截断——用户会以为拖高度没生效。

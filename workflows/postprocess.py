@@ -262,6 +262,67 @@ def align_sequence(frames: Sequence[Image.Image]) -> List[Image.Image]:
     return [frames[0]] + [align_to(f, ref) for f in frames[1:]]
 
 
+def normalize_sequence(frames: Sequence[Image.Image], *, fill: float | None = None,
+                       lo: float = 0.55, hi: float = 0.85,
+                       bottom: float = 0.93) -> List[Image.Image]:
+    """把整段序列的**主体大小**统一到一个尺度，脚底落在同一高度。
+
+    **为什么必需**（Qwen 逐帧路线专用）：SD 那条路是 ControlNet 硬约束，
+    骨架画多大、人物就多大，帧与帧天然同尺度。Qwen 只有「骨架当参考」的软
+    引导，实测同一段 3 帧里主体高度能差 3 倍——最小的那帧前景只占 2%
+    （`quality` 判据要求 5~60%），直接判废。
+
+    做法：量每帧 alpha 包围盒的高度占比 → 取中位数当目标（`fill` 给了就用它，
+    但夹在 lo~hi 之间，防止「全体都画成拇指大的小人」也照抄）→ 等比缩放到该
+    高度 → 底边对齐到 `bottom` 处。**不裁剪内容**，所以不会切掉手脚。
+
+    这是确定性后处理：同样的帧集合永远得到同样的结果，可复现。
+    """
+    if not frames:
+        return []
+    H = frames[0].height
+    W = frames[0].width
+    ratios: List[float] = []
+    for f in frames:
+        bb = f.convert("RGBA").getchannel("A").getbbox()
+        ratios.append((bb[3] - bb[1]) / H if bb else 0.0)
+    valid = [r for r in ratios if r > 0]
+    if not valid:
+        return list(frames)
+    target = fill if fill is not None else sorted(valid)[len(valid) // 2]
+    target = min(hi, max(lo, target))
+
+    out: List[Image.Image] = []
+    for f, r in zip(frames, ratios):
+        rgba = f.convert("RGBA")
+        bb = rgba.getchannel("A").getbbox()
+        if r <= 0 or bb is None:
+            out.append(rgba)
+            continue
+        # **裁出主体再缩放**，不能缩放整张画布：画布跟着放大后主体没变大，
+        # 还会被画布边界裁掉一截（实测 200² 里 80px 的竖条，按画布缩放后
+        # 主体变成 186px 且顶部被切）。
+        sub = rgba.crop(bb)
+        sw, sh = sub.size
+        scale = (target * H) / sh
+        if sw * scale > W * 0.96:
+            scale = W * 0.96 / sw
+        nw, nh = max(1, round(sw * scale)), max(1, round(sh * scale))
+        if nw != sw or nh != sh:
+            # RGB 用 LANCZOS（线条平滑），**alpha 用 NEAREST**：alpha 插值会在
+            # 主体四周长出一圈 1~8 的半透明毛边，下一帧量 bbox 时把毛边算进去，
+            # 「帧高」就会逐帧飘 5~7px——归一化本身反而成了漂移的来源。
+            a = sub.getchannel("A").resize((nw, nh), Image.NEAREST)
+            sub = sub.convert("RGB").resize((nw, nh), Image.LANCZOS).convert("RGBA")
+            sub.putalpha(a)
+        canvas = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        x = (W - nw) // 2
+        y = max(0, int(bottom * H) - nh)
+        canvas.alpha_composite(sub, (x, y))
+        out.append(canvas)
+    return out
+
+
 # ---------------- 精灵图打包 ----------------
 
 def pack_sheet(

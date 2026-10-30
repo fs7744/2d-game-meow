@@ -239,10 +239,15 @@ git checkout sd
 | 文生图 / 图生图 | ✅ | 图生图是**指令改图**（没有 strength 语义） |
 | 角色迁移 | ✅ | **双图条件**：角色图 + 骨架图进同一个 vision context，实测姿势几乎逐点一致 |
 | 抠图 / 像素转换 / 转像素 | ✅ | 原生 RGBA（alpha 66~68%），开透明底会自动跳过抠图 |
-| 局部重绘 / 局部AI重绘 / 姿态序列 / 序列帧替换 | ❌ | 没有 SD 的 UNet / CLIP；Qwen 编辑管线也没有 `mask` 参数（见下） |
-| LoRA / Refiner / ControlNet 硬约束 | ❌ | 不同主干与文本编码器，一点都不通用 |
+| 局部重绘 / 局部 AI 重绘 | ⚠️ **近似** | 没有 mask 接口 → 「整图指令改图 + 蒙版贴回」。选区外**逐点不变**，选区内不保证只改那一点 |
+| 姿态序列 / 序列帧替换 | ⚠️ **近似** | 没有 ControlNet → 「骨架/轮廓当参考图 + 指令」软引导；24s/帧，靠闸门 + 尺度归一兜底 |
+| LoRA / Refiner / ControlNet 硬约束 / AnimateDiff | ❌ | 主干与文本编码器都不同，一点都不通用 |
 
-**为什么局部重绘做不了**：`StableDiffusionInpaintPipeline` 靠 **9 通道 UNet**
+⚠️ 的三个在前端节点上有橙色「近似」标记（`/models` 的 `caps.approx`）。
+十个工作流的实现方式、实测数据、以及**明确做不到的八件事**见
+[`docs/PLAN-QWEN-ONLY.md`](docs/PLAN-QWEN-ONLY.md)。
+
+**为什么局部重绘只能近似**：`StableDiffusionInpaintPipeline` 靠 **9 通道 UNet**
 （4 噪声 latent + 4 被遮原图 latent + 1 mask）做 masked latent 混合，选区外逐点不变；
 Qwen 的 `QwenImage21Pipeline / QwenImageEditPipeline / QwenImageEditPlusPipeline`
 签名里**都没有 `mask` / `mask_image` / `strength`**，它的机制是「条件图编码成 vision
@@ -250,9 +255,9 @@ context + VAE latent tokens 前置到噪声」，改哪里由**指令**决定。
 `qwen-image-edit-2511` 权重（本机 pixelforge 里有）只有 transformer + processor，
 缺 text_encoder / vae / tokenizer，配齐后同样没有 mask 入口。
 
-能替代的是「局部 AI 重绘（w5）」那条路：裁剪「选区 + 上下文」→ **Qwen 指令改图**
-→ 羽化贴回原图。选区外逐点不变由二值蒙版保证，与用哪个模型无关。
-实测数据见「Qwen-only 可行性验证」。
+现用的替代是把**整图**当条件 → 指令改图 → 羽化贴回：模型看得到完整角色，
+身份与画风不丢，改完的像素按蒙版贴回去，选区外依旧逐点不变。
+（早期试过的「裁剪块」方案质量不合格：裁剪块放大后被当新图重画，脸会丢。）
 
 ### SD1.5 / SDXL（已归档，代码仍在）
 
@@ -424,18 +429,25 @@ SDXL 三条 ControlNet 与 IP-Adapter 的实测（1024²）：
 ```bash
 # 43GB：transformer 14G（另有 6.7G fp8 缓存）+ text_encoder 22G + vae 1.3G
 # 放 models/checkpoints/qwen-image-2.1/，需要 diffusers≥0.41 + transformers≥5.21
+# 文本编码器再生成一份 fp8 缓存（8.8G，一次性）：python tools/make_qwen_fp8.py
 ```
 
 它不是"更大的 SD"：**7B 单流 DiT + Qwen3-VL 视觉语言编码器**，一个权重同时干
 文生图 / 指令改图 / 原生 RGBA 三件事。接入后它出现在「底模」下拉里，
 `arch` 是 `qwen21`，与 SD 系列**不共用任何组件**（LoRA、ControlNet、Refiner 全部不通用）。
 
-| 项 | 实测值（RTX 4090 24G） |
+| 项 | 实测值（RTX 4090 24G，fp8 双模块） |
 |---|---|
-| 文生图 768² / 20 步 | **24~50s**，峰值 **16.4GB** |
+| 文生图 768² / 8 步 | 10.45s，峰值 **11.41GB** |
+| 指令改图 768² / 8 步 | 11.92s，峰值 **11.82GB** |
+| 产线口径（768² / 24 步） | 约 28~30s/帧，峰值 15.4GB |
 | 原生透明底 | alpha 占 66~68%，边缘无脏毛边 |
-| 指令改图（图生图） | 24~28s，"把红披风改成蓝的"能精确执行 |
 | 像素风 | **直接出像样的像素画**，不需要像素 LoRA |
+
+**显存/内存峰值主要在文本编码器上**：`text_encoder` 是 Qwen3-VL（8.77B，bf16
+16.3GB），量化成 fp8 后峰值从 16.59GB 降到 11.41GB（-31%）、速度快 25%、
+内存少 7.5GB、加载快 44%。同 seed 出图平均差 **1.10/255**（结构一致）。
+不满意就 `MEOW_QWEN_TEXT_FP8=0` 退回 bf16。细节见 `docs/PLAN-QWEN-ONLY.md` §2.1。
 
 **几个必须知道的坑**（都是实测踩出来的）：
 

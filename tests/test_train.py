@@ -4,6 +4,16 @@ from __future__ import annotations
 import json
 
 import pytest
+
+# SD 权重已归档（models/_archive/sd/）：这条用例要真跑 SD 管线 / 训练 SD LoRA，
+# 权重不在就跳过；搬回来自动恢复（不是删测试）。
+from pathlib import Path as _P
+
+_SD_WEIGHTS = (_P(__file__).resolve().parents[1] / "models" / "checkpoints"
+               / "sd15" / "model_index.json").is_file()
+requires_sd = pytest.mark.skipif(
+    not _SD_WEIGHTS,
+    reason="SD 权重已归档到 models/_archive/sd/（恢复后自动恢复）")
 from PIL import Image
 
 from workflows import lora as L
@@ -102,6 +112,7 @@ def test_train_end_to_end_small(tmp_path, root):
 
 # ---------------- API ----------------
 
+@requires_sd
 def test_train_api_roundtrip(client, tmp_path, root):
     """/train 提交 → 轮询 → 失败或完成都要有明确状态。"""
     ds = tmp_path / "ds"

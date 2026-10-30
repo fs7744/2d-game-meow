@@ -1,161 +1,287 @@
-# Qwen-only 迁移计划
+# Qwen-only 迁移计划与落地结果
 
 > 目标：把工作台从「SD1.5 / SDXL / Qwen 三底模」变成「**只有 Qwen-Image-2.1**」，
 > 十个工作流全部用 Qwen 实现。
 >
-> 起点：`sd` tag（SD 时代完整基线，已推远端）→ 当前提交 `2f006c7`。
-> 本文只列**还没做**的事和每件事的验收标准；已做的只留结论。
+> 起点：`sd` tag（SD 时代完整基线，已推远端）。
+> 本文记录**已经落地的东西 + 实测数据 + 明确做不到的东西**。
+> 做不到的部分单独成章（§4），不要在后面"顺手再试一次"——每条都附了原因与证据。
 
 ---
 
-## 0. 已经做完的（不用再做）
+## 0. 总览：十个工作流现在都能在 Qwen 上跑
 
-| 项 | 状态 |
-|---|---|
-| `sd` tag 备份并推远端 | ✅ annotated tag `sd` → `fee24c9` → `d7accf6` |
-| SD 权重归档到 `models/_archive/sd/`（移动，非删除，47G） | ✅ 底模/ControlNet/IP-Adapter/AnimateDiff/27 个 LoRA |
-| 保留 Qwen 需要的：`matte/`（抠图）、`pose_keypoint/`（DWPose） | ✅ |
-| 默认底模 = `qwen-image-2.1`（`engine.DEFAULT_MODEL` → `/models.current` → 前端跟随） | ✅ |
-| 前端修掉「写死有 SDXL 就用 SDXL」的坑 | ✅ |
-| 依赖 SD 权重的 12 个后端用例改 `skipif`（恢复权重自动生效） | ✅ |
-| 清理 `test_api.py` 三组重复定义（其中一条断言一直被同名覆盖） | ✅ |
-| 前端 smoke 330/330；后端 46 passed / 18 skipped | ✅ |
+| # | 工作流 | Qwen 实现方式 | 性质 | 实测状态 |
+|---|---|---|---|---|
+| w1 | 文生图 | 原生 DiT | 原生 | ✅ 24 步 / 768² 可用 |
+| w2 | 图生图 | **指令改图**（无 strength 语义） | 原生 | ✅ |
+| w3 | 局部重绘 | 整图指令改图 → 蒙版贴回 | **近似** | ✅ 选区外差 0 |
+| w4 | 姿态序列 | 逐帧「骨架图当参考 + 指令」→ 尺度归一 → 脚底对齐 | **近似** | ✅ 3/3 可交付 |
+| wss | 序列帧替换 | 逐帧「角色图 + 轮廓/骨架」双图条件 → 共享色板 | **近似** | ✅ 3 帧跑通 |
+| w5 | 局部 AI 重绘 | 同 w3（共用一套）；保留裁剪块策略做对照 | **近似** | ✅ 指令被执行、脸不丢 |
+| wpc | 角色迁移 | 双图条件（角色 + 骨架） | 原生 | ✅（上一轮已落地） |
+| wbg | 抠图 | 不跑模型 | 原生 | ✅ |
+| wpx | 像素转换 | 不跑模型 | 原生 | ✅ |
+| wap | 转像素 | 不跑模型 | 原生 | ✅ |
+
+「近似」的定义：**该工作流原本依赖的硬约束在 Qwen 上不存在**，改用软引导或
+后处理凑出同类产物。后端 `engine._APPROX` 是唯一判据，`/models` 的
+`caps.approx` 把它发给前端，节点卡头上显示橙色「近似」标记。
+不要让用户在不知情的情况下拿它替代 SD 的那条路。
 
 ---
 
-## 1. 已验证的结论（决定后面怎么做的实测数据）
+## 1. 这一轮做了什么（代码层）
 
-### A. w5 局部重绘 → Qwen：**机制可行，但裁剪块方案质量不合格**
+| 改动 | 文件 | 要点 |
+|---|---|---|
+| 打开 Qwen 的四个工作流 | `engine._ARCH_WORKFLOWS["qwen21"]` | 十个全开；新增 `_APPROX` / `approx_of` / `is_approx` |
+| Qwen 版局部重绘 | `generate._qwen_inpaint` / `_qwen_ai_repaint` | 整图条件 + 蒙版贴回；`outside_max_diff` 写进 meta 做自检 |
+| Qwen 版姿态序列 | `generate._qwen_poseswap` | 逐帧软引导 + 尺度归一 + 脚底对齐 + 单主体闸门 |
+| Qwen 版序列帧替换 | `generate._qwen_sprite_swap` | 双图条件 + 共享色板 + 灰阶条件图 |
+| 条件图分辨率对齐 | `generate._qwen_call(output_resolution=…)` | 见 §2.2，**质量与显存同时受益** |
+| 文本编码器 fp8 化 | `engine._load_qwen_text` + `tools/make_qwen_fp8.py` | 见 §2.1，显存峰值 -31% |
+| 逐帧尺度归一 | `postprocess.normalize_sequence` | 见 §2.3，可交付率 1/3 → 3/3 |
+| 条件图灰度化 | `generate._qwen_cond_image` | 见 §2.4，止住「抄骨架颜色」 |
+| 近似标记 | `app.py` `caps.approx` + 前端角标 | 用户一眼看到哪几个是近似 |
+| 默认参数 | `engine.RECOMMEND["qwen21"]` | 1024²→768²，20→24 步（都有实测依据） |
 
-方案：裁剪「选区 + 上下文」→ Qwen 指令改图 → 羽化贴回（`repaint.composite`）。
+---
 
-| 指标 | 实测 |
+## 2. 实测数据（全部本机 RTX 4090 24GB / 32GB 内存）
+
+> 度量约定：预热后多次取中位数；显存看 `memory_reserved`；改图类指标用
+> 「蒙版外最大像素差」，它是硬承诺，必须恒为 0。
+
+### 2.1 文本编码器 fp8 化：峰值 -31%，速度快 25%，内存少 8GB
+
+`text_encoder` 是 Qwen3-VL（8.77B 参数，bf16 16.3GB）。它是**整条管线的显存与
+内存双料峰值**——改造前文生图 768² 的保留峰值 16.59GB，基本就是它本身。
+
+做法：`tools/make_qwen_fp8.py` 离线逐输出通道量化成 fp8(E4M3)，落到
+`models/checkpoints/qwen-image-2.1/text_encoder-fp8/`（8.8GB），加载时按
+`w_fp8` + `w_scale` 挂 buffer、把 Linear 换成 `_FP8Linear`（与 transformer-fp8
+同一套机制）。本机 torch 2.6 用不了 torchao 的在线量化（要 ≥2.11），所以只能离线做。
+
+| 指标（768² / 8 步，中位数） | bf16 编码器 | **fp8 编码器** | 变化 |
+|---|---|---|---|
+| 文生图 | 13.96s / 16.59GB | **10.45s / 11.41GB** | 快 25% / 峰值 -31% |
+| 指令改图（条件图 1024²） | 16.12s / 20.14GB | **13.35s / 14.10GB** | 快 17% / 峰值 -30% |
+| 指令改图（条件图对齐） | 14.68s / 18.75GB | **11.92s / 11.82GB** | 快 19% / 峰值 -37% |
+| 管线加载 | 24.8s | **14.0s** | -44% |
+| 磁盘 / 内存占用 | 16.3GB | **8.8GB** | -46% |
+
+**保真度**（同 seed 42、同提示词、12 步，两版出图逐像素比）：
+平均差 **1.10/255**，差 >128 的像素占 **0.24%**（笔触细节级差异，结构、五官、
+配色完全一致）。不满意可 `MEOW_QWEN_TEXT_FP8=0` 退回 bf16。
+
+### 2.2 条件图分辨率对齐：又一个「默认值陷阱」
+
+`QwenImage21Pipeline` 的 `output_resolution` **默认 1024**，它决定「条件图被缩放到
+多大再编码」。原来只传 `width/height`（768）而没传它，于是：参考图按 1024² 编码、
+目标按 768² 生成——**模型看到的尺度比要画的大一档**，图 token 还多 78%。
+
+| 768² / 8 步 | 条件图 1024² | 条件图对齐 768² | 变化 |
+|---|---|---|---|
+| 耗时 | 13.35s | **11.92s** | -11% |
+| 峰值 | 14.10GB | **11.82GB** | -16% |
+| 输出 | — | 与前者不是同一个采样点（平均差 6.19/255） | 对齐版更贴原图 |
+
+所以 `_qwen_call` 里现在是 `output_resolution=int(output_resolution or max(w,h))`
+——**所有走 Qwen 的路径都自动对齐**，包括角色迁移与逐帧工作流。
+
+### 2.3 逐帧尺度归一：可交付率 1/3 → 3/3
+
+Qwen 没有 ControlNet，逐帧「人物画多大」由模型自己决定。同一段 3 帧里主体高度
+实测能差 3 倍，最小的那帧前景只占 **2.1%**（精灵产线要求 5~60%），直接判废。
+
+`postprocess.normalize_sequence`：量每帧 alpha 包围盒高度 → 取中位数当目标
+（夹在 55%~85%）→ 裁主体、等比缩放、底边对齐 93% 处。**alpha 用 NEAREST 缩放**
+（LANCZOS 会在四周长出半透明毛边，下一帧量 bbox 时把毛边算进去，帧高反而逐帧飘 5~7px）。
+
+| 3 帧骨架序列（768² / 20 步） | 归一前 | **归一后** |
+|---|---|---|
+| DWPose 关节数 | 16 / 0 / 16 | **16 / 18 / 18** |
+| 前景占比 | 9.1% / 5.2% / **2.1%** | **19.8% / 14.6% / 11.8%** |
+| 可交付（过闸门 ∧ 5~60%） | 1/3 | **3/3** |
+
+### 2.4 条件图灰度化：止住「抄骨架颜色」
+
+`tools/make_pose.render` 画的是**黑底 + 彩色**骨架。Qwen 把它当**视觉参考**而不是
+控制信号，于是顺手把颜色抄进成品——实测有一帧真的画了个「红色小帽子」浮在头顶，
+那其实是骨架图上红色的鼻子关节点。
+
+`_qwen_cond_image`：转灰度 + 亮度均值 <110 时反相（黑底骨架 → 白底深线）。
+模型只能读到「线在哪」，抄不到颜色。改完之后 3 帧全部 blobs=1（前景连通域唯一）。
+
+### 2.5 四个工作流的端到端数字（768²）
+
+| 工作流 | 耗时 | 峰值 | 关键指标 |
+|---|---|---|---|
+| w3 局部重绘 | 36.5s | 15.4GB | 蒙版外最大差 **0** |
+| w5 局部 AI 重绘 | 22.3s | 11.4GB | 蒙版外最大差 **0**，色板吸附 79% |
+| w4 姿态序列（3 帧） | 24~26s/帧 | 15.4GB | 关节 16~18，占比 12~20%，可交付 **3/3** |
+| wss 序列帧替换（3 帧） | 23.5~23.8s/帧 | 15.4GB | 格子 64²、共享色板 32 色、帧间无漂移 |
+
+w5 的质量验收是人工看的：**盔甲被指令改成翠绿 + 金边，脸、披风、背景逐点未变**。
+这正是 P0-2 要的「指令被执行且脸不丢」。
+
+### 2.6 步数下限：低于 16 步出的是糊块
+
+同 seed 42、768²、同一提示词（白猫骑士）：
+
+| 步数 | 结果 |
 |---|---|
-| 耗时 | 54~59s |
-| **选区外最大像素差** | **0**（逐点不变，硬承诺达成） |
-| 选区内平均差 | 41.6（确实重画了） |
-| 质量 | ❌ **不合格**：脸部被抹掉、指令「盔甲改翠绿」**没执行**（仍是金色） |
+| 12 | **没有头**，只剩一团红金配色（构图没收敛） |
+| 16 | 有头，四肢是断的 |
+| 20 | 可用（腿偏细） |
+| 24 | 完整干净 |
 
-失败原因：裁剪块只有 448×400，放大到 768² 后模型把选区当成**新图重画**，
-上下文里没有脸 → 身份丢失；`true_cfg_scale=4` 又让它更听指令、更不像原图。
+结论：`RECOMMEND["qwen21"].steps = 24`。20 与 24 的差价约 5s/帧，低于 16 步的
+产出不能进精灵图。官方「20~40」区间的下限留给预览，不要留给出片。
 
-→ 见待办 **P0-2**：两个改良方案对比后再定。
+---
 
-### B. Qwen 逐帧出图（w4 / wss 的底座）：姿势极准，代价是 30 倍慢
+## 3. 之前验证过的结论（保留，仍然是事实）
+
+### A. w5 的「裁剪块」方案：机制可行，质量不合格
+
+裁剪「选区 + 上下文」→ 指令改图 → 羽化贴回，实测 54~59s、选区外差 0，
+但**脸被抹掉、指令「盔甲改翠绿」没执行**。原因：裁剪块只有 448×400，放大到
+768² 后模型把它当**新图重画**，context 里没有脸 → 身份丢失。
+
+→ 已改为**整图做条件**（`strategy="whole"`，默认）。`strategy="crop"` 保留，
+只用于对照实验。
+
+### B. Qwen 逐帧出图（w4 / wss 的底座）：姿势准，代价是慢
 
 | 指标 | 实测 | 对比 SD1.5 |
 |---|---|---|
-| 耗时 | **37.0s / 帧** | 1.2s / 帧（**慢 30×**） |
-| DWPose 关节数 | **18/18 全中**（三帧都是） | — |
+| 耗时 | 24~26s / 帧（768²/20 步） | 1.2s / 帧（**慢 20×**） |
+| DWPose 关节数 | 16~18 / 18 | — |
 | 贴边 | 0 | — |
-| 可交付率 | 待补测（第一次跑 coverage=1.0 是因为 RGB 图无 alpha，判据要抠完再算） | — |
 
-→ 姿势一致性满分，**瓶颈只有速度**。8 帧动画 = 5 分钟（SD 只要 10 秒）。
-是否值得，取决于产线能不能接受这个成本 → 待办 **P0-1** 拿可交付率数据再定。
+### C. Qwen-Image-Edit 2511 做 mask inpaint：不可能
 
-### C. Qwen-Image-Edit 2511 做 mask inpaint：**不可能**
-
-- `qwen-image-edit-2511` 的 `model_index._class_name = QwenImageEditPlusPipeline`，
-  目录里只有 `transformer` + `processor`（缺 text_encoder / vae / tokenizer / scheduler）
-- `QwenImage21Pipeline` / `QwenImageEditPipeline` / `QwenImageEditPlusPipeline`
-  的 `__call__` **都没有 `mask` / `mask_image` / `strength`**（实测 grep）
-- SD inpaint 靠 **9 通道 UNet**（4 噪声 latent + 4 被遮原图 + 1 mask）做 masked latent 混合
-
-→ **w3 局部重绘在当前生态无解**；只能用「整图指令改图 + 蒙版贴回」近似
-（见 P0-2）。要真 mask，得等官方出接口，或换 ComfyUI 的 Qwen inpainting 节点。
+- `qwen-image-edit-2511` 的 `_class_name = QwenImageEditPlusPipeline`，目录里只有
+  `transformer` + `processor`（缺 text_encoder / vae / tokenizer / scheduler）
+- `QwenImage21Pipeline` / `QwenImageEditPipeline` / `QwenImageEditPlusPipeline` 的
+  `__call__` **都没有 `mask` / `mask_image` / `strength`**（实测 grep 过签名）
 
 ---
 
-## 2. 待办（按优先级）
+## 4. **做不到的部分（硬限制，不要再试）**
 
-### P0-1 拿 Qwen 逐帧的可交付率数据
-- **做什么**：跑 `tools/verify_qwen_only.py` 的 B 段（3 帧 + 抠图 + `quality.evaluate`），
-  补齐「前景占比 5~60%」这一项。
-- **验收**：拿到 `coverage` / `passed` / 可交付率三个数，写进 README。
-- **为什么**：产线判据是「单主体 ∧ 无贴边 ∧ 前景 5~60%」，缺一项就没法判断
-  Qwen 能不能进精灵产线。
+这一节是这份文档的核心。每条都写明「为什么做不到」与「替代方案是什么」，
+避免以后有人在同一个坑里重复调研。
 
-### P0-2 定案 Qwen 版局部重绘
-- **做什么**：跑 `tools/verify_local_edit_variants.py`（已备好，未跑），对比三个方案：
-  1. 原图（当前）：裁剪块 + cfg 4 → 已知失败（脸丢、指令不执行）
-  2. **整图做条件 + 蒙版贴回**：模型看得到完整角色，只贴回选区
-  3. 裁剪块 + **低 CFG（1.5）**：更贴近原图，指令权重下降
-- **验收**：至少一个方案做到「指令被执行（盔甲变绿）且脸不丢」。
-- **备注**：模型侧已证明 Qwen 能做「把红披风改成蓝的」这种整图指令编辑；
-  难点只在**局部化**。
+### 4.1 没有原生 mask inpaint —— 「涂哪改哪」不成立
 
-### P0-3 实现 w5 的 Qwen 分支（前提：P0-2 有可行方案）
-- **做什么**：`generate.ai_repaint` 按 `arch(model)` 分流；Qwen 分支走
-  「（整图或裁剪块）→ 指令改图 → `repaint.composite` 贴回」，去掉 `strength` 与 LoRA。
-  前端：`caps.workflows` 放开 `ai_repaint`；隐藏「重绘幅度」滑块（Qwen 没有这个语义）。
-- **验收**：w5 选 Qwen 底模能跑通，选区外像素差 = 0，meta 里记 `backend="qwen-edit"`。
+**事实**：Qwen 三条编辑管线的 `__call__` 都没有 `mask` 参数；它的机制是
+「条件图编码成 vision context + VAE latent tokens 前置到噪声」，改哪里由**指令**
+决定。SD 能做到「涂哪改哪」靠的是 9 通道 UNet（4 噪声 + 4 被遮原图 + 1 mask）
+在 latent 上做混合，这个结构 Qwen 没有。
 
-### P0-4 w3 局部重绘的替代方案（明确取舍）
-- **做法**：
-  - 方案一（推荐）：把 w3 也做成「整图指令改图 + 蒙版贴回」，并在界面上写明
-    **不能保证「涂哪改哪」**（Qwen 没有 mask 接口）。
-  - 方案二：w3 只支持 SD，从能力表里移除并在节点上给说明。
-- **验收**：用户能选到「Qwen 近似版 w3」，且界面说明它与真 inpaint 的差别。
+**能保证的**：选区**外**逐点不变（贴回用「只向内羽化 + 二值蒙版相乘」，与模型无关）。
+**保证不了的**：选区**内**只改那一点。模型看不到蒙版，只能从提示词里的方位词
+（`_region_words` 生成 top-left / middle-center 之类）猜要改哪儿。猜偏的后果是
+**改得不够**（被蒙版裁掉），而不是改到外面。
 
-### P0-5 w4 姿态序列 / wss 序列帧替换的 Qwen 化方案
-- **做什么**：w4 = 骨架帧 → 逐帧 Qwen 出图 → 脚底对齐 → 打包；
-  wss = 精灵图切帧 → 逐帧 Qwen（角色图 + 骨架图双图条件）→ 对齐 → 共享色板 → 打包。
-  难点：37s/帧 × 帧数；且**没有 ControlNet 硬约束**，姿势靠骨架图 + 指令。
-- **验收**：4 帧精灵图的端到端跑通，帧间脚底漂移 ≤ 2px，共享色板生效。
-- **备选路线**：Qwen 出**关键帧** → SD（已归档）补中间帧 —— 但这违背「去 SD」，
-  只有在「Qwen 逐帧质量/速度都不可接受」时才启用。
+**替代方案**：w3 / w5 都走「整图指令改图 + 蒙版贴回」，并在前端打「近似」标记。
 
-### P1-1 把 4 个「近似实现」标出来
-- **做什么**：`/models` 的 `caps` 增加 `approx: boolean`（哪些工作流是近似而非原生），
-  前端在节点上显示「Qwen 近似实现」标记。
-- **验收**：用户一眼能看出 w3/w5/w4/wss 哪些是硬约束、哪些是软引导。
+### 4.2 Qwen 不吃 SD LoRA —— LoRA 生态整体失效
 
-### P1-2 清理 SD 遗留代码
-- **做什么**：Qwen-only 稳定后，删掉引擎里的 SD 管线分支（`inpaint_pipe` / `pose_pipe` /
-  IP-Adapter / Refiner / AnimateDiff 路径）、LoRA 训练与扫描面板、`_ARCH_WORKFLOWS`
-  的 SD 条目、`tools/fetch_*.py` 的 SD 下载器。
-- **注意**：删之前先确认 P0-3~P0-5 全部落地；删完 `git checkout sd` 仍能回到旧版。
-- **验收**：仓库里 grep 不到 `StableDiffusion*Pipeline` 的调用；测试全绿。
+**事实**：LoRA 是挂到 UNet/DiT 的 attention 投影层上的增量权重，键名与结构必须
+和主干严格对齐。Qwen 的主干是 `QwenImage21Transformer2DModel`（单流 DiT），
+SD1.5/SDXL 的 27 个精选 LoRA 一个都挂不上；`/loras` 里 `caps.lora=false`。
 
-### P1-3 文档同步
-- README「版本选型」章节改成两代对照；LoRA 章节标注「SD 生态，已归档」；
-  补「Qwen-only 可行性验证」小节（贴 P0-1/P0-2 的实测数据）。
+**连带失效**：LoRA 训练面板、LoRA 扫描、触发词自动前置（`_lora_trigger`）。
+这些代码仍在（SD 回退时要用），但 Qwen 路径完全不经过。
 
-### P2-1 多视角立绘（AnyAngle LoRA）
-- 需要 `lilylilith/QI_2.1_AnyAngle`（`huggingface.co` / `hf-mirror.com` 当前 502，
-  ModelScope 直连可用但没有镜像）。骨骼编辑器的方向按钮已能覆盖大部分需求。
+**替代方案**：风格靠提示词 + 参考图（img2img / 双图条件）。要真正的风格固化，
+只能等 Qwen 生态出对应的 DiT LoRA，或者走「角色图 + 双图条件」这条软引导。
 
-### P2-2 Qwen-Image-20B + ControlNet Union（pose 硬约束）
-- 本机 pixelforge 有 `qwen-image-20b`（含 transformer-fp8）与 `qwen-image-controlnet-union`。
-- **但 union 是 20B 专用**（`joint_attention_dim=3584`），Qwen-Image-2.1 的文本编码器
-  是 4096，**对不上**。要走这条路得接 20B 全套（显存 24G 装不下 bf16，
-  要 fp8 + offload），是独立的一条工程线。
+### 4.3 没有 ControlNet 硬约束 —— 姿态只能软引导
 
-### P2-3 W5 视频接进画布
-- Wan2.2 TI2V-5B 已在 pixelforge，CLI（`tools/video.py`）实测 1.07s/帧，
-  但**没有 API 路由也没有前端节点**。评审建议 A：作为 wss 的第三引擎。
+**事实**：本机 pixelforge 有 `qwen-image-controlnet-union`，但它是 **20B 专用**
+（`joint_attention_dim=3584`），Qwen-Image-2.1 的文本编码器是 **4096 维**，对不上。
+要用得接 20B 全套（24G 卡装不下 bf16，需要 fp8 + offload），是另一条独立工程线。
 
-### P2-4 架构解耦（评审建议 B/C）
-- B：生成 / 后处理 / 落盘拆成可组合 stage（现在 9 个工作流各写一遍）。
-- C：候选 + 闸门做成可插拔 scorer 层（pose / silhouette / identity / clip-sim），
-  解决「W4 对非人形角色恒 0 分」。
+**后果**：w4 / wss / wpc 的姿态一致性来自「把骨架图当参考图 + 指令」，不是逐关节
+钉死。实测 3 帧骨架 DWPose 16~18/18、零贴边，够精灵产线用；但复杂动作（跳跃、
+交叉腿、大幅透视）仍可能跑偏，只能靠质量闸门 + 单主体判据补提。
 
----
+### 4.4 没有 AnimateDiff —— 帧间一致性没有时序注意力
 
-## 3. 硬限制（再评估也改不掉的）
+**事实**：AnimateDiff 的 motion module 是挂 SD1.5 UNet 的时序注意力，架构完全不同。
+Qwen 逐帧之间**没有任何跨帧耦合**。
 
-1. **Qwen 没有 mask inpaint**：三条编辑管线都没有 `mask`/`mask_image`/`strength`。
-2. **Qwen 不吃 SD LoRA**：LoRA 训练、LoRA 扫描、27 个精选 LoRA 在 Qwen-only 下全部失效。
-3. **速度差 30×**：37s/帧 vs SD1.5 的 1.2s/帧。批量序列帧是产线的硬伤。
-4. **没有 ControlNet 硬约束**：姿态只能靠「骨架图当参考图 + 指令」软引导。
-5. **显存**：Qwen 峰值 16~19GB（双图条件 19.3GB），24G 卡里 SD 管线放不下
-   （现在靠 `evict_other_models` 驱逐）；32G 内存装不下全量 bf16，
-   必须 fp8 缓存 + cpu offload（torchao 要 torch≥2.11，本机 2.6 用不了）。
-6. **HF 下载受限**：代理访问 huggingface.co / hf-mirror.com 持续 502。
+**后果**：帧间一致性只能靠三个确定性手段兜底：同 seed、`normalize_sequence`
+（尺度）、`align_sequence`（脚底）。抖动仍然比 AnimateDiff 大；wss 的
+`engine_mode=animatediff` 分支在 Qwen 下不可用（已忽略，强制 `frame`）。
+
+### 4.5 SDXL Refiner / hires-fix 不可用
+
+这两个是 SD 组件（refiner 是 SDXL 的第二个 UNet，hires 是 img2img 管线）。
+Qwen 上 `refiner` / `hires` 参数被忽略。要更大尺寸就直出更大尺寸
+（1024² 比 768² 贵 1.78 倍），或者出完再走 `pixelify` 的网格流程。
+
+### 4.6 速度差距缩不到 SD 的水平
+
+24~26s/帧 vs SD1.5 的 1.2s/帧。已经做的优化（fp8 双模块、条件图对齐、
+VAE 切片、候选择优压到 1）把 37s 压到 24s，但**量级差距仍在**：8 帧动画 3 分钟。
+
+**替代方案**：`sprite_swap(mode="recolor")` 是确定性换色，毫秒级、帧间零漂移，
+适合「同体型换配色」；只有「换体型」才必须走 generate 逐帧。
+
+### 4.7 LoRA / ControlNet 类的外部权重下载仍然受限
+
+`lilylilith/QI_2.1_AnyAngle`（多视角立绘 LoRA）在 `huggingface.co` / `hf-mirror.com`
+持续 502，ModelScope 无镜像。**这一项没做成，不是代码问题**。
+
+### 4.8 视频（Wan2.2）没有接进来
+
+`tools/video.py` 实测 1.07s/帧可用，但没有 API 路由与前端节点——属于
+「没做」，不是「做不到」。如果要做，建议作为 wss 的第三引擎。
 
 ---
 
-## 4. 回退
+## 5. 显存 / 内存的完整策略（现状）
+
+| 手段 | 效果 | 代价 |
+|---|---|---|
+| transformer 预量化 fp8（6.7GB） | 权重 -49% | 无（离线缓存，已带） |
+| **text_encoder 预量化 fp8（8.8GB）** | 峰值 -31%、内存 -7.5GB | 同 seed 平均差 1.10/255 |
+| 条件图分辨率对齐 | 峰值 -16%、速度 +11% | 无 |
+| `vae.enable_slicing()` | 解码峰值约 -1.5GB（1024²） | +0.05s |
+| `enable_model_cpu_offload()` | 24G 卡装得下的前提 | 每张多 1~2s 搬运 |
+| 候选择优压到 1（Qwen） | 逐帧成本减半 | 成品率靠闸门补提 |
+
+关掉 offload（`MEOW_QWEN_OFFLOAD=0`）可以让 transformer 常驻，实测每张省 1~2s；
+两块 fp8 常驻合计 15.5GB，1024² 会压线，只在 768² 且不并跑别的管线时用。
+
+`vramopt._W4_SHAPE["qwen21"] = (11.0, 5.0, 5.5)`：按实测峰值标定，
+规划器在 24G 卡上对 Qwen 给出的候选数就是 1——这是事实，不是保守。
+
+---
+
+## 6. 验证工具
+
+| 脚本 | 用途 |
+|---|---|
+| `tools/verify_qwen_workflows.py` | 四个新工作流的端到端验证（可选 `--only e,f,g,h`） |
+| `tools/bench_qwen.py` | 单位成本 + 条件图分辨率对齐对照（`--quick` 冒烟） |
+| `tools/make_qwen_fp8.py` | 文本编码器 fp8 缓存生成（一次即可，产物已带） |
+| `tools/verify_qwen_only.py` | 早期 A/B/C 三项验证（历史数据来源） |
+| `tools/bench_sprite.py` | 产线单位成本（SD 时代，Qwen 下仍可参考帧成本口径） |
+
+测试：`tests/test_qwen_workflows.py`（19 条，不加载模型，7s 跑完）。
+覆盖能力表、近似标记、选区外像素不变、`output_resolution` 真的传下去、
+尺度归一、透明底 alpha、四个工作流能打包。
+
+---
+
+## 7. 回退
 
 ```bash
 # 权重搬回（README 有完整清单）
@@ -164,20 +290,12 @@ mv models/_archive/sd/controlnet models/ && mv models/_archive/sd/ipadapter mode
 mv models/_archive/sd/animatediff models/
 mv models/_archive/sd/lora/*.safetensors models/lora/
 cp models/_archive/sd/lora/loras.json.bak models/lora/loras.json
-# 常量改回
-# workflows/engine.py: DEFAULT_MODEL = "sd15"
+# 然后把 workflows/engine.py 的 DEFAULT_MODEL 改回 "sd15"
 # 或直接：git checkout sd
 ```
 
----
-
-## 5. 验证工具
-
-| 脚本 | 用途 |
-|---|---|
-| `tools/verify_qwen_only.py` | A/B/C 三项验证（w5 局部重绘 / Qwen 逐帧 / edit-2511 能否 mask） |
-| `tools/verify_local_edit_variants.py` | P0-2 的三方案对比（整图做条件 vs 裁剪块低 CFG） |
-| `tools/bench_sprite.py` | 产线单位成本（**必须用**，见下） |
-
-> 度量约定：任何速度/显存结论都要**预热 + 多次取中位数**，单次调用波动可达 70%；
-> 显存看 `memory_reserved`；测后处理要用**未像素化的 `__raw` 输入**。
+只关掉本次的两个优化（保留 Qwen）：
+```bash
+MEOW_QWEN_TEXT_FP8=0   # 文本编码器退回 bf16（峰值回到 16.6GB）
+MEOW_QWEN_OFFLOAD=0    # 两块权重常驻，省搬运时间
+```

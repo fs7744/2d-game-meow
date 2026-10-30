@@ -103,3 +103,32 @@ def client():
 
     with TestClient(app_module.app) as c:
         yield c
+
+
+# ---------------- SD 归档后的统一跳过 ----------------
+#
+# SD 权重已移到 `models/_archive/sd/`（见 README「底模」）。历史上有一批用例
+# 直接 `txt2img(model="sd15")`，权重不在就抛
+# `FileNotFoundError: 权重缺失: .../checkpoints/sd15`——**这不是回归**，
+# 而是「这台机器上跑不了 SD」。逐条加 skipif 有 40 多条，容易漏，
+# 于是统一在这里把它转成 skip（带明确原因），权重搬回来就自动恢复执行。
+#
+# 只匹配 `权重缺失` + SD 路径：Qwen 权重缺失仍然会正常失败，
+# 不会被这条规则掩盖。
+
+_SD_HINTS = ("checkpoints\\sd15", "checkpoints/sd15",
+             "checkpoints\\sdxl", "checkpoints/sdxl",
+             "controlnet", "ipadapter", "animatediff", "models\\lora")
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    rep = outcome.get_result()
+    if rep.failed and call.excinfo is not None:
+        err = call.excinfo.value
+        if isinstance(err, FileNotFoundError) and "权重缺失" in str(err) \
+                and any(h in str(err) for h in _SD_HINTS):
+            rep.outcome = "skipped"
+            rep.longrepr = (f"SD 权重已归档到 models/_archive/sd/"
+                            f"（搬回后自动恢复）：{err}")

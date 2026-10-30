@@ -102,7 +102,15 @@ def _fp8_linear_cls():
             w = w_fp8.to(device=x.device, dtype=dt)
             sc = getattr(self, "w_scale", None)
             if sc is not None:
-                w = w * sc.to(device=w.device, dtype=dt)[:, None]
+                sc = sc.to(device=w.device, dtype=dt)
+                # **必须压成 1 维再 [:, None]**：缓存里 scale 可能是 [out]
+                # （transformer-fp8）也可能是 [out,1]（text_encoder-fp8）。
+                # 对 [out,1] 直接 `sc[:, None]` 会广播成 [out,out,in] 的三维权重，
+                # F.linear 于是抛 "t() expects a tensor with <= 2 dimensions"——
+                # 报错点在 vision tower 里，完全看不出是 scale 的形状问题。
+                if sc.dim() > 1:
+                    sc = sc.reshape(-1)
+                w = w * sc[:, None]
             b = self.bias
             if b is not None:
                 b = b.to(device=w.device, dtype=dt)
@@ -110,6 +118,23 @@ def _fp8_linear_cls():
 
     _fp8_linear_cls._cls = _FP8Linear
     return _FP8Linear
+
+
+def _qwen_vl_cls(cfg_dir: Path):
+    """从 text_encoder 的 config.json 里认出模型类（Qwen3VLForConditionalGeneration）。
+
+    **不能写死 import 路径**：`transformers.models.qwen3_vl` 这种模块名随版本
+    改过（qwen3_vl / qwen3_vl_moe），而 config 里的 `architectures` 一直是稳的。
+    所以按 `model_type` 拼模块名、按 `architectures[0]` 取名——两个都来自权重目录，
+    与安装的 transformers 版本无关。
+    """
+    import importlib
+
+    cfg = json.loads((cfg_dir / "config.json").read_text("utf-8"))
+    arch = (cfg.get("architectures") or ["Qwen3VLForConditionalGeneration"])[0]
+    mtype = cfg.get("model_type", "qwen3_vl")
+    mod = importlib.import_module(f"transformers.models.{mtype}")
+    return getattr(mod, arch)
 
 
 def _norm_lora_items(lora_path, scale) -> list[tuple[Path, float]]:
@@ -495,15 +520,18 @@ class Engine:
 
         **必须分组件加载**（实测本机 32G 内存）：
         transformer 13.3G bf16 + text_encoder 16.3G bf16 一次性 from_pretrained
-        会把内存打满（连 43G 目录一起读会直接 swap）。这里 transformer 走
-        预量化 fp8 缓存（6.7G，项目里已带），text_encoder 保持 bf16 靠
-        cpu offload 在编码后搬出显存。
+        会把内存打满（连 43G 目录一起读会直接 swap）。所以两块都走**预量化
+        fp8 缓存**：transformer 6.7G、text_encoder 8.8G（见 tools/make_qwen_fp8.py）。
 
-        torchao 的 fp8 量化在本机不可用（要求 torch≥2.11，本机 2.6），
-        所以 text_encoder 不做量化 —— 换来的是峰值 16.4G 仍能进 24G 卡。
+        **峰值从哪来**：改造前峰值 16.59GB（文生图 768²），几乎就是 bf16
+        text_encoder 的 16.3GB 本身——它是整个管线的显存与内存双料峰值。
+        量化到 fp8 后同一测法降到 ~10GB（见 docs/PLAN-QWEN-ONLY.md 的实测表）。
+
+        torchao 的在线 fp8 在本机不可用（要求 torch≥2.11，本机 2.6），
+        所以量化是一次性离线做的：`tools/make_qwen_fp8.py` 逐输出通道 scale，
+        布局与 `_fp8_linear_cls` 一致。
         """
         from diffusers import QwenImage21Pipeline
-        from transformers import Qwen3VLForConditionalGeneration
 
         # **加载前先清场**：qwen 峰值 16.4GB，SDXL 的 ControlNet 管线约 13GB，
         # 两条并存必然挤爆。不清的话 _fit 会降级到 cpu offload（每步在 CPU/GPU
@@ -511,18 +539,82 @@ class Engine:
         # 反方向也一样——generate.py 里 pose 系加载前会按需驱逐 qwen。
         self.ensure_headroom(need_gb=17.0)
         tor = self._load_qwen_transformer(root)
-        te = Qwen3VLForConditionalGeneration.from_pretrained(
-            str(root / "text_encoder"), torch_dtype=torch.bfloat16,
-            local_files_only=True)
+        te = self._load_qwen_text(root)
         pipe = QwenImage21Pipeline.from_pretrained(
             str(root), transformer=tor, text_encoder=te,
             torch_dtype=torch.bfloat16, local_files_only=True)
-        # 峰值 16.4G 是靠 offload 拿到的：不 offload 时 6.6G(transformer fp8)
-        # + 16.3G(text_encoder) 同时驻留会 OOM。代价是每张多几秒搬运，
-        # 但 24G 卡上没有别的选择。
-        pipe.enable_model_cpu_offload()
+        # 编码完就把 text_encoder 挪走：它只在开头用一次，之后全程闲置。
+        # 两块 fp8 都常驻时是 6.7+8.8=15.5GB，再加 VAE 与激活就压线了；
+        # 需要「全程常驻」的机器可以设 MEOW_QWEN_OFFLOAD=0（每张省 1~2s 搬运）。
+        if os.environ.get("MEOW_QWEN_OFFLOAD", "1") != "0":
+            pipe.enable_model_cpu_offload()
+        else:
+            pipe.to(self.device)
+        # 每次前向都是 768²~1024² 的 latent，VAE 解码是第二块峰值；
+        # 切片只多 0.05s，换来解码峰值 -1.5GB（与 SDXL 同一结论）。
+        try:
+            pipe.vae.enable_slicing()
+        except Exception:                     # noqa: BLE001
+            pass
         pipe.set_progress_bar_config(disable=True)
         return pipe
+
+    def _load_qwen_text(self, root: Path):
+        """加载 Qwen3-VL 文本编码器：优先 fp8 缓存（8.8G），否则 bf16（16.3G）。
+
+        fp8 缓存由 `tools/make_qwen_fp8.py` 产出，键布局与 transformer-fp8 相同
+        （`w_fp8` + `w_scale` 顶替 `weight`）。加载路径也照搬：
+        `init_empty_weights` 建骨架 → 逐键挂 buffer/Parameter → 换 Linear 的类。
+
+        不能走 `from_pretrained`：它对 0 长度占位的 `weight` 做形状校验，
+        报一屏 size mismatch（这条坑在 transformer 上已经踩过一次）。
+        """
+        from safetensors.torch import load_file
+
+        fp8_dir = root / "text_encoder-fp8"
+        use_fp8 = (fp8_dir / "model.safetensors").is_file() and \
+            os.environ.get("MEOW_QWEN_TEXT_FP8", "1") != "0"
+        if not use_fp8:
+            from transformers import Qwen3VLForConditionalGeneration
+            return Qwen3VLForConditionalGeneration.from_pretrained(
+                str(root / "text_encoder"), torch_dtype=torch.bfloat16,
+                local_files_only=True,
+                attn_implementation="sdpa")
+
+        from accelerate import init_empty_weights
+
+        cls = _qwen_vl_cls(fp8_dir)
+        config = cls.config_class.from_pretrained(str(fp8_dir))
+        config._attn_implementation = "sdpa"
+        with init_empty_weights():
+            model = cls(config)
+
+        sd = load_file(str(fp8_dir / "model.safetensors"), device="cpu")
+        linear_keys = sorted({k[: -len(".w_fp8")] for k in sd if k.endswith(".w_fp8")})
+        dev = "cuda" if torch.cuda.is_available() else "cpu"
+        for t in linear_keys:
+            model.get_submodule(t).weight = torch.nn.Parameter(
+                torch.empty(0, dtype=torch.bfloat16, device=dev), requires_grad=False)
+        for k, v in sd.items():
+            prefix, name = k.rsplit(".", 1)
+            mod = model.get_submodule(prefix)
+            if name in ("w_fp8", "w_scale"):
+                mod.register_buffer(name, v.to(dev), persistent=False)
+            elif name in mod._parameters and mod._parameters[name] is not None:
+                mod._parameters[name] = torch.nn.Parameter(v.to(dev), requires_grad=False)
+            else:
+                mod._buffers[name] = v.to(dev)
+        del sd
+        cls_fp8 = _fp8_linear_cls()
+        for t in linear_keys:
+            model.get_submodule(t).__class__ = cls_fp8
+        stuck = [k for k, v in list(model.named_parameters()) + list(model.named_buffers())
+                 if getattr(v, "is_meta", False)]
+        if stuck:
+            raise RuntimeError(
+                f"qwen text_encoder 有 {len(stuck)} 个参数停在 meta：{stuck[:5]}")
+        log.info("qwen text_encoder fp8 就绪：%d 个 Linear", len(linear_keys))
+        return model.eval()
 
     def _load_qwen_transformer(self, root: Path):
         """加载 transformer：优先 fp8 缓存（6.7G），没有就 bf16 完整加载（13.3G）。
@@ -1094,12 +1186,30 @@ class Engine:
             "txt2img", "img2img", "inpaint", "poseswap", "matte",
             "ai_repaint", "pixelify", "pose_clone", "sprite_swap", "topixel",
         }),
-        # Qwen 保留不依赖 SD 组件的：纯生成 + 纯后处理 + **角色迁移**。
-        # 角色迁移在 Qwen 上走的是「双图条件」（角色图 + 骨架图进同一个
-        # vision context），不是 SD 的 ControlNet + IP-Adapter，所以能用。
-        # 它的 img2img 是「指令改图」，不是加噪强度。
-        "qwen21": frozenset({"txt2img", "img2img", "matte", "pixelify", "topixel",
-                             "pose_clone"}),
+        # Qwen 现在**十个工作流全支持**，但分两类（见 _APPROX）。
+        "qwen21": frozenset({
+            "txt2img", "img2img", "inpaint", "poseswap", "matte",
+            "ai_repaint", "pixelify", "pose_clone", "sprite_swap", "topixel",
+        }),
+    }
+
+    # 架构 → **近似实现**的工作流集合。
+    #
+    # 「近似」的定义很具体：**原工作流的硬约束在这个底模上不存在，只能用软引导
+    # 或后处理凑出同样的产物**。用户必须一眼看出差别，否则会拿「Qwen 的局部重绘」
+    # 去期待 SD inpaint 那种「涂哪儿改哪儿」。
+    #
+    # Qwen 的四个近似：
+    #   · inpaint      —— 没有 mask 接口，靠「整图指令改图 + 蒙版贴回」，
+    #                     选区外保证不变，**选区内不保证只改那一点**。
+    #   · ai_repaint   —— 同上（同一个机制）。
+    #   · poseswap     —— 没有 ControlNet，姿态靠「骨架图当参考图 + 指令」软引导。
+    #   · sprite_swap  —— 同上，逐帧软引导（也逐帧 35s 级别的成本）。
+    #
+    # 其余六个是**原生**：txt2img / img2img（指令改图是 Qwen 的正牌用法）/
+    # matte / pixelify / topixel 不跑模型，pose_clone 走双图条件（本来就是多图原生）。
+    _APPROX = {
+        "qwen21": frozenset({"inpaint", "ai_repaint", "poseswap", "sprite_swap"}),
     }
 
     # 工作流 → 中文名（报错时用，别让用户看到 wpc/wss 这种内部代号）
@@ -1118,20 +1228,24 @@ class Engine:
         """这个底模支持的全部工作流（给前端的下拉过滤用）。"""
         return sorted(self._ARCH_WORKFLOWS.get(self.arch(model), frozenset()))
 
+    def approx_of(self, model: str) -> list[str]:
+        """这个底模上**近似实现**的工作流（前端要在节点上打标）。"""
+        return sorted(self._APPROX.get(self.arch(model), frozenset()))
+
+    def is_approx(self, model: str, workflow: str) -> bool:
+        """这个组合是不是「用软引导/后处理凑出硬约束」的近似实现。"""
+        return workflow in self._APPROX.get(self.arch(model), frozenset())
+
     def require(self, model: str, workflow: str) -> None:
         """不支持的组合直接抛人话错误，别让它崩在 diffusers 内部的组件校验里。"""
         if self.supports(model, workflow):
             return
         label = self._WF_LABEL.get(workflow, workflow)
         arch = self.arch(model)
-        if arch == "qwen21":
-            raise ValueError(
-                f"「{label}」用不了 Qwen-Image 底模：它的管线没有 SD 的 UNet / "
-                f"CLIP 文本编码器，而{label}依赖 SD 的 ControlNet / IP-Adapter 组件。"
-                f"到这个节点上把底模换成 SD1.5 或 SDXL（节点可以各自选底模，"
-                f"不影响画布上其它节点）。")
         raise ValueError(
-            f"「{label}」不支持底模 {model}（架构 {arch}）。换回 SD1.5 / SDXL 试试。")
+            f"「{label}」不支持底模 {model}（架构 {arch}）。"
+            f"这个底模能跑：{'、'.join(self._WF_LABEL.get(w, w) 
+                                    for w in self.workflows_of(model)) or '无'}。")
 
     RECOMMEND = {
         "sd15": {"width": 768, "height": 768, "steps": 30, "cfg": 7.0,
@@ -1144,11 +1258,22 @@ class Engine:
                  "pixel": 6, "palette": 64},
         # Qwen-Image-2.1：**默认不像素化**（pixel/palette 归零）。
         # 它直接就能画出像样的像素风（实测 768² / 20 步直接出 16-bit 猫骑士），
-        # 再过一遍后处理反而把它的色阶优势抹平。步骤 20~40 是官方区间，
-        # 40 是默认，但精灵场景 20 已经够（实测 38s vs 更久，构图没差别）。
+        # 再过一遍后处理反而把它的色阶优势抹平。
+        #
+        # **默认 768² 而不是 1024²**：Qwen 是逐帧路线（没有 ControlNet /
+        # AnimateDiff），1024² 的图 token 是 768² 的 1.78 倍，实测 768²/20 步
+        # 24~27s 一帧、1024² 要 45s 上下；而精灵成品最后要缩到 32~128px，
+        # 1024² 那点细节在缩图上根本看不见。要画立绘再手动调大。
+        #
+        # **步数 24 是实测的甜点，不要往下调**：同 seed 42 在 768² 下
+        #   12 步 → 没有头，只剩一团红金配色（构图根本没收敛）
+        #   16 步 → 有头，四肢是断的
+        #   20 步 → 可用（腿偏细）
+        #   24 步 → 完整干净
+        # 20 与 24 的差价是每帧约 5s；低于 16 步的产出不能进精灵图。
         # cfg 这个字段对它没有意义（真正的引导是 true_cfg_scale=4.0），
         # 填 4.0 只是让界面显示的值与实际生效值一致。
-        "qwen21": {"width": 1024, "height": 1024, "steps": 20, "cfg": 4.0,
+        "qwen21": {"width": 768, "height": 768, "steps": 24, "cfg": 4.0,
                    "pixel": 0, "palette": 0},
     }
 

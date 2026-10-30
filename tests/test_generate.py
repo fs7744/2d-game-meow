@@ -5,6 +5,17 @@ import json
 
 import numpy as np
 import pytest
+
+
+# SD 权重已归档（models/_archive/sd/）：本模块的用例要真读 SD 权重目录，
+# 权重不在就跳过；搬回来自动恢复。
+from pathlib import Path as _P
+
+_SD_WEIGHTS = (_P(__file__).resolve().parents[1] / "models" / "checkpoints"
+               / "sd15" / "model_index.json").is_file()
+requires_sd = pytest.mark.skipif(
+    not _SD_WEIGHTS,
+    reason="SD 权重已归档到 models/_archive/sd/（恢复后自动恢复）")
 from pathlib import Path
 from PIL import Image, ImageDraw
 
@@ -16,6 +27,8 @@ def _arr(p: str) -> np.ndarray:
     return np.asarray(Image.open(p).convert("RGB"))
 
 
+@requires_sd
+@requires_sd
 def test_detect_variant_matches_layout(root):
     assert detect_variant(root / "models" / "checkpoints" / "sd15") is None       # sf 只有 fp32
     assert detect_variant(root / "models" / "checkpoints" / "sd15-inpaint") == "fp16"

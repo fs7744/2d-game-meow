@@ -294,10 +294,14 @@ def models() -> Dict[str, Any]:
             #                  过滤它的底模下拉：Qwen 没有 SD 的 UNet/CLIP，
             #                  角色迁移/序列帧替换这类依赖 ControlNet 的节点
             #                  选它就是必崩，不如直接不让选。
+            #   approx      —— workflows 里哪些是**近似实现**（硬约束不存在，
+            #                  靠软引导/后处理凑）。前端要在节点上打标，
+            #                  用户据此决定「能不能拿它替代 SD 的那条路」。
             "caps": {m: {"transparent": engine.arch(m) == "qwen21",
                          "instruction": engine.arch(m) == "qwen21",
                          "lora": engine.arch(m) != "qwen21",
-                         "workflows": engine.workflows_of(m)}
+                         "workflows": engine.workflows_of(m),
+                         "approx": engine.approx_of(m)}
                      for m in have},
             # 本机有没有 SDXL refiner 权重：没有就别让用户勾那个开关
             "refiner": engine.has_refiner()}
