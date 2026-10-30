@@ -64,6 +64,8 @@ def main() -> int:
     ap.add_argument("--pose", default="assets/_pose_walk_07.png")
     ap.add_argument("--steps", type=int, default=25)
     ap.add_argument("--lora", type=float, default=1.0)
+    ap.add_argument("--lora-name", default="vnccs_pose",
+                    help="models/lora/ 下的文件名（不带 .safetensors）")
     ap.add_argument("--extra", default=IDENTITY, help="附加的身份/场景描述")
     ap.add_argument("--out", default="assets/_vnccs_pose.png")
     ap.add_argument("--canvas", default="pose",
@@ -74,8 +76,8 @@ def main() -> int:
     eng = Engine("models")
     pipe = eng.txt2img_pipe("qwen-image-2.1")
 
-    print(f"挂 VNCCS LoRA (scale={args.lora})", flush=True)
-    eng.apply_loras(pipe, [{"name": "vnccs_pose", "scale": args.lora}])
+    print(f"挂 {args.lora_name} (scale={args.lora})", flush=True)
+    eng.apply_loras(pipe, [{"name": args.lora_name, "scale": args.lora}])
     print("  生效:", eng.active_loras(), flush=True)
 
     ref = Image.open(args.ref).convert("RGB")

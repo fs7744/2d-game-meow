@@ -826,6 +826,27 @@ LoRA 152MB，ComfyUI 格式（`diffusion_model.` + `lora_A/B`，rank 32），
 中间，模型把它理解成"小幅度动作"——**双腿交叉退化成双腿收窄**。
 改成取骨架比例（→ 768×1152）后交叉腿立刻成立。
 
+#### V1 vs V2（2026-10-31）
+
+仓库 sibling 列表里有 `VNCCS_QI2_PoseStudioV2.safetensors`，但**实际下载 404**
+（`Entry not found`，作者列了没传）。不过 `VNCCS_QI2_PoseStudioV1.1.safetensors`
+的 metadata 里写着 `ss_output_name: VNCCS_QI2_PoseStudioV2_copy`，训练 step 1500 /
+epoch 51（ai-toolkit 0.13.19）——**它就是 V2**。
+
+权重对比：384 个张量 key 完全一致，但**没有一个张量数值相同**，
+整体余弦相似度 0.959、单张量最大相对差 1.10 → 是重新训的，不是微调。
+
+多 seed 实测（768×1152，25 步，同输入同 seed）：
+
+| | seed 43 | seed 7 |
+|---|---|---|
+| V1 | 正面，双腿交叉，清晰度 270 | 正面，双腿交叉，**清晰度 328** |
+| V2 | 正面，双腿交叉，清晰度 280 | **背面**（背对镜头），清晰度 297 |
+
+**结论：V2 没有更好。** 画质指标两者相当（V2 在 seed43 略高、seed7 明显低），
+但 V2 在 seed 7 上把姿态理解成了"转身背对"，稳定性不如 V1。
+默认继续用 V1（`vnccs_pose.safetensors`），V2 留档备查。
+
 **② 骨架要等比贴入，不能拉伸**
 
 512×768 硬拉到 768×768 会把腿压短，姿态同样只跟一半。
