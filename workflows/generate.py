@@ -29,6 +29,8 @@ from . import framescore
 from . import gate as gate_mod
 from . import refprep
 from . import qwen_mask
+from . import outpaint as op_mod
+from . import swap as swap_mod
 from . import sheet as sheet_mod
 from .engine import DEFAULT_MODEL, Engine
 
@@ -1021,6 +1023,140 @@ def ai_repaint(eng: Engine, *, image: str | Path, mask: str | Path, prompt: str,
         match_color=match_color, match_strength=match_strength,
         palette_snap=palette_snap, palette_colors=palette_colors,
         strategy=strategy, scope=scope, tag=tag)
+
+
+# ---------------- WOUTFIT / WFACE 换装与换脸 ----------------
+
+def _swap_impl(eng: Engine, *, kind: str, base_image: str | Path,
+               ref_image: str | Path, prompt: str, negative: Optional[str],
+               width: int, height: int, steps: int, cfg: float, seed: int,
+               model: str, scope: str, tag: str) -> Dict[str, Any]:
+    """换装 / 换脸共用实现：两张图进同一个 vision context + 结构化指令。
+
+    **不需要任何专用权重**——Qwen 的多图条件会自己分配"谁是身份、谁是服装"，
+    只要指令里写清楚每张图负责什么（`swap.OUTFIT_PROMPT` / `FACE_PROMPT`）。
+    """
+    base = Image.open(base_image).convert("RGBA")
+    ref = Image.open(ref_image).convert("RGBA")
+    if seed < 0:
+        seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
+
+    # 输出尺寸跟随基底图（换装/换脸的"画布"就是基底图）
+    w = max(256, (int(width) if width else base.width) // 16 * 16)
+    h = max(256, (int(height) if height else base.height) // 16 * 16)
+
+    torch.cuda.reset_peak_memory_stats()
+    dt = _timer()
+    full = swap_mod.swap_prompt(kind, prompt)
+    img = _qwen_call(
+        eng, prompt=full, negative=(negative or QWEN_EDIT_NEG),
+        width=w, height=h, steps=steps, seed=seed,
+        ref_image=[base, ref], model=model, label=tag, cfg=cfg)
+    img = img.convert("RGBA")
+    if img.size != (w, h):
+        img = img.resize((w, h), Image.LANCZOS)
+    seconds = dt()
+    wf = "woutfit" if kind == "outfit" else "wface"
+    return _save(img, _stamp(tag), wf, {
+        "workflow": wf, "kind": kind,
+        "prompt": full, "prompt_body": prompt, "negative": negative or QWEN_EDIT_NEG,
+        "base_image": str(base_image), "ref_image": str(ref_image),
+        "width": w, "height": h, "steps": _eff_steps(eng, steps),
+        "cfg": cfg, "seed": seed, "model": model,
+        "backend": "qwen-multiref", "approx": False,
+        "seconds": seconds,
+        "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
+        **_fast_meta(eng),
+    }, scope=scope)
+
+
+def outfit_swap(eng: Engine, *, image: str | Path, outfit: str | Path,
+                prompt: str = "", negative: Optional[str] = None,
+                width: int = 0, height: int = 0, steps: int = 16,
+                cfg: float = 1.0, seed: int = -1, model: str = DEFAULT_MODEL,
+                scope: str = "", tag: str = "woutfit") -> Dict[str, Any]:
+    """**换装**：把 `outfit`（图 2）的服装穿到 `image`（图 1）的人物身上。
+
+    保留图 1 的身份、姿势、背景；服装的剪裁/颜色/材质来自图 2。
+    游戏素材用途：同一角色出不同装备/皮肤（商店套装、等级外观）。
+    """
+    eng.require(model, "outfit_swap")
+    return _swap_impl(eng, kind="outfit", base_image=image, ref_image=outfit,
+                      prompt=prompt, negative=negative, width=width,
+                      height=height, steps=steps, cfg=cfg, seed=seed,
+                      model=model, scope=scope, tag=tag)
+
+
+def face_swap(eng: Engine, *, image: str | Path, face: str | Path,
+              prompt: str = "", negative: Optional[str] = None,
+              width: int = 0, height: int = 0, steps: int = 16,
+              cfg: float = 1.0, seed: int = -1, model: str = DEFAULT_MODEL,
+              scope: str = "", tag: str = "wface") -> Dict[str, Any]:
+    """**换脸**：把 `face`（图 2）的脸/发型换到 `image`（图 1）的人物上。
+
+    保留图 1 的姿势、服装、场景；面部特征/发型/胡须来自图 2。
+    游戏素材用途：同一套动作换主角脸（换主角、捏脸结果落图）。
+    """
+    eng.require(model, "face_swap")
+    return _swap_impl(eng, kind="face", base_image=image, ref_image=face,
+                      prompt=prompt, negative=negative, width=width,
+                      height=height, steps=steps, cfg=cfg, seed=seed,
+                      model=model, scope=scope, tag=tag)
+
+
+# ---------------- WOUT 扩图 ----------------
+
+def outpaint(eng: Engine, *, image: str | Path, direction: str = "right",
+             expand: float = 0.5, prompt: str = "", negative: Optional[str] = None,
+             steps: int = 16, cfg: float = 1.0, seed: int = -1,
+             model: str = DEFAULT_MODEL, lora_scale: float = 0.9,
+             blend: bool = True, scope: str = "", tag: str = "wout"
+             ) -> Dict[str, Any]:
+    """**扩图**：把图往某个方向扩展，新区域按场景连续性补全。
+
+    靠 Outpaint LoRA（`ausboss/Qwen-Image-2.1-Outpaint-LoRA`）+ 中性灰 padding：
+    灰色是"这里要补内容"的信号，LoRA 让模型偏向"接缝连贯、保持原图"。
+    **提示词必须以 LoRA 的触发句开头**（见 `outpaint.OUTPAINT_TRIGGER`）。
+
+    `direction`：right / left / up / down / all
+    `expand`：往该方向扩多少（相对对应边长，0.5 = 扩一半）
+    `blend=True`：原图区域软边贴回（保证原图像素基本不变）
+
+    游戏素材用途：方形背景 → 16:9 横版 / 竖版，地图块延展，立绘左右留白。
+    """
+    eng.require(model, "outpaint")
+    if direction not in ("right", "left", "up", "down", "all"):
+        raise ValueError(f"未知方向 {direction}（可选 right/left/up/down/all）")
+    if not (0.1 <= float(expand) <= 2.0):
+        raise ValueError(f"扩展比例 {expand} 超出范围（0.1~2.0）")
+
+    src = Image.open(image).convert("RGBA")
+    if seed < 0:
+        seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
+
+    torch.cuda.reset_peak_memory_stats()
+    dt = _timer()
+    pipe = eng.txt2img_pipe(model)
+    # 扩图**必须**挂 Outpaint LoRA（标准权重不认识灰色 padding 的语义）
+    eng.apply_loras(pipe, [{"name": eng.OUTPAINT_LORA, "scale": float(lora_scale)}])
+
+    res = op_mod.outpaint(
+        pipe, src=src, direction=direction, expand=float(expand),
+        prompt=prompt, negative=negative, steps=steps, cfg=cfg, seed=seed,
+        blend=blend)
+    out = res["image"].convert("RGBA")
+    seconds = dt()
+
+    meta = op_mod.outpaint_meta(
+        res, workflow="wout", direction=direction, expand=float(expand),
+        lora=eng.OUTPAINT_LORA, lora_scale=float(lora_scale),
+        prompt_body=prompt, image=str(image), steps=_eff_steps(eng, steps),
+        cfg=cfg, seed=seed, model=model, backend="qwen-outpaint",
+        blend=bool(blend), approx=False,
+        seconds=seconds,
+        peak_vram_gb=round(torch.cuda.max_memory_allocated() / 2**30, 2),
+        **_fast_meta(eng))
+    return _save(out, _stamp(tag), "outpaint", meta, scope=scope)
 
 
 # ---------------- WPX 完美像素转换 ----------------

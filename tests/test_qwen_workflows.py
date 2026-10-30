@@ -61,10 +61,16 @@ def _mask(tmp_path, size=(256, 256)):
 # ---------------- 能力表 ----------------
 
 def test_qwen_supports_every_workflow(eng):
+    """Qwen 现在支持 13 个工作流。
+
+    比最初的 10 个多出的三个是 2026-10-30 加的（RunComfy 调研的产物）：
+    `outpaint`（扩图，靠 Outpaint LoRA）、`outfit_swap`（换装）、
+    `face_swap`（换脸）——后两个是「两图 + 结构化指令」，不需要新权重。
+    """
     got = set(eng.workflows_of("qwen-image-2.1"))
     assert got == {"txt2img", "img2img", "inpaint", "poseswap", "matte",
                    "ai_repaint", "pixelify", "pose_clone", "sprite_swap",
-                   "topixel"}
+                   "topixel", "outpaint", "outfit_swap", "face_swap"}
     # require() 不该再对 Qwen 抛错——它曾经是「Qwen 不支持 ControlNet 类节点」的闸门
     for wf in got:
         eng.require("qwen-image-2.1", wf)

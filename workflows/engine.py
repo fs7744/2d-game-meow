@@ -343,6 +343,10 @@ class Engine:
     #: 快速模式的步数上限（Lightning 在 8 步就收敛，实测画质几乎不掉）
     FAST_STEPS = 8
 
+    #: 扩图用的 Outpaint LoRA（ausboss/Qwen-Image-2.1-Outpaint-LoRA，152MB）。
+    #: 标准权重不认识中性灰 padding 的语义，**扩图必须挂它**。
+    OUTPAINT_LORA = "qwen21_outpaint"
+
     def set_fast_mode(self, on: bool) -> Dict[str, Any]:
         """开关快速模式（挂/卸 Lightning + 后续生成步数压到 8）。
 
@@ -548,6 +552,7 @@ class Engine:
         "qwen21": frozenset({
             "txt2img", "img2img", "inpaint", "poseswap", "matte",
             "ai_repaint", "pixelify", "pose_clone", "sprite_swap", "topixel",
+            "outpaint", "outfit_swap", "face_swap",
         }),
     }
 
@@ -579,6 +584,7 @@ class Engine:
         "poseswap": "姿态序列", "matte": "抠图", "ai_repaint": "局部 AI 重绘",
         "pixelify": "像素转换", "pose_clone": "角色迁移",
         "sprite_swap": "序列帧替换", "topixel": "转像素",
+        "outpaint": "扩图", "outfit_swap": "换装", "face_swap": "换脸",
     }
 
     def supports(self, model: str, workflow: str) -> bool:

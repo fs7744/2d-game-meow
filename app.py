@@ -98,6 +98,8 @@ def _run(job_id: str, workflow: str, params: Dict[str, Any]) -> None:
               "w5": gen.ai_repaint, "wpx": gen.pixelify,
               "wpc": gen.pose_clone, "wss": gen.sprite_swap,
               "topixel": gen.image_to_pixel,
+              "wout": gen.outpaint,
+              "woutfit": gen.outfit_swap, "wface": gen.face_swap,
               # 旧名保留：早期只用于动漫人物
               "wap": gen.image_to_pixel}[workflow]
         # **按目标函数的签名过滤参数**：Qwen-only 之后 lora / clip_skip /
