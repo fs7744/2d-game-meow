@@ -169,15 +169,61 @@ def models() -> Dict[str, Any]:
             #   approx      —— workflows 里哪些是**近似实现**（硬约束不存在，
             #                  靠软引导/后处理凑）。前端要在节点上打标，
             #                  用户据此决定「能不能拿它替代 SD 的那条路」。
+            #   lora —— 是否支持 LoRA。**Qwen 现在也支持了**（2026-10-30 实测：
+            #   fp8 量化后的 transformer 照样能挂 diffusers 原生格式的 LoRA，
+            #   实测 AnyAngle rank24 / 384 张量挂上后 1440 个 LoRA 模块生效，
+            #   出图只慢 1.1s）。但 Qwen 的 LoRA 生态要**先转格式**
+            #   （tools/convert_lora.py），ComfyUI 格式挂上去会静默不生效。
             "caps": {m: {"transparent": engine.arch(m) == "qwen21",
                          "instruction": engine.arch(m) == "qwen21",
-                         "lora": engine.arch(m) != "qwen21",
+                         "lora": True,
                          "workflows": engine.workflows_of(m),
                          "approx": engine.approx_of(m)}
                      for m in have},
             # refiner 已随 SD 一起删掉（Qwen 没有精修器）。字段留着恒 False，
             # 是为了老前端的 `if (refiner) 显示开关` 不至于拿到 undefined 就崩。
             "refiner": False}
+
+
+class LoraReq(BaseModel):
+    """挂载 LoRA 的请求。`items` 为空表示卸载全部。"""
+
+    items: list[dict] = Field(default_factory=list)
+
+
+@app.get("/loras")
+def list_loras() -> Dict[str, Any]:
+    """可用的 **Qwen** LoRA（只列 diffusers 原生格式的）。
+
+    ComfyUI 格式（`diffusion_model.` + `lora_A/B`）要先转：
+    `python tools/convert_lora.py in.safetensors out.safetensors`
+    """
+    return {"items": engine.available_loras(), "active": engine.active_loras()}
+
+
+@app.post("/loras/apply")
+def apply_loras(req: LoraReq) -> Dict[str, Any]:
+    """挂载 LoRA（状态式：一直生效，直到下次 apply 或 unload）。
+
+    `items`：`[{"name": "qwen21_anyangle", "scale": 0.8}]`
+    """
+    try:
+        pipe = engine.txt2img_pipe(engine.DEFAULT_MODEL)
+        active = engine.apply_loras(pipe, req.items)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, f"挂载 LoRA 失败：{exc}") from exc
+    return {"active": active, "items": engine.active_loras()}
+
+
+@app.post("/loras/unload")
+def unload_loras() -> Dict[str, Any]:
+    """卸掉全部 LoRA，回到基座模型。"""
+    try:
+        pipe = engine.txt2img_pipe(engine.DEFAULT_MODEL)
+        engine.unload_loras(pipe)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, f"卸载 LoRA 失败：{exc}") from exc
+    return {"active": [], "items": []}
 
 
 #: 能当 W4 输入的图片扩展名。与 generate.POSE_EXTS 保持一致。

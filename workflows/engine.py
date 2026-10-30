@@ -15,7 +15,7 @@ import os
 import time
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
@@ -26,6 +26,21 @@ log = logging.getLogger("engine")
 
 # 运行态只有 Qwen：SD 权重已移到 models/_archive/sd/（git tag `sd` 之前的状态）。
 DEFAULT_MODEL = "qwen-image-2.1"
+
+
+def _lora_keys(path: Path) -> List[str]:
+    """只读 safetensors 的头部，拿到 key 列表（不加载张量数据）。
+
+    safetensors 的布局是：8 字节小端长度 + JSON 头 + 数据。
+    只读头就能判断这是不是 diffusers 原生格式。
+    """
+    import struct
+    with open(path, "rb") as f:
+        n = struct.unpack("<Q", f.read(8))[0]
+        if n > 8 * 1024 * 1024:          # 头不该这么大，防御一下
+            return []
+        head = json.loads(f.read(n))
+    return [k for k in head if k != "__metadata__"]
 
 
 def _fp8_linear_cls():
@@ -211,6 +226,115 @@ class Engine:
         return self._get(key)
 
     # ---------- Qwen-Image-2.1 ----------
+
+    # ---------------- Qwen 的 LoRA 支持 ----------------
+
+    def lora_dir(self) -> Path:
+        """Qwen LoRA 目录（只放 **diffusers 原生格式** 的权重）。
+
+        ComfyUI 格式的要先转：`python tools/convert_lora.py in.safetensors out.safetensors`
+        —— 键名规则不同（`diffusion_model.` + `lora_A/B` vs
+        `transformer.` + `lora.down/up`），不能直接挂。
+        """
+        return self.root / "lora"
+
+    def available_loras(self) -> List[Dict[str, Any]]:
+        """列出可用的 Qwen LoRA。
+
+        **只认 diffusers 原生格式**（key 前缀 `transformer.`）——ComfyUI 格式
+        挂上去会静默不生效（`load_lora_weights` 匹配不到任何层），比报错更坏。
+        """
+        out: List[Dict[str, Any]] = []
+        d = self.lora_dir()
+        if not d.is_dir():
+            return out
+        for f in sorted(d.glob("*.safetensors")):
+            try:
+                keys = _lora_keys(f)
+            except Exception:                 # noqa: BLE001
+                continue
+            if not any(k.startswith("transformer.") for k in keys):
+                continue
+            out.append({
+                "name": f.stem,
+                "file": str(f),
+                "size_mb": round(f.stat().st_size / 1024 / 1024, 1),
+                "tensors": len(keys),
+            })
+        return out
+
+    def apply_loras(self, pipe, specs: Sequence[Dict[str, Any]]) -> List[str]:
+        """把 LoRA 挂到 Qwen 管线上，返回实际生效的 adapter 名列表。
+
+        `specs`：`[{"name": ..., "scale": 0.8}, ...]`
+
+        **状态式设计**：挂上的 LoRA 会一直生效，直到下一次 `apply_loras`
+        （传空列表）或 `unload_loras`。这样 LoRA 不必穿过每个工作流的
+        参数链——设置一次，后续所有生成自动带上它。
+
+        **实测可行**（2026-10-30）：fp8 量化后的 transformer **照样能挂 LoRA**——
+        diffusers 的 LoRA 层是包在 `nn.Linear` 外面的，fp8 的 `w_fp8` 在
+        `forward` 里反量化，LoRA 分支是并联加上去的，不冲突。
+        实测 AnyAngle（rank 24，384 张量）挂上后 1440 个 LoRA 模块生效，
+        出图只慢 1.1s（12.6s → 13.7s）。
+        """
+        active: List[str] = []
+        # 先全卸，避免上一次调用残留
+        for a in list(getattr(pipe, "_loaded_lora_adapters", []) or []):
+            try:
+                pipe.delete_adapters(a)
+            except Exception:                 # noqa: BLE001
+                pass
+        try:
+            pipe._loaded_lora_adapters = []
+        except Exception:                     # noqa: BLE001
+            pass
+
+        for spec in specs:
+            name = str(spec.get("name") or "").strip()
+            scale = float(spec.get("scale", 1.0))
+            if not name:
+                continue
+            f = self.lora_dir() / f"{name}.safetensors"
+            if not f.is_file():
+                f = self.lora_dir() / name
+            if not f.is_file():
+                raise FileNotFoundError(f"LoRA 文件不存在：{name}（见 models/lora/）")
+            adapter = f"qwen_{name}"
+            pipe.load_lora_weights(str(f), adapter_name=adapter)
+            active.append((adapter, scale))
+        if active:
+            pipe.set_adapters([a for a, _ in active], [s for _, s in active])
+            try:
+                pipe._loaded_lora_adapters = [a for a, _ in active]
+            except Exception:                 # noqa: BLE001
+                pass
+        # 记下当前状态：供 /loras 接口与前端显示。
+        # 记**原始名**（不是 adapter 名）——前端拿这个名字去 /loras 列表里找。
+        self._active_loras = [
+            {"name": str(spec.get("name") or "").strip(), "scale": sc,
+             "adapter": a}
+            for (a, sc), spec in zip(active, [x for x in specs if x.get("name")])
+        ]
+        return [a for a, _ in active]
+
+    def unload_loras(self, pipe) -> None:
+        """卸掉所有 LoRA（回到基座模型）。"""
+        for a in list(getattr(pipe, "_loaded_lora_adapters", []) or []):
+            try:
+                pipe.delete_adapters(a)
+            except Exception:                 # noqa: BLE001
+                pass
+        try:
+            pipe._loaded_lora_adapters = []
+        except Exception:                     # noqa: BLE001
+            pass
+        self._active_loras = []
+
+    def active_loras(self) -> List[Dict[str, Any]]:
+        """当前生效的 LoRA（供 /loras 与前端显示）。"""
+        return list(getattr(self, "_active_loras", []) or [])
+
 
     def _load_qwen21(self, root: Path):
         """Qwen-Image-2.1：单流 DiT（7B）+ Qwen3-VL 编码器，一个权重干三件事。
