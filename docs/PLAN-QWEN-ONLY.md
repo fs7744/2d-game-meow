@@ -359,6 +359,16 @@ meta 里写死 4.0）——也就是说界面上那个 CFG 输入框从来就没
 - **torch.compile / flash-attn / triton**：本机 Windows 环境**没有 triton**
   （inductor 的快路径依赖它），也没有 flash-attn（Windows 无官方包）。
   注意力走的是 diffusers 默认的 SDPA，已经不慢。
+  实测 `torch.compile(pipe.transformer, mode="reduce-overhead")` 直接报错：
+  `Cannot find a working triton installation`。
+- **蒸馏权重（Qwen-Image-Lightning，4/8 步）**：这是剩下唯一的大杠杆
+  （4 步 + 无 CFG ≈ 现在的 1/2.5），权重只有 0.79GB（bf16）。
+  **卡在下载速度**：HF 直连超时（`ConnectTimeout`），走 hf-mirror 只能到
+  **81MB / 15 分钟（≈90KB/s）** → 0.79GB 要 2.5 小时。
+  已把断点留在 `models/_lightning/.cache`（huggingface_hub 能续传）。
+  另有一个未验证的风险：Lightning 的权重是按**官方 20B 版 Qwen-Image** 训的，
+  本机这份 `qwen-image-2.1` 的 transformer 只有 13.3GB bf16（约 6.6B 参数），
+  LoRA 的键名/形状能不能对上还没验证。
 
 ## 3. 之前验证过的结论（保留，仍然是事实）
 
