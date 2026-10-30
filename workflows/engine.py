@@ -419,8 +419,11 @@ class Engine:
     #
     # 其余六个是**原生**：txt2img / img2img（指令改图是 Qwen 的正牌用法）/
     # matte / pixelify / topixel 不跑模型，pose_clone 走双图条件（本来就是多图原生）。
+    # 「近似」= 该工作流原本依赖的硬约束在 Qwen 上不存在，只能用软引导凑。
+    # inpaint / ai_repaint 已移出这张表：它们现在走**真蒙版路径**
+    # （workflows/qwen_mask.py），模型看得见蒙版、指令能被准确执行。
     _APPROX = {
-        "qwen21": frozenset({"inpaint", "ai_repaint", "poseswap", "sprite_swap"}),
+        "qwen21": frozenset({"poseswap", "sprite_swap"}),
     }
 
     # 工作流 → 中文名（报错时用，别让用户看到 wpc/wss 这种内部代号）

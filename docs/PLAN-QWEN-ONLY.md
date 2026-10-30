@@ -15,10 +15,10 @@
 |---|---|---|---|---|
 | w1 | 文生图 | 原生 DiT | 原生 | ✅ 24 步 / 768² 可用 |
 | w2 | 图生图 | **指令改图**（无 strength 语义） | 原生 | ✅ |
-| w3 | 局部重绘 | 整图指令改图 → 蒙版贴回 | **近似** | ✅ 选区外差 0 |
+| w3 | 局部重绘 | **真蒙版**（蒙版内换噪声 + 每步蒙版外拉回原 latent） | 原生 | ✅ 指令准确执行 |
 | w4 | 姿态序列 | 逐帧「骨架图当参考 + 指令」→ 尺度归一 → 脚底对齐 | **近似** | ✅ 3/3 可交付 |
 | wss | 序列帧替换 | 逐帧「角色图 + 轮廓/骨架」双图条件 → 共享色板 | **近似** | ✅ 3 帧跑通 |
-| w5 | 局部 AI 重绘 | 同 w3（共用一套）；保留裁剪块策略做对照 | **近似** | ✅ 指令被执行、脸不丢 |
+| w5 | 局部 AI 重绘 | 同 w3（共用一套）；旧路径与裁剪块策略保留做对照 | 原生 | ✅ 指令被执行、脸不丢 |
 | wpc | 角色迁移 | 双图条件（角色 + 骨架） | 原生 | ✅（上一轮已落地） |
 | wbg | 抠图 | 不跑模型 | 原生 | ✅ |
 | wpx | 像素转换 | 不跑模型 | 原生 | ✅ |
@@ -370,6 +370,125 @@ meta 里写死 4.0）——也就是说界面上那个 CFG 输入框从来就没
   本机这份 `qwen-image-2.1` 的 transformer 只有 13.3GB bf16（约 6.6B 参数），
   LoRA 的键名/形状能不能对上还没验证。
 
+### 2.11 真·蒙版局部重绘（推翻 §4.1）
+
+**一句话**：Qwen-Image-2.1 **能**做「涂哪改哪」，diffusers 只是没封装。
+我们用管线现成的 `latents=` + `callback_on_step_end` 复刻了 ComfyUI 的做法，
+w3 / w5 从此不再是「近似实现」。
+
+#### 原理
+
+ComfyUI 的 `Qwen Image 2.1 Inpainting | No-Offset Edits` 用**标准 2.1 权重**
+（没有专用 inpaint 权重）实现，靠两件事：
+
+1. `SetLatentNoiseMask`：初始 latent 里蒙版内换成噪声
+2. 采样循环里的 `denoise_mask`：**每一步**把蒙版外拉回原 latent
+   （`comfy/samplers.py:641-642`：`out = out * denoise_mask + latent_image * latent_mask`）
+
+第 2 步是**采样器级**机制，与权重无关。核心公式（flow matching）：
+
+```
+x_t = (1 - σ) · x0 + σ · ε
+```
+
+`x0` 是原图的 VAE latent，`ε` 是**固定**的那份初始噪声，`σ` 是当前噪声级。
+`σ=1` 时就是纯噪声（管线的正常起点），`σ→0` 时趋于 `x0`——模型会把蒙版外
+还原成原图。
+
+#### 实现
+
+新模块 `workflows/qwen_mask.py`，核心 60 行。三个坑（都踩过）：
+
+1. **pack / unpack 必须用管线自己的 `_pack_latents` / `_unpack_latents`**。
+   Qwen-Image-2.1 的 latents 是 **2×2 patchify** 过的（管线里那句
+   `latents.shape[1] // 4` 就是这个意思），手写 `transpose+reshape` 会让
+   空间布局错位 → 输出满屏彩色条纹。
+2. **条件图 latent 必须与管线内部算的那一份逐字节一致**。管线会用
+   `output_resolution` 经 `calculate_dimensions` 重算条件图尺寸（不一定是
+   你传的 w×h），自己按 w×h 编码会对不上 → 同样彩色条纹。
+3. **VAE 只吃 RGBA（4 通道）**。给 RGB 报
+   `expected input to have 4 channels, but got 3`——Qwen 的 VAE 原生透明底，
+   不是 bug。
+
+#### 实测（本机 RTX 4090 24GB）
+
+| 项 | 真蒙版（`mask`） | 旧路径（`whole`） |
+|---|---|---|
+| 蒙版内指令执行 | ✅ 选区正确变绿 | ❌ 常不执行（靠方位词猜） |
+| 蒙版外 | 最大像素差 **19~46**（视觉无差） | **0**（逐点不变） |
+| 身份保持 | ✅ 脸/背景不动 | ✅ |
+| 耗时（768²/20 步） | ~15s（探针）/ ~34s（含模型加载） | ~30s |
+| 峰值显存 | 15.4GB | 15.4GB |
+
+**工作尺寸下限是 768**：实测三档（同一素材、同一提示词、20 步）——
+512²（latent 32×32）→ **选区没被改**（蒙版糊成一个点）；
+768²（latent 48×48）→ 正确；1024² → 正确但慢 1.5 倍。
+所以 `qwen_mask` 内部把工作尺寸夹到 768 起。
+
+#### 承诺的变化（要诚实）
+
+- 蒙版外**不再是逐点为 0**，而是「视觉上完全一致」（差异来自 VAE 编码-解码
+  本身）。ComfyUI 官方也说明「不保证像素级完全相同」。
+- 换来的是**蒙版内指令被准确执行**——这才是局部重绘的意义。
+- 旧路径保留为 `strategy="whole"`，需要逐点为 0 时仍可用。
+
+#### 影响
+
+- `engine._APPROX["qwen21"]` 从 4 项减到 2 项（只剩 `poseswap` / `sprite_swap`）
+- 前端不再给 w3 / w5 打「近似」角标
+- 游戏素材价值：**改装备配色、改披风颜色、给角色加配件**这类操作
+  从「靠提示词求模型」变成「模型看得见蒙版」，可靠度完全不同
+
+### 2.12 调研：RunComfy 的 10 个 Qwen-Image-2.1 工作流
+
+> 来源：https://www.runcomfy.com/comfyui-workflows/models/qwen-image-2.1
+> （2026-10-30 逐页抓取，含 ComfyUI 源码核实）
+
+| # | 工作流 | 核心 | 对我们项目的价值 | 结论 |
+|---|---|---|---|---|
+| 1 | Text-to-Image | INT8 权重、2048² 原生 | 我们跑 768²/24 步；官方推荐 **2048²/40 步**。2K 是原生分辨率不是拉伸 | **可采纳**：立绘/背景这类需要细节的走 2K；精灵帧仍用小图 |
+| 2 | Turbo Edit | 8 步 INT8 编辑 | 速度。官方 Turbo 权重 `Qwen/Qwen-Image-2.1-Turbo` | **待验证**：见 §2.13 |
+| 3 | Turbo Text-to-Image | 8 步 | 同上 | 同上 |
+| 4 | Outpainting | 灰底 padding + **Outpaint LoRA** | **扩图**：场景/背景/图块扩展，游戏素材刚需（现在完全没有这个工作流） | **可采纳**：LoRA 152MB，hf-mirror 可下 |
+| 5 | VNCCS PoseStudio | 3D 姿势编辑 | 我们已有更好的方案（双图条件 + 伪 3D 骨骼编辑器） | **不采纳** |
+| 6 | **Inpainting（no-offset）** | **标准权重 + SetLatentNoiseMask** | **推翻 §4.1** | **已实现**（§2.11） |
+| 7 | Multi-Image Editing | 最多 **10 张参考图** | 我们目前只用到 2 张（角色 + 骨架）。10 张能做「多角色同框 + 场景拼装」 | **可采纳**：管线原生支持，改前端即可 |
+| 8 | Face & Head Swap | 两图 + 指令 | 换脸/换头。游戏里做「同一角色不同立绘」 | **可采纳**：本质是多图编辑，我们已有 |
+| 9 | Outfit Change | 两图 + 指令 | **换装备**——游戏素材高频需求（同一角色不同服装） | **可采纳**：同上 |
+| 10 | Image Editing | 基础图 + 可选参考图 + 指令 | 我们的 w2 已经是这个 | 已有 |
+
+**关键发现**：这 10 个工作流里，**没有一个需要我们没有的底模**——
+全部跑在标准 Qwen-Image-2.1 上。它们多出来的是**节点编排**，不是模型能力。
+ComfyUI 生态的价值在于「把能力拼成工作流」，而我们做的是「把能力拼成产品」。
+
+### 2.13 生态侦察：HF 上 Qwen-Image-2.1 的可用资产
+
+之前记的「HF 下载被代理挡住」**部分不成立**：hf-mirror.com 现在可用
+（`huggingface.co` 直连仍不通，ModelScope 可用）。已确认的资产：
+
+| 资产 | 仓库 | 大小 | 格式 | 用途 |
+|---|---|---|---|---|
+| **Lightning LoRA** | `lightx2v/Qwen-Image-2.1-Lightning` | 64MB | **diffusers 原生**（`transformer.…lora.down/up`） | 少步蒸馏（4/8 步），可直接 `load_lora_weights` |
+| Turbo 权重 | `Qwen/Qwen-Image-2.1-Turbo` | 9.5GB×2 | diffusers | 8 步生成/编辑 |
+| Turbo LoRA | `Comfy-Org/Qwen-Image-2.1` → `loras/qwen_image_2.1_turbo_lora_avg_rank_178` | — | ComfyUI | 给标准权重加 Turbo 能力 |
+| 5/6/8 步 LoRA | 同上 `loras/p_q_image_2.1_{5,6,8}_steps` | 320MB | ComfyUI | 少步 |
+| Outpaint LoRA | `ausboss/Qwen-Image-2.1-Outpaint-LoRA` | 152MB | ComfyUI | 扩图 |
+| **ControlNet Union** | `alibaba-pai/Qwen-Image-2.1-Fun-Controlnet-Union` | 7.2GB | ComfyUI | **8 种结构控制 + 蒙版 inpaint** |
+| PE 提示词重写 | `Qwen/Qwen-Image-2.1-PE-T2I` / `PE-I2I` | 9B | transformers | 短提示词扩写成详细描述 |
+| AnyAngle LoRA | `lilylilith/QI_2.1_AnyAngle` | 119MB | ComfyUI | 相机方位控制（**本机已下好**） |
+
+**重要更正**：§4.3 说「ControlNet Union 是 20B 专用，2.1 用不了」——
+那条结论**只对 pixelforge 里的 `qwen-image-controlnet-union` 成立**。
+`alibaba-pai` 后来发布了**专为 Qwen-Image-2.1** 的 Fun-Controlnet-Union，
+而且它的 control 分支 `control_in_dim = 129 = 64 控制latent | 1 mask | 64 遮罩图latent`
+——**官方自己就把蒙版做进了控制分支**。
+它需要 VideoX-Fun 的代码（不是 diffusers 原生），接进来是一条新工程线。
+
+**LoRA 格式的坑**：ComfyUI 格式的 key 带 `diffusion_model.` 前缀、
+用 `lora_A/lora_B` 命名；diffusers 用 `transformer.` 前缀 + `lora.down/up`。
+两者**不能直接互换**，需要转换脚本（键名映射 + A/B 顺序）。
+只有 `lightx2v` 那个是 diffusers 原生格式，可以直接挂。
+
 ## 3. 之前验证过的结论（保留，仍然是事实）
 
 ### A. w5 的「裁剪块」方案：机制可行，质量不合格
@@ -402,19 +521,33 @@ meta 里写死 4.0）——也就是说界面上那个 CFG 输入框从来就没
 这一节是这份文档的核心。每条都写明「为什么做不到」与「替代方案是什么」，
 避免以后有人在同一个坑里重复调研。
 
-### 4.1 没有原生 mask inpaint —— 「涂哪改哪」不成立
+### 4.1 ~~没有原生 mask inpaint~~ → **已解决（2026-10-30，见 §2.11）**
 
-**事实**：Qwen 三条编辑管线的 `__call__` 都没有 `mask` 参数；它的机制是
-「条件图编码成 vision context + VAE latent tokens 前置到噪声」，改哪里由**指令**
-决定。SD 能做到「涂哪改哪」靠的是 9 通道 UNet（4 噪声 + 4 被遮原图 + 1 mask）
-在 latent 上做混合，这个结构 Qwen 没有。
+> **本节结论已被推翻。** 原判断只看了 diffusers 的 `__call__` 签名没有 `mask`
+> 参数，就断定模型做不到。实际是：**diffusers 没封装，但模型做得到**——
+> ComfyUI 用**标准 2.1 权重**（无专用 inpaint 权重）就能做真蒙版重绘，
+> 靠的是采样器级的 `denoise_mask` 机制。
+> 已实现并实测通过（蒙版内指令准确执行、蒙版外几乎不变）。
+> 详见 **§2.11 真·蒙版局部重绘**。下面保留原文并标注推翻原因。
 
-**能保证的**：选区**外**逐点不变（贴回用「只向内羽化 + 二值蒙版相乘」，与模型无关）。
-**保证不了的**：选区**内**只改那一点。模型看不到蒙版，只能从提示词里的方位词
-（`_region_words` 生成 top-left / middle-center 之类）猜要改哪儿。猜偏的后果是
-**改得不够**（被蒙版裁掉），而不是改到外面。
+**原事实（对 diffusers 成立、对模型不成立）**：Qwen 三条编辑管线的 `__call__`
+都没有 `mask` 参数；它的机制是「条件图编码成 vision context + VAE latent
+tokens 前置到噪声」，改哪里由**指令**决定。SD 能做到「涂哪改哪」靠的是
+9 通道 UNet（4 噪声 + 4 被遮原图 + 1 mask）在 latent 上做混合。
 
-**替代方案**：w3 / w5 都走「整图指令改图 + 蒙版贴回」，并在前端打「近似」标记。
+**推翻它的证据**：ComfyUI 的 `Qwen Image 2.1 Inpainting | No-Offset Edits`
+工作流用的**就是标准 2.1 权重**（`UNETLoader` 加载 Qwen-Image-2.1，
+没有专用 inpaint 权重），靠两件事实现：
+
+1. `SetLatentNoiseMask`：初始 latent 里蒙版内换成噪声
+2. 采样循环里的 `denoise_mask`：**每步**把蒙版外拉回原 latent
+   （`comfy/samplers.py:641-642`）
+
+第 2 步是**采样器级**机制，与权重无关 → diffusers 侧用
+`latents=` 入参 + `callback_on_step_end` 钩子即可复刻。已落地。
+
+**仍然成立的部分**：旧的「整图改图 + 蒙版贴回」路径（`strategy="whole"`）
+仍在，保留做对照——它选区外逐点为 0，但模型看不见蒙版、指令常不执行。
 
 ### 4.2 Qwen 不吃 SD LoRA —— LoRA 生态整体失效
 
@@ -430,7 +563,15 @@ SD1.5/SDXL 的 27 个精选 LoRA 一个都挂不上；`/loras` 里 `caps.lora=fa
 
 ### 4.3 没有 ControlNet 硬约束 —— 姿态只能软引导
 
-**事实**：本机 pixelforge 有 `qwen-image-controlnet-union`，但它是 **20B 专用**
+> **部分更正（2026-10-30）**：本条只对 **pixelforge 里那个** union 成立。
+> `alibaba-pai` 后来发布了**专为 Qwen-Image-2.1** 的
+> `Qwen-Image-2.1-Fun-Controlnet-Union`（7.2GB），覆盖 8 种结构条件
+> （Canny/Depth/Grayscale/HED/Lineart/MLSD/Pose/Scribble）**且支持蒙版 inpaint**。
+> 它不是 diffusers 原生格式（需要 VideoX-Fun 的代码），接进来是**一条新工程线**，
+> 但「Qwen-Image-2.1 没有 ControlNet」这句话已经不成立了。详见 §2.13。
+
+**原事实（对 pixelforge 的 union 成立）**：本机 pixelforge 有
+`qwen-image-controlnet-union`，但它是 **20B 专用**
 （`joint_attention_dim=3584`），Qwen-Image-2.1 的文本编码器是 **4096 维**，对不上。
 要用得接 20B 全套（24G 卡装不下 bf16，需要 fp8 + offload），是另一条独立工程线。
 

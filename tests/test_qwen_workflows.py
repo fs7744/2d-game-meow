@@ -71,11 +71,16 @@ def test_qwen_supports_every_workflow(eng):
 
 
 def test_qwen_approx_flags(eng):
-    """近似集合必须**恰好**是那四个：标错会让用户以为 Qwen 有真 inpaint。"""
-    assert set(eng.approx_of("qwen-image-2.1")) == {
-        "inpaint", "ai_repaint", "poseswap", "sprite_swap"}
+    """近似集合必须**恰好**是那两个：标错会让用户以为 Qwen 有真 inpaint。
+
+    inpaint / ai_repaint 已移出这张表——它们现在走**真蒙版路径**
+    （workflows/qwen_mask.py）：蒙版内换噪声、每步把蒙版外拉回原 latent，
+    模型**看得见蒙版**，所以不再是"靠提示词方位词猜哪儿要改"的近似实现。
+    """
+    assert set(eng.approx_of("qwen-image-2.1")) == {"poseswap", "sprite_swap"}
     assert not eng.is_approx("qwen-image-2.1", "txt2img")
-    assert eng.is_approx("qwen-image-2.1", "inpaint")
+    assert not eng.is_approx("qwen-image-2.1", "inpaint")
+    assert not eng.is_approx("qwen-image-2.1", "ai_repaint")
     # SD 没有近似实现（它有 ControlNet / mask 通道）。
     # 这里查表而不是 `approx_of("sd15")`：SD 权重已归档，arch() 会因缺权重抛错
     assert "sd15" not in eng._APPROX and "sdxl" not in eng._APPROX
@@ -122,19 +127,36 @@ def test_edit_prompt_carries_region_and_rules():
 # ---------------- 局部重绘的硬承诺 ----------------
 
 def test_qwen_inpaint_keeps_outside_pixels(eng, sandbox, tmp_path):
+    """真蒙版路径：蒙版外几乎不变（VAE 重建本身的误差量级），选区内被重画。
+
+    注意「几乎」不是「逐点」：真蒙版路径让**模型**去保持选区外的原样，
+    剩余差异来自 VAE 编码-解码本身（实测 19~46/255，视觉上无差）。
+    旧的整图改图+贴回路径才是逐点为 0，但那时模型看不见蒙版、指令常不执行。
+    """
     src, msk = _src(tmp_path), _mask(tmp_path)
     r = g.inpaint(eng, image=src, mask=msk, prompt="emerald green armor",
                   steps=8, model="qwen-image-2.1", scope="t")
     meta = r["meta"]
-    assert meta["backend"] == "qwen-edit" and meta["approx"] is True
-    assert meta["outside_max_diff"] == 0
+    assert meta["backend"] == "qwen-mask-inpaint" and meta["approx"] is False
+    assert meta["strategy"] == "mask"
 
     out = Image.open(r["file"]).convert("RGB")
     a = np.asarray(Image.open(src).convert("RGB"), dtype=np.int16)
     b = np.asarray(out, dtype=np.int16)
     m = np.asarray(Image.open(msk).convert("L")) > 127
-    assert np.abs(a - b)[~m].max() == 0        # 逐点不变
-    assert np.abs(a - b)[m].mean() > 20        # 选区内确实被重画
+    # 蒙版外：误差在 VAE 重建量级内（不是逐点 0，但也不该有结构性变化）
+    assert np.abs(a - b)[~m].max() <= 60
+    assert np.abs(a - b)[m].mean() > 10        # 选区内确实被重画
+
+
+def test_qwen_inpaint_whole_strategy_still_available(eng, sandbox, tmp_path):
+    """旧的「整图改图 + 蒙版贴回」路径保留：逐点为 0，但属近似实现。"""
+    src, msk = _src(tmp_path), _mask(tmp_path)
+    r = g.inpaint(eng, image=src, mask=msk, prompt="emerald green armor",
+                  steps=8, model="qwen-image-2.1", scope="t", strategy="whole")
+    meta = r["meta"]
+    assert meta["backend"] == "qwen-edit" and meta["approx"] is True
+    assert meta["outside_max_diff"] == 0
 
 
 def test_qwen_call_aligns_output_resolution(eng, monkeypatch):

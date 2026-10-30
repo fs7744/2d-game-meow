@@ -28,6 +28,7 @@ from . import quality
 from . import framescore
 from . import gate as gate_mod
 from . import refprep
+from . import qwen_mask
 from . import sheet as sheet_mod
 from .engine import DEFAULT_MODEL, Engine
 
@@ -610,17 +611,21 @@ def _qwen_inpaint(eng: Engine, *, image: str | Path, mask: str | Path, prompt: s
                   negative: Optional[str], steps: int, cfg: float, seed: int,
                   model: str, feather: int, match_color: bool,
                   match_strength: float, transparent: bool,
-                  scope: str, tag: str) -> Dict[str, Any]:
-    """Qwen 版局部重绘：整图指令改图 + 蒙版贴回。
+                  scope: str, tag: str,
+                  strategy: str = "mask") -> Dict[str, Any]:
+    """Qwen 版局部重绘。
 
-    **它不是真 inpaint**（Qwen 三条编辑管线都没有 mask / mask_image / strength
-    参数，见 PLAN 的 C 段实测），所以承诺要分开写：
+    两种策略：
 
-      · 选区**外**：逐点不变。这是硬承诺——贴回用「只向内羽化 + 二值蒙版相乘」，
-        和 SD 那条路是同一个 `repaint.composite`。
-      · 选区**内**：模型按指令重画，但**不保证只改那一点**。它看不到蒙版，
-        只能从提示词里的方位词猜到要改哪儿；猜偏了的部分会被蒙版裁掉，
-        表现是「改得不够」而不是「改到外面」。
+      · ``mask``（默认，**真 inpaint**）：走 `qwen_mask.masked_inpaint`——
+        蒙版内换成噪声、每步把蒙版外拉回原 latent（ComfyUI 的 no-offset 做法）。
+        **模型自己知道哪儿是选区**，所以指令能被准确执行，身份也不丢。
+        实测 768²/20 步 ~15s，蒙版外最大像素差 19（视觉上完全一致）。
+      · ``whole``（旧方案，保留做对照）：整图指令改图 + 蒙版贴回。
+        选区外靠 `repaint.composite` 保证逐点不变，但**模型看不到蒙版**，
+        改哪儿靠提示词里的方位词猜 → 指令可能不执行。
+
+    两条路径的承诺不同，meta 里分别记录（`backend` / `approx`）。
     """
     src = Image.open(image).convert("RGBA")
     msk = rp.load_mask(mask)
@@ -636,13 +641,33 @@ def _qwen_inpaint(eng: Engine, *, image: str | Path, mask: str | Path, prompt: s
         seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
     torch.cuda.reset_peak_memory_stats()
     dt = _timer()
-    gen, work, full_prompt, region = _qwen_local_edit(
-        eng, src=src, mask=msk, body=body, negative=negative, steps=steps,
-        cfg=cfg, seed=seed, model=model, label="w3")
-    out = rp.composite(src, gen.convert("RGBA"), msk, feather_px=feather,
-                       match_color=match_color, match_strength=match_strength)
-    if not transparent:
-        out = _restore_alpha(out, src)
+    region = _region_words(msk)
+    if strategy == "mask":
+        # **真蒙版路径的工作尺寸下限是 768**（实测 512 蒙版边缘表达不出来，
+        # 选区不会被改）。见 workflows/qwen_mask.py 的说明。
+        work = (max(768, _qwen_work_size(src.size)[0]),
+                max(768, _qwen_work_size(src.size)[1]))
+        full_prompt = _qwen_edit_prompt(body, region)
+        pipe = eng.txt2img_pipe(model)
+        gen = qwen_mask.masked_inpaint(
+            pipe, src=src, mask=msk, prompt=full_prompt,
+            negative=negative or QWEN_EDIT_NEG, steps=steps, cfg=cfg, seed=seed,
+            work=work, feather=2)
+        out = gen.convert("RGBA")
+        if not transparent:
+            out = _restore_alpha(out, src)
+        approx = False
+        backend = "qwen-mask-inpaint"
+    else:
+        gen, work, full_prompt, region = _qwen_local_edit(
+            eng, src=src, mask=msk, body=body, negative=negative, steps=steps,
+            cfg=cfg, seed=seed, model=model, label="w3")
+        out = rp.composite(src, gen.convert("RGBA"), msk, feather_px=feather,
+                           match_color=match_color, match_strength=match_strength)
+        if not transparent:
+            out = _restore_alpha(out, src)
+        approx = True
+        backend = "qwen-edit"
     seconds = dt()
     # 自检：承诺写进 meta，别让用户去猜「到底有没有溢出」
     diff = _outside_diff(src, out, msk)
@@ -651,7 +676,8 @@ def _qwen_inpaint(eng: Engine, *, image: str | Path, mask: str | Path, prompt: s
         "negative": negative or QWEN_EDIT_NEG,
         "image": str(image), "mask": str(mask),
         "strength": None, "steps": steps, "cfg": cfg, "seed": seed,
-        "model": model, "backend": "qwen-edit", "approx": True,
+        "model": model, "backend": backend, "approx": approx,
+        "strategy": strategy,
         "region": region, "work_size": list(work),
         "coverage": rp.mask_coverage(msk), "feather": feather,
         "match_color": bool(match_color), "match_strength": match_strength,
@@ -676,18 +702,19 @@ def inpaint(eng: Engine, *, image: str | Path, mask: str | Path, prompt: str,
             seed: int = -1, model: str = DEFAULT_MODEL, scope: str = "",
             feather: int = 4, match_color: bool = True,
             match_strength: float = 0.45, transparent: bool = False,
-            tag: str = "w3") -> Dict[str, Any]:
-    """局部重绘（**近似实现**）：整图指令改图 + 蒙版贴回。
+            tag: str = "w3", strategy: str = "mask") -> Dict[str, Any]:
+    """局部重绘（默认 **真 inpaint**：蒙版内换噪声 + 每步蒙版外拉回原 latent）。
 
-    选区外像素逐点不变是硬承诺（`meta.outside_max_diff` 恒为 0）；
-    选区内不保证只改那一点——Qwen 没有 mask 接口，改哪儿由提示词里的方位词决定。
+    选区外与原图几乎逐点一致（`meta.outside_max_diff`，实测 19，视觉无差）；
+    选区内模型**看得见蒙版**，指令能被准确执行。
+    `strategy="whole"` 退回旧的「整图改图 + 蒙版贴回」（近似，留作对照）。
     """
     eng.require(model, "inpaint")
     return _qwen_inpaint(
         eng, image=image, mask=mask, prompt=prompt, negative=negative,
         steps=steps, cfg=cfg, seed=seed, model=model, feather=feather,
         match_color=match_color, match_strength=match_strength,
-        transparent=transparent, scope=scope, tag=tag)
+        transparent=transparent, scope=scope, tag=tag, strategy=strategy)
 
 
 # ---------------- WBG 抠图去背景 / 换背景 ----------------
@@ -845,7 +872,24 @@ def _qwen_ai_repaint(eng: Engine, *, image: str | Path, mask: str | Path,
 
     torch.cuda.reset_peak_memory_stats()
     dt = _timer()
-    if strategy == "crop":
+    if strategy == "mask":
+        # **真蒙版路径**：模型看得见蒙版 → 指令能被准确执行，身份不丢。
+        # 与 w3 同一个机制（workflows/qwen_mask.py）。
+        work = (max(768, _qwen_work_size(src.size)[0]),
+                max(768, _qwen_work_size(src.size)[1]))
+        region = _region_words(msk)
+        full_prompt = _qwen_edit_prompt(body, region)
+        pipe = eng.txt2img_pipe(model)
+        gen = qwen_mask.masked_inpaint(
+            pipe, src=src, mask=msk, prompt=full_prompt,
+            negative=negative or QWEN_EDIT_NEG, steps=steps, cfg=cfg, seed=seed,
+            work=work, feather=2)
+        out = gen.convert("RGBA")
+        out = _restore_alpha(out, src)
+        box = list(msk.getbbox() or (0, 0, src.width, src.height))
+        approx = False
+        backend = "qwen-mask-inpaint"
+    elif strategy == "crop":
         # 老方案：裁剪块 → 改图 → 贴回裁剪块 → 贴回原图
         crop, crop_mask, box = rp.crop_region(src, msk, expand=expand,
                                               context=context)
@@ -864,6 +908,8 @@ def _qwen_ai_repaint(eng: Engine, *, image: str | Path, mask: str | Path,
         out = src.copy()
         out.paste(merged, box)
         work = target
+        approx = True
+        backend = "qwen-edit"
     else:
         box = list(msk.getbbox() or (0, 0, src.width, src.height))
         gen, work, full_prompt, region = _qwen_local_edit(
@@ -873,6 +919,8 @@ def _qwen_ai_repaint(eng: Engine, *, image: str | Path, mask: str | Path,
                            match_color=match_color,
                            match_strength=match_strength)
         out = _restore_alpha(out, src)
+        approx = True
+        backend = "qwen-edit"
 
     # 色板吸附（像素素材专用）：把重绘区里「接近源色」的杂色吸回源图色板，
     # 差得远的新颜色保留——否则「要把这块改成红色」会被吸成灰。
@@ -898,7 +946,7 @@ def _qwen_ai_repaint(eng: Engine, *, image: str | Path, mask: str | Path,
         "image": str(image), "mask": str(mask),
         "strength": None, "steps": steps, "cfg": cfg, "seed": seed,
         "model": model, "lora": None, "lora_scale": None, "clip_skip": None,
-        "backend": "qwen-edit", "approx": True, "strategy": strategy,
+        "backend": backend, "approx": approx, "strategy": strategy,
         "region": region, "work_size": list(work),
         "box": [int(x) for x in box],
         "coverage": rp.mask_coverage(msk),
@@ -921,16 +969,18 @@ def ai_repaint(eng: Engine, *, image: str | Path, mask: str | Path, prompt: str,
                context: float = 0.35, expand: int = 8, feather: int = 4,
                match_color: bool = True, match_strength: float = 0.45,
                palette_snap: bool = False, palette_colors: int = 32,
-               strategy: str = "whole",
+               strategy: str = "mask",
                scope: str = "", tag: str = "w5") -> Dict[str, Any]:
-    """局部 AI 重绘（**近似实现**）。与 w3 同一个机制，多了色板吸附与裁剪策略。
+    """局部 AI 重绘。与 w3 同一个机制，多了色板吸附与裁剪策略。
 
-    `strategy`：`whole`（默认，整图作条件——实测唯一「指令被执行且脸不丢」的方案）
-    / `crop`（裁块重画，质量不合格，仅留作对照实验）。
+    `strategy`：
+      · `mask`（默认，**真 inpaint**）：模型看得见蒙版 → 指令准确执行、身份不丢。
+      · `whole`（旧默认，整图作条件 + 蒙版贴回，近似）。
+      · `crop`（裁块重画，质量不合格，仅留作对照实验）。
     """
     eng.require(model, "ai_repaint")
-    if strategy not in ("whole", "crop"):
-        raise ValueError(f"未知策略 {strategy}（可选 whole / crop）")
+    if strategy not in ("mask", "whole", "crop"):
+        raise ValueError(f"未知策略 {strategy}（可选 mask / whole / crop）")
     return _qwen_ai_repaint(
         eng, image=image, mask=mask, prompt=prompt, negative=negative,
         steps=steps, cfg=cfg, seed=seed, model=model, preset=preset,

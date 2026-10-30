@@ -549,7 +549,8 @@ const ALL_WF = ['txt2img', 'img2img', 'inpaint', 'poseswap', 'matte',
   'ai_repaint', 'pixelify', 'pose_clone', 'sprite_swap', 'topixel']
 
 /** Qwen 上属于「近似实现」的工作流（老后端不给 approx 时兜底） */
-const QWEN_APPROX = ['inpaint', 'ai_repaint', 'poseswap', 'sprite_swap']
+// inpaint / ai_repaint 已走**真蒙版路径**（模型看得见蒙版），不再是近似
+const QWEN_APPROX = ['poseswap', 'sprite_swap']
 
 export async function fetchModels(): Promise<ModelList> {
   const r = await fetch(`${base}/models`)
