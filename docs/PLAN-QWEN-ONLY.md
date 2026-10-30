@@ -766,6 +766,70 @@ python tools/fetch_parallel.py <url> models/controlnet/qwen21_union.safetensors 
 断点续传：每段独立 `.part` 文件，中断后重跑跳过已完成的段，全下完按序拼接。
 它会把已有文件当作第 0 段的前缀（兼容之前 `curl -C -` 顺序续传的字节）。
 
+### 2.16b VNCCS PoseStudio：**不用 ControlNet** 的姿势迁移路线（2026-10-31）
+
+> 这一节推翻了我对"姿态控制必须接 ControlNet"的前提。
+
+社区号称"完美保持角色一致性"的那个 RunComfy 工作流，实际做法是
+**专用 LoRA + 双图指令**，全流程没有一个 ControlNet 节点。
+
+#### 官方工作流的真实构成
+
+从 `MIUProject/VNCCS_PoseStudio_QI2.1` 仓库里的
+`VNCCS_PoseStudio_QI2.1.json` 读出来的节点清单（14 个）：
+
+```
+LoadImage              角色图（image_2）
+VNCCS_PoseStudio       3D 摆姿势 → 渲染骨架（image_1）
+TextEncodeQwenImage21  双图 + 指令 → 正/负条件
+LoraLoaderModelOnly    VNCCS_QI2_PoseStudioV1.safetensors, strength=1.0
+QwenImage21Cache       缓存加速（gpu/int8）
+KSampler               steps=25, cfg=1, euler, simple, denoise=1
+EmptyLatentImage ← GetImageSize(角色图)   ← **画布尺寸取自角色图**
+VAELoader / VAEDecode / UNETLoader / CLIPLoader / SaveImage
+```
+
+**固定的指令模板**（逐字）：
+
+```
+replace the pose of <image 2> with the pose of <image 1>. keep the character of <image 2>
+```
+
+`image 1` = 骨架，`image 2` = 角色图；negative 是空字符串。
+
+#### 我们的实现（`tools/verify_vnccs_pose.py`）
+
+LoRA 152MB，ComfyUI 格式（`diffusion_model.` + `lora_A/B`，rank 32），
+用 `tools/convert_lora.py` 转成 diffusers 格式（384 张量）后直接
+`load_lora_weights`。
+
+实测（24~25 步、cfg 1、LoRA 1.0）：
+
+| 指标 | ControlNet Union 路线 | **VNCCS LoRA 路线** |
+|---|---|---|
+| 画风 | ❌ 会变（灰白/塑料感） | ✅ 与参考图一致（2D 平涂+黑轮廓） |
+| 头部 | ❌ 方形画布下整个丢失 | ✅ 完整，脸清晰 |
+| 肢体 | ⚠️ 偶发多一条腿 | ✅ 只有两条腿 |
+| 服装/发型 | ⚠️ 部分丢失 | ✅ 皮甲缝线、腰带、护膝、靴扣、低马尾全保住 |
+| 姿态精度 | ✅ 逐点贴合 | ⚠️ 能跟（交叉腿成立），但不如硬约束精确 |
+| 耗时 | 17~51s | **18.6~30.4s** |
+
+**结论：要"保角色一致性"，走 VNCCS LoRA 这条路；ControlNet Union 适合
+"只要结构、不在乎外观"的场合。**
+
+#### 两个必须踩准的细节
+
+**① 画布要取骨架的比例，不是角色图的**
+
+官方是"输出尺寸取角色图"，但那是建立在"角色图和骨架同为竖版"的前提上。
+我们的角色图是 768² 方形、骨架是 512×768 竖版，取方形画布时骨架只能缩在
+中间，模型把它理解成"小幅度动作"——**双腿交叉退化成双腿收窄**。
+改成取骨架比例（→ 768×1152）后交叉腿立刻成立。
+
+**② 骨架要等比贴入，不能拉伸**
+
+512×768 硬拉到 768×768 会把腿压短，姿态同样只跟一半。
+
 ### 2.16 生态侦察：HF 上 Qwen-Image-2.1 的可用资产
 
 之前记的「HF 下载被代理挡住」**不成立**：本机有可用代理

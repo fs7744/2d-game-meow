@@ -149,11 +149,54 @@ python tools/pose_from_image.py walk.mp4  --step 3   -o assets/pose
 108px/768²，见 PLAN §2.8）。动作幅度要大，现阶段得接受「换一个姿势」而不是
 「精确复制这个姿势」。
 
-**ControlNet Union 已接通（2026-10-30）**，姿态可以真压：竖版 768×1024 +
-详述 prompt + scale 1.0 能出完整角色，姿势与骨架逐点对应（双流注入，
-见 `docs/PLAN-QWEN-ONLY.md` §2.15）。**还没接进姿态序列 / 序列帧替换这两条
-工作流**，接入时画布要用竖版、prompt 要按角色自动拼详述文本，否则会出
-"有身体没头"或"线条人"。接入后能否把 108px 的偏差压下来要重测。
+**ControlNet Union 已接通**（2026-10-30）：`alibaba-pai/Qwen-Image-2.1-Fun-Controlnet-Union`
+
+它是**双流**（VACE 风格）：control block 是完整 Transformer block 的副本，
+每步都重跑、吃 timestep 调制，所以 skip 随采样步变化（实测 U 型
+0.352→0.273→0.393）。按「算一次复用」做会退化成常量偏置——8 步勉强能用、
+24 步必崩，出图直接是骨架的彩色线段。
+
+实测（**竖版 768×1024 / 40 步 / scale 1.0 / 几百字详述 prompt**）：完整角色，
+有脸有发饰，姿态与骨架逐点对应。峰值显存 18.7GB（24G 卡够用，不需要 fp8 化）。
+
+**这个分支对配置极敏感，三条要一起对**：
+1. **画布必须匹配内容**——2D 角色是竖构图就用竖版（768×1024），
+   用 768² 方形时模型会把人物撑满、把头顶出画面（表现为"有身体没头"）
+2. **prompt 要详述**（头发颜色、发饰、服装、姿态、背景、光线），
+   只写 "a 2D game character sprite" 会让模型直接照抄骨架画个线条人
+3. 强度 scale 1.0 是官方值，竖版下完全正常
+
+四个坑：条件 latent 要做 mean/std 归一化、control block 要**继承**而不是组合
+（否则 key 多 `block.` 前缀）、`init_stream` 要加回 base hidden、
+mask 通道填 0 而非 1（填 1 等于"保留空的 masked-image"，出全透明图）。
+**有 control 时必须 `use_kv_cache=False`**。
+细节见 `docs/PLAN-QWEN-ONLY.md` §2.15，验证脚本 `tools/verify_cn_portrait.py`。
+
+
+**VNCCS PoseStudio：不用 ControlNet 的姿势迁移（2026-10-31）**
+
+社区那个号称"完美保持角色一致性"的工作流，实际做法是**专用 LoRA + 双图指令**，
+全流程没有一个 ControlNet 节点。指令是固定的一句：
+
+```
+replace the pose of <image 2> with the pose of <image 1>. keep the character of <image 2>
+```
+
+（`image 1` = 骨架、`image 2` = 角色图；25 步、cfg 1、LoRA 权重 1.0。）
+LoRA 是 `MIUProject/VNCCS_PoseStudio_QI2.1`（152MB，ComfyUI 格式，
+用 `tools/convert_lora.py` 转成 diffusers）。实测对比：
+
+| | ControlNet Union | **VNCCS LoRA** |
+|---|---|---|
+| 画风 | ❌ 会变 | ✅ 与参考图一致 |
+| 头部 | ❌ 方形画布下丢失 | ✅ 完整清晰 |
+| 肢体 | ⚠️ 偶发多腿 | ✅ 正常 |
+| 服装/发型 | ⚠️ 部分丢失 | ✅ 全保住 |
+| 姿态精度 | ✅ 精确 | ⚠️ 能跟 |
+
+**要保角色一致性走 VNCCS；只要结构、不在乎外观才用 ControlNet Union。**
+验证脚本 `tools/verify_vnccs_pose.py`，细节见 `docs/PLAN-QWEN-ONLY.md` §2.16b。
+
 
 ### 3. 像素画的散落杂色（已做清洗，但未根除）
 
@@ -259,7 +302,7 @@ Qwen 后期的修复一起带走（蒙版贴回、尺度归一、fp8 编码器�
 | 角色迁移 | ✅ | **双图条件**：角色图 + 骨架图进同一个 vision context；上身跟随好，**腿部常被参考图的站姿覆盖**（见 §2.8 实测） |
 | 抠图 / 像素转换 / 转像素 | ✅ | 原生 RGBA（alpha 66~68%），开透明底会自动跳过抠图 |
 | 局部重绘 / 局部 AI 重绘 | ✅ **真 inpaint** | 蒙版内换噪声 + 每步把蒙版外拉回原 latent（ComfyUI 的 no-offset 做法）。模型**看得见蒙版**，指令准确执行 |
-| 姿态序列 / 序列帧替换 | ⚠️ **近似** | 仍是「骨架/轮廓当参考图 + 指令」软引导；24s/帧，靠闸门 + 尺度归一兜底。**ControlNet Union 已能硬压姿态**（见下），但还没接进这两条工作流 |
+| 姿态序列 / 序列帧替换 | ⚠️ **近似** | 仍是「骨架/轮廓当参考图 + 指令」软引导；24s/帧，靠闸门 + 尺度归一兜底。**VNCCS LoRA 路线已跑通**（见下），但还没接进这两条工作流 |
 | LoRA | ✅ | **Qwen 自己的 LoRA 能挂**（fp8 量化后也行，实测只慢 1.1s）。但必须是 diffusers 原生格式，ComfyUI 格式要先转 |
 | **扩图** | ✅ | 中性灰 padding + Outpaint LoRA + 原图贴回；无接缝、无灰块 |
 | **换装 / 换脸** | ✅ | 两图 + `<image1>/<image2>` 结构化指令，不需要专用权重 |
@@ -306,31 +349,6 @@ ComfyUI 的 `Qwen Image 2.1 Inpainting | No-Offset Edits` 工作流用的
 **快速模式**：侧栏「LoRA」分组顶部的开关，挂 Lightning 少步蒸馏 LoRA +
 步数压到 8。实测 24 步 17.3s → 8 步 9.3s（-46%），画质几乎不掉。
 逐帧路线（姿态序列 / 序列帧替换）建议开着——单帧 37s 降到 9.3s，8 帧 ≈ 75s。
-
-**ControlNet Union 已接通**（2026-10-30）：`alibaba-pai/Qwen-Image-2.1-Fun-Controlnet-Union`
-**专为 2.1**（8 种结构控制 + 蒙版 inpaint），**不用 VideoX-Fun 的代码**——
-纯 safetensors，`workflows/controlnet_union.py` 逐 key 复刻，180 key 全对。
-
-它是**双流**（VACE 风格）：control block 是完整 Transformer block 的副本，
-每步都重跑、吃 timestep 调制，所以 skip 随采样步变化（实测 U 型
-0.352→0.273→0.393）。按「算一次复用」做会退化成常量偏置——8 步勉强能用、
-24 步必崩，出图直接是骨架的彩色线段。
-
-实测（**竖版 768×1024 / 40 步 / scale 1.0 / 几百字详述 prompt**）：完整角色，
-有脸有发饰，姿态与骨架逐点对应。峰值显存 18.7GB（24G 卡够用，不需要 fp8 化）。
-
-**这个分支对配置极敏感，三条要一起对**：
-1. **画布必须匹配内容**——2D 角色是竖构图就用竖版（768×1024），
-   用 768² 方形时模型会把人物撑满、把头顶出画面（表现为"有身体没头"）
-2. **prompt 要详述**（头发颜色、发饰、服装、姿态、背景、光线），
-   只写 "a 2D game character sprite" 会让模型直接照抄骨架画个线条人
-3. 强度 scale 1.0 是官方值，竖版下完全正常
-
-四个坑：条件 latent 要做 mean/std 归一化、control block 要**继承**而不是组合
-（否则 key 多 `block.` 前缀）、`init_stream` 要加回 base hidden、
-mask 通道填 0 而非 1（填 1 等于"保留空的 masked-image"，出全透明图）。
-**有 control 时必须 `use_kv_cache=False`**。
-细节见 `docs/PLAN-QWEN-ONLY.md` §2.15，验证脚本 `tools/verify_cn_portrait.py`。
 
 ### SD1.5 / SDXL 时代（权重已归档，代码已删）
 
