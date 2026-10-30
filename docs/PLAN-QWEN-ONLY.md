@@ -103,7 +103,8 @@
 
 ### 2.3 逐帧尺度归一：可交付率 1/3 → 3/3
 
-Qwen 没有 ControlNet，逐帧「人物画多大」由模型自己决定。同一段 3 帧里主体高度
+Qwen 逐帧「人物画多大」由模型自己决定（当时还没有 ControlNet；现在有了 Union
+也没解决这条——它的条件图不带尺度语义，见 §2.15）。同一段 3 帧里主体高度
 实测能差 3 倍，最小的那帧前景只占 **2.1%**（精灵产线要求 5~60%），直接判废。
 
 `postprocess.normalize_sequence`：量每帧 alpha 包围盒高度 → 取中位数当目标
@@ -554,9 +555,9 @@ Qwen 的多图条件会自己分配"谁是身份、谁是服装"。
 （`output_resolution=448` 而输出仍是 768²）。默认 768 编码时 8 张就到
 21.3GB，10 张会超。这条以后做「多角色同框 / 场景拼装」要用到。
 
-### 2.15 ControlNet Union：结构已 100% 对齐，待权重到位跑端到端
+### 2.15 ControlNet Union：已端到端跑通，控制生效（2026-10-30）
 
-`alibaba-pai/Qwen-Image-2.1-Fun-Controlnet-Union`（7.2GB）是**专为 2.1** 的
+`alibaba-pai/Qwen-Image-2.1-Fun-Controlnet-Union`（7.55GB）是**专为 2.1** 的
 控制分支（不是 pixelforge 那个 20B 专用的 union）。它覆盖 8 种结构条件
 （Canny / Depth / Grayscale / HED / Lineart / MLSD / Pose / Scribble）
 **且支持蒙版 inpaint**。
@@ -581,57 +582,176 @@ skip 数: 16             每个形状: (1, 2304, 4096)
 3. `norm_q/norm_k` 形状是 `[128]`（head_dim），不是 `[4096]`
 4. `before_proj` **只有 block 0 有**（不是每块都有）——第一版放顶层就错了
 
-#### 注入方式：forward hook，不改 diffusers 源码
+#### 它是双流（VACE 风格）—— 第一版做错就崩在这
+
+官方 ComfyUI 实现（PR #16519，`comfy/ldm/qwen_image21/model.py`）是**双流**：
 
 ```python
-inj = ControlInjection(transformer, branch, scale=1.0)
+def init_stream(self, x, control, prefix_len):
+    joint = torch.zeros_like(x)
+    joint[:, prefix_len:] = self.control_img_in(control)   # 只填图像行
+    return self.control_blocks[0].before_proj(joint) + x    # ★ 要加回 base hidden
+
+def step(self, index, c, mod, pe, attn_fn, ...):
+    c = block(c, mod, pe, attn_fn, ...)      # 完整 block，吃 modulation
+    return c, block.after_proj(c)
+```
+
+```python
+inj = ControlInjection(transformer, branch, scale=0.6)
 inj.set_condition(control_latents)   # [1, 129, H/16, W/16]
 ... 跑 pipe(...) ...
 inj.remove()                          # 必须卸，否则污染后续生成
 ```
 
-- 注入点 = `[0, 2, 4, …, 30]`（16 个，与官方 `control_layers` 一致）
-- `set_condition` **只算一次**：control skips 不依赖 timestep，整条采样链复用
-- hook 里有形状防御：skip 的 token 数与 hidden 不一致时**直接报错**，
-  不让它静默错位（control 条件图分辨率必须与目标 latent 对齐）
+两个要害：
 
-#### 129 通道怎么组装
+1. **control block 是 base block 的完整副本**（官方 `QwenImage21FunControlBlock`
+   直接继承 `QwenImage21TransformerBlock`），吃 timestep 调制（`modulation`，
+   实测形状 `[2, 16384]`）和 rotary embedding（`[L, 64]` complex64）。
+   参数上没有 norm 权重，因为 base 的 `img_norm1/2` 是
+   `elementwise_affine=False`（无参），modulation 复用 base 的。
+2. **每一步都重跑整条控制流**，skip 因此随 timestep 变化。
+
+第一版按「算一次、整条采样链复用」做（`set_condition` 一次算好 16 个 skip），
+skip 就成了常量偏置：每步叠加一次，低噪声后期相对占比越来越大。
+症状非常典型——**8 步勉强能用、24 步必崩**，24 步 / scale 0.6 直接出骨架
+本身的彩色线段（模型在照抄条件图）。改成双流后累积效应消失：
 
 ```
-control_in = cat([ control_latents(64),        # 条件图的 VAE latent
-                   mask(1),                    # inpaint 蒙版；纯控制时全 0
-                   masked_image_latents(64) ], # 被遮住的图；纯控制时全 0
-                 dim=1)
+各步首层 skip absmean（24 步）:
+[0.352, 0.285, 0.279, 0.277, 0.275, 0.273, 0.273, 0.275, 0.277,
+ 0.279, 0.283, 0.287, 0.293, 0.299, 0.305, 0.311, 0.316, 0.326,
+ 0.336, 0.346, 0.355, 0.367, 0.379, 0.393]     ← U 型，随步变化（旧实现是恒定值）
 ```
 
-- **纯结构控制**（pose/canny/depth）：只给 `control`，另两个通道填 0
-  （官方文档：zero-pads the mask / masked-image channels）
-- **inpaint**：control = 原图，mask = 涂抹区，masked-image = 原图（区外置灰）
-- **可叠加**：同时给控制图和 mask，重绘区同时听提示词和结构
+#### 六个必须踩准的坑（都是实测踩出来的）
 
-#### 状态
+**① 有 control 时必须关 KV cache** ← 最隐蔽的一个
 
-- ✅ 结构验证通过（`workflows/controlnet_union.py`，180 key 全对）
-- ✅ 注入代码写完（`ControlInjection`，未改 diffusers 一行）
-- ⏳ **端到端待权重到位**：7.2GB 走代理约 0.7MB/s，需要 3 小时左右。
-  下载命令：
+pipeline 的 `use_kv_cache` 默认 `True`：它把文本 token 当 prefix 缓存，
+之后每个 block 只处理**图像** token（实测 768² 下 2304 个），
+而 control 链算的是**完整 joint**（2331 = 2304 图像 + 27 文本）—— 两者对不上。
+文本 token 根本不经过 block，hint 只能硬塞进图像段，信号全错。
 
-```bash
-curl -L -C - -x http://127.0.0.1:7897 \
-  -o models/controlnet/qwen21_union.safetensors \
-  "https://hf-mirror.com/alibaba-pai/Qwen-Image-2.1-Fun-Controlnet-Union/resolve/main/Qwen-Image-2.1-Fun-Controlnet-Union.safetensors"
+官方实现里就有这个判断：
+`cache_enabled = use_kv_cache and ... and control_context is None`。
+我们这边要显式传 `use_kv_cache=False`。
+
+**② mask 通道填 0（全重画），不是 1**
+
+官方 pipeline 是 `mask_latent = 1 - mask_condition`（白=重画），
+所以这通道 **1 = 保留原图，0 = 重画**。填 1 等于告诉模型
+"整张图保持 `masked_image`"，而纯结构控制时 masked_image 是空的
+→ 模型老实输出一张空图。实测填 1 时 RGBA 不透明占比 **0.0%**（整张全透明）。
+
+**这个坑最坑的地方是度量会骗人**：填 1 时"与对照组的像素差"反而更大（40→80），
+看着像"控制力翻倍"，其实是画面在往空白塌。**像素差不能单独当判据**。
+
+**③ prompt 必须描述完整画面** ← 决定成败的一环
+
+官方建议 "write a prompt that describes the **whole** target image"。
+只写 "a 2D game character sprite, centered" 这种泛化描述时，模型不知道要画什么，
+就**直接把骨架原样画出来**——实测输出是一根粗黑线条人（0.8）或淡灰线条人（0.6），
+完全没有角色。给足描述后同一个 seed 立刻出完整角色：
+
+```
+a female warrior in blue leather armor, standing with legs wide apart,
+arms hanging at her sides, facing viewer, full body, 2D game character sprite,
+flat cel shading, clean lineart, detailed
 ```
 
-- ⚠️ **显存待确认**：base fp8（6.7GB）+ control 分支 bf16（7.2GB）≈ 14GB，
-  加 VAE 与激活后 24G 卡是否够用要实测。不够的话要把 control 分支也 fp8 化
-  （`tools/make_qwen_fp8.py` 的同一套做法）。
+**④ 条件 latent 必须做 mean/std 归一化**
+
+管线的 `_encode_vae_image` 是 `(x - latents_mean) / latents_std`
+（`pipeline_qwenimage21.py:448`）。漏掉这一步，尺度差几倍，
+16 层 skip 直接把 hidden 打成 NaN，出图**全黑**。
+
+**⑤ control block 要继承而不是组合**
+
+`QwenImage21TransformerBlock` 的 state_dict 只有 **9 个 key**
+（attn 6 + img_mlp 3，norm 无参），对账：
+
+```
+16 × 9 (block) + 16 × 2 (after_proj) + 2 (before_proj，仅 0) + 2 (control_img_in) = 180
+```
+
+如果包一层再挂投影，key 会变成 `block.attn.to_q.weight`，多出 `block.` 前缀
+就对不上了。必须 `class ControlBlock(QwenImage21TransformerBlock)`。
+
+**⑥ `init_stream` 要加回 base 的 hidden**（`+ x`）
+
+只把 control 投影进 joint 序列、不与 base hidden 相加，控制流就与 base 的表示
+脱节——第一版正是漏了这个（还自己补了个无参 LayerNorm 去压残差，属于治标）。
+
+> 附带一条：joint 序列里图像 token 是不是连续后缀？实测 **是**
+> （2304/2350，`idx.diff()==1` 全 True），所以前缀切片也能用。
+> 但 diffusers 源码注释写着 "the two are interleaved, so the mask cannot be
+> sliced off as a prefix"，多图/参考图场景未必成立，所以 `init_stream` 现在
+> 优先用 `image_pad_mask` 精确散射（从 transformer 入参 `img_mask` 复算），
+> 拿不到才退回前缀。
+
+#### 强度标定（768²，pose 骨架，双流，透明底）
+
+| 步数 | 甜点 scale | 表现 |
+|---|---|---|
+| **24（推荐）** | **0.45** | 完整角色 + 姿态逐点贴合骨架，画质细腻 |
+| 8（Lightning） | 0.6 | 完整角色 + 姿态贴合，头部细节弱一些 |
+| 24 | 0.65+ | 过曝发白 |
+| 8 | 0.8+ | 满铺/劣化 |
+
+强度窗口不算窄，但**必须配详细 prompt**——prompt 不够时任何强度都会变成复刻骨架。
+
+#### 实测数据（RTX 4090 24GB / 768²）
+
+| 项 | 数值 |
+|---|---|
+| 权重加载 | 26s（7.55GB，bf16） |
+| 条件编码 | 1.2~2.0s（含 VAE encode + 归一化） |
+| 控制流前向（16 个完整 block / 步） | 每步都跑，8 步共 128 次 block |
+| 显存 reserved | 7.4GB（base 走 cpu offload） |
+| 显存 peak | 18.7GB |
+| 8 步 + 控制 | 9.4s（旧的一次性实现 7.5s；双流多跑 16 个 block ≈ +25%） |
+| 24 步 + 控制 | 17.3s |
+
+**显存结论：24G 卡够用**，不需要把 control 分支 fp8 化（峰值 18.7GB，
+余量约 5GB）。
+
+#### 控制效果：能用了
+
+同一提示词 + 同一 seed（"a female warrior in blue leather armor, standing with
+legs wide apart, arms hanging at her sides" + 透明底）：
+
+- 无控制：完整女战士，但姿态由模型自己定
+- 24 步 / 0.45：**完整蓝色装甲战士，双腿大分、双臂下垂外张，与骨架逐点对应**，
+  透明底，画质可用
+- 8 步 / 0.6：同样贴骨架，头部细节弱一些
+
+关键不是强度，而是 **prompt 要描述完整画面**。同一个 0.45，泛 prompt
+（"a 2D game character sprite, centered"）出的是骨架的线条人复刻，
+详细 prompt 出的是完整角色——这是整条链路上最反直觉的一环。
+
+透明底（`--transparent`）顺带解决了"背景被条件图污染成米黄"的老问题。
 
 #### 它对我们的价值
 
 - **姿态硬约束**：w4 姿态序列 / wss 序列帧替换的短板正是"姿态只能软引导"，
-  union 的 Pose 条件能把它变成硬约束
+  union 的 Pose 条件能把它变成硬约束。**接入后要重测 108px 的姿态偏差**
 - **真 inpaint 的第二条路**：现在的 `qwen_mask` 是采样器级近似，
   union 的 mask 通道是**训练过的**那条路，质量可能更好（待对比）
+
+#### 权重下载：并行分段（单连接被限速）
+
+单连接走代理只有 475 KB/s，7.5GB 要 4 小时。**16 路并发能到 6.0 MB/s**
+（12.6 倍），16 分钟下完。工具是 `tools/fetch_parallel.py`：
+
+```bash
+python tools/fetch_parallel.py <url> models/controlnet/qwen21_union.safetensors \
+  --jobs 16 --chunk-mb 24
+```
+
+断点续传：每段独立 `.part` 文件，中断后重跑跳过已完成的段，全下完按序拼接。
+它会把已有文件当作第 0 段的前缀（兼容之前 `curl -C -` 顺序续传的字节）。
 
 ### 2.16 生态侦察：HF 上 Qwen-Image-2.1 的可用资产
 
@@ -741,14 +861,13 @@ SD1.5/SDXL 的 27 个精选 LoRA 一个都挂不上；`/loras` 里 `caps.lora=fa
 **替代方案**：风格靠提示词 + 参考图（img2img / 双图条件）。要真正的风格固化，
 只能等 Qwen 生态出对应的 DiT LoRA，或者走「角色图 + 双图条件」这条软引导。
 
-### 4.3 没有 ControlNet 硬约束 —— 姿态只能软引导
+### 4.3 ~~没有 ControlNet 硬约束~~ → **已解决（2026-10-30，见 §2.15）**
 
-> **部分更正（2026-10-30）**：本条只对 **pixelforge 里那个** union 成立。
-> `alibaba-pai` 后来发布了**专为 Qwen-Image-2.1** 的
-> `Qwen-Image-2.1-Fun-Controlnet-Union`（7.2GB），覆盖 8 种结构条件
-> （Canny/Depth/Grayscale/HED/Lineart/MLSD/Pose/Scribble）**且支持蒙版 inpaint**。
-> 它不是 diffusers 原生格式（需要 VideoX-Fun 的代码），接进来是**一条新工程线**，
-> 但「Qwen-Image-2.1 没有 ControlNet」这句话已经不成立了。详见 §2.13。
+> **已作废**：`alibaba-pai/Qwen-Image-2.1-Fun-Controlnet-Union` 已端到端跑通，
+> 不需要 VideoX-Fun 的代码（纯 safetensors，180 key 逐一对齐）。
+> 改成**双流**（control block 用完整 Transformer block + 每步重算）之后，
+> 8 步 / 0.6 能出与骨架逐点对应的姿态（双腿大开、双臂外张），
+> 比第一版「一次性跳连」的软贴近强得多。细节与坑见 §2.15。
 
 **原事实（对 pixelforge 的 union 成立）**：本机 pixelforge 有
 `qwen-image-controlnet-union`，但它是 **20B 专用**

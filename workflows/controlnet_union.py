@@ -2,7 +2,7 @@
 
 ## 这是什么
 
-`alibaba-pai/Qwen-Image-2.1-Fun-Controlnet-Union`（7.2GB）是**专为
+`alibaba-pai/Qwen-Image-2.1-Fun-Controlnet-Union`（7.55GB）是**专为
 Qwen-Image-2.1** 训的控制分支（不是 20B 那个 union）。它：
 
 - 覆盖 **8 种结构条件**：Canny / Depth / Grayscale / HED / Lineart /
@@ -11,56 +11,97 @@ Qwen-Image-2.1** 训的控制分支（不是 20B 那个 union）。它：
   `control latents(64) | mask(1) | masked-image latents(64)`
 - 只含 **control 分支**（`control_img_in` + 16 个 `control_blocks`，~7.0GB），
   用 `strict=False` 加载到 base transformer 上，base 保持冻结
-- 每 **2 层**注入一次（`control_layers = [0, 2, 4, …, 30]`，16 个注入点），
-  通过零初始化的 `before_proj` / `after_proj` 加回主分支
+- 每 **2 层**注入一次（`control_layers = [0, 2, 4, …, 30]`，16 个注入点）
+
+## 它是双流（VACE 风格），不是「一次性跳连」
+
+这一点是最容易做错的（我们第一版就错了，症状是「8 步勉强能用、24 步必崩」）。
+官方 ComfyUI 实现（PR #16519，`comfy/ldm/qwen_image21/model.py`）：
+
+```python
+def init_stream(self, x, control, prefix_len):
+    # control latents fill the target rows, text and reference rows stay zero
+    joint = torch.zeros_like(x)
+    joint[:, prefix_len:] = self.control_img_in(control)
+    return self.control_blocks[0].before_proj(joint) + x
+
+def step(self, index, c, mod, pe, attn_fn, ...):
+    c = block(c, mod, pe, attn_fn, ...)      # 完整 block，吃 modulation
+    return c, block.after_proj(c)
+```
+
+两个含义：
+
+1. **control block 是 base block 的完整副本**（`QwenImage21FunControlBlock`
+   直接继承 `QwenImage21TransformerBlock`），吃 timestep 调制（`modulation`）
+   和 rotary embedding。参数上没有 norm 权重，是因为 base 的 `img_norm1/2`
+   是 `elementwise_affine=False`（无参），modulation 复用 base 的。
+2. **每一步都重跑整条 control 流**，所以 skip 随 timestep 变化。
+
+如果按「算一次、整条采样链复用」做，skip 就成了常量偏置：每步叠加一次，
+低噪声后期它相对占比越来越大，最后变成「照抄条件图」——实测 24 步 / scale 0.6
+直接出骨架本身的彩色线段。改成双流后这个累积效应消失。
 
 ## 为什么能自己实现（不用 VideoX-Fun）
 
-官方的参考实现是 VideoX-Fun 的 `config/qwenimage21/qwenimage21_control.yaml`，
-但权重本身是**纯 safetensors**，结构能从 key 名和形状完全推出来：
+权重是**纯 safetensors**，结构能从 key 名和形状完全推出来。数量对账：
 
-| key | 形状 | 说明 |
-|---|---|---|
-| `control_img_in.weight` | [4096, 129] | 129 通道 → hidden |
-| `control_blocks.N.attn.to_{q,k,v,out.0}.weight` | [4096, 4096] | 自注意力 |
-| `control_blocks.N.attn.norm_{q,k}.weight` | [128] | q/k 的 RMSNorm（head_dim） |
-| `control_blocks.N.img_mlp.{proj,gate_layer}.weight` | [12288, 4096] | SwiGLU 上投影 |
-| `control_blocks.N.img_mlp.out.weight` | [4096, 12288] | SwiGLU 下投影 |
-| `control_blocks.N.before_proj.{weight,bias}` | [4096, 4096] / [4096] | **只有 block 0 有** |
-| `control_blocks.N.after_proj.{weight,bias}` | [4096, 4096] / [4096] | 每块都有（零门控） |
+```
+16 blocks × 9 key (attn 6 + img_mlp 3) = 144
+16 blocks × 2 key (after_proj)         =  32
+ 1 block  × 2 key (before_proj，仅 0)  =   2
+control_img_in                          =   2
+                                   合计 = 180  ← 与官方逐 key 吻合
+```
 
-3 个关键对齐点（都验证过）：
-1. `img_mlp` 的 `proj/gate_layer/out` 命名与 diffusers 的
-   `QwenImage21SwiGLUFeedForward` **完全一致**（不是 `gate_up` 那种合并式）
-2. `12288 = 4096 × 3` → `mlp_ratio = 3.0`
-3. `norm_q/norm_k` 的形状是 `[128]` = `attention_head_dim`，不是 `[4096]`
-
-所以直接用 diffusers 的 `QwenImage21Attention` + `QwenImage21SwiGLUFeedForward`
-拼出来即可，**不需要引 VideoX-Fun 的代码**。
+所以用 diffusers 的 `QwenImage21TransformerBlock` **继承**（不是包一层，
+否则 key 会多出 `block.` 前缀）再挂 `before_proj` / `after_proj` 即可，
+**不需要引 VideoX-Fun 的代码**。
 
 ## 三个条件怎么组装（129 通道）
 
 ```
-control_in = cat([ control_latents(64),        # 条件图的 VAE latent
-                   mask(1),                    # inpaint 蒙版；纯控制时全 0
+control_in = cat([ control_latents(64),        # 条件图的 VAE latent（已归一化）
+                   mask(1),                    # inpaint 蒙版；纯控制时填 0（全重画）
                    masked_image_latents(64) ], # 被遮住的图；纯控制时全 0
                  dim=1)                        # → 129
 ```
 
-- **纯 pose / canny / depth 控制**：mask 与 masked-image 都填 0
-  （官方文档：`the pipeline zero-pads the mask / masked-image channels`）
-- **inpaint**：control=原图 latent，mask=涂抹区，masked-image=原图（区外置灰）
+- **纯结构控制**（pose/canny/depth）：只给 `control`，mask 与 masked-image
+  都填 **0**（= 全部重画，这是官方 zero-pad 的真实含义）。
+  **别填 1**：1 表示"保留原图"，配上空的 masked-image 就等于要求模型
+  输出一张空图（实测 RGBA 不透明占比 0.0%，整张全透明）。
+- **inpaint**：control = 原图，mask = 涂抹区（白=重画，内部会转成 0），
+  masked-image = 原图（区外置灰）
 - **两者可叠加**：同时给控制图和 mask，重绘区会同时听提示词和结构
 
-## 显存
+## 有 control 时必须关 KV cache
 
-base transformer 我们走 fp8（6.7GB）+ control 分支 7.2GB(bf16) ≈ 14GB，
-再加 VAE 与激活——24G 卡上要确认。**这是接进来前必须实测的第一件事。**
+pipeline 的 `use_kv_cache` 默认 True，它会把文本 token 当 prefix 缓存，
+之后每个 block 只处理图像 token（768² 下 2304 个），而 control 链算的是
+完整 joint（2331 = 2304 图像 + 27 文本）—— 两者对不上，hint 只能硬塞进
+图像段，信号全错。**调用方要显式传 `use_kv_cache=False`**
+（官方实现里就有这个判断：`cache_enabled = ... and control_context is None`）。
+
+## 显存（实测 768² / RTX 4090 24GB）
+
+base transformer fp8 走 cpu offload，control 分支 bf16 常驻 7.05GB。
+生成时 reserved 7.4GB、peak 18.7GB，余量约 5GB。24G 卡够用，
+**不需要**把 control 分支也 fp8 化。
+
+## 必须踩准的坑
+
+1. **条件 latent 要做 mean/std 归一化**：管线的 `_encode_vae_image` 是
+   `(x - latents_mean) / latents_std`。漏掉这步，尺度差几倍，
+   16 层 skip 直接把 hidden 打成 NaN，出图**全黑**。
+2. **`init_stream` 要加回 base 的 hidden**（`+ x`）：只把 control 投影进去
+   会让控制流从零起步，与 base 的表示脱节。
+3. **注入用 `prepend=True`**（torch≥2.6）：抢在 accelerate 的 cpu-offload
+   post-hook 之前执行，此时 output 还在 GPU 上，加法不用搬设备。
+4. **控制块要继承而不是组合**：包一层会让 key 多出 `block.` 前缀。
 """
 
 from __future__ import annotations
-
-from typing import Optional
 
 import torch
 from torch import nn
@@ -72,86 +113,121 @@ CONTROL_LAYERS = list(range(0, 32, 2))
 CONTROL_IN_DIM = 129
 
 
-class ControlBlock(nn.Module):
-    """一个控制块：自注意力 + SwiGLU FFN。
+def _block_class():
+    """动态构造「完整 Transformer block + before_proj / after_proj」的类。
 
-    刻意复用 diffusers 的组件（`QwenImage21Attention` / `QwenImage21SwiGLUFeedForward`），
-    因为它们的参数命名与官方权重**逐字对应**——自己写反而容易在
-    `to_out.0` 还是 `to_out`、`gate_layer` 还是 `gate_up` 上错位。
+    继承而不是组合：组合会让 state_dict 的 key 变成 `block.attn.to_q.weight`，
+    多出 `block.` 前缀，官方权重就对不上。
     """
+    from diffusers.models.transformers.transformer_qwenimage21 import (
+        QwenImage21TransformerBlock,
+    )
 
-    def __init__(self, dim: int = 4096, num_heads: int = 32,
-                 head_dim: int = 128, mlp_ratio: float = 3.0, eps: float = 1e-6,
-                 with_before_proj: bool = False):
-        super().__init__()
-        from diffusers.models.transformers.transformer_qwenimage21 import (
-            QwenImage21Attention, QwenImage21SwiGLUFeedForward,
-        )
+    class ControlBlock(QwenImage21TransformerBlock):
+        def __init__(self, dim=4096, num_heads=32, head_dim=128,
+                     mlp_ratio=3, eps=1e-6, first=False):
+            super().__init__(dim, num_heads, head_dim, mlp_ratio, eps)
+            self.after_proj = nn.Linear(dim, dim)
+            # **只有 block 0 有 before_proj**（官方权重就是这样）
+            self.before_proj = nn.Linear(dim, dim) if first else None
 
-        self.attn = QwenImage21Attention(
-            dim=dim, heads=num_heads, dim_head=head_dim, eps=eps)
-        self.img_mlp = QwenImage21SwiGLUFeedForward(
-            hidden_size=dim, mlp_hidden_size=int(dim * mlp_ratio))
-        self.after_proj = nn.Linear(dim, dim)
-        # **只有 block 0 有 before_proj**（官方权重就是这样，不是每块都有）
-        self.before_proj = nn.Linear(dim, dim) if with_before_proj else None
+    return ControlBlock
 
 
 class ControlNetUnionBranch(nn.Module):
-    """ControlNet Union 的完整控制分支（16 块 + 输入投影）。
+    """ControlNet Union 的完整控制分支（双流，VACE 风格）。
 
-    用法：
+    用法（由 `ControlInjection` 驱动，**每个采样步都要跑**）：
+
     ```python
     branch = ControlNetUnionBranch()
-    branch.load_state_dict(sd, strict=True)
-    branch.eval()
-
-    # 在 base transformer 的 forward 里，每 2 层注入一次：
-    #   hidden = hidden + branch(control_latents, mask, masked_latents)[i]
+    branch.load_state_dict(sd, strict=True)      # 180 key 全对
+    c = branch.init_stream(x, control_tokens)    # 步初：建控制流
+    c, skip = branch.step(0, c, mod, pe)         # 每层推进一次
+    hidden = hidden + skip
     ```
     """
 
     def __init__(self, dim: int = 4096, num_heads: int = 32,
-                 head_dim: int = 128, mlp_ratio: float = 3.0,
+                 head_dim: int = 128, mlp_ratio: int = 3, eps: float = 1e-6,
                  control_in_dim: int = CONTROL_IN_DIM,
                  num_blocks: int = len(CONTROL_LAYERS)):
         super().__init__()
         self.control_img_in = nn.Linear(control_in_dim, dim)
+        block_cls = _block_class()
         self.control_blocks = nn.ModuleList([
-            ControlBlock(dim, num_heads, head_dim, mlp_ratio,
-                         with_before_proj=(i == 0))
+            block_cls(dim, num_heads, head_dim, mlp_ratio, eps, first=(i == 0))
             for i in range(num_blocks)
         ])
         self.dim = dim
 
-    def forward(self, control_in: torch.Tensor) -> list[torch.Tensor]:
-        """`control_in`：[B, 129, H, W]（latent 空间）→ 16 个 skip 张量。
+    # ---------------- 双流的两个动作 ----------------
 
-        每个 skip 的形状与 base transformer 的 hidden_states 一致
-        （[B, H*W, dim]），由调用方在对应层 `hidden = hidden + skip`。
+    def init_stream(self, x: torch.Tensor, control_tokens: torch.Tensor,
+                    image_pad_mask: torch.Tensor | None = None) -> torch.Tensor:
+        """步初：把 control 塞进 joint 序列的**图像位置**，再与 base hidden 相加。
+
+        `x`              : [B, L, dim]   base 的 joint_hidden_states（文本+图像）
+        `control_tokens` : [B, HW, 129]  control 条件，已展平成图像 token 数
+        `image_pad_mask` : [L] bool，标记 joint 序列里哪些位置是图像 token
+
+        **必须用 mask 散射，不能用前缀切片**。diffusers 里那段注释写得很直白：
+
+        > Text positions of the joint sequence line up, in order, with the
+        > non-image positions of the vision-language sequence — the two are
+        > **interleaved**, so the mask **cannot be sliced off as a prefix**.
+
+        按 `j[:, n:]` 猜位置会把 control 铺到错的位置上，模型收到的信号全乱，
+        表现是"照着条件图画线条人"或干脆输出一张空图（都已实测）。
         """
-        b, c, h, w = control_in.shape
-        # 通道优先展平成 token 序列：[B, 129, H*W] → [B, H*W, 129]
-        tokens = control_in.reshape(b, c, h * w).transpose(1, 2)
-        x = self.control_img_in(tokens)
-        first = self.control_blocks[0]
-        if first.before_proj is not None:
-            x = x + first.before_proj(x)
+        b, l, _ = x.shape
+        n = control_tokens.shape[1]
+        features = self.control_img_in(control_tokens.to(x.dtype)).to(x.dtype)
 
-        skips: list[torch.Tensor] = []
-        for blk in self.control_blocks:
-            x = x + blk.attn(x)
-            x = x + blk.img_mlp(x)
-            skips.append(blk.after_proj(x))
-        return skips
+        joint = torch.zeros_like(x)
+        if image_pad_mask is not None:
+            mask = image_pad_mask.to(x.device)
+            if mask.shape[0] != l:
+                raise RuntimeError(
+                    f"image_pad_mask 长度 {mask.shape[0]} 与 joint 长度 {l} 不一致；"
+                    f"control token 数 {n}，mask 里 True 有 {int(mask.sum())}")
+            got = int(mask.sum())
+            if got != n:
+                raise RuntimeError(
+                    f"图像位置 {got} 与 control token 数 {n} 不一致："
+                    f"条件图分辨率必须与目标 latent 对齐")
+            joint[:, mask] = features
+        else:
+            # 兜底（拿不到 img_mask 时）：按"文本在前、图像在后"铺。纯文生图
+            # 单条件图时成立，但多图/参考图场景会错位，所以只当兜底。
+            if n > l:
+                raise RuntimeError(
+                    f"control token 数 {n} 多于 joint 序列长度 {l}："
+                    f"条件图比目标分辨率大")
+            joint[:, l - n:] = features
+        return self.control_blocks[0].before_proj(joint) + x
+
+    def step(self, index: int, c: torch.Tensor, modulation: torch.Tensor,
+             rotary_emb: torch.Tensor | None = None,
+             **kw) -> tuple[torch.Tensor, torch.Tensor]:
+        """推进一层控制流，返回 (新的控制流, 该层的 skip)。
+
+        `modulation` / `rotary_emb` 与 base block 收到的是**同一份**
+        （transformer 里所有 block 共用），所以控制流也在同样的
+        timestep 条件与位置编码下演化——这正是它能跟上采样轨迹的原因。
+        """
+        blk = self.control_blocks[index]
+        c = blk(hidden_states=c, modulation=modulation,
+                rotary_emb=rotary_emb,
+                attention_mask=kw.get("attention_mask"),
+                target_token_mask=kw.get("target_token_mask"),
+                key_valid=kw.get("key_valid"))
+        return c, blk.after_proj(c)
 
 
 def expected_keys(dim: int = 4096, num_blocks: int = 16,
                   control_in_dim: int = CONTROL_IN_DIM) -> set[str]:
-    """这个模块**应该**产出的 state_dict key 集合。
-
-    与官方权重的 key 对比、或做 `load_state_dict(strict=True)` 前的自检。
-    """
+    """这个模块**应该**产出的 state_dict key 集合（与官方 180 key 对账用）。"""
     keys = {"control_img_in.weight", "control_img_in.bias"}
     for i in range(num_blocks):
         p = f"control_blocks.{i}."
@@ -171,11 +247,11 @@ def expected_keys(dim: int = 4096, num_blocks: int = 16,
 
 # ---------------- 接入 diffusers 的 transformer ----------------
 
-def load_branch(path: str, *, dtype=torch.bfloat16, device: str = "cpu") -> ControlNetUnionBranch:
+def load_branch(path: str, *, dtype=torch.bfloat16,
+                device: str = "cpu") -> ControlNetUnionBranch:
     """加载官方 control 分支权重。
 
-    `strict=True` 能成功就是结构完全对齐的证明（我们已用随机初始化验证过
-    180 个 key 逐一对应）。
+    `strict=True` 能成功就是结构完全对齐的证明。
     """
     from safetensors.torch import load_file
 
@@ -198,8 +274,7 @@ def encoder_condition(*, control: "Image.Image | None" = None,
 
     `129 = control(64) | mask(1) | masked-image(64)`
 
-    - **纯结构控制**（pose/canny/depth…）：只给 `control`，mask 与 masked-image 全 0
-      （官方文档：zero-pads the mask / masked-image channels）
+    - **纯结构控制**（pose/canny/depth）：只给 `control`，mask 默认全 1
     - **inpaint**：`control` = 原图，`mask` = 涂抹区（白=重画），
       `masked_image` = 原图（区外置灰）
     - **两者叠加**：都给，重绘区同时听提示词和结构
@@ -210,9 +285,11 @@ def encoder_condition(*, control: "Image.Image | None" = None,
 
     def _encode(img: "Image.Image | None") -> torch.Tensor:
         if img is None:
+            # 官方语义是 zero-pad：填充**归一化空间**的 0（不是像素空间的 0）
             return torch.zeros((1, 64, h // 16, w // 16), device=device, dtype=dtype)
-        im = img.convert("RGBA").resize((w, h), __import__("PIL.Image", fromlist=["Image"]).LANCZOS)
-        t = torch.from_numpy(np.asarray(im)).float() / 127.5 - 1.0
+        im = img.convert("RGBA").resize(
+            (w, h), __import__("PIL.Image", fromlist=["Image"]).LANCZOS)
+        t = torch.from_numpy(np.array(im, copy=True)).float() / 127.5 - 1.0
         t = t.permute(2, 0, 1).unsqueeze(0).unsqueeze(2).to(device, dtype)
         with torch.no_grad():
             enc = vae.encode(t)          # **只调一次**（重复调用会白算一遍编码）
@@ -221,31 +298,52 @@ def encoder_condition(*, control: "Image.Image | None" = None,
             out = out[0] if isinstance(out, (tuple, list)) else out.latents
         if out.dim() == 5:               # Qwen VAE 是视频式 5 维 [B,C,F,H,W]
             out = out.squeeze(2)
-        return out
+        # **必须做 mean/std 归一化**：管线的 `_encode_vae_image` 就是
+        # `(x - latents_mean) / latents_std`（pipeline_qwenimage21.py:448）。
+        # 漏掉这一步，尺度差好几倍，出图全黑（已实测踩过）。
+        mean = torch.tensor(vae.config.latents_mean).view(
+            1, -1, 1, 1).to(out.device, out.dtype)
+        std = torch.tensor(vae.config.latents_std).view(
+            1, -1, 1, 1).to(out.device, out.dtype)
+        return (out - mean) / std
 
     ctrl = _encode(control)
     masked = _encode(masked_image)
 
     if mask is None:
+        # **纯结构控制必须填 0（全重画）**。
+        #
+        # 语义来自官方 pipeline：`mask_latent = 1 - mask_condition`，其中
+        # `mask_condition` 白=重画。所以这一通道 **1 = 保留原图，0 = 重画**。
+        # 填 1 等于告诉模型「整张图保持 `masked_image`」，而纯结构控制时
+        # masked_image 是空的 → 模型老老实实输出一张空图。
+        #
+        # 这个坑很隐蔽：填 1 时"与对照组的像素差"反而更大（40→80），看着像
+        # "控制力翻倍"，其实是画面在往空白塌；继续加强度到 1.0 就得到一张
+        # 全透明 PNG（实测不透明占比 0.0%）。度量指标在这里会骗人。
         m = torch.zeros((1, 1, h // 16, w // 16), device=device, dtype=dtype)
     else:
+        # 显式传入的 mask 按官方约定：白=重画 → 转成 1=保留
         mimg = mask.convert("L").resize((w // 16, h // 16), 1)
-        m = torch.from_numpy(np.asarray(mimg)).float().to(device, dtype) / 255.0
+        m = 1.0 - torch.from_numpy(np.array(mimg)).float().to(
+            device, dtype) / 255.0
         m = m[None, None]
 
     return torch.cat([ctrl, m, masked], dim=1)   # [1, 129, H/16, W/16]
 
 
 class ControlInjection:
-    """把 control skips 注入 base transformer 的指定层（用 forward hook，不改源码）。
+    """把双流控制分支接到 base transformer 上（forward hook，不改 diffusers 源码）。
 
-    用法：
     ```python
     inj = ControlInjection(transformer, branch, scale=1.0)
     inj.set_condition(control_latents)     # [1, 129, H/16, W/16]
     ... 跑 pipe(...) ...
     inj.remove()
     ```
+
+    **每一步都会重跑整条控制流**（控制流随 timestep 演化），
+    所以不再有「skip 是常量、步数越多累积越狠」的问题。
     """
 
     def __init__(self, transformer, branch: ControlNetUnionBranch,
@@ -254,37 +352,124 @@ class ControlInjection:
         self.branch = branch
         self.scale = float(scale)
         self._handles: list = []
-        self._skips: list[torch.Tensor] | None = None
+        self._tokens: torch.Tensor | None = None
+        self._stream: torch.Tensor | None = None
+        #: 诊断：(层号, hidden 绝对值均值, skip 绝对值均值)，只记前 8 次
+        self.trace: list[tuple[int, float, float]] = []
+        #: 诊断：每个采样步「首层 skip」的绝对值均值——双流的证据：
+        #: 它应当随步变化；旧的一次性实现这里是恒定值。
+        self.step_trace: list[float] = []
+        #: 注入开关：采样过程中可以按步关掉
+        self.enabled = True
+        #: 诊断：与 hidden 设备不一致的次数（prepend 没生效时会涨）
+        self._device_mismatch = 0
+        #: 图像位置 mask（由 transformer 的 pre-hook 每步更新）
+        self._image_pad_mask: torch.Tensor | None = None
+        self._tr_handle = None
         # 注入点：每 2 个 block（与官方 control_layers = [0,2,...,30] 一致）
         self.layers = [i for i in CONTROL_LAYERS
                        if i < len(transformer.transformer_blocks)]
         self._install()
+        self._install_mask_probe()
 
     def set_condition(self, control_in: torch.Tensor) -> None:
-        """算一次 skips（**不依赖 timestep**，所以整条采样链复用同一份，省算力）。"""
-        with torch.no_grad():
-            self._skips = self.branch(control_in.to(self.branch.control_img_in.weight.dtype))
+        """登记条件（每步复用同一份条件，但控制流每步重建）。
+
+        `control_in`：[B, 129, H, W] → 展平成 [B, HW, 129] 供 `control_img_in`。
+        """
+        b, c, h, w = control_in.shape
+        # (h,w) 顺序的每个空间位置作为一行，与 base 的图像 token 顺序一致
+        self._tokens = control_in.reshape(b, c, h * w).transpose(1, 2).contiguous()
+
+    def _install_mask_probe(self) -> None:
+        """从 transformer 的入参里抠出 `img_mask`，复算出 joint 序列的图像位置。
+
+        diffusers 内部就是这么算的（`transformer_qwenimage21.py:911`）：
+
+        ```python
+        repeats = torch.where(img_mask, _IMG_TOKENS_PER_SLOT, 1)[0]
+        image_pad_mask = torch.repeat_interleave(img_mask[0], repeats)
+        ```
+
+        一个图像 slot 展开成 4 个 token，文本 slot 保持 1 个，所以两者是**交错**
+        的，不能按前缀切。
+        """
+        from diffusers.models.transformers import transformer_qwenimage21 as _t
+
+        per_slot = getattr(_t, "_IMG_TOKENS_PER_SLOT", 4)
+
+        def _pre(module, args, kwargs):
+            im = kwargs.get("img_mask")
+            if im is None:
+                return None
+            if not torch.is_tensor(im):
+                return None
+            try:
+                im2 = im if im.dim() == 2 else im[None]
+                repeats = torch.where(im2, per_slot, 1)[0]
+                self._image_pad_mask = torch.repeat_interleave(
+                    im2[0], repeats).to(im.device)
+            except Exception:                 # noqa: BLE001
+                self._image_pad_mask = None
+            return None
+
+        try:
+            self._tr_handle = self.transformer.register_forward_pre_hook(
+                _pre, with_kwargs=True)
+        except TypeError:
+            self._tr_handle = None
 
     def _install(self) -> None:
         blocks = self.transformer.transformer_blocks
         for k, layer_idx in enumerate(self.layers):
-            def _hook(module, inputs, output, _k=k):
-                if self._skips is None:
+            # `_li`：layer_idx 是循环变量，必须绑成默认参数，否则闭包捕获
+            # 的是循环结束后的值（诊断里所有层会打印成 30）。
+            def _hook(module, args, kwargs, output, _k=k, _li=layer_idx):
+                if self._tokens is None or not self.enabled:
                     return output
-                skip = self._skips[_k]
-                # 形状防御：skip 的 token 数必须与 hidden 一致，否则说明
-                # control 条件图的分辨率与目标 latent 不一致（会静默错位）
-                if skip.shape[1] != output.shape[1]:
-                    raise RuntimeError(
-                        f"control skip 的 token 数 {skip.shape[1]} 与第 {layer_idx} 层 "
-                        f"hidden 的 {output.shape[1]} 不一致：条件图尺寸要与目标 latent 对齐")
+                x = kwargs.get("hidden_states")
+                if x is None or not torch.is_tensor(x):
+                    x = args[0] if args else None
+                mod = kwargs.get("modulation")
+                if not torch.is_tensor(x) or mod is None:
+                    return output
+                if self._tokens.device != x.device:
+                    self._tokens = self._tokens.to(x.device)
+                if _k == 0:
+                    # 每个采样步从这里重建控制流
+                    self._stream = self.branch.init_stream(
+                        x, self._tokens, self._image_pad_mask)
+                self._stream, skip = self.branch.step(
+                    _k, self._stream, mod, kwargs.get("rotary_emb"),
+                    attention_mask=kwargs.get("attention_mask"),
+                    target_token_mask=kwargs.get("target_token_mask"),
+                    key_valid=kwargs.get("key_valid"))
+                if len(self.trace) < 8:
+                    self.trace.append((int(_li),
+                                       float(output.abs().mean()),
+                                       float(skip.abs().mean())))
+                if _k == 0:
+                    self.step_trace.append(float(skip.abs().mean()))
+                if skip.device != output.device:
+                    self._device_mismatch += 1
+                    skip = skip.to(output.device)
                 return output + skip.to(output.dtype) * self.scale
 
-            self._handles.append(blocks[layer_idx].register_forward_hook(_hook))
+            # `prepend=True`（torch≥2.6）：抢在 accelerate 的 cpu-offload
+            # post-hook 之前执行，此时 output 还在 GPU 上，加法不用搬设备。
+            try:
+                h = blocks[layer_idx].register_forward_hook(
+                    _hook, prepend=True, with_kwargs=True)
+            except TypeError:                 # 老 torch 没有 prepend/with_kwargs
+                h = blocks[layer_idx].register_forward_hook(_hook)
+            self._handles.append(h)
 
     def remove(self) -> None:
         """卸掉所有 hook（一定要在生成结束后调，否则会污染后续无控制的生成）。"""
         for h in self._handles:
             h.remove()
         self._handles.clear()
-        self._skips = None
+        if self._tr_handle is not None:
+            self._tr_handle.remove()
+            self._tr_handle = None
+        self._stream = None
