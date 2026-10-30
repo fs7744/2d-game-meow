@@ -385,35 +385,56 @@ VAE 切片、候选择优压到 1）把 37s 压到 24s，但**量级差距仍在
 
 ---
 
-## 6. SD 遗留代码：现状与清理清单（**未执行，需要确认**）
+## 6. SD 遗留代码：**已全部删除**
 
-Qwen-only 之后，SD 时代的代码一行都没删。现在用两道措施把它圈住，删不删由你定。
+`§6` 原来写的是「清理清单待确认」。2026-10-30 已执行，两个提交：
 
-### 已经做的（零风险）
+| 提交 | 内容 |
+|---|---|
+| `1831ade` | 后端：engine / generate / app / 模块 / 工具 / 测试 |
+| `e92775e` | 前端：LoRA 下拉与叠加、训练面板、Refiner 控件、payload 字段 |
 
-1. **代码里划出边界**：`engine.py` 在 SD 方法前有一段 `⚠️ LEGACY` 横幅，
-   列清哪些方法是 SD 专属、为什么留着、真删时看哪份清单。
-2. **用测试钉住"走不到"**：`tests/test_qwen_workflows.py::
-   test_qwen_workflows_never_touch_sd_pipelines` 把 8 个 SD 管线方法全换成
-   `raise`，w3 / w5 / w4 照跑。哪天有人把 SD 分支接回主路径，这条立刻红。
+规模：`engine.py` 1493 → 606 行，`generate.py` 3028 → 1777 行，测试从
+345 条降到 260 条（85 条全是 SD 用例）。
 
-### 要删的话，清单在这儿（按风险从低到高）
+### 删了什么
 
-| 位置 | 规模 | 说明 |
-|---|---|---|
-| `engine.py` L713–1160 的 14 个方法 | ~450 行 | `inpaint_pipe / controlnet / ipa_weight / pose_pipe / _attach_ipa / animatediff_* / distill_* / apply_lora / refiner_*` |
-| `engine.py` 顶部 import | ~16 处 | `StableDiffusion*Pipeline`、`ControlNetModel`、`AnimateDiff*`、`LCMScheduler` |
-| `generate.py` 六个工作流的 SD 分支 | ~600 行 | `txt2img / img2img / inpaint / poseswap / pose_clone / sprite_swap` 里 `if arch == "qwen21"` 之后的全部代码 |
-| `workflows/clip.py` / `lora.py` / `train.py` | 856 行 | 全部只服务 SD（Qwen 不吃 SD LoRA，也没有跳跃层语义） |
-| `tools/fetch_*.py` | 6 个文件 | SD / 动漫 / AnimateDiff 权重下载器 |
-| SD 专属测试 | ~35 条 | `test_clip` / `test_controlnet` / `test_generate` / `test_lora` / `test_train` + 少量散条 |
+- **engine**：14 个 SD 管线方法（`inpaint_pipe` / `controlnet` / `ipa_weight` /
+  `pose_pipe` / `_attach_ipa` / `animatediff_*` / `distill_*` / `apply_lora` /
+  `refiner_*`）+ `_fit` / `_base_kwargs` / `_discover_bases` / `_txt2img_ok` /
+  `_arch_of` / `img2img_pipe` / `_ctrl_gc` / 三个 LoRA 助手 / 10 个
+  `StableDiffusion*` 导入。`arch()` 现在恒返回 `qwen21`，
+  `available_models()` 恒为 `[qwen-image-2.1]`。
+- **generate**：六个工作流（w1/w2/w3/w5/wpc/wss/w4）的 SD 分支全删，
+  改成 Qwen 实现的薄封装；连带删掉 `_text_kwargs` / `_sdxl_embeds` /
+  `_hires_fix` / `_lora_trigger` / `_floatify` / `_sprite_animatediff` /
+  `composite` / `NEG_DEFAULT` / `QUALITY_PRESETS`。
+- **模块**：`workflows/clip.py`、`lora.py`、`train.py`（856 行）。
+- **路由**：`/loras`、`/loras/scan`、`/train*` 五条 + `_resolve_lora` /
+  `_register_lora` / `_run_train` / `TrainReq`。
+- **工具**：`fetch_*`（6 个）、`smoke.py`、`bench.py`、`bench_sprite.py`、
+  `ab_base` / `ab_quality` / `ab_matte` / `ab_repaint`、`train_lora.py`、
+  `audit_loras.py`、`probe_ill_pixel.py`、`e2e_sprite_swap.py`。
+- **前端**：节点「更多设置」里的 LoRA 下拉 / 叠加 LoRA / LoRA 强度 /
+  Refiner 精修，侧栏 LoRA 计数与扫描按钮，顶栏「训练 LoRA」与 TrainPanel，
+  `loraPayload` / `fetchLoras` / `scanLoras`，`GenParams` 的 lora 与 refiner 字段。
 
-### 为什么停在这里
+### 保留的两处「向后兼容」（不是漏删）
 
-删掉之后就**没法「挪回权重 + 跑起来」了**，只能 `git checkout sd`（那会把
-Qwen 这十几个提交一起回退）。也就是说这不是重构，是**放弃 SD 回退路径**的决定。
-所以：先划边界 + 上护栏，等你一句话再动手；真要动手，删完一个 commit 收尾，
-`git revert <sha>` 就能回来。
+1. `app._run` 现在**按目标函数签名过滤参数**：旧请求里带 `lora` / `clip_skip` /
+   `hires` / `distill` / `refiner` / `strength` / `cn_scale` / `ipa_scale` 不会
+   TypeError，而是丢掉并写进 `meta.params_ignored`——用户翻产物能看到"这条被忽略了"，
+   比静默消失诚实。
+2. `/models` 的 `refiner` 字段仍在，恒 `False`：老前端的 `if (refiner)` 不会
+   拿到 `undefined` 而崩。
+
+### 回退方式
+
+```bash
+git checkout pre-sd-purge        # 整段回退（推荐：删除后 Qwen 侧还有修复，
+                                 #  cherry-pick 会把那些修复弄丢）
+git revert e92775e && git revert 1831ade   # 只回退这两刀
+```
 
 ## 7. 验证工具
 | 脚本 | 用途 |
@@ -433,18 +454,22 @@ Qwen 这十几个提交一起回退）。也就是说这不是重构，是**放�
 
 ## 8. 回退
 
+SD 代码已删除，**没有「挪回权重就跑起来」这条路了**，只能回退代码：
+
 ```bash
-# 权重搬回（README 有完整清单）
+git checkout pre-sd-purge      # 删除前的最后状态（tag 已推远端）
+# 或 git revert e92775e && git revert 1831ade
+```
+
+然后搬权重（`models/_archive/sd/` 里都还在）：
+
+```bash
 mv models/_archive/sd/checkpoints/sd15 models/checkpoints/
 mv models/_archive/sd/controlnet models/ && mv models/_archive/sd/ipadapter models/
 mv models/_archive/sd/animatediff models/
-mv models/_archive/sd/lora/*.safetensors models/lora/
-cp models/_archive/sd/lora/loras.json.bak models/lora/loras.json
-# 然后把 workflows/engine.py 的 DEFAULT_MODEL 改回 "sd15"
-# 或直接：git checkout sd
 ```
 
-只关掉本次的两个优化（保留 Qwen）：
+只关掉本次的显存优化（保留 Qwen）：
 ```bash
 MEOW_QWEN_TEXT_FP8=0   # 文本编码器退回 bf16（峰值回到 16.6GB）
 MEOW_QWEN_OFFLOAD=0    # 两块权重常驻，省搬运时间

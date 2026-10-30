@@ -51,19 +51,21 @@ export const GEN_STYLES: GenStyle[] = [
     note: '颗粒更粗、色数更少（16 色），复古 8-bit 味。',
   },
   {
-    v: 'anime', label: '动漫立绘（不像素化）',
-    preset: 'anime', pixel: 0, palette: 0,
-    note: '纯插画，保画质。建议底模选 sdxl-anime，尺寸 1024²。',
+    v: 'anime', label: '动漫立绘（1024²，不像素化）',
+    preset: 'anime', pixel: 0, palette: 0, width: 1024, height: 1024,
+    note: '纯插画、保画质。**立绘档位用 1024²**：精灵档是 768²，因为成品要缩到 '
+      + '32~128px；立绘不缩图，1024² 的笔触细节才留得住。代价是每张约 45s（768² 约 25s）。',
   },
   {
-    v: 'realistic', label: '写实插画（不像素化）',
-    preset: 'portrait', pixel: 0, palette: 0,
-    note: '厚涂/写实风，不像素化。',
+    v: 'realistic', label: '写实插画（1024²，不像素化）',
+    preset: 'portrait', pixel: 0, palette: 0, width: 1024, height: 1024,
+    note: '厚涂/写实风，不像素化。跟立绘一样用 1024²。',
   },
   {
-    v: 'ink', label: '水墨国风（不像素化）',
-    preset: 'wuxia', pixel: 0, palette: 0,
-    note: '水墨线稿风，建议配武侠 LoRA（wuxia_v2）。',
+    v: 'ink', label: '水墨国风（1024²，不像素化）',
+    preset: 'wuxia', pixel: 0, palette: 0, width: 1024, height: 1024,
+    note: '水墨线稿风。提示词契约里有压印章与水墨背景的负向词'
+      + '（SD 时代还要配 wuxia_v2 LoRA，Qwen 之后 LoRA 已删）。',
   },
   {
     v: 'custom', label: '自定义参数',

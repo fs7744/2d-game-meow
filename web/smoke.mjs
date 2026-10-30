@@ -455,121 +455,9 @@ function check(name, cond, extra = '') {
   dom.window.close()
 }
 
-// 7) LoRA：下拉、自动切契约、触发词填入、提交带 lora
-{
-  const { dom, errors } = await boot('?demo=1')
-  const doc = dom.window.document
-  const win = dom.window
-  await new Promise((r) => setTimeout(r, 500))
-
-  doc.querySelector('details.fold').open = true
-  await new Promise((r) => setTimeout(r, 80))
-
-  const sel = [...doc.querySelectorAll('select')].find(
-    (s) => s.parentElement?.textContent?.startsWith('LoRA'))
-  check('存在 LoRA 下拉', !!sel)
-  check('隐藏项被过滤（不挂 + 2 个可见）', sel?.options.length === 3,
-    String(sel?.options.length))
-
-  const setSelect = (el, v) => {
-    const setter = Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value').set
-    setter.call(el, v)
-    el.dispatchEvent(new win.Event('change', { bubbles: true }))
-  }
-  setSelect(sel, 'wuxia_v2')
-  await new Promise((r) => setTimeout(r, 100))
-
-  check('选中后显示触发词', (doc.querySelector('.lora-trigger')?.textContent || '').includes('wuxia'))
-  // 「产出风格」下拉按 preset+pixel+palette 三项反推档位。
-  // LoRA 会把 preset 改成 wuxia，此时参数已偏离任何预设档 → 老实显示 custom
-  // （不骗人还在预设档上）。
-  const presetSel = [...doc.querySelectorAll('select')].find(
-    (s) => s.parentElement?.textContent?.startsWith('产出风格'))
-  check('LoRA 自带契约后风格档位转为「自定义」（不谎报还在预设档）',
-    presetSel?.value === 'custom', presetSel?.value)
-
-  const before = doc.querySelector('textarea.prompt').value
-  doc.querySelector('.lora-trigger .mini')
-    .dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 80))
-  check('一键填入触发词', doc.querySelector('textarea.prompt').value.startsWith('wuxia'))
-  check('触发词加在提示词之前', doc.querySelector('textarea.prompt').value !== before)
-
-  // 再点一次不应重复添加
-  const once = doc.querySelector('textarea.prompt').value
-  doc.querySelector('.lora-trigger .mini')
-    .dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 80))
-  check('重复填入不重复触发词', doc.querySelector('textarea.prompt').value === once)
-
-  doc.querySelector('.gen-btn').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 200))
-  const sub = calls.filter((c) => c.url.endsWith('/generate')).pop()
-  const body = JSON.parse(sub.body)
-  // 现在一律发数组：单个也发数组，避免前端为"1 个 / 多个"写两条路径
-  check('提交带 lora 与强度（数组形式）',
-    JSON.stringify(body.params.lora) === JSON.stringify(['wuxia_v2'])
-      && JSON.stringify(body.params.lora_scale) === JSON.stringify([0.8]),
-    JSON.stringify({ l: body.params.lora, s: body.params.lora_scale }))
-  check('提交带 wuxia 契约', body.params.preset === 'wuxia', body.params.preset)
-
-  check('LoRA 场景无脚本错误', errors.length === 0, errors[0] || '')
-  dom.window.close()
-}
-
-
-// 8) LoRA 训练面板：打开、提交、进度渲染
-{
-  const { dom, errors } = await boot('')
-  const doc = dom.window.document
-  const win = dom.window
-  await new Promise((r) => setTimeout(r, 500))
-
-  const openBtn = doc.querySelector('.train-btn')
-  check('顶栏有「训练 LoRA」入口', !!openBtn && (openBtn.textContent || '').includes('训练'))
-  openBtn.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 120))
-  check('训练面板打开', !!doc.querySelector('.train-panel'))
-  check('面板有数据集输入', !!doc.querySelector('.train-panel input'))
-
-  const setInput = (el, v) => {
-    const setter = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value').set
-    setter.call(el, v)
-    el.dispatchEvent(new win.Event('input', { bubbles: true }))
-  }
-  const inputs = [...doc.querySelectorAll('.train-panel input')]
-  setInput(inputs[1], 'mk_knight')          // 输出名
-  setInput(inputs[2], 'mk_knight')          // 触发词
-  await new Promise((r) => setTimeout(r, 80))
-
-  const startBtn = doc.querySelector('.train-panel .gen-btn')
-  check('开始训练按钮可用', !!startBtn && !startBtn.disabled)
-  startBtn.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 260))
-
-  const sub = calls.filter((c) => c.url.endsWith('/train') && c.method === 'POST').pop()
-  const body = JSON.parse(sub.body)
-  check('提交带输出名与触发词',
-    body.name === 'mk_knight' && body.trigger === 'mk_knight',
-    JSON.stringify({ n: body.name, t: body.trigger }))
-
-  // 轮询一次后会渲染进度条
-  await new Promise((r) => setTimeout(r, 1500))
-  check('显示进度条', !!doc.querySelector('.train-bar-fill'))
-  check('显示步数与 loss',
-    (doc.querySelector('.train-line')?.textContent || '').includes('20/100'),
-    doc.querySelector('.train-line')?.textContent)
-  check('显示可训练参数量',
-    (doc.querySelector('.train-status')?.textContent || '').includes('1.59M'))
-
-  doc.querySelector('.train-head .icon-btn').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 100))
-  check('面板可关闭', !doc.querySelector('.train-panel'))
-
-  check('训练面板无脚本错误', errors.length === 0, errors[0] || '')
-  dom.window.close()
-}
-
+// 7) 与 8) 原本是 LoRA 下拉 / 触发词 / 训练面板的用例。
+// **已随 SD 一起删除**（提交 e92775e）：Qwen 不吃 SD LoRA，那两块 UI 也没了。
+// 用例一起删掉，别留一组永远红的断言。
 
 // 9) 画布平移：空白处直接拖（曾经因为 .canvas-grid 是 pointer-events:none 而完全拖不动）
 {
@@ -666,15 +554,6 @@ function check(name, cond, extra = '') {
   }
   setSelect(nodeModelSel, 'sdxl')
   await new Promise((r) => setTimeout(r, 300))
-  // 节点切到 SDXL 后，SD1.5 的 LoRA 必须被过滤掉（装上去是废图）
-  const nodeLora = [...doc.querySelectorAll('details select')].find(
-    (x) => x.parentElement?.textContent?.startsWith('LoRA'))
-  // 不锁死数量：现在注册表里有 SDXL 的 LoRA（Pixelizer），断言改成
-  // 「SD1.5 的被过滤、不挂那一项还在」——锁数量会在加 LoRA 后误报
-  const loraVals = [...(nodeLora?.options || [])].map((o) => o.value)
-  check('节点切到 SDXL 后 SD1.5 的 LoRA 被过滤',
-    loraVals.includes('') && !loraVals.includes('wuxia_v2'),
-    JSON.stringify(loraVals))
 
   check('侧栏场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
@@ -1799,87 +1678,9 @@ function check(name, cond, extra = '') {
   dom.window.close()
 }
 
-// 28) LoRA 扫描：放完权重点一下，把缺的配置补进 loras.json
-{
-  const { dom, errors } = await boot('')
-  const doc = dom.window.document
-  const win = dom.window
-  const wait = (ms) => new Promise((r) => setTimeout(r, ms))
+// 28) 原本是 LoRA 扫描用例，已随 LoRA 一起删除（见 7) 的说明）。
 
-  const btn = doc.querySelector('.rail-scan')
-  check('侧栏有「扫描」按钮', !!btn)
-  check('扫描按钮有说明（只补不覆盖）',
-    (btn?.getAttribute('title') || '').includes('只补不覆盖'), btn?.getAttribute('title'))
-
-  btn.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await wait(300)
-
-  const call = calls.filter((c) => c.url.endsWith('/loras/scan')).pop()
-  check('点击后调用 POST /loras/scan', !!call && call.method === 'POST',
-    JSON.stringify(call && { u: call.url, m: call.method }))
-  check('扫描后提示新增/隐藏结果',
-    (doc.querySelector('.toast')?.textContent || '').includes('扫描 13 个权重'),
-    doc.querySelector('.toast')?.textContent)
-
-  check('LoRA 扫描场景无脚本错误', errors.length === 0, errors[0] || '')
-  dom.window.close()
-}
-
-// 29) 多个 LoRA 叠加：+ 叠加 → 选第二个 → 提交带 2 个名字与 2 个强度
-{
-  const { dom, errors } = await boot('?demo=1')
-  const doc = dom.window.document
-  const win = dom.window
-  const wait = (ms) => new Promise((r) => setTimeout(r, ms))
-  await wait(500)
-  doc.querySelector('details.fold').open = true
-  await wait(80)
-
-  const setSelect = (el, v) => {
-    const setter = Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value').set
-    setter.call(el, v)
-    el.dispatchEvent(new win.Event('change', { bubbles: true }))
-  }
-  const selByPrefix = (prefix) => [...doc.querySelectorAll('select')]
-    .find((s) => (s.parentElement?.textContent || '').startsWith(prefix))
-
-  setSelect(selByPrefix('LoRA'), 'wuxia_v2')
-  await wait(100)
-
-  const addBtn = [...doc.querySelectorAll('.lora-stack .mini')]
-    .find((b) => (b.textContent || '').includes('叠加'))
-  check('有「+ 叠加」按钮', !!addBtn)
-  addBtn.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await wait(120)
-
-  const rowSel = doc.querySelector('.stack-row select')
-  check('叠加后出现一层 LoRA 行', !!rowSel)
-  // 模拟数据里只有 wuxia_v2 与 guofeng 可见
-  setSelect(rowSel, 'guofeng')
-  await wait(120)
-
-  doc.querySelector('.gen-btn').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await wait(250)
-  const body = JSON.parse(calls.filter((c) => c.url.endsWith('/generate')).pop().body)
-  check('提交 2 个 LoRA',
-    JSON.stringify(body.params.lora) === JSON.stringify(['wuxia_v2', 'guofeng']),
-    JSON.stringify(body.params.lora))
-  check('两个 LoRA 各自带强度（各自的推荐值 0.8 / 0.7）',
-    JSON.stringify(body.params.lora_scale) === JSON.stringify([0.8, 0.7]),
-    JSON.stringify(body.params.lora_scale))
-  // 副槽不改契约：那是"主 LoRA 的训练约定"，被第二个覆盖只会更乱
-  check('副槽不改提示词契约', body.params.preset === 'wuxia', body.params.preset)
-
-  // 移除后回到单个
-  const del = [...doc.querySelectorAll('.stack-row .mini')]
-    .find((b) => (b.textContent || '').trim() === '×')
-  del.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await wait(120)
-  check('移除后叠加行消失', !doc.querySelector('.stack-row select'))
-
-  check('多 LoRA 场景无脚本错误', errors.length === 0, errors[0] || '')
-  dom.window.close()
-}
+// 29) 原本是「叠加多个 LoRA」用例，已随 LoRA 一起删除。
 
 // 30) 像素块要显示有效像素，并在极端值时告警
 {
@@ -2028,113 +1829,7 @@ function check(name, cond, extra = '') {
   dom.window.close()
 }
 
-// 32) Refiner 开关由用户控制（只在 SDXL + 本机有权重时可用）
-{
-  const { dom, errors } = await boot('?demo=1')
-  const doc = dom.window.document
-  const win = dom.window
-  const wait = (ms) => new Promise((r) => setTimeout(r, ms))
-  await wait(500)
-  doc.querySelector('details.fold').open = true
-  await wait(120)
-
-  const lab = (name) => [...doc.querySelectorAll('label')]
-    .find((l) => (l.textContent || '').trim().startsWith(name))
-  const clickCheck = (el) =>
-    el.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-
-  const rf = lab('应用 Refiner')?.querySelector('input')
-  check('有 Refiner 开关', !!rf)
-  check('默认关闭', rf?.checked === false, String(rf?.checked))
-  check('SD1.5 下禁用（refiner 只支持 SDXL）', rf?.disabled === true, String(rf?.disabled))
-  check('并说明为什么禁用',
-    (doc.querySelector('.node-body')?.textContent || '').includes('只支持 SDXL'))
-
-  // 切到 SDXL 才可用
-  const modelSel = doc.querySelector('.node-model select')
-  const setSel = (el, v) => {
-    const setter = Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value').set
-    setter.call(el, v)
-    el.dispatchEvent(new win.Event('change', { bubbles: true }))
-  }
-  setSel(modelSel, 'sdxl')
-  await wait(250)
-  check('切到 SDXL 后开关可用',
-    lab('应用 Refiner')?.querySelector('input')?.disabled === false)
-
-  clickCheck(lab('应用 Refiner').querySelector('input'))
-  await wait(120)
-  check('勾上后出现精修参数', !!lab('精修强度') && !!lab('精修步数'),
-    (doc.querySelector('.node-body')?.textContent || '').slice(-60))
-
-  doc.querySelector('.gen-btn').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await wait(250)
-  const body = JSON.parse(calls.filter((c) => c.url.endsWith('/generate')).pop().body)
-  check('提交带 refiner 开关与参数',
-    body.params.refiner === true && body.params.refiner_cfg === 6
-      && body.params.refiner_steps === 20 && body.params.refiner_end === 0.8,
-    JSON.stringify({ r: body.params.refiner, c: body.params.refiner_cfg }))
-
-  check('Refiner 场景无脚本错误', errors.length === 0, errors[0] || '')
-
-  // 34) 「像素精灵·Illustrious」档位：一档配好底模 / LoRA / 尺寸 / 像素块
-  const illStyle = () => [...doc.querySelectorAll('select')].find((x) =>
-    [...x.options].some((o) => o.textContent.includes('像素精灵·Illustrious')))
-  check('有「像素精灵·Illustrious」档位', !!illStyle())
-  setSel(illStyle(), 'spriteIll')
-  await wait(400)
-  check('切到 Illustrious 档不回弹', illStyle()?.value === 'spriteIll',
-    illStyle()?.value)
-  // 档位切的是**节点自己的**底模（底模是节点级，侧栏已无选模型入口）
-  const nodeModelNow = [...doc.querySelectorAll('.node-model select')].pop()
-  check('档位把该节点的底模切到 sdxl-anime', nodeModelNow?.value === 'sdxl-anime',
-    nodeModelNow?.value)
-  const numsIll = [...doc.querySelectorAll('.node-body input[type=number]')]
-    .map((i) => Number(i.value))
-  check('档位把尺寸改成 1024（1024/8=128 有效像素）', numsIll.includes(1024),
-    JSON.stringify(numsIll))
-  // 按 option 的 **value** 找，别按 textContent：下拉显示的是中文 label
-  // （「像素着色器 Pixelizer…」），文件名只在 value 里
-  const loraSelIll = [...doc.querySelectorAll('select')].find((x) =>
-    [...x.options].some((o) => o.value === 'Illustrious_PixelArt_Shader_M_01_epoch_4'))
-  check('档位自动挂上 Pixelizer LoRA',
-    loraSelIll?.value === 'Illustrious_PixelArt_Shader_M_01_epoch_4',
-    loraSelIll?.value)
-
-  // 手动换掉 LoRA 后档位必须回退成「自定义参数」——不能还显示着 Illustrious 档
-  setSel(loraSelIll, '')
-  await wait(200)
-  check('换掉 LoRA 后档位回退为自定义', illStyle()?.value === 'custom',
-    illStyle()?.value)
-
-  // 35) 从 Illustrious 档**切出去**必须能切走（回归：档位自带的 LoRA 不摘，
-  // 参数就永远比不中任何档位——下拉立刻弹回「自定义」，而且之后每档都弹，
-  // 等于进了这一档就再也出不来）
-  setSel(illStyle(), 'spriteIll')
-  await wait(300)
-  check('重新选中 Illustrious 档', illStyle()?.value === 'spriteIll', illStyle()?.value)
-
-  setSel(illStyle(), 'sprite16')
-  await wait(300)
-  check('从 Illustrious 切到「像素精灵 16-bit」不回弹',
-    illStyle()?.value === 'sprite16', illStyle()?.value)
-  const loraAfter = [...doc.querySelectorAll('select')].find((x) =>
-    [...x.options].some((o) => o.value === 'Illustrious_PixelArt_Shader_M_01_epoch_4'))
-  check('切走后档位自带的 LoRA 被摘掉', loraAfter?.value === '', loraAfter?.value)
-  const numsAfter = [...doc.querySelectorAll('.node-body input[type=number]')]
-    .map((i) => Number(i.value))
-  check('尺寸跟着档位回到 768（768÷6=128 有效像素）', numsAfter.includes(768),
-    JSON.stringify(numsAfter))
-
-  // 再切到「动漫立绘」也不能弹回去——连着切多档都得稳
-  setSel(illStyle(), 'anime')
-  await wait(300)
-  check('连切第二档（动漫立绘）也不回弹', illStyle()?.value === 'anime',
-    illStyle()?.value)
-
-  check('Illustrious 档位场景无脚本错误', errors.length === 0, errors[0] || '')
-  dom.window.close()
-}
+// 32) 原本是 Refiner 精修开关用例，已随 SD 一起删除（Qwen 没有精修器）。
 
 // 37) 骨骼编辑节点：可拖关节 + 8 方向 + 导出入口
 {

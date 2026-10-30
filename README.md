@@ -195,42 +195,46 @@ SDXL 的像素风出图，量化到 32 色后角色周围会冒出一粒粒红 /
 - 像素 LoRA 必须配 `pixel` 或 `sprite` 契约，配错了会出彩色色块怪物（见下节）。
 - 武侠 LoRA 必须配 `wuxia` 契约（压印章与水墨背景），且抠图要用 u2net。
 
-## 底模：当前只有 Qwen-Image-2.1（SD 已归档）
+## 底模：只剩 Qwen-Image-2.1（SD 代码与权重都已移除）
 
-### 归档了什么、怎么恢复
+### SD 时代的东西在哪
+
+权重只是**移到** `models/_archive/sd/`（28G checkpoints + 12G controlnet +
+3.1G IP-Adapter + 1.7G AnimateDiff + 2.2G LoRA），但**代码已经删了**
+（提交 `1831ade`，engine 1493→570 行、generate 3028→1777 行）。
 
 ```
 models/_archive/sd/
-├── checkpoints/   sd15, sd15-inpaint, sdxl, sdxl-anime, sdxl-refiner（28G）
-├── controlnet/    SD1.5/SDXL 的 openpose / canny / tile（12G）
-├── ipadapter/     ViT-H 编码器 + SD1.5/SDXL 两套 adapter（3.1G）
-├── animatediff/   SD1.5 的 motion module（1.7G）
-└── lora/          27 个 SD LoRA 权重 + loras.json 备份（2.2G）
+├── checkpoints/   sd15, sd15-inpaint, sdxl, sdxl-anime, sdxl-refiner
+├── controlnet/    SD1.5/SDXL 的 openpose / canny / tile
+├── ipadapter/     ViT-H 编码器 + SD1.5/SDXL 两套 adapter
+├── animatediff/   SD1.5 的 motion module
+└── lora/          27 个 SD LoRA 权重 + loras.json 备份
 ```
 
-`models/lora/loras.json` 已清空为 `{}`（LoRA 是 SD 生态，Qwen 不吃）。
 **保留没动的**：`qwen-image-2.1`、`matte/`（抠图模型，Qwen 也用）、
-`pose_keypoint/`（DWPose，骨骼提取用）。
+`pose_keypoint/`（DWPose，骨骼提取 + 质量闸门用）。
 
-恢复 SD（两种都行）：
+### 真要用回 SD：只能整段回退代码
 
 ```bash
-# A. 搬回权重 + 改一个常量
+git checkout pre-sd-purge    # SD 代码 + 归档前的运行态（推荐，能直接跑）
+# 或者只回退那两刀：
+git revert e92775e    # 先恢复前端（LoRA / 训练面板）
+git revert 1831ade    # 再恢复后端（SD 管线 + 路由 + 工具）
+# 然后把权重搬回去：
 mv models/_archive/sd/checkpoints/sd15 models/checkpoints/
 mv models/_archive/sd/controlnet models/ && mv models/_archive/sd/ipadapter models/
 mv models/_archive/sd/animatediff models/
-mv models/_archive/sd/lora/*.safetensors models/lora/
-cp models/_archive/sd/lora/loras.json.bak models/lora/loras.json
-# 然后把 workflows/engine.py 的 DEFAULT_MODEL 改回 "sd15"
-
-# B. 直接切到备份标签（代码也一起回退）
-git checkout sd
 ```
 
-`engine.DEFAULT_MODEL` 是唯一的默认底模来源，`/models` 的 `current` 字段带出来；
-前端初始选它（`App.tsx` 里 `want = available.includes(current) ? current : …`）。
-**不要在前端写死底模名**——SD 时代写死的「有 SDXL 就用 SDXL」在权重归档后会挑一个
-根本没装的底模出来（这是这次切换踩到的坑）。
+`pre-sd-purge` 是删除前的最后一个状态（tag 已推远端）。**注意**：回退会把
+Qwen 后期的修复一起带走（蒙版贴回、尺度归一、fp8 编码器、底色参数都在删除之后
+才定型），所以能整段回退、别指望 cherry-pick。
+
+`engine.DEFAULT_MODEL` 仍是唯一的默认底模来源，`/models` 的 `current` 字段带出来；
+前端初始选它。**不要在前端写死底模名**——SD 时代写死的「有 SDXL 就用 SDXL」
+在权重归档后会挑一个根本没装的底模，这是当年踩过的坑。
 
 ### Qwen-Image-2.1 能做什么、不能做什么
 
@@ -766,160 +770,26 @@ alpha **都是二值**（中间 alpha 占比 0，边缘硬度假设不成立）�
 alpha 由模型自己给（干净时前景 31%、全透明 67.8%、半透明中间值只有 2.9%）。
 抠图是 SD 时代的补丁——那时候模型不会输出 alpha，只能事后猜。
 
-## LoRA：装什么、怎么用
+## LoRA / 训练：已随 SD 一起删除
 
-`models/lora/*.safetensors` + 同目录 `loras.json`（标签 / 触发词 / 推荐强度）。
-启动后 `GET /loras` 直接列出，节点里「更多设置 → LoRA」可选，选中会自动带出触发词
-和匹配的提示词契约。
+**这一整块没了**（提交 `1831ade`）。原因不是"懒得维护"，而是 Qwen 根本不吃：
 
-### 放进去就能用：自动扫描
+- LoRA 是挂在 UNet/DiT 注意力投影层上的增量权重，键名要与主干严格对齐。
+  Qwen 的主干是 `QwenImage21Transformer2DModel`（单流 DiT），SD1.5/SDXL 的
+  27 个精选 LoRA 一个都挂不上。
+- 训练那边同理：`workflows/train.py` 训的是 SD 的 UNet LoRA，产出对 Qwen 无用。
 
-```bash
-python -m workflows.lora              # 扫描并补全 loras.json
-python -m workflows.lora --dry-run    # 只看结果不写
-```
+一起删掉的：`workflows/lora.py` / `clip.py` / `train.py`、`/loras` 与 `/train`
+五条路由、前端的 LoRA 下拉与「训练 LoRA」面板、`models/lora/` 的注册逻辑。
 
-侧栏「LoRA N 个」旁边也有「扫描」按钮（`POST /loras/scan`，13 个约 0.1s）。
-**读的是 safetensors 头部，不加载权重。**
+**现在的风格控制手段**：
+1. 提示词契约（`presets.py`，产出风格档位就是它的预设组合）
+2. 参考图 —— 图生图是指令改图，双图条件（角色 + 骨架）能锁身份
+3. 原生像素风 —— Qwen 直接就能画，不需要像素 LoRA（这是当年上 LoRA 的主因）
 
-它解决的是这个问题：新放的权重没有配置就是哑巴——没有 `base`，选中就报
-`size mismatch for ... 640 vs 1280`，而用户会以为是文件坏了，去换一个同样错的 LoRA。
-
-架构判据（按可靠性排序）：
-
-| 判据 | 说明 |
-|---|---|
-| 上下文维度 | SD1.5 的 CLIP context 是 **768**，SDXL 是 **2048**。这是硬指纹 |
-| 键名 | 含 `adaln_modulation` / `double_blocks` → DiT（Flux/anima）；顶层 `diffusion_model.` + `cross_attn` → 视频模型（Wan） |
-| 训练元数据 | 只在前两者都读不出时用（LoKr/LoHa 没有标准张量）。**metadata 会说谎**：实测 octopath 标着 `stable-diffusion-v1/lora`，tensor 却是 DiT |
-
-三条克制规则：
-
-1. **只补不覆盖**。手写的 `label / scale / note / hidden` 一律不动。
-2. **默认不填触发词**（要填得加 `--fill-trigger`）。空 `trigger` 有两种含义——
-   "不知道"和"知道但故意不用"（实测像素 LoRA 加触发词后 3/3 多主体）。
-   自动填会把后者覆盖掉，等于把一条实测结论抹了。
-3. **不可用架构标隐藏而不是留着**。视频/DiT 的 LoRA 出现在下拉里，等你选中再报错，
-   是更差的体验。
-
-顺带会报两类"配置卫生"问题：同一份权重存了多个文件名（内容指纹相同）、
-配置里有条目但文件已经删了。
-
-### 2026-10-28 新加的三个：两个用不了，一个重复
-
-放进去的三个权重文件名都像像素 LoRA，实际只有一个是 SD 的，而且和已有的重复：
-
-| 文件 | 扫描判定 | 结论 |
-|---|---|---|
-| `pixel-art-xl` | `sdxl` | ⚠️ 与已有 `pixelart_xl` **是同一份权重**（大小 + tensor 形状指纹一致），已隐藏。删掉即可 |
-| `octopath_traverl` | `flux`（anima） | ❌ 键名 `lora_unet_blocks_*_adaln_modulation_*` 是 DiT 结构，**不是 SD 的 UNet LoRA**。训练集 210 张、rank 32，风格确实是八方旅人，但要用于出图必须换 SD 版权重 |
-| `wan_t2v_h_unipixel-e6` | `wan` | ❌ Wan2.2 视频 LoRA。出图用不了；W5 视频链路（`workflows/video.py`）目前也还没接 LoRA 加载 |
-| `mk_sp_pixel` | `sd15` | ✅ 可用。12MB 小体积（diffusers 格式、无元数据、无触发词），当轻量风格调整；像素主力仍用 `px_illustrious`，尚未 A/B |
-
-> 这三个都是"文件名像但架不对"的典型。没有自动识别的话，它们的表现是
-> 选中后报一串 `size mismatch`，看起来像文件损坏。
-
-### 比报错更难查的：静默空挂
-
-把 `wan_t2v_h_unipixel-e6`（Wan 视频 LoRA）挂到 SDXL 上实测：
-
-```
-load_lora_weights()  →  不报错
-unet 里 LoRA 参数     0 → 0        ← 一个都没注入
-界面                  →  显示"已挂 LoRA"
-出图                  →  和没挂完全一样
-```
-
-diffusers 对认不出的键只打三条 warning（"No LoRA keys associated to
-UNet2DConditionModel found"），异常不抛。用户看到"加载成功"会以为是强度不够，
-把 0.8 一路调到 1.0——全是白费。
-
-所以 `apply_lora` 现在会在加载后数一遍 LoRA 参数增量，为 0 就**卸载并报错**：
-
-```
-这个 LoRA 没起作用: wan_t2v_h_unipixel-e6.safetensors
-文件能读、但**没有一个权重键能对上当前底模**（diffusers 只给了 warning，不报错）。
-常见于把视频模型（Wan）或 DiT（Flux/anima）的 LoRA 挂到 SD1.5/SDXL 上。
-```
-
-同一次实测里还有第二种失败形态：`octopath_traverl` 挂 SDXL 抛
-`NoMatchingPeftModuleError: Target modules {'q.proj','v.proj',...} not found`。
-以前这会被归因为"LoKr 变体不支持"，现在识别为**模块结构对不上**（架构不对）。
-
-### 精选结论（全部实跑验证，不是看描述选的）
-
-| LoRA | 体量 | 来源人气 | 判定 |
-|---|---|---|---|
-| **px_illustrious**（像素游戏素材） | 36MB | dl 55382 / ♥5357 | ✅ **像素风首选** |
-| **wuxia_v2**（武侠） | 96MB | dl 17267 / ♥2793 | ✅ **武侠首选** |
-| **pixel_f2**（像素风 SD1.5） | 144MB / rank 128 | — | ⏳ 待 A/B：容量是 px_illustrious 的 4 倍 |
-| paseer_wuxia（武侠线稿） | 144MB | dl 2533 / ♥507 | ⚠️ 纯线稿，当形状底稿用 |
-| px_toolkit（2D 像素工具包） | 36MB | dl 53451 / ♥5140 | ❌ 背景污染 + 多主体，隐藏 |
-| guofeng（工笔重彩） | 72MB | dl 18595 / ♥2416 | ❌ 手部崩坏，隐藏 |
-| xuer_wuxia | 144MB | dl 8871 / ♥1005 | ❌ 出的是真人摄影风，隐藏 |
-
-> 人气高 ≠ 适合产线。上面三个 ❌ 的下载量都不低，实测才知道不行。
-> 隐藏项保留文件（`"hidden": true`），前端不显示，便于复现判断。
-
-### 两条必须记住的用法
-
-**1. 像素 LoRA 要配 `preset=pixel`，绝不能配 `sprite`**
-
-`sprite` 契约里写着 `16-bit pixel art`，而像素 LoRA 已经把风格学进去了，重复要求
-会让画面在「插画」和「像素」之间打架——实测套 sprite 契约出的是彩色色块怪物。
-正确组合：
-
-```python
-txt2img(prompt="pixelart, knight in armor holding sword", preset="pixel",
-        lora="px_illustrious", lora_scale=0.75,
-        width=512, height=576, pixel=4, palette=24, matte=True)
-```
-
-**2. 武侠 LoRA 会给画面盖印章、画水墨背景**
-
-必须靠 `preset=wuxia` 的负向词压（`seal / signature / ink splatter / paper texture`），
-而且这类图必须用 **u2net 语义分割**抠图——纯色键控会把白袍和脸一起抠掉（实测第一帧
-脸直接消失）。另外 `wuxia_v2` 的产出**偏半身**（训练集如此），要全身走 W4 姿态驱动，
-让骨架锁结构、LoRA 只给风格。
-
-## LoRA 训练
-
-自包含训练循环（`workflows/train.py`），不依赖 diffusers 的 examples 脚本，
-产出直接是 `Engine.apply_lora` 能加载的格式，训完立刻出现在下拉里。
-
-```bash
-# 数据集：图片 + 同名 .txt（每张一句 caption）；没有 .txt 时用 --caption 兜底
-dataset/my_knight/
-  knight_01.png
-  knight_01.txt   ->  "mk_knight, a knight in plate armor, pixel art, white background"
-  ...
-
-python tools/train_lora.py --data dataset/my_knight --name mk_knight \
-    --caption "mk_knight, pixel art game sprite, white background" --steps 400
-```
-
-WebUI 顶栏「训练 LoRA」同一个功能，有进度条、loss、显存与可训练参数量。
-
-**实测（RTX 4090 24GB，fp32 UNet + gradient checkpointing，512 分辨率 batch 1）**
-
-| 项 | 数值 |
-|---|---|
-| 可训练参数 | rank8 → 1.59M；rank16 → 3.19M |
-| 耗时 | 约 **0.34s/步**（60 步 25s / 420 步 143s） |
-| 峰值显存 | **4.67GB** |
-| 产出体积 | rank8 → 6.2MB；rank16 → 13MB |
-
-**三个坑（都写进代码注释了）**
-
-1. `save_lora_weights` 的第一个参数是**目录**不是文件，且文件名写死
-   `pytorch_lora_weights.safetensors`。直接传文件路径会得到一个同名目录，产物「消失」。
-2. 直接传 `unet_lora_layers=unet` 会把**整个 fp32 UNet（3.3GB）**存进去且格式不对。
-   必须 `get_peft_model_state_dict(unet)` + `convert_state_dict_to_diffusers()` 只取 LoRA 层。
-3. 触发词必须写进 `loras.json`，否则训完也没人知道该写什么词唤出它（等于白训）。
-
-**关于样本量**：实测 6 张图 + 420 步只能学到「像素风的大致色块分布」，出图仍会跑形。
-角色 LoRA 建议 15~30 张同一角色不同姿势，风格 LoRA 20~40 张，配合
-`plan_steps()` 自动按样本数算步数（下限 100、上限 2000）。
+历史记录还在：`git show pre-sd-purge:README.md` 能看到完整的 LoRA 调研结论
+（哪些能用、哪些静默空挂、触发词为什么必须自动前置）。那些结论对 SD 仍然有效，
+只是这个工作台不再跑 SD 了。
 
 ## WebUI（画布 · 文生图 / 图生图）
 
@@ -1756,52 +1626,53 @@ python tools/video.py i2v assets/cat.png "the same character walking" -o assets/
 ## 测试
 
 ```bash
-python -m pytest tests -q        # 404 个用例，约 560s（含 SDXL 与动漫底模慢用例）
+python -m pytest tests -q        # 260 个用例，约 150s（含两次 Qwen 管线加载）
 ```
 
-**按改动选测试，不要每次都跑全量**（全量 4 分钟，只在合并/发版前跑一次）：
+**按改动选测试，不要每次都跑全量**（全量 2.5 分钟，只在合并/发版前跑一次）：
 
 | 改了什么 | 跑这些 | 约 |
 |---|---|---|
-| `workflows/engine.py` | test_review_fixes test_lora test_vramopt | 25s |
-| `workflows/generate.py` | test_review_p1 test_denoise | 40s |
-| `workflows/presets.py` / `clip.py` | test_presets test_quality | 10s |
+| `workflows/engine.py` | test_models test_vramopt test_stability | 110s |
+| `workflows/generate.py` | test_qwen_workflows test_denoise | 45s |
+| `workflows/presets.py` | test_presets test_quality | 10s |
 | `workflows/matte.py` / `refprep.py` | test_matte test_refprep | 20s |
 | `workflows/postprocess.py` / `pixelfy.py` | test_postprocess test_pixelfy test_sheet | 15s |
-| `app.py` / `workflows/assetdb.py` | test_api test_review_p2 | 35s |
+| `app.py` / `workflows/assetdb.py` | test_api test_review_p2 | 15s |
 | `tools/*` `docs/*` `README` | 不跑（工具靠自身输出验证） | — |
-| 合并 / 发版前 | 全量 | 240s |
+| 合并 / 发版前 | 全量 | 150s |
 
-纯 CPU 的子集（presets / postprocess / matte / repaint / assetdb）都在 1 分钟内，
-改文档或工具时完全不必要动 GPU 用例。
+纯 CPU 的子集（presets / postprocess / matte / repaint / assetdb / qwen_workflows）
+都在 1 分钟内。**只有真正加载 Qwen 权重的三条**（test_models 的 /models、
+test_stability 的 free 与泄漏、test_matte 的缓存素材）需要 GPU。
 
 | 文件 | 覆盖 | 用例数 |
 |---|---|---|
-| `tests/test_postprocess.py` | 锚点、逐帧对齐、打包几何、色板上限、alpha 二值化、裁边、**像素块单色性**、**前景块计数** | 11 |
-| `tests/test_generate.py` | **角色迁移（两个源入 meta / 检测不到人时报错）**、**序列帧替换（换皮确定性 + 形状逐像素不变 / AI 重绘回原格子尺寸 / 网格认不出时报错 / auto 模式在像素画上降级到轮廓）**、**像素转换（每格一色 / 指定目标尺寸 / 不量化模式）**、**局部 AI 重绘（选区外逐点不变 / 约束条款是英文 / 蒙版尺寸不匹配报错）**、**抠图三种模式（透明/纯色/换背景图）**、同 seed 逐像素一致、不同 seed 相异、色板生效、**重绘选区外不变**、序列帧数、**闸门重提与批量挑帧**、**clip_skip 生效与 meta 记录**、主体数上报、**图生图后处理与 raw 留存**、**项目隔离（产物分目录 + 跨项目引用被拒）**、显存回收、缺权重报错 | 22 |
-| `tests/test_controlnet.py` | Canny conditioning 生效、Tile 放大结构相关性 > 0.5、像素块均匀性 | 3 |
-| `tests/test_api.py` | **wpc 队列往返**、**wss 队列往返（换皮模式）**、**wpx 队列往返**、**w5 队列往返**、**未知 workflow 报错**、**wbg 队列往返**、**蒙版端点（同名覆盖/拒绝非 PNG）**、全部端点、队列串行性、**w2 队列往返（含 raw 留存）**、**上传端点（坏文件/空文件/文件名清洗/进项目目录）**、**真删（连带 sidecar/raw、索引清理、路径穿越防护、索引不可删）**、**资产按项目过滤**、**下载的 Content-Disposition**、400/404 | 24 |
-| `tests/test_pose.py` | 检测器切换、18 点完整性、关节在画面内且头高于髋、骨架渲染、双后端一致性、引擎内的姿态提取器单例、精灵图切片 CLI | 7 |
-| `tests/test_sheet.py` | **精灵图网格自动检测（等宽网格 / 带缝 / 白底 / 纵向不误判 / 单帧返回 None）**、**切分（数量、位置顺序、跳空格、trim、越界报错）**、前景掩膜 | 16 |
-| `tests/test_generate.py`（新增） | **AnimateDiff 路线（引擎可用性 / 整段生成 / 残缺帧补提记录 / 权重缺失时报错）**、**显存有界 / 档位降分辨率**、**SDXL clip_skip 换算语义**、**anime 契约（质量词 / 短负向 / 显式风格 / 构图不写死）** | 9 |
-| `tests/test_vramopt.py` | **显存规划（帧数不砍 / 降分辨率 / 档位行为）**、**估算公式（随帧数超线性 / 随分辨率平方）**、**两项优化真的生效**、**重复优化幂等** | 11 |
-| `tests/test_refprep.py` | **参考图预处理（透明区填白不填黑 / 主体裁剪居中 / 像素画最近邻缩放）**、**帧级评分（剪影 IoU / 身份相似度 / 贴边检测 / 候选挑选 / 序列一致性）** | 19 |
-| `tests/test_refcond.py` | **轮廓条件（有边缘 / 标出主体内部 / 最近邻放大 / 全透明报错）**、**auto 模式降级到轮廓且记录原因**、**强制骨架模式时明确报错**、**换皮（保形状 / 只用色板颜色 / 确定性 / 保住明暗关系 / 空色板无副作用）**、色板提取忽略透明区 | 13 |
-| `tests/test_quality.py` | 前景占比/质心/漂移、**贴边检测**（含未抠图时整体失效）、无模型时「无法判定」、关节数影响排序与闸门 | 11 |
-| `tests/test_io_paths.py` | 视频抽帧、GIF、精灵图切片（含空格子）、CLI 错误码、非 8 倍数尺寸重绘、cols 夹取、环境自检 JSON、LoRA 空接口 | 11 |
-| `tests/test_presets.py` | 契约拼接与优先级、77 token 预算、**长提示词不丢后缀**、**无逗号文本不截成空串**、中文 token 估算、下载器过滤 | 12 |
-| `tests/test_pixelfy.py` | **网格检测（正方/非正方格子）**、**每格一色**、**色板外颜色为 0**、**共享色板**、alpha 二值、**噪点清理保留高对比细节**、**离谱网格尺寸不死循环**、**网格吸附到标准尺寸**、色板确定性 | 20 |
-| `tests/test_repaint.py` | **选区外逐点不变**、硬边完全替换、**色彩校正不把中心拉回原色**、**色板吸附保留远色**、蒙版运算、尺寸对齐、**RGBA 进 VAE 会炸**、**透明底填白** | 16 |
-| `tests/test_clip.py` | **clip_skip=1 与管道默认逐元素一致**、cs2 换向量、越界值夹取、无 text_encoder 时报错 | 4 |
-| `tests/test_fetch.py` | Range 分块拼接、断点续传、**拒绝非 206 响应**（防 429 错误体污染）、超长残留文件重置 | 5 |
-| `tests/test_stability.py` | 连续 20 次推理显存不涨、`free()` 释放 pipeline 与 ControlNet、跨进程同 seed 一致、PNG 结构、sidecar 一致 | 5 |
-| `tests/test_matte.py` | 背景估计、连通域不误抠内部同色区、去白边生效、alpha 二值、容差方向、裁边、真实生成图抠图、**u2net 抠空自动回退**、**强制后端不回退** | 13 |
-| `tests/test_anim.py` | GIF/APNG 帧数、索引几何、Godot tres 分区序列、tscn 像素设置（最近邻/autoplay/脚底偏移）、导出确定性 | 9 |
-| `tests/test_video.py` | numpy/PIL 帧兼容、mp4 落地、模型路径校验、Wan 真实生成（`RUN_WAN=1`） | 6 |
-| `tests/test_lora.py` | 注册表扫描/元数据/坏 JSON 容错、名称解析、去碎屑、贴边占比判定、武侠契约预算 | 13 |
-| `tests/test_train.py` | 数据集读取与兜底、步数规划、**端到端 6 步真训练**（导出的体积上限、可被 scan/apply_lora 认出）、`/train` 全流程 | 9 |
-| `tests/test_models.py` | `/models` 只列出本机已装的、未知底模报错、**W3+SDXL 走 base 权重且选区外不变**、**SDXL clip_skip 的 penultimate 换算**、SDXL 真实生成、**W4+SDXL 端到端**、SDXL 版 IPA 与三条 ControlNet、**refiner embeds 必须等于 OpenCLIP 1280 维隐层**、**精修强度换算**、**精修不糊（方差 ≥ 不精修的 70%）** | 14 |
-| `tests/test_denoise.py` | `strip_fringe` 剥白边/迭代/不误伤主体、`clean_isolated` 内部改色/外挂删除/**斜向轮廓不被吃** | 9 |
+| `tests/test_qwen_workflows.py` | **十个工作流的能力表与「近似」标记**、**局部重绘选区外逐点不变**、**output_resolution 真的对齐**、**逐帧尺度归一**、**透明底 alpha 不被白底吃掉**、**Qwen 路径不许碰已删的 SD 管线** | 21 |
+| `tests/test_matte.py` | 背景估计、连通域不误抠内部同色区、去白边、alpha 二值、**u2net 抠空自动回退**、**已有 alpha 复用（IoU 1.000）**、**雾状 alpha 仍重抠**、**补内部洞但不动通到边界的缺口** | 17 |
+| `tests/test_api.py` | 各工作流队列往返、**未知 workflow 报错**、蒙版端点、上传端点、真删（连带 sidecar/raw、路径穿越）、资产按项目过滤、**参数按签名过滤并记 params_ignored** | 23 |
+| `tests/test_models.py` | **只剩一个底模时接口自洽**：available / arch / recommend / caps.approx / refiner=false、未知底模报错 | 5 |
+| `tests/test_postprocess.py` | 锚点、逐帧对齐、打包几何、色板上限、alpha 二值、像素块单色性、前景块计数 | 11 |
+| `tests/test_pixelfy.py` | 网格检测、每格一色、共享色板、噪点清理、网格吸附 | 20 |
+| `tests/test_sheet.py` | 精灵图网格自动检测、切分、前景掩膜 | 16 |
+| `tests/test_pose.py` | 检测器切换、18 点完整性、骨架渲染、双后端一致性、单例 | 7 |
+| `tests/test_refcond.py` | 轮廓条件、auto 降级、强制骨架报错、换皮 | 13 |
+| `tests/test_refprep.py` | 参考图预处理、帧级评分 | 19 |
+| `tests/test_quality.py` | 前景占比/质心/漂移/贴边、无模型时「无法判定」 | 11 |
+| `tests/test_io_paths.py` | 视频抽帧、GIF、切片 CLI、非 8 倍数尺寸、环境自检 | 10 |
+| `tests/test_presets.py` | 契约拼接与优先级、token 预算、长提示词不丢后缀 | 9 |
+| `tests/test_repaint.py` | 选区外逐点不变、色彩校正、色板吸附、RGBA 进 VAE 会炸 | 16 |
+| `tests/test_stability.py` | 连续出图显存不涨、**free() 清空缓存**、跨进程同 seed（`MEOW_SLOW=1` 手动跑） | 5 |
+| `tests/test_vramopt.py` | 显存规划（帧数不砍 / 降分辨率 / 档位）、估算公式 | 9 |
+| `tests/test_denoise.py` | `strip_fringe` 剥白边、`clean_isolated`、斜向轮廓不被吃 | 9 |
+| `tests/test_anim.py` | GIF/APNG 帧数、Godot tres/tscn 导出 | 9 |
+| `tests/test_video.py` | numpy/PIL 帧兼容、mp4 落地、Wan 真实生成（`RUN_WAN=1`） | 6 |
+| `tests/test_review_p2.py` | 抠图后端选择、网格对齐、资产索引增量 | 9 |
+
+**SD 时代的 8 个测试模块已一起删除**（`test_clip` / `test_controlnet` /
+`test_generate` / `test_lora` / `test_train` / `test_review_fixes` /
+`test_review_p1` / `test_fetch`）：它们测的全是 LoRA 注入、ControlNet 条件、
+clip_skip 换算、AnimateDiff 时序这些已经不存在的机制。
 
 已知限制：骨架质量决定成败——实测 8 帧序列里有 2 帧只提取到 8/18 个关节（手臂与身体重叠），
 这两帧生成时会自由发挥，出现朝向漂移。产线上应当在提取后按「可见关节数」筛帧；
