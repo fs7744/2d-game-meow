@@ -30,10 +30,13 @@ def test_models_endpoint(client, eng):
     assert set(body["arch"].values()) == {"qwen21"}
 
     rec = body["recommend"][DEFAULT_MODEL]
-    # 768² / 24 步 / 不像素化：每一条都有实测依据（PLAN §2.6 的步数梯度）
+    # 768² / 16 步 / 不像素化 / cfg=1.0：每一条都有实测依据
+    # （PLAN §2.6 的步数梯度、§2.10 的真 CFG 与耗时拆解）
     assert rec["width"] == 768 and rec["height"] == 768
     assert rec["pixel"] == 0 and rec["palette"] == 0
-    assert rec["steps"] >= 20
+    assert rec["steps"] == 16
+    # cfg=1.0 = 单次前向（真 CFG 会让 transformer 前向翻倍，见 PLAN §2.10）
+    assert rec["cfg"] == 1.0
     assert 1 <= rec["max_candidates"] <= 6
 
     caps = body["caps"][DEFAULT_MODEL]

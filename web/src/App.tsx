@@ -64,7 +64,8 @@ const DEFAULT_PARAMS: GenParams = {
   // pixel=6 / palette=32 正好把 768 降到 128 有效像素 —— 标准精灵尺寸。
   width: 768,
   height: 768,
-  steps: 30,
+  // 16 步是实测下限（浅色主体可以调到 20~24）
+  steps: 16,
   // Qwen 的真 CFG：1 = 单次前向（快 40%，默认）；>1 = 真 CFG（慢一倍）
   cfg: 1.0,
   seed: -1,
@@ -481,7 +482,7 @@ export default function App() {
       // 1024² 是 Qwen **文生图**的推荐，但角色迁移是「改图」路线（双图条件），
       // 768² / 28 步实测姿势跟随最准，也快得多（72s vs 150s+）。
       if (n.kind === 'poseclone' && next === 'qwen-image-2.1') {
-        Object.assign(patch, { width: 768, height: 768, steps: 28, cfg: 1.0 })
+        Object.assign(patch, { width: 768, height: 768, steps: 16, cfg: 1.0 })
       }
       // 序列帧候选上限按新底模的显存上限夹住，否则界面写着 4 实际只能出 3
       if (n.kind === 'spriteswap' && rec) {
