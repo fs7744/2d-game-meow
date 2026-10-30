@@ -13,7 +13,8 @@ type Props = {
   onDeleteProject: (id: string) => void
   onAddNode: (
     kind?: 'gen' | 'img2img' | 'image' | 'bg' | 'inpaint' | 'airepaint' | 'pixelify'
-    | 'poseclone' | 'spriteswap' | 'topixel' | 'poseswap' | 'poseedit',
+    | 'poseclone' | 'spriteswap' | 'topixel' | 'poseswap' | 'poseedit'
+    | 'outpaint' | 'outfit' | 'faceswap',
   ) => void
   canApply: boolean
   onApplyFav: (text: string) => void
@@ -194,6 +195,51 @@ export default function Sidebar({
               <em>拿已有图改内容 / 改画风</em>
             </span>
             <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('img2img')}>+</button>
+          </div>
+          <div
+            className="rail-item"
+            draggable
+            onDragStart={(e) => {
+              e.dataTransfer.setData('application/x-node-type', 'outpaint')
+              e.dataTransfer.effectAllowed = 'copy'
+            }}
+            title="扩图：把图往左/右/上/下/四周扩展，新区域按场景连续性补全"
+          >
+            <span className="rail-item-main">
+              <b>扩图</b>
+              <em>场景/背景延展</em>
+            </span>
+            <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('outpaint')}>+</button>
+          </div>
+          <div
+            className="rail-item"
+            draggable
+            onDragStart={(e) => {
+              e.dataTransfer.setData('application/x-node-type', 'outfit')
+              e.dataTransfer.effectAllowed = 'copy'
+            }}
+            title="换装：把服装图的衣服穿到人物图上，保留身份与姿势"
+          >
+            <span className="rail-item-main">
+              <b>换装</b>
+              <em>同角色不同装备</em>
+            </span>
+            <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('outfit')}>+</button>
+          </div>
+          <div
+            className="rail-item"
+            draggable
+            onDragStart={(e) => {
+              e.dataTransfer.setData('application/x-node-type', 'faceswap')
+              e.dataTransfer.effectAllowed = 'copy'
+            }}
+            title="换脸：把身份图的脸与发型换到场景人物上，保留姿势与场景"
+          >
+            <span className="rail-item-main">
+              <b>换脸</b>
+              <em>换主角 / 捏脸落图</em>
+            </span>
+            <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('faceswap')}>+</button>
           </div>
           <div
             className="rail-item"

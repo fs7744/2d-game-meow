@@ -12,6 +12,7 @@ import {
   submitPoseSeq,
   submitSpriteSwap, submitTxt2Img, uploadImage, extractPose,
   fetchLoras, applyLoras, setFastMode, type QwenLora, type ActiveLora,
+  submitOutpaint, submitOutfitSwap, submitFaceSwap,
 } from './api'
 import ConfirmDialog from './components/ConfirmDialog'
 import Lightbox from './components/Lightbox'
@@ -97,6 +98,8 @@ const DEFAULT_PARAMS: GenParams = {
   pxSnapTo: 16,           // 网格吸附到 16 的整数倍（精灵常用尺寸）
   genStyle: 'sprite16',   // 产出风格：像素精灵 16-bit（最常用）
   fastMode: false,        // 快速模式（Lightning 少步蒸馏），默认关
+  outpDirection: 'right', // 扩图方向（right/left/up/down/all）
+  outpExpand: 0.5,        // 扩图比例（0.5 = 往该方向扩一半）
   // 转像素（topixel）：任意图 → 像素画（没有源图时先出图再转）
   apTarget: 192,          // 目标原生像素边长（192 装得下「全身 + 武器」）
   apColors: 32,           // 共享色板（32 色 = 16-bit 风格）
@@ -476,7 +479,10 @@ export default function App() {
                   : type === 'spriteswap' ? 'spriteswap'
                     : type === 'poseswap' ? 'poseswap'
                       : type === 'poseedit' ? 'poseedit'
-                        : 'gen'
+                        : type === 'outpaint' ? 'outpaint'
+                          : type === 'outfit' ? 'outfit'
+                            : type === 'faceswap' ? 'faceswap'
+                              : 'gen'
     setNodes((list) => {
       // 原点放多个时阶梯错开，避免完全重叠
       const sameSpot = list.filter((n) => n.x === at.x && n.y === at.y).length
@@ -763,6 +769,8 @@ export default function App() {
     if (node.kind === 'img2img' || node.kind === 'bg' || node.kind === 'inpaint'
       || node.kind === 'airepaint' || node.kind === 'pixelify' || node.kind === 'poseclone'
       || node.kind === 'spriteswap'
+      // 扩图只吃源图；换装/换脸吃源图（图1）+ charSource（图2）
+      || node.kind === 'outpaint' || node.kind === 'outfit' || node.kind === 'faceswap'
       // **topixel 例外**：源图是可选的。没有源图时后端会用 prompt 先出
       // 一张图再转像素——这才是这条链路的默认用法（用户只写描述）。
       ) {
@@ -779,7 +787,36 @@ export default function App() {
     patchNode(id, { job: { id: 'pending', status: 'queued', startedAt: Date.now() } })
     try {
       let jobId: string
-      if (node.kind === 'poseclone') {
+      if (node.kind === 'outpaint') {
+        // 扩图：只要源图 + 方向/比例；prompt 可选（描述原图里看得见的内容）
+        const src = sourcePathOf(node)
+        if (!src) {
+          patchNode(id, { job: { id: 'error', status: 'failed',
+            error: '还没有源图：把要扩展的图连过来' } })
+          return
+        }
+        const r = await submitOutpaint(node.params,
+          { model: mdl, matteBackend, scope: currentId }, src)
+        jobId = r.job_id
+      } else if (node.kind === 'outfit' || node.kind === 'faceswap') {
+        // 换装/换脸：图1（基底）+ 图2（服装/脸）
+        const basePath = sourcePathOf(node)
+        const refPath = charPathOf(node)
+        if (!basePath || !refPath) {
+          const isOutfit = node.kind === 'outfit'
+          patchNode(id, { job: { id: 'error', status: 'failed',
+            error: !basePath
+              ? '缺底图：连线接一张（换装是"人物"，换脸是"场景人物"）'
+              : `缺${isOutfit ? '服装图' : '人脸图'}：在下面选一个` } })
+          return
+        }
+        const r = node.kind === 'outfit'
+          ? await submitOutfitSwap(node.params,
+            { model: mdl, matteBackend, scope: currentId }, basePath, refPath)
+          : await submitFaceSwap(node.params,
+            { model: mdl, matteBackend, scope: currentId }, basePath, refPath)
+        jobId = r.job_id
+      } else if (node.kind === 'poseclone') {
         const posePath = sourcePathOf(node)
         const charPath = charPathOf(node)
         if (!posePath || !charPath) {

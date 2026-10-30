@@ -116,7 +116,8 @@ function common(params: GenParams, opts: SubmitOpts) {
 }
 
 async function post(
-  workflow: 'w1' | 'w2' | 'w3' | 'w4' | 'w5' | 'wbg' | 'wpx' | 'wpc' | 'wss' | 'topixel' | 'wap',
+  workflow: 'w1' | 'w2' | 'w3' | 'w4' | 'w5' | 'wbg' | 'wpx' | 'wpc' | 'wss'
+    | 'topixel' | 'wap' | 'wout' | 'woutfit' | 'wface',
   params: Record<string, unknown>,
 ) {
   const r = await fetch(`${base}/generate`, {
@@ -257,6 +258,64 @@ export function submitToPixel(
  * 角色迁移（wpc）。动作参考图 → 骨架/轮廓（条件图）+ 角色图，两张一起进
  * Qwen 的 vision context，生成角色做出参考动作的图。
  */
+/**
+ * 扩图（wout）：把 `image` 往 `direction` 方向扩 `expand` 比例。
+ *
+ * 靠 Outpaint LoRA + 中性灰 padding；提示词由后端加 LoRA 触发句，
+ * 这里传的 prompt 只用来描述**原图里看得见的**内容（给模型当上下文）。
+ */
+export function submitOutpaint(
+  params: GenParams,
+  opts: SubmitOpts,
+  image: string,
+) {
+  return post('wout', {
+    image,
+    direction: params.outpDirection || 'right',
+    expand: params.outpExpand ?? 0.5,
+    prompt: params.prompt,
+    negative: params.negative || undefined,
+    steps: params.steps,
+    cfg: params.cfg,
+    seed: params.seed,
+    ...opts,
+  })
+}
+
+/** 换装（woutfit）：把 `outfit`（图2）的服装穿到 `image`（图1）的人物身上 */
+export function submitOutfitSwap(
+  params: GenParams,
+  opts: SubmitOpts,
+  image: string,
+  outfit: string,
+) {
+  return post('woutfit', {
+    image, outfit,
+    prompt: params.prompt,
+    negative: params.negative || undefined,
+    width: params.width, height: params.height,
+    steps: params.steps, cfg: params.cfg, seed: params.seed,
+    ...opts,
+  })
+}
+
+/** 换脸（wface）：把 `face`（图2）的脸/发型换到 `image`（图1）的人物上 */
+export function submitFaceSwap(
+  params: GenParams,
+  opts: SubmitOpts,
+  image: string,
+  face: string,
+) {
+  return post('wface', {
+    image, face,
+    prompt: params.prompt,
+    negative: params.negative || undefined,
+    width: params.width, height: params.height,
+    steps: params.steps, cfg: params.cfg, seed: params.seed,
+    ...opts,
+  })
+}
+
 export function submitPoseClone(
   params: GenParams,
   opts: SubmitOpts,

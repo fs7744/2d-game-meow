@@ -471,6 +471,11 @@ export default function GenNodeCard({
   const isSpriteSwap = node.kind === 'spriteswap'
   const isPoseSwap = node.kind === 'poseswap'
   const isPoseEdit = node.kind === 'poseedit'
+  const isOutpaint = node.kind === 'outpaint'
+  const isOutfit = node.kind === 'outfit'
+  const isFaceSwap = node.kind === 'faceswap'
+  /** 换装/换脸：都是「两图 + 结构化指令」，共用一套正文 */
+  const isSwap = isOutfit || isFaceSwap
   /** 是否锁了高度（只有参数视图能锁；图片等比显示，锁高会拉伸） */
   const lockH = !isImg && !imageMode && !!node.h
   /**
@@ -797,7 +802,8 @@ export default function GenNodeCard({
             isPoseSwap ? ' poseswap' : ''
           }${isToPixel ? ' topixel' : ''}`}
         >
-          {isPoseEdit ? '骨骼编辑' : isImg ? '图片' : isBg ? '抠图' : isPixelify ? '像素转换'
+          {isOutpaint ? '扩图' : isOutfit ? '换装' : isFaceSwap ? '换脸'
+            : isPoseEdit ? '骨骼编辑' : isImg ? '图片' : isBg ? '抠图' : isPixelify ? '像素转换'
             : isToPixel ? '转像素'
             : isPoseClone ? '角色迁移'
               : isPoseSwap ? '姿态序列'
@@ -1396,6 +1402,95 @@ export default function GenNodeCard({
           {job?.status === 'done' && job.candidatesNote && (
             <div className="warn">⚠ {job.candidatesNote}</div>
           )}
+        </div>
+      ) : isOutpaint ? (
+        <div className="node-body">
+          {sourceBox}
+          <div className="skel-dirs" style={{ gridTemplateColumns: 'repeat(5, 1fr)' }}>
+            {([['right', '右'], ['left', '左'], ['down', '下'], ['up', '上'],
+              ['all', '四周']] as const).map(([v, label]) => (
+              <button
+                key={v}
+                className={`skel-dir${p.outpDirection === v ? ' on' : ''}`}
+                onClick={() => setParam('outpDirection', v)}
+                title={`往${label}扩展`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <label className="strength" title="扩展比例：0.5 = 往该方向扩一半">
+            <span>扩展</span>
+            <input
+              type="range" min={0.15} max={1.5} step={0.05}
+              value={p.outpExpand}
+              onChange={(e) => setParam('outpExpand', Number(e.target.value))}
+            />
+            <b>{Math.round(p.outpExpand * 100)}%</b>
+          </label>
+          <div className="prompt-wrap">
+            <textarea
+              className="prompt" rows={2}
+              placeholder="可选：描述原图里看得见的内容（给模型当上下文，别描述要扩出来的部分）"
+              value={p.prompt}
+              onChange={(e) => setParam('prompt', e.target.value)}
+            />
+          </div>
+          <div className="src-note">
+            靠 Outpaint LoRA + 中性灰填充：原图区域贴回，新区域按场景连续性补全。
+            一次别扩太大（超过 1.0 容易跑偏），要更大就分两次扩。
+          </div>
+        </div>
+      ) : isSwap ? (
+        <div className="node-body poseclone-body">
+          {sourceBox}
+          <div className="src-box char-box">
+            <span
+              className="conn in char"
+              data-port="char"
+              title={isOutfit ? '服装图：把上游输出拖到这里' : '人脸图：把上游输出拖到这里'}
+            />
+            <div className="src-thumb" title={isOutfit ? '服装图' : '人脸图'}>
+              {charThumb ? (
+                <img src={charThumb} alt="参考" draggable={false} />
+              ) : (
+                <span>{isOutfit ? '无服装' : '无人脸'}</span>
+              )}
+            </div>
+            <div className="src-side">
+              <select
+                value={node.charSource?.nodeId ?? ''}
+                onChange={(e) =>
+                  onPatch({
+                    charSource: e.target.value ? { nodeId: e.target.value } : undefined,
+                  })
+                }
+              >
+                <option value="">{isOutfit ? '（选服装图）' : '（选人脸图）'}</option>
+                {sourceOptions.map((o) => (
+                  <option key={o.id} value={o.id}>{o.label}</option>
+                ))}
+              </select>
+              <div className="src-note">
+                {charThumb
+                  ? (isOutfit ? '服装的剪裁/颜色/材质来自这张' : '脸/发型来自这张')
+                  : (isOutfit ? '缺服装图' : '缺人脸图')}
+              </div>
+            </div>
+          </div>
+          <div className="prompt-wrap">
+            <textarea
+              className="prompt" rows={2}
+              placeholder="可选：补充细节（如「外套改成皮夹克」「笑得自然些」）"
+              value={p.prompt}
+              onChange={(e) => setParam('prompt', e.target.value)}
+            />
+          </div>
+          <div className="src-note">
+            {isOutfit
+              ? '换装：保留图 1 的身份/姿势/背景，穿上图 2 的服装。'
+              : '换脸：保留图 1 的姿势/服装/场景，换成图 2 的脸与发型。'}
+          </div>
         </div>
       ) : isPoseClone ? (
         <div className="node-body poseclone-body">

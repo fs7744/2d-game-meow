@@ -1972,6 +1972,60 @@ function check(name, cond, extra = '') {
   dom.window.close()
 }
 
+// 41) 扩图 / 换装 / 换脸：三个新节点能创建、正文渲染正确
+{
+  const { dom, errors } = await boot('?demo=1')
+  const doc = dom.window.document
+  const win = dom.window
+  await new Promise((r) => setTimeout(r, 600))
+
+  const addOf = (name) => [...doc.querySelectorAll('.rail-add')].find((b) =>
+    (b.closest('.rail-item')?.textContent || '').includes(name))
+
+  check('侧栏有「扩图」「换装」「换脸」三个入口',
+    !!addOf('扩图') && !!addOf('换装') && !!addOf('换脸'),
+    [...doc.querySelectorAll('.rail-item b')].map((b) => b.textContent).join('/'))
+
+  // 扩图：5 个方向按钮 + 比例滑块
+  addOf('扩图')?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 250))
+  const outNode = [...doc.querySelectorAll('.node')].find((n) =>
+    (n.querySelector('.node-kind')?.textContent || '').includes('扩图'))
+  check('能创建扩图节点', !!outNode)
+  check('扩图有 5 个方向按钮（右/左/下/上/四周）',
+    outNode?.querySelectorAll('.skel-dir').length === 5,
+    String(outNode?.querySelectorAll('.skel-dir').length))
+  const allBtn = [...(outNode?.querySelectorAll('.skel-dir') || [])]
+    .find((b) => (b.textContent || '') === '四周')
+  allBtn?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 150))
+  check('点「四周」后高亮', !!allBtn?.classList.contains('on'), allBtn?.className)
+
+  // 换装：有 char 输入端口
+  addOf('换装')?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 250))
+  const outfitNode = [...doc.querySelectorAll('.node')].find((n) =>
+    (n.querySelector('.node-kind')?.textContent || '').includes('换装'))
+  check('能创建换装节点', !!outfitNode)
+  check('换装有第二路输入端口（服装图）',
+    !!outfitNode?.querySelector('.conn.in.char'))
+  check('换装提示提到「身份/姿势/背景」保留',
+    (outfitNode?.textContent || '').includes('保留图 1'),
+    (outfitNode?.querySelector('.src-note')?.textContent || '').slice(0, 40))
+
+  // 换脸
+  addOf('换脸')?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 250))
+  const faceNode = [...doc.querySelectorAll('.node')].find((n) =>
+    (n.querySelector('.node-kind')?.textContent || '').includes('换脸'))
+  check('能创建换脸节点', !!faceNode)
+  check('换脸提示提到「脸与发型」',
+    (faceNode?.textContent || '').includes('脸与发型'),
+    (faceNode?.textContent || '').slice(0, 60))
+  check('新节点场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
 const failed = results.filter((r) => !r.ok)
 console.log(`\n${results.length - failed.length}/${results.length} 通过`)
 process.exit(failed.length ? 1 : 0)

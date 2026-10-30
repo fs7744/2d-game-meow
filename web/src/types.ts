@@ -4,6 +4,7 @@ export type Preset = 'sprite' | 'portrait' | 'wuxia' | 'pixel' | 'anime' | 'none
 export type NodeKind =
   | 'gen' | 'img2img' | 'image' | 'bg' | 'inpaint' | 'airepaint' | 'pixelify'
   | 'poseclone' | 'spriteswap' | 'poseswap' | 'topixel' | 'poseedit'
+  | 'outpaint' | 'outfit' | 'faceswap'
 
 /** 骨骼编辑器节点的一个关节：x/y 归一化 0~1，z 是前后深度（伪 3D） */
 export type Joint3 = { x: number; y: number; z: number }
@@ -126,6 +127,9 @@ export type GenParams = {
   ssMode: SwapMode        // 序列帧替换：AI 重绘 还是 确定性换皮
   /** 快速模式：挂 Lightning 少步蒸馏 LoRA + 步数降到 8（实测 -46%，画质几乎不掉） */
   fastMode: boolean
+  // 扩图（outpaint）：往哪个方向扩、扩多少
+  outpDirection: 'right' | 'left' | 'up' | 'down' | 'all'
+  outpExpand: number     // 相对对应边长的比例（0.5 = 扩一半）
   ssRefMode: RefMode      // 序列帧替换：动作参考图的解释方式
   ssPalette: number       // 序列帧替换：共享色板色数
   ssCandidates: number    // 序列帧替换：每帧生成几个候选再挑最好的

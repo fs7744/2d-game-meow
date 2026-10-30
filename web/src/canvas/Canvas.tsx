@@ -201,7 +201,8 @@ export default function Canvas({
       || referencedIds.has(n.id))
     .map((n) => {
       const kindLabel = n.kind === 'image' ? '图片' : n.kind === 'poseedit' ? '骨骼'
-        : n.kind === 'gen' ? '图生成' : '图'
+        : n.kind === 'outpaint' ? '扩图' : n.kind === 'outfit' ? '换装'
+          : n.kind === 'faceswap' ? '换脸' : n.kind === 'gen' ? '图生成' : '图'
       const name = (n.kind === 'image' || n.kind === 'poseedit')
         ? fileNameOf(n.image?.path) || n.id
         : n.params.prompt.slice(0, 20) || n.id
