@@ -71,9 +71,6 @@ const DEFAULT_PARAMS: GenParams = {
   pixel: 6,
   palette: 32,
   matte: false,
-  clipSkip: 1,
-  // 图生图默认幅度：0.55 能明显改内容又不丢构图；低于 0.35 基本只是磨皮
-  strength: 0.55,
   // 抠图节点默认：透明底（纯去背景）
   bgMode: 'alpha',
   bgColor: '#ffffff',
@@ -103,8 +100,6 @@ const DEFAULT_PARAMS: GenParams = {
   apEdgeRebuild: true,    // 轮廓描边——不描就「融化」
   apMatte: true,          // 先抠背景（转照片时可关掉保留背景）
   // 角色迁移：姿态强度 / 身份强度 / 人物占画面高度
-  pcCnScale: 1.0,
-  pcIpaScale: 0.8,
   pcFill: 0.8,
   // 参考模式默认 auto：先试骨架，认不出人体自动降级到轮廓（游戏素材走这条路）
   pcRefMode: 'auto',
@@ -115,8 +110,6 @@ const DEFAULT_PARAMS: GenParams = {
   ssRows: 0,
   ssMode: 'generate',
   ssRefMode: 'outline',
-  ssCnScale: 1.0,
-  ssIpaScale: 0.85,
   ssPalette: 32,
   // 多候选择优：业界实测同 seed 也会漂 20~30%，靠生成多张挑一张
   ssCandidates: 2,
@@ -189,10 +182,8 @@ function pickRec(rec?: ModelRecommend): Partial<GenParams> {
     width: rec.width, height: rec.height, steps: rec.steps,
     cfg: rec.cfg, pixel: rec.pixel, palette: rec.palette,
   }
-  // 动漫底模额外带 clip_skip 与 preset：clip_skip=2 是动漫模型的标准设置，
-  // preset=anime 给的是「质量词 + 简单背景 + 短负向」这套 danbooru 契约。
-  // 只在这两个字段有值时才覆盖，普通底模不受影响。
-  if (rec.clip_skip !== undefined) out.clipSkip = rec.clip_skip
+  // 底模可以额外带一个 preset：动漫底模给的是「质量词 + 简单背景 + 短负向」
+  // 这套 danbooru 契约。只在有值时才覆盖，其它档位不受影响。
   if (rec.preset !== undefined) out.preset = rec.preset
   // **档位要跟着参数一起改**。只改参数不改 genStyle 的话，切到动漫底模后
   // 参数已经是「动漫立绘」（pixel/palette 归零），下拉却还停在「像素精灵」——
@@ -207,7 +198,7 @@ function matchesRec(p: GenParams, rec?: ModelRecommend): boolean {
   return !!rec && REC_KEYS.every((k) => p[k] === rec[k])
 }
 
-/** 老存档没有 lora/loraScale/strength，读回来补默认值，否则下拉会显示空、强度变 NaN。 */
+/** 老存档可能缺后来新增的字段，读回来补齐默认值，否则节点渲染会拿到 undefined。 */
 function migrate(n: GenNode): GenNode {
   // 旧存档兼容：'animepixel'（早期只做动漫人物）改名为 'topixel'（通用）
   const kind = (n.kind as string) === 'animepixel' ? 'topixel' : (n.kind ?? 'gen')
@@ -415,9 +406,7 @@ export default function App() {
     // 原点在侧栏底下，点完看不见节点（实测只露出右半截）。
     const at = world ?? centerWorld(viewportRef.current)
     if (type === 'airepaint') {
-      // 局部 AI 重绘的默认幅度比图生图高：实测 0.8 时模型几乎保留原样，
-      // 等于没重画（0.9 才开始明显改动）
-      const node = makeNode(at.x, at.y, 'airepaint', { strength: 0.9 })
+      const node = makeNode(at.x, at.y, 'airepaint')
       setSelectedId(node.id)
       setNodes((list) => [...list, node])
       return

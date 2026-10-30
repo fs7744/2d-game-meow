@@ -106,7 +106,10 @@ def _run(job_id: str, workflow: str, params: Dict[str, Any]) -> None:
         # 太粗暴；这里丢掉并记进 meta，用户翻产物时能看到「这条被忽略了」。
         sig = inspect.signature(fn)
         accepted = {k: v for k, v in params.items() if k in sig.parameters}
-        ignored = sorted(set(params) - set(accepted) - {"lora", "lora_scale"})
+        # 多余的键**全部记账**：以前把 lora / lora_scale 排除在外（那时还有
+        # 专门的解析逻辑），现在 LoRA 整套已删，它们和 clip_skip / strength
+        # 一样是纯粹的多余键，不报出来就等于静默丢弃。
+        ignored = sorted(set(params) - set(accepted))
         with _gpu_lock:                    # 单卡不并发
             job["result"] = fn(engine, **accepted)
         if ignored:

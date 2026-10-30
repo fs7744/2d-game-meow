@@ -104,7 +104,6 @@ function common(params: GenParams, opts: SubmitOpts) {
     pixel: params.pixel,
     palette: params.palette,
     matte: params.matte,
-    clip_skip: params.clipSkip,
     // 底模与抠图后端是全局设置，不在节点参数里
     model: opts.model || 'qwen-image-2.1',
     matte_backend: opts.matteBackend || 'auto',
@@ -142,13 +141,14 @@ export function submitImg2Img(params: GenParams, opts: SubmitOpts, initImage: st
   return post('w2', {
     ...common(params, opts),
     init_image: initImage,
-    strength: params.strength,
   })
 }
 
 /**
- * 局部重绘（w3）。后端 inpaint() 只认这几个参数，别的别塞——多传一个就 TypeError。
- * 源图与蒙版都是磁盘路径：蒙版是笔刷画完上传到项目目录的那张 PNG。
+ * 局部重绘（w3）。源图与蒙版都是磁盘路径：蒙版是笔刷画完上传到项目目录的那张 PNG。
+ *
+ * **别再往载荷里塞后端没有的键**：`app._run` 会按目标函数签名过滤，多传的会被
+ * 丢掉并写进产物的 `meta.params_ignored`——不会崩，但每张图都会挂一条没用的警告。
  */
 export function submitInpaint(
   params: GenParams,
@@ -161,7 +161,6 @@ export function submitInpaint(
     mask,
     prompt: params.prompt,
     negative: params.negative || undefined,
-    strength: params.strength,
     steps: params.steps,
     cfg: params.cfg,
     seed: params.seed,
@@ -173,7 +172,8 @@ export function submitInpaint(
 
 /**
  * 局部 AI 重绘（w5）。裁剪「选区+上下文」→ 通用模型重画 → 贴回。
- * 与 w3 的区别：w5 能挂 LoRA、能用 SDXL（w3 的专用 inpaint 权重只有 512 且不能挂 LoRA）。
+ * 与 w3 的区别：w5 多一步色板吸附，并能选 `strategy=crop` 做对照实验；
+ * 两者在 Qwen 上走同一个「整图指令改图 + 蒙版贴回」机制。
  */
 export function submitAiRepaint(
   params: GenParams,
@@ -186,12 +186,10 @@ export function submitAiRepaint(
     mask,
     prompt: params.prompt,
     negative: params.negative || undefined,
-    strength: params.strength,
     steps: params.steps,
     cfg: params.cfg,
     seed: params.seed,
     preset: params.preset,
-    clip_skip: params.clipSkip,
     model: opts.model || 'qwen-image-2.1',
     scope: opts.scope || undefined,
     context: params.rpContext,
@@ -250,15 +248,14 @@ export function submitToPixel(
     // 原生透明底：Qwen 直接出 alpha，比「生成后再抠」干净得多
     //（白猫白底这类场景，抠图会把身体一起切掉——实测过）
     transparent: params.transparent || undefined,
-    clip_skip: params.clipSkip,
     seed: params.seed,
     scope: opts.scope || undefined,
   })
 }
 
 /**
- * 角色迁移（wpc）。动作参考图 → 骨架（ControlNet 定姿态）+ 角色图
- * → IP-Adapter（定身份），生成角色做出参考动作的图。
+ * 角色迁移（wpc）。动作参考图 → 骨架/轮廓（条件图）+ 角色图，两张一起进
+ * Qwen 的 vision context，生成角色做出参考动作的图。
  */
 export function submitPoseClone(
   params: GenParams,
@@ -277,11 +274,8 @@ export function submitPoseClone(
     cfg: params.cfg,
     seed: params.seed,
     preset: params.preset,
-    clip_skip: params.clipSkip,
     model: opts.model || 'qwen-image-2.1',
     scope: opts.scope || undefined,
-    cn_scale: params.pcCnScale,
-    ipa_scale: params.pcIpaScale,
     fill: params.pcFill,
     // 参考模式：auto=先试骨架，认不出人自动降级到轮廓
     ref_mode: params.pcRefMode,
@@ -349,10 +343,8 @@ export function submitPoseSeq(
     steps: params.steps,
     cfg: params.cfg,
     seed: params.seed,
-    clip_skip: params.clipSkip,
     // 列数：0 时按帧数自动排成一行（后端 cols 默认 8，这里显式给）
     cols: params.ssCols > 0 ? params.ssCols : 0,
-    cn_scale: params.ssCnScale,
     palette: params.ssPalette,
     pixel: params.pixel,
     matte: params.matte,
@@ -368,7 +360,7 @@ export function submitPoseSeq(
  * 序列帧角色替换（wss）。把一段游戏动画（精灵图）里的角色换成目标角色。
  *
  * mode=recolor 走确定性换皮（不跑模型，帧间零漂移）；
- * mode=generate 跑模型（轮廓条件 + IP-Adapter），能换体型。
+ * mode=generate 跑模型（轮廓条件 + 角色参考图），能换体型。
  */
 export function submitSpriteSwap(
   params: GenParams,
@@ -390,8 +382,6 @@ export function submitSpriteSwap(
     mode: params.ssMode,
     ref_mode: params.ssRefMode,
     bg: params.bgTone,
-    cn_scale: params.ssCnScale,
-    ipa_scale: params.ssIpaScale,
     palette: params.ssPalette,
     // 多候选择优：每帧生成几个候选，按「动作贴合 + 身份贴合」挑最好的
     candidates: params.ssCandidates,
@@ -404,7 +394,6 @@ export function submitSpriteSwap(
     steps: params.steps,
     cfg: params.cfg,
     seed: params.seed,
-    clip_skip: params.clipSkip,
   })
 }
 
@@ -522,7 +511,7 @@ export type ModelCaps = {
   lora: boolean
   /**
    * 这个底模能跑哪些工作流（txt2img / pose_clone / sprite_swap …）。
-   * 节点的底模下拉按它过滤——Qwen 没有 SD 的 UNet/CLIP，ControlNet 类节点
+   * 节点的底模下拉按它过滤——Qwen 没有 SD 的 UNet/CLIP，姿态类节点
    * 选上它就是必崩，不如直接不列出来。
    */
   workflows: string[]
@@ -544,7 +533,7 @@ export type ModelList = {
   arch: Record<string, string>
   /** 底模名 → 能力表（透明底 / 指令改图 / LoRA） */
   caps: Record<string, ModelCaps>
-  /** 本机是否装了 SDXL refiner 权重 */
+  /** 恒 false：refiner 已随 SD 删除，字段留着给老前端做 `if` 判空 */
   refiner: boolean
 }
 

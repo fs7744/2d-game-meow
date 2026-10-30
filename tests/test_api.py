@@ -2,18 +2,21 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 
 import pytest
 
-# SD 权重已归档到 models/_archive/sd/：下面这些用例要真跑 SD 管线，
-# 权重不在就跳过（恢复权重后自动重新生效，不是删测试）。
-_SD_WEIGHTS = (Path(__file__).resolve().parent.parent / "models" / "checkpoints"
-               / "sd15" / "model_index.json").is_file()
-requires_sd = pytest.mark.skipif(
-    not _SD_WEIGHTS,
-    reason="SD 权重已归档到 models/_archive/sd/（恢复后自动恢复）")
+# 要真跑 Qwen 管线（256² 一张约 8~15s，768² 约 25s）的用例默认跳过。
+# 手动跑：MEOW_SLOW=1 pytest tests/test_api.py -m slow
+#
+# **为什么是「默认跳过」而不是「默认跑」**：这些用例每张 10s 起，整组 5 张就是
+# 1 分多钟；日常改代码时全量测试要保持在 2 分钟内。改完出图链路想确认没坏，
+# 再显式开这一组。
+slow_qwen = pytest.mark.skipif(
+    os.environ.get("MEOW_SLOW") != "1",
+    reason="要真跑 Qwen 管线：MEOW_SLOW=1 pytest tests/test_api.py -m slow")
 
 from fastapi.testclient import TestClient
 
@@ -40,7 +43,7 @@ def test_engine_stats(client):
     assert "NVIDIA" in r.json()["device"]
 
 
-@requires_sd
+@slow_qwen
 def test_generate_roundtrip(client):
     payload = {"workflow": "w1", "params": {
         "prompt": "blue slime monster", "width": 256, "height": 256,
@@ -61,9 +64,9 @@ def test_generate_roundtrip(client):
     assert job["result"]["meta"]["seed"] == 42
 
 
-@requires_sd
+@slow_qwen
 def test_generate_w2_roundtrip(client, tmp_path):
-    """图生图走同一条队列：w2 只认 init_image + strength，不接受 width/height。"""
+    """图生图走同一条队列：w2 的尺寸跟源图走，不接受 width/height。"""
     src = tmp_path / "w2_src.png"
     from PIL import Image, ImageDraw
 
@@ -87,8 +90,41 @@ def test_generate_w2_roundtrip(client, tmp_path):
         time.sleep(0.5)
     assert job["status"] == "done", job.get("error")
     meta = job["result"]["meta"]
-    assert meta["workflow"] == "w2" and meta["strength"] == 0.5
+    assert meta["workflow"] == "w2"
+    # Qwen 没有 strength 语义：它不是参数，是会被丢掉并记账的**多余键**
+    assert "strength" in meta.get("params_ignored", [])
     assert Path(meta["raw"]).exists(), "w2 也要给下游留未处理的原图"
+
+
+def test_run_filters_params_by_signature(client, monkeypatch):
+    """多传的键不 TypeError，但**必须记账**（写进 meta.params_ignored）。
+
+    这条把「按签名过滤」变成可执行的断言：旧前端 / 手写 curl 里带着
+    `clip_skip`、`lora` 这类已经没有对应形参的键时，后端要丢掉它们，
+    同时在产物 meta 里留下痕迹——用户翻产物时能看到「这条被忽略了」，
+    比静默消失诚实。
+
+    用假实现替换工作流函数，**不加载模型**，所以这条是秒级的。
+    """
+    from workflows import generate as gen
+
+    def fake(eng, *, prompt: str):
+        return {"file": "fake.png", "meta": {"prompt": prompt}}
+
+    monkeypatch.setattr(gen, "txt2img", fake)
+    r = client.post("/generate", json={"workflow": "w1", "params": {
+        "prompt": "hi", "clip_skip": 2, "lora": "wuxia_v2", "strength": 0.5}})
+    assert r.status_code == 200
+    job_id = r.json()["job_id"]
+
+    job = None
+    for _ in range(40):
+        job = client.get(f"/jobs/{job_id}").json()
+        if job["status"] in ("done", "failed"):
+            break
+        time.sleep(0.1)
+    assert job["status"] == "done", job.get("error")
+    assert job["result"]["meta"]["params_ignored"] == ["clip_skip", "lora", "strength"]
 
 
 def test_upload_image(client):
@@ -248,7 +284,6 @@ def test_delete_assets_protects_index(client):
     assert idx.exists()
 
 
-@requires_sd
 def test_generate_wbg_roundtrip(client, tmp_path):
     """抠图工作流也走同一条队列（wbg）。"""
     from PIL import Image, ImageDraw
@@ -275,7 +310,7 @@ def test_generate_wbg_roundtrip(client, tmp_path):
     assert Path(job["result"]["file"]).exists()
 
 
-@requires_sd
+@slow_qwen
 def test_generate_w5_roundtrip(client, tmp_path):
     """局部 AI 重绘（w5）走同一条队列。"""
     from PIL import Image, ImageDraw
@@ -309,7 +344,6 @@ def test_generate_w5_roundtrip(client, tmp_path):
     assert Path(job["result"]["file"]).exists()
 
 
-@requires_sd
 def test_generate_rejects_unknown_workflow_lists_valid_ones(client):
     """未知工作流要报 400，并在信息里列出可用工作流（否则用户不知道能用什么）。"""
     r = client.post("/generate", json={"workflow": "w9", "params": {"prompt": "x"}})
@@ -348,7 +382,7 @@ def test_generate_wpx_roundtrip(client, tmp_path):
     assert Path(job["result"]["file"]).exists()
 
 
-@requires_sd
+@slow_qwen
 def test_generate_wpc_roundtrip(client, tmp_path):
     """角色迁移（wpc）走同一条队列。
 
@@ -463,7 +497,7 @@ def test_unknown_job_404(client):
     assert client.get("/jobs/deadbeef").status_code == 404
 
 
-@requires_sd
+@slow_qwen
 def test_queue_serializes_two_jobs(client):
     ids = []
     for s in (11, 12):
@@ -484,47 +518,6 @@ def test_queue_serializes_two_jobs(client):
     assert b["started"] >= a["finished"] - 0.05
 
 
-@requires_sd
-def test_generate_resolves_lora_name(client):
-    """params.lora 传名字要能解析成路径；名字不存在则降级而不是整单失败。"""
-    import app as app_module
-
-    resolved = app_module._resolve_lora({"lora": "wuxia_v2"})
-    assert resolved["lora"].endswith("wuxia_v2.safetensors")
-
-    missing = app_module._resolve_lora({"lora": "nope"})
-    assert missing["lora"] is None and missing["lora_missing"] == "nope"
-
-    assert app_module._resolve_lora({"prompt": "x"}) == {"prompt": "x"}
-
-
-def test_generate_with_lora_name_roundtrip(client):
-    """端到端：只给名字，服务端解析后能真跑出一张图。"""
-    import app as app_module
-
-    if not (app_module.ROOT / "models" / "lora" / "wuxia_v2.safetensors").exists():
-        pytest.skip("本机无 wuxia_v2 权重")
-
-    payload = {"workflow": "w1", "params": {
-        "prompt": "Wuxia, swordsman, front view", "width": 256, "height": 256,
-        "steps": 8, "seed": 7, "preset": "wuxia", "pixel": 4, "palette": 16,
-        "matte": True, "lora": "wuxia_v2", "lora_scale": 0.8, "tag": "apilora"}}
-    job_id = client.post("/generate", json=payload).json()["job_id"]
-
-    for _ in range(120):
-        j = client.get(f"/jobs/{job_id}").json()
-        if j["status"] in ("done", "failed"):
-            break
-        time.sleep(0.5)
-
-    assert j["status"] == "done", j.get("error")
-    meta = j["result"]["meta"]
-    assert meta["lora"].endswith("wuxia_v2.safetensors")
-    assert meta["lora_scale"] == 0.8
-    assert isinstance(meta["edge_touch"], list)
-
-
-@requires_sd
 def test_generate_wss_roundtrip(client, tmp_path):
     """序列帧角色替换（wss）走同一条队列。
 
@@ -572,7 +565,6 @@ def test_generate_wss_roundtrip(client, tmp_path):
     assert Path(job["result"]["file"]).exists()
 
 
-@requires_sd
 def test_generate_rejects_unknown_workflow(client):
     """未知工作流必须被拒（别让它进队列再失败）。"""
     r = client.post("/generate", json={"workflow": "wzz", "params": {}})

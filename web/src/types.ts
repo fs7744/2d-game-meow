@@ -69,14 +69,12 @@ export type ModelRecommend = {
   cfg: number
   pixel: number
   palette: number
-  /** 动漫底模要 clip_skip=2；普通底模不给这个字段（保持默认） */
-  clip_skip?: number
   /** 建议的提示词契约（动漫底模 → 'anime'） */
   preset?: Preset
   /**
-   * 这个底模在推荐尺寸下，W4（ControlNet + IP-Adapter）最多能批量几个候选。
-   * 由后端按本机总显存算——实测 sdxl@1024 批量 2 会占满 24GB，不报 OOM
-   * 但耗时从 5.0s 崩到 17.5s，靠用户自己猜是猜不出来的。
+   * 这个底模在推荐尺寸下，W4（姿态序列）最多能批量几个候选。
+   * 由后端按本机总显存算——Qwen@768² 单帧峰值 11.8~15.4GB，多一个候选再 +6GB，
+   * 24G 卡上只有 1 个候选装得下。靠用户自己猜是猜不出来的。
    */
   max_candidates: number
 }
@@ -93,8 +91,6 @@ export type GenParams = {
   pixel: number
   palette: number
   matte: boolean
-  clipSkip: number        // 1=最后一层（默认）；2=跳过最后一层（多数动漫/像素 LoRA 的训练设置）
-  strength: number        // 图生图的重绘幅度；文生图忽略
   bgMode: BgMode          // 抠图节点：透明 / 纯色 / 换背景图
   bgColor: string         // 抠图节点：纯色背景（#rrggbb）
   bgNodeId: string        // 抠图节点：当背景用的那个图片节点 id
@@ -121,8 +117,6 @@ export type GenParams = {
   apPreEnhance: number    // 量化前对比度/饱和度增强强度（0 = 关）
   apEdgeRebuild: boolean  // 轮廓描边（色数不变，压缩后不「融化」）
   apMatte: boolean        // 先抠背景（像素精灵通常要透明底）
-  pcCnScale: number       // 角色迁移：ControlNet 姿态强度（越大越贴参考动作）
-  pcIpaScale: number      // 角色迁移：IP-Adapter 身份强度（越大越像角色图）
   pcFill: number          // 角色迁移：人物在画布里占的高度比例
   pcRefMode: RefMode      // 角色迁移：动作参考图的解释方式（自动/骨架/轮廓/已画好的骨架图）
   bgTone: BgTone          // 逐帧生成用的底色：white=白底（默认）/ dark=深色底（白毛角色用）
@@ -130,8 +124,6 @@ export type GenParams = {
   ssRows: number          // 序列帧替换：精灵图行数（0 = 自动检测）
   ssMode: SwapMode        // 序列帧替换：AI 重绘 还是 确定性换皮
   ssRefMode: RefMode      // 序列帧替换：动作参考图的解释方式
-  ssCnScale: number       // 序列帧替换：动作强度
-  ssIpaScale: number      // 序列帧替换：身份强度
   ssPalette: number       // 序列帧替换：共享色板色数
   ssCandidates: number    // 序列帧替换：每帧生成几个候选再挑最好的
   ssGateRetries: number   // 序列帧替换：候选都不合格时补提几次

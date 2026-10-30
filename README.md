@@ -115,34 +115,39 @@ python tools/pose_from_image.py walk.mp4  --step 3   -o assets/pose
 
 ## 画质：为什么差，以及怎么调
 
-用户连续反馈「生成质量差」，实测下来是三个叠加的原因，按影响从大到小：
+用户连续反馈「生成质量差」，实测下来是三层叠加的原因，按影响从大到小：
 
-### 1. 默认分辨率太低（已修）
+### 1. 参数档位不对（已修）
 
-同一 prompt / 同一 seed 的对比：
+**每个底模的推荐档位由后端给**（`engine.RECOMMEND`，经 `/models` 的 `recommend` 下发），
+前端拿到就填，不自己拍。Qwen-Image-2.1 的推荐值是
+**768² / 24 步 / cfg 4.0 / 不像素化（pixel=0, palette=0）**。
 
-| 分辨率 | 结果 |
-|---|---|
-| 512² + pixel 4 / palette 16 | 糊、抗锯齿边缘、连「猫」都读不出、没有骑士元素 |
-| **768² + pixel 6 / palette 32** | 有胡须、眼高光、猫耳、披风褶皱，明显可辨认 |
-| 1024² | **崩**：SD1.5 超出训练分辨率会重复肢体，实测出 3~4 个猫头叠在一起 |
+两条实测依据：
 
-所以默认值已经改成 **768² / 30 步 / cfg 7.0 / pixel 6 / palette 32**（`QUALITY_PRESETS`）。
-768 ÷ 6 = 128 有效像素，正好是精灵尺寸。
+- **768² 而不是 1024²**：Qwen 是逐帧路线，1024² 的图 token 是 768² 的 1.78 倍——
+  实测 768² 一帧 24~28s，1024² 约 45s；而精灵成品最后要缩到 32~128px，
+  1024² 那点细节在缩图上根本看不见。**只有立绘档才用 1024²**（不缩图，笔触要留住）。
+- **步数不能低于 24**：同 seed 42、768²，12 步没有头、16 步四肢断、20 步可用但腿细、
+  24 步完整干净（详见 `docs/PLAN-QWEN-ONLY.md` §2.6）。
 
-### 2. SD1.5 本身的能力上限（换底模可解，见下一节）
+### 2. 底模能力上限（Qwen 能画复合概念了，短板换成了姿势）
 
 同一句 "cat knight with katana"：
 
-- **SD1.5**：画得出「猫 + 红袍」，但**画不出刀、画不出铠甲**——拟人角色拿武器这种
-  复合概念超出它的能力，肢体与躯干也会糊成一团。
-- **SDXL 1.0**：猫头、耳朵、口鼻、深色铠甲、红披风、握在爪子里的剑**全部到位**。
+- **SD1.5**（已归档）：画得出「猫 + 红袍」，但**画不出刀、画不出铠甲**——拟人角色
+  拿武器这种复合概念超出它的能力，肢体与躯干也会糊成一团。
+- **Qwen-Image-2.1**：刀、铠甲、披风、面部表情都能到位，而且**直接就是像素风**
+  （所以默认 `pixel=0`，再过一遍像素化反而把它的色阶优势抹平）。
 
-这不是调参能救的差距。要这种题材，就换底模。
+**Qwen 现在的短板不在单张画质，而在逐帧的姿态贴合**：没有 ControlNet，姿势靠
+「骨架图当参考 + 指令」软引导，实测腿部常被角色参考图的站姿覆盖（平均偏差
+108px/768²，见 PLAN §2.8）。动作幅度要大，现阶段得接受「换一个姿势」而不是
+「精确复制这个姿势」。
 
 ### 3. 像素画的散落杂色（已做清洗，但未根除）
 
-SDXL 的像素风出图，量化到 32 色后角色周围会冒出一粒粒红 / 青 / 橙的点。
+开了像素化（`pixel>0`）并量化到 32 色后，角色周围会冒出一粒粒红 / 青 / 橙的点。
 排查时有个反直觉的发现：**它们不是独立小块**——实测 1024² 图上 25 个前景块，
 最小的也有 2368px，压根没有孤立小块。所以面积过滤和形态学开运算都拿它们
 没办法（那两种手段只动 alpha，而这里要动的是**颜色**）。
@@ -263,172 +268,25 @@ context + VAE latent tokens 前置到噪声」，改哪里由**指令**决定。
 身份与画风不丢，改完的像素按蒙版贴回去，选区外依旧逐点不变。
 （早期试过的「裁剪块」方案质量不合格：裁剪块放大后被当新图重画，脸会丢。）
 
-### SD1.5 / SDXL（已归档，代码仍在）
+### SD1.5 / SDXL 时代（权重已归档，代码已删）
 
+这一段原来有四小节：SD1.5/SDXL 底模、SDXL 版 LoRA 实测、`sdxl-anime`（Illustrious）、
+SDXL 版 ControlNet。**全部失效**——权重在 `models/_archive/sd/`，代码在提交 `1831ade`
+删掉了，它们引用的 `tools/fetch_*.py` 也一起删了。别再照旧命令去下权重。
 
+当时实测里仍然通用的三条（接别的底模时照样成立）：
 
-```bash
-# 权重（SDXL 约 6.5GB，fp16 变体，走代理从 HF 直下）
-mkdir -p models/checkpoints/sdxl && ...   # 见 tools/fetch_modelscope.py
-```
+1. **尺寸不是越大越好。** SDXL@1024 反而比 @768 差：角色占画面比例更大、更容易贴边，
+   可交付率 92% → 75%，每张还慢一倍。前端填多大的依据应该是「成品要缩到多少 px」。
+2. **姿态强度与身份强度是两条独立旋钮。** 调错一个的表现是「姿势对了但不像这个角色」
+   或反过来。Qwen 没有这两条旋钮（双图条件由模型自己分配），但这条诊断思路仍适用：
+   先看是姿态跑偏还是身份跑偏，再决定改指令还是换参考图。
+3. **`clip_skip` 只对 SD1.5 系动漫模型成立**，SDXL 有两个文本编码器，设了会静默失效。
+   这个字段现在整个删了（Qwen 的文本编码器是 Qwen3-VL，没有跳层语义）。
 
-| 项 | SD1.5 | SDXL 1.0 |
-|---|---|---|
-| 原生分辨率 | 512²（768² 是甜点，1024² 会崩） | **1024²** |
-| W1 文生图实测 | 768²/30 步 ≈ 1.8s / 3.4GB | **1024²/30 步 ≈ 4.5s / 10.5GB** |
-| W4 姿态驱动实测 | 512²/25 步 ≈ 1.2s / 3.6GB | **1024²/28 步 ≈ 9.1s / 13.2GB** |
-| W3 局部重绘实测 | 512²/25 步 ≈ 0.75s / 4.6GB | **768²/10 步 ≈ 5.5s / 8.8GB**（base 权重） |
-| ControlNet | OpenPose/Canny/Tile 三套 | **三套都已装**（xinsir 版，各 2.4GB） |
-| IP-Adapter | ✅ | ✅ 已装（666MB，与 SD1.5 **共享** ViT-H encoder） |
-| W3 局部重绘 | ✅ 有专用 inpaint 权重 | ✅ 走 base 权重（无官方 inpaint 微调版） |
-| LoRA | 3 个精选 | **2 个可用**（见下） |
+要看完整历史：`git show pre-sd-purge:README.md`。
 
-**切换方式：底模是「节点级」的，每个节点自己选（侧栏已不再有选模型）。**
-
-每个用模型的节点在自己卡头上都有一条「底模」下拉（`跟随默认（SD1.5）` /
-具体某个底模）。侧栏里**没有**选模型的入口了——一个全局底模必然带来
-"想混跑就得来回切、每次切都把各节点调好的参数冲一遍"。
-
-为什么改成节点级：一张画布上混跑是常态——立绘想要 Qwen（原生透明底 + 直出
-像素风），精灵帧还得用 SDXL（ControlNet 硬约束）。
-
-- 节点选过具体底模就固定住；`跟随默认` 的用后端 `/models` 的 `current`
-  （本机通常是 SD1.5）
-- 切换节点底模会**只动这一个节点**（推荐参数也只套到它身上）
-- 下拉只列**这个节点真能跑**的底模：后端 `engine._ARCH_WORKFLOWS` 是唯一判据。
-  Qwen 没有 SD 的 UNet/CLIP，序列帧替换 / 姿态序列 / 局部重绘 / 局部 AI 重绘
-  选它就是必崩，直接不列出来；**角色迁移例外**（Qwen 走双图条件，见下文）
-- LoRA 列表按**这个节点自己的**底模架构过滤——SD1.5 的 LoRA 装在 SDXL 上
-  完全无效且会静默出废图
-
-**切底模会主动驱逐其它底模的管线**（`Engine.evict_other_models`）。
-不驱逐的后果不是报错，而是显存挤爆后 `_fit` 静默降级到 cpu offload
-（每步在 CPU/GPU 间搬权重），表现成「一直转、显存满、跑不完」。
-实测：qwen 占 16.4GB 后切 SD15 跑角色迁移，驱逐后 **9.8s / 峰值 5.3GB**；
-不驱逐则会挤到降级。
-
-W3 在 SDXL 下用 `StableDiffusionXLInpaintPipeline` + **base 权重**：SDXL 没有官方
-inpaint 微调版，这是唯一可行路径。管线对 4 通道 UNet 是支持的（把 mask 与被遮图
-拼进 latent 只发生在 9 通道 UNet 上），所以不用额外下权重；质量略逊于 SD1.5 那套
-专用权重，换来的是 1024² 分辨率。选区外逐点不变的承诺两个底模都成立。
-
-> **IP-Adapter 的坑**：HF 上 `sdxl_models/image_encoder` 是 **ViT-bigG**
-> （hidden 1664 / projection 1280），而 `ip-adapter_sdxl_vit-h` 要的是 **ViT-H**
-> （1280 / 1024）——和 SD1.5 完全同一个。用错会报
-> `mat1 and mat2 shapes cannot be multiplied (2x1280 and 1024x8192)`。
-> 所以权重并列放在 `ipadapter/models/`，两个底模共用一份 encoder（省 2.5GB）。
-
-### SDXL 版 LoRA（实测）
-
-| LoRA | 体量 | 判定 |
-|---|---|---|
-| **Pixel Art XL** | 163MB | ✅ 可用。SDXL 最高人气像素风（dl 119741 / ♥6288），无触发词，靠 prompt 里的 `pixel art` 生效 |
-| **Ink Art XL** | 102MB | ✅ 可用。水墨线稿，触发词 `ink art` |
-| 水墨风格 ink wash | 68MB | ❌ **LoKr 格式**（key 是 `lokr_w1`），diffusers 的 `load_lora_weights` 不支持 |
-
-> LoKr / LoHa / LyCORIS 这类变体加载时会抛一堆「keys have not been correctly renamed」，
-> 用户根本看不懂。引擎已把它翻成人话：「大概率不是标准 LoRA」，并把管道状态卸干净。
-
-### 动漫底模：`sdxl-anime`（Illustrious XL v0.1）
-
-SDXL base 能出动漫味，但**偏厚涂、手部与武器衔接糊、背景不干净**——它的训练
-数据里动漫占比低。要动漫角色立绘就换专门的底模。
-
-```bash
-python tools/fetch_anime_xl.py                  # Illustrious XL v0.1，约 6.5GB
-python tools/fetch_anime_xl.py --model animagine  # 或 Animagine XL 3.1
-```
-
-走 ModelScope（HF 在国内经常 502）。下完**自动登记成底模**（`models/checkpoints/`
-下多一个目录就等于多一个可选底模），前端下拉直接能选。
-
-实测对比（同一提示词、同 seed，1024² / 28 步）：
-
-| | SDXL base | **Illustrious** |
-|---|---|---|
-| 画风 | 偏写实厚涂，动漫感打折 | **纯正日系动漫** |
-| 五官 | 正常 | **清晰锐利，眼睛高光细腻** |
-| 线条 | 柔和、勾线弱 | **干净流畅** |
-| 手部 | 手指略糊 | **SDXL 家族里最好** |
-
-**配套三件事**（缺一件就出不来效果）：
-
-1. **`preset=anime`**——danbooru 契约。选中动漫底模时前端会自动填上。
-2. **`clip_skip=2`**——见下面那个反直觉的坑。
-3. **CFG 8.0 / 1024² / 28 步**——同样由 `/models` 的推荐参数带出。
-
-#### ⚠️ SDXL 的 clip_skip 语义与 SD1.5 不同（踩过坑）
-
-diffusers 的 SDXL `encode_prompt` 里写着：
-
-```python
-if clip_skip is None:
-    embeds = hidden_states[-2]        # 默认 = 倒数第二层
-else:
-    # "2" because SDXL always indexes from the penultimate layer.
-    embeds = hidden_states[-(clip_skip + 2)]
-```
-
-**SDXL 默认取的就是倒数第二层**——那已经等价于业界说的「clip skip 2」，
-也正是动漫底模推荐的那档。所以：
-
-- 用户给 1 或 2 → 都是默认档（penultimate），meta 记 2
-- 用户给 3 → 才真的多跳一层（传给 diffusers 的是 `n-2`）
-
-直接把用户的 `clip_skip=2` 传进去会跳到 **-4 层**，过度跳过——实测出图
-一片灰雾（`std` 从 38 掉到 19，五官全无）。
-
-#### anime 契约怎么写的（每条都有实测依据）
-
-- **质量词只要 `masterpiece, best quality`**：堆更多（amazing quality /
-  absurdres…）不会更好，实测会引入偏差与伪影。
-- **负向词要短**：这些模型已经排除了低质量样本，再堆"通用负面词表"是负优化，
-  只会压制正常特征。
-- **风格必须显式给**：Illustrious v0.1 官方注明未做美学预调。实测三档——
-  不给风格词 → 偏写实厚涂；`flat colors, cel shading` → **赛璐璐平涂**；
-  `clean lineart` → **线条最锐利**。两个都给能同时拿到。
-- **构图 tag 由用户给，契约不写死**：实测不给构图 tag 时前景占 83.5% 且四边
-  贴边，加 `full body` 后前景 24.5%、无贴边。要全身就自己写 `full body`，
-  要头像就写 `upper body`——契约只约束背景与居中，不抢构图。
-
-**提示词用 danbooru tag，不要用自然语言**：
-
-```
-1girl, solo, long silver hair, blue eyes, armor, holding sword, full body
-```
-
-Illustrious 是在 Danbooru 上重训的，tag 到概念的映射很准，同义改写反而变差。
-
-**CFG 8.0 是实测选的**，不是照抄网上的 6.5：同提示词同 seed，6.5 下兽人五官
-松散、法师法杖顶端结构混乱；8.0 下五官清晰立体、武器造型完整、手部姿势自然。
-网上流传的"Illustrious 用 CFG 5~7"是通用建议，本项目实测 8.0 更好。
-
-### SDXL 版 ControlNet（W4 才能吃 1024）
-
-```
-models/controlnet/sdxl_openpose/     # xinsir/controlnet-openpose-sdxl-1.0，2.4GB
-```
-
-SD1.5 与 SDXL 的 ControlNet **形状不同、不能混用**——代码里按 `model` 分开取，
-拿错会直接 shape 不匹配崩掉，所以是显式报错而不是静默降级。
-
-实测 W4 + SDXL（4 帧走路，1024²）：
-
-- 四帧**角色完全一致**（红发、红袍、深色腰带、靴子），SD1.5 做不到这个稳定性
-- 姿态**跟随骨架**，全身在画面内
-- 已知瑕疵：剑柄握持偶有偏移、个别帧有细微尺寸漂移
-
-SDXL 三条 ControlNet 与 IP-Adapter 的实测（1024²）：
-
-| 组合 | 耗时 | 峰值显存 |
-|---|---|---|
-| W4 + OpenPose + IP-Adapter（2 帧） | 20s | 14.83GB |
-| W4 + Canny 形状迁移（1 帧） | 12s | 12.99GB |
-| W4 + Tile 高清放大（1 帧） | 32s | **21.94GB**（接近 24GB 上限，别再叠加别的） |
-
-`poseswap` 新增 `controlnet="openpose|canny|tile"` 参数，三个底模无关地通用。
-
-### Qwen-Image-2.1：第三个底模（原生透明底 / 指令改图）
+### Qwen-Image-2.1：唯一的底模（原生透明底 / 指令改图）
 
 ```bash
 # 43GB：transformer 14G（另有 6.7G fp8 缓存）+ text_encoder 22G + vae 1.3G
@@ -1626,8 +1484,13 @@ python tools/video.py i2v assets/cat.png "the same character walking" -o assets/
 ## 测试
 
 ```bash
-python -m pytest tests -q        # 260 个用例，约 150s（含两次 Qwen 管线加载）
+python -m pytest tests -q                          # 260 个用例，约 150s（含两次 Qwen 管线加载）
+MEOW_SLOW=1 pytest tests -m slow                  # 真跑 Qwen 的端到端组（约 3~5 分钟）
 ```
+
+`-m slow` 那组会**真的加载权重出图**（w1/w2/w5/wpc 各一张 + 队列串行），
+用来确认「改完出图链路没坏」。默认不跑，因为它每张 10s 起、整组 1 分多钟，
+日常改代码时全量测试要保持在 2 分钟内。
 
 **按改动选测试，不要每次都跑全量**（全量 2.5 分钟，只在合并/发版前跑一次）：
 
@@ -1650,7 +1513,7 @@ test_stability 的 free 与泄漏、test_matte 的缓存素材）需要 GPU。
 |---|---|---|
 | `tests/test_qwen_workflows.py` | **十个工作流的能力表与「近似」标记**、**局部重绘选区外逐点不变**、**output_resolution 真的对齐**、**逐帧尺度归一**、**透明底 alpha 不被白底吃掉**、**Qwen 路径不许碰已删的 SD 管线** | 21 |
 | `tests/test_matte.py` | 背景估计、连通域不误抠内部同色区、去白边、alpha 二值、**u2net 抠空自动回退**、**已有 alpha 复用（IoU 1.000）**、**雾状 alpha 仍重抠**、**补内部洞但不动通到边界的缺口** | 17 |
-| `tests/test_api.py` | 各工作流队列往返、**未知 workflow 报错**、蒙版端点、上传端点、真删（连带 sidecar/raw、路径穿越）、资产按项目过滤、**参数按签名过滤并记 params_ignored** | 23 |
+| `tests/test_api.py` | 各工作流队列往返、**未知 workflow 报错**、蒙版端点、上传端点、真删（连带 sidecar/raw、路径穿越）、资产按项目过滤、**参数按签名过滤并记 params_ignored** | 28 |
 | `tests/test_models.py` | **只剩一个底模时接口自洽**：available / arch / recommend / caps.approx / refiner=false、未知底模报错 | 5 |
 | `tests/test_postprocess.py` | 锚点、逐帧对齐、打包几何、色板上限、alpha 二值、像素块单色性、前景块计数 | 11 |
 | `tests/test_pixelfy.py` | 网格检测、每格一色、共享色板、噪点清理、网格吸附 | 20 |

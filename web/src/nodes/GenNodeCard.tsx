@@ -482,13 +482,6 @@ export default function GenNodeCard({
   const headFilePath = isImg || isPoseEdit ? node.image?.path || ''
     : imageMode ? job?.path || '' : ''
   const headFile = headFilePath ? fileNameOf(headFilePath) : ''
-  /**
-   * 这个节点的底模是不是 Qwen。
-   *
-   * 判据用 caps.instruction 而不是硬编码底模名：instruction（图生图走「指令改图」）
-   * 目前只有 Qwen 有，但底模名是可以自己放的目录，硬编码名字迟早对不上。
-   */
-  const isQwenModel = !!modelCaps?.[model]?.instruction
   /** 本节点跑的工作流名（和 /models 的 caps.workflows 同一套词） */
   const wf = WORKFLOW_OF[node.kind] || ''
   /**
@@ -722,26 +715,13 @@ export default function GenNodeCard({
             </option>
           ))}
         </select>
-        {isI2I && (isQwenModel ? (
-          /* Qwen 的图生图是**指令改图**：没有 strength 语义，改多少全看提示词。
+        {isI2I && (
+          /* 图生图是**指令改图**：没有 strength 语义，改多少全看提示词。
              留个滑块在这儿只会让人以为调小就改得少（实际完全无效）。 */
           <p className="src-note">
-            Qwen 走「指令改图」：改成什么样由提示词决定，没有重绘幅度可调。
+            走「指令改图」：改成什么样由提示词决定，没有重绘幅度可调。
           </p>
-        ) : (
-          <label className="strength" title={hint('重绘')}>
-            <span>重绘</span>
-            <input
-              type="range"
-              min={0.15}
-              max={0.9}
-              step={0.05}
-              value={p.strength}
-              onChange={(e) => setParam('strength', Number(e.target.value))}
-            />
-            <b>{p.strength.toFixed(2)}</b>
-          </label>
-        ))}
+        )}
         <div className="src-note">
           {sourceNode?.kind === 'image'
             ? '用这张本地图'
@@ -1047,18 +1027,6 @@ export default function GenNodeCard({
               />
               <b>{p.ssCols > 0 ? '列' : '自动'}</b>
             </label>
-            <label className="strength" title={hint('动作')}>
-              <span>动作</span>
-              <input
-                type="range"
-                min={0.2}
-                max={1.5}
-                step={0.05}
-                value={p.ssCnScale}
-                onChange={(e) => setParam('ssCnScale', Number(e.target.value))}
-              />
-              <b>{p.ssCnScale.toFixed(2)}</b>
-            </label>
             <label className="strength" title={hint('候选')}>
               <span>候选</span>
               <input
@@ -1263,36 +1231,6 @@ export default function GenNodeCard({
                     <option value="pose">骨架（真人照片）</option>
                   </select>
                 </label>
-                {/* 动作/身份两根滑块是 SD 的 ControlNet + IP-Adapter 强度。
-                    Qwen 走双图条件，两张图一起进 vision context，没有强度旋钮。 */}
-                {!isQwenModel && (
-                  <>
-                    <label className="strength" title={hint('动作')}>
-                      <span>动作</span>
-                      <input
-                        type="range"
-                        min={0.2}
-                        max={1.5}
-                        step={0.05}
-                        value={p.ssCnScale}
-                        onChange={(e) => setParam('ssCnScale', Number(e.target.value))}
-                      />
-                      <b>{p.ssCnScale.toFixed(2)}</b>
-                    </label>
-                    <label className="strength" title={hint('身份')}>
-                      <span>身份</span>
-                      <input
-                        type="range"
-                        min={0}
-                        max={1.5}
-                        step={0.05}
-                        value={p.ssIpaScale}
-                        onChange={(e) => setParam('ssIpaScale', Number(e.target.value))}
-                      />
-                      <b>{p.ssIpaScale.toFixed(2)}</b>
-                    </label>
-                  </>
-                )}
                 <label className="bg-mode" title={'生成时的底色：角色偏白（白毛、白甲）时，白底会让抠图把脸和腿一起判成背景；选「深色底」靠对比度抠更干净。深色系角色反过来仍用白底。'}>
                   底色
                   <select
@@ -1455,43 +1393,13 @@ export default function GenNodeCard({
           </div>
           <details className="adv">
             <summary>更多设置</summary>
-            {/* 「姿态」「身份」两根滑块是 SD 那条路（ControlNet 强度 / IP-Adapter
-                强度）专属的。Qwen 走的是**双图条件**（角色图 + 骨架图进同一个
-                vision context），模型自己分配两张图各管什么，没有强度旋钮——
-                留着只会让人以为调了有用。 */}
-            {isQwenModel ? (
-              <div className="src-note">
-                Qwen 底模走「双图条件」：角色图 + 骨架图一起进模型，姿势与身份由它
-                自己分配，没有姿态/身份强度可调（SD 那两个滑块已隐藏）。
-              </div>
-            ) : (
-              <>
-                <label className="strength" title={hint('姿态')}>
-                  <span>姿态</span>
-                  <input
-                    type="range"
-                    min={0.2}
-                    max={1.5}
-                    step={0.05}
-                    value={p.pcCnScale}
-                    onChange={(e) => setParam('pcCnScale', Number(e.target.value))}
-                  />
-                  <b>{p.pcCnScale.toFixed(2)}</b>
-                </label>
-                <label className="strength" title={hint('身份')}>
-                  <span>身份</span>
-                  <input
-                    type="range"
-                    min={0}
-                    max={1.5}
-                    step={0.05}
-                    value={p.pcIpaScale}
-                    onChange={(e) => setParam('pcIpaScale', Number(e.target.value))}
-                  />
-                  <b>{p.pcIpaScale.toFixed(2)}</b>
-                </label>
-              </>
-            )}
+            {/* 「姿态」「身份」两根强度滑块是 SD 那条路（ControlNet / IP-Adapter）
+                专属的，已随 SD 一起删除。现在是**双图条件**：角色图 + 骨架图进同一个
+                vision context，姿势与身份由模型自己分配。 */}
+            <div className="src-note">
+              双图条件：角色图 + 骨架图一起进模型，姿势与身份由它自己分配，
+              没有姿态/身份强度可调。动作跟随的实际水平见 docs/PLAN-QWEN-ONLY.md §2.8。
+            </div>
             <label className="strength" title={hint('占高')}>
               <span>占高</span>
               <input
@@ -1817,26 +1725,11 @@ export default function GenNodeCard({
               onChange={(e) => setParam('prompt', e.target.value)}
             />
           </div>
-          {isQwenModel ? (
-            <p className="src-note">
-              Qwen 没有重绘幅度，改成什么样由提示词里的指令决定。它是
-              <b>近似实现</b>：整图作条件、蒙版只负责贴回——选区外保证逐点不变，
-              选区内不保证只改那一点（猜偏的部分会被蒙版裁掉，表现是「改得不够」）。
-            </p>
-          ) : (
-            <label className="strength" title={hint('重绘')}>
-              <span>重绘</span>
-              <input
-                type="range"
-                min={0.1}
-                max={1}
-                step={0.05}
-                value={p.strength}
-                onChange={(e) => setParam('strength', Number(e.target.value))}
-              />
-              <b>{p.strength.toFixed(2)}</b>
-            </label>
-          )}
+                    <p className="src-note">
+            Qwen 没有重绘幅度，改成什么样由提示词里的指令决定。它是
+            <b>近似实现</b>：整图作条件、蒙版只负责贴回——选区外保证逐点不变，
+            选区内不保证只改那一点（猜偏的部分会被蒙版裁掉，表现是「改得不够」）。
+          </p>
           <details className="adv">
             <summary>更多设置</summary>
             <label className="strength" title={hint('上下文')}>
@@ -1996,26 +1889,11 @@ export default function GenNodeCard({
               onChange={(e) => setParam('prompt', e.target.value)}
             />
           </div>
-          {isQwenModel ? (
-            <p className="src-note">
-              Qwen 没有重绘幅度，改成什么样由提示词里的指令决定。它是
-              <b>近似实现</b>：整图作条件、蒙版只负责贴回——选区外保证逐点不变，
-              选区内不保证只改那一点（猜偏的部分会被蒙版裁掉，表现是「改得不够」）。
-            </p>
-          ) : (
-            <label className="strength" title={hint('重绘')}>
-              <span>重绘</span>
-              <input
-                type="range"
-                min={0.1}
-                max={1}
-                step={0.05}
-                value={p.strength}
-                onChange={(e) => setParam('strength', Number(e.target.value))}
-              />
-              <b>{p.strength.toFixed(2)}</b>
-            </label>
-          )}
+                    <p className="src-note">
+            Qwen 没有重绘幅度，改成什么样由提示词里的指令决定。它是
+            <b>近似实现</b>：整图作条件、蒙版只负责贴回——选区外保证逐点不变，
+            选区内不保证只改那一点（猜偏的部分会被蒙版裁掉，表现是「改得不够」）。
+          </p>
           {hasImage && (
             <div
               className="preview"
@@ -2373,96 +2251,6 @@ export default function GenNodeCard({
                 />
               </label>
               <div className="row">
-                <label title={isQwenModel
-                  ? 'Qwen 的引导强度是固定的 true_cfg_scale=4.0，这个框不生效'
-                  : hint('CFG')}>
-                  CFG
-                  <input
-                    type="number"
-                    step={0.5}
-                    value={p.cfg}
-                    disabled={isQwenModel}
-                    onChange={(e) => setParam('cfg', Number(e.target.value) || 7.5)}
-                  />
-                </label>
-                {/* 透明背景：Qwen-Image-2.1 原生 RGBA。跟「抠图」不是一回事——
-                    抠图是生成后用分割模型切一遍（发丝/细剑常被切断），
-                    这个是让模型直接画 alpha，边界更干净。 */}
-                <label
-                  className="check"
-                  title={hint('透明背景')}
-                >
-                  <input
-                    type="checkbox"
-                    checked={p.transparent && canTransparent}
-                    disabled={!canTransparent}
-                    onChange={(e) => setParam('transparent', e.target.checked)}
-                  />
-                  透明背景（原生 RGBA）
-                  {!canTransparent && <span className="dim"> 仅 Qwen-Image</span>}
-                </label>
-                {canTransparent && p.transparent && (
-                  <p className="src-note">
-                    模型直接输出 alpha，不用再抠图；此时「抠图」会被跳过。
-                  </p>
-                )}
-                {/* 像素块 / 色数**只在「自定义」风格下暴露**：
-                    平时由产出风格一档决定（用户不用算「768² 配 6px = 128 有效像素」），
-                    填错不报错、只是出图看着不对，所以默认藏起来。 */}
-                {styleOf(p) === 'custom' && (
-                  <>
-                    <label className="check" title={hint('像素化')}>
-                      <input
-                        type="checkbox"
-                        checked={p.pixel > 1}
-                        onChange={(e) => setParam('pixel',
-                          e.target.checked ? (p.pixel > 1 ? p.pixel : 6) : 0)}
-                      />
-                      像素化
-                    </label>
-                    <label title={hint('像素块')}>
-                      像素块
-                      <input
-                        type="number"
-                        min={0}
-                        max={16}
-                        value={p.pixel}
-                        disabled={p.pixel <= 1}
-                        // max 挡不住手输，所以 onChange 也要夹一下：曾经手输 64，
-                        // 512/64 = 8px 有效像素，出图细节全被抹平
-                        onChange={(e) => setParam('pixel',
-                          Math.min(16, Math.max(0, Number(e.target.value) || 0)))}
-                      />
-                      <b>{p.pixel > 1 ? `${effPx}px` : '关'}</b>
-                    </label>
-                    <label title={hint('色数')}>
-                      色数
-                      <input
-                        type="number"
-                        min={0}
-                        max={64}
-                        value={p.palette}
-                        onChange={(e) => setParam('palette',
-                          Math.min(64, Math.max(0, Number(e.target.value) || 0)))}
-                      />
-                    </label>
-                  </>
-                )}
-                <label title={isQwenModel
-                  ? 'Qwen 的文本编码器是 Qwen3-VL，没有「跳过几层」这个概念'
-                  : model === 'sdxl'
-                    ? 'SDXL 不支持 clip skip（两个文本编码器要一起改），切回 SD1.5 才生效'
-                    : '1 = 最后一层（默认）；2 = 跳过最后一层，多数动漫/像素 LoRA 的训练设置'}>
-                  跳过层
-                  <input
-                    type="number"
-                    min={1}
-                    max={4}
-                    value={p.clipSkip}
-                    disabled={model === 'sdxl' || isQwenModel}
-                    onChange={(e) => setParam('clipSkip', Number(e.target.value) || 1)}
-                  />
-                </label>
               </div>
               {/* 极端值直接说后果：这类设置不会报错，只是出图"看着不对"，
                   而用户会归因为模型不行（实测有人填了 64/4 → 8px 有效像素）。 */}
