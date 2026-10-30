@@ -315,18 +315,21 @@ ComfyUI 的 `Qwen Image 2.1 Inpainting | No-Offset Edits` 工作流用的
 0.352→0.273→0.393）。按「算一次复用」做会退化成常量偏置——8 步勉强能用、
 24 步必崩，出图直接是骨架的彩色线段。
 
-实测（768²/RTX 4090）：权重加载 26s、条件编码 1.2s、**峰值显存 18.7GB**
-（24G 卡够用，不需要 fp8 化）。8 步 + 控制 9.4s（比无控制多 25%），24 步 17.3s。
+实测（**竖版 768×1024 / 40 步 / scale 1.0 / 几百字详述 prompt**）：完整角色，
+有脸有发饰，姿态与骨架逐点对应。峰值显存 18.7GB（24G 卡够用，不需要 fp8 化）。
 
-强度甜点**按步数分开给**：**8 步（Lightning）0.6，24 步 0.4**。拐点很陡
-（0.45 起糊、0.5 起空白）。达到的效果：8 步 0.6 出双腿大开 + 双臂外张，
-与骨架逐点对应。验证脚本 `tools/verify_controlnet_union.py`。
+**这个分支对配置极敏感，三条要一起对**：
+1. **画布必须匹配内容**——2D 角色是竖构图就用竖版（768×1024），
+   用 768² 方形时模型会把人物撑满、把头顶出画面（表现为"有身体没头"）
+2. **prompt 要详述**（头发颜色、发饰、服装、姿态、背景、光线），
+   只写 "a 2D game character sprite" 会让模型直接照抄骨架画个线条人
+3. 强度 scale 1.0 是官方值，竖版下完全正常
 
 四个坑：条件 latent 要做 mean/std 归一化、control block 要**继承**而不是组合
 （否则 key 多 `block.` 前缀）、`init_stream` 要加回 base hidden、
-mask 通道填 1 而非 0。细节见 `docs/PLAN-QWEN-ONLY.md` §2.15。
-
-权重下载用 `tools/fetch_parallel.py`——单连接被限速到 475 KB/s，16 路并发 6.0 MB/s。
+mask 通道填 0 而非 1（填 1 等于"保留空的 masked-image"，出全透明图）。
+**有 control 时必须 `use_kv_cache=False`**。
+细节见 `docs/PLAN-QWEN-ONLY.md` §2.15，验证脚本 `tools/verify_cn_portrait.py`。
 
 ### SD1.5 / SDXL 时代（权重已归档，代码已删）
 
