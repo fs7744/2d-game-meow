@@ -149,3 +149,161 @@ def test_forced_backends_do_not_fall_back(monkeypatch, tmp_path):
     out = M.matte_auto(_sprite(), "u2net", tmp_path, info=info)
     assert info == {"backend": "u2net", "fallback": False}
     assert M.fg_ratio(out) == 0.0
+
+
+# ---------------- Qwen 原生透明：别再重抠一遍 ----------------
+#
+# 现场问题：底模是 Qwen-Image-2.1、图本来就带 alpha，用户又勾了「抠图」，
+# 于是 isnet 把白毛角色的额头/脸颊当背景咬掉 —— 看到的就是「抠图把脸抠没了」。
+
+def _rgba_with_alpha() -> Image.Image:
+    """干净的 alpha：主体实心、四周全透明。"""
+    im = Image.new("RGBA", (128, 128), (0, 0, 0, 0))
+    ImageDraw.Draw(im).ellipse([30, 24, 98, 100], fill=(235, 235, 235, 255))
+    return im
+
+
+def test_flatten_white_does_not_blacken_transparent_area():
+    """透明区必须合成到白底：convert("RGB") 会留下 VAE 噪声色，分割模型会被带偏。"""
+    im = Image.new("RGBA", (8, 8), (0, 0, 0, 0))
+    ImageDraw.Draw(im).rectangle([2, 2, 5, 5], fill=(200, 30, 30, 255))
+    flat = M.flatten_white(im)
+    assert flat.mode == "RGB"
+    assert flat.getpixel((0, 0)) == (255, 255, 255)
+    assert flat.getpixel((3, 3)) == (200, 30, 30)
+    # 本来就不透明的图不该被改动
+    opaque = Image.new("RGBA", (8, 8), (1, 2, 3, 255))
+    assert M.flatten_white(opaque).getpixel((0, 0)) == (1, 2, 3)
+
+
+def test_alpha_trust_accepts_clean_and_rejects_fog():
+    ok, obs = M.alpha_trust(_rgba_with_alpha())
+    assert ok and obs["mid"] < 0.12
+
+    # 雾状 alpha：大片中间值（提示词里写了 white background 时 Qwen 就出这个）
+    fog = Image.new("RGBA", (128, 128), (200, 200, 200, 120))
+    ok2, obs2 = M.alpha_trust(fog)
+    assert not ok2 and obs2["mid"] > 0.5
+
+    # 全不透明：没有 alpha 可言
+    assert M.alpha_trust(Image.new("RGBA", (16, 16), (9, 9, 9, 255)))[0] is False
+
+
+def test_matte_auto_reuses_native_alpha():
+    """带可信 alpha 的图，auto 后端应原样返回（不再跑分割）。"""
+    src = _rgba_with_alpha()
+    info = {}
+    out = M.matte_auto(src, "auto", None, info=info)
+    assert info["backend"] == "alpha" and info["alpha_reused"] is True
+    assert np.array_equal(np.asarray(out.getchannel("A")),
+                          np.asarray(src.getchannel("A")))
+
+
+def test_matte_auto_still_recuts_when_alpha_is_fog():
+    """alpha 不可信时必须真的重抠，不能拿雾当成品交出去。"""
+    fog = Image.new("RGBA", (128, 128), (200, 200, 200, 120))
+    ImageDraw.Draw(fog).rectangle([30, 30, 90, 90], fill=(200, 30, 30, 255))
+    info = {}
+    out = M.matte_auto(fog, "color", None, info=info)
+    assert info["backend"] == "color"
+    a = np.asarray(out.getchannel("A"))
+    assert set(np.unique(a)).issubset({0, 255})       # 色键给硬边
+
+
+def test_fill_holes_fills_interior_but_not_open_gap():
+    """主体内部的洞要补回实心；通到边界/外部的空隙不能补。"""
+    im = Image.new("RGBA", (128, 128), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    d.rectangle([20, 20, 108, 108], fill=(200, 30, 30, 255))   # 主体
+    d.rectangle([52, 52, 76, 76], fill=(0, 0, 0, 0))           # 内部洞
+    out = M.fill_holes(im)
+    a = np.asarray(out.getchannel("A"))
+    assert a[64, 64] == 255                                    # 洞被补上
+
+    # 「两腿之间」的缺口通到主体下边界之外 → 不该被填
+    legs = Image.new("RGBA", (128, 128), (0, 0, 0, 0))
+    d2 = ImageDraw.Draw(legs)
+    d2.rectangle([20, 20, 56, 110], fill=(0, 0, 255, 255))
+    d2.rectangle([72, 20, 108, 110], fill=(0, 0, 255, 255))
+    out2 = M.fill_holes(legs)
+    a2 = np.asarray(out2.getchannel("A"))
+    assert a2[64, 64] == 0                                     # 中间仍透明
+
+
+# ---------------- Qwen 原生透明：别再重抠一遍 ----------------
+#
+# 现场问题：底模是 Qwen-Image-2.1、图本来就带 alpha，用户又勾了「抠图」，
+# 于是 isnet 把白毛角色的额头/脸颊当背景咬掉 —— 看到的就是「抠图把脸抠没了」。
+
+def _rgba_with_alpha() -> Image.Image:
+    """干净的 alpha：主体实心、四周全透明。"""
+    im = Image.new("RGBA", (128, 128), (0, 0, 0, 0))
+    ImageDraw.Draw(im).ellipse([30, 24, 98, 100], fill=(235, 235, 235, 255))
+    return im
+
+
+def test_flatten_white_does_not_blacken_transparent_area():
+    """透明区必须合成到白底：convert("RGB") 会留下 VAE 噪声色，分割模型会被带偏。"""
+    im = Image.new("RGBA", (8, 8), (0, 0, 0, 0))
+    ImageDraw.Draw(im).rectangle([2, 2, 5, 5], fill=(200, 30, 30, 255))
+    flat = M.flatten_white(im)
+    assert flat.mode == "RGB"
+    assert flat.getpixel((0, 0)) == (255, 255, 255)
+    assert flat.getpixel((3, 3)) == (200, 30, 30)
+    # 本来就不透明的图不该被改动
+    opaque = Image.new("RGBA", (8, 8), (1, 2, 3, 255))
+    assert M.flatten_white(opaque).getpixel((0, 0)) == (1, 2, 3)
+
+
+def test_alpha_trust_accepts_clean_and_rejects_fog():
+    ok, obs = M.alpha_trust(_rgba_with_alpha())
+    assert ok and obs["mid"] < 0.12
+
+    # 雾状 alpha：大片中间值（提示词里写了 white background 时 Qwen 就出这个）
+    fog = Image.new("RGBA", (128, 128), (200, 200, 200, 120))
+    ok2, obs2 = M.alpha_trust(fog)
+    assert not ok2 and obs2["mid"] > 0.5
+
+    # 全不透明：没有 alpha 可言
+    assert M.alpha_trust(Image.new("RGBA", (16, 16), (9, 9, 9, 255)))[0] is False
+
+
+def test_matte_auto_reuses_native_alpha():
+    """带可信 alpha 的图，auto 后端应原样返回（不再跑分割）。"""
+    src = _rgba_with_alpha()
+    info = {}
+    out = M.matte_auto(src, "auto", None, info=info)
+    assert info["backend"] == "alpha" and info["alpha_reused"] is True
+    assert np.array_equal(np.asarray(out.getchannel("A")),
+                          np.asarray(src.getchannel("A")))
+
+
+def test_matte_auto_still_recuts_when_alpha_is_fog():
+    """alpha 不可信时必须真的重抠，不能拿雾当成品交出去。"""
+    fog = Image.new("RGBA", (128, 128), (200, 200, 200, 120))
+    ImageDraw.Draw(fog).rectangle([30, 30, 90, 90], fill=(200, 30, 30, 255))
+    info = {}
+    out = M.matte_auto(fog, "color", None, info=info)
+    assert info["backend"] == "color"
+    a = np.asarray(out.getchannel("A"))
+    assert set(np.unique(a)).issubset({0, 255})       # 色键给硬边
+
+
+def test_fill_holes_fills_interior_but_not_open_gap():
+    """主体内部的洞要补回实心；通到边界/外部的空隙不能补。"""
+    im = Image.new("RGBA", (128, 128), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    d.rectangle([20, 20, 108, 108], fill=(200, 30, 30, 255))   # 主体
+    d.rectangle([52, 52, 76, 76], fill=(0, 0, 0, 0))           # 内部洞
+    out = M.fill_holes(im)
+    a = np.asarray(out.getchannel("A"))
+    assert a[64, 64] == 255                                    # 洞被补上
+
+    # 「两腿之间」的缺口通到主体下边界之外 → 不该被填
+    legs = Image.new("RGBA", (128, 128), (0, 0, 0, 0))
+    d2 = ImageDraw.Draw(legs)
+    d2.rectangle([20, 20, 56, 110], fill=(0, 0, 255, 255))
+    d2.rectangle([72, 20, 108, 110], fill=(0, 0, 255, 255))
+    out2 = M.fill_holes(legs)
+    a2 = np.asarray(out2.getchannel("A"))
+    assert a2[64, 64] == 0                                     # 中间仍透明

@@ -273,3 +273,39 @@ def test_qwen_sprite_swap_keeps_cell_size(eng, sandbox, tmp_path):
     assert m["cell"] == [64, 64]
     assert m["frames"] == 3
     assert Image.open(r["file"]).size == (64 * 3, 64)
+
+
+# ---------------- 透明底：提示词不能和 alpha 声明打架 ----------------
+
+def test_strip_bg_words_removes_conflicts():
+    """透明底时「white background」这类措辞必须被清掉。
+
+    实测同一个 seed：带这句时 Qwen 的 alpha 是一层雾（81.5% 前景、77.5% 停在
+    16~240 的中间值），清掉后是干净的（31% 前景、67.8% 全透明、中间值 2.9%）。
+    """
+    p, hit = g._strip_bg_words("a pixel art cat, plain white background, full body")
+    assert hit and "white background" not in p.lower()
+    assert p == "a pixel art cat, full body"
+    # 删完不能留悬空介词
+    assert g._strip_bg_words("a cat on a white background")[0] == "a cat"
+    # 没有冲突词就不该动
+    same, hit2 = g._strip_bg_words("a cat, golden armor")
+    assert not hit2 and same == "a cat, golden armor"
+
+
+# ---------------- 透明底：提示词不能和 alpha 声明打架 ----------------
+
+def test_strip_bg_words_removes_conflicts():
+    """透明底时「white background」这类措辞必须被清掉。
+
+    实测同一个 seed：带这句时 Qwen 的 alpha 是一层雾（81.5% 前景、77.5% 停在
+    16~240 的中间值），清掉后是干净的（31% 前景、67.8% 全透明、中间值 2.9%）。
+    """
+    p, hit = g._strip_bg_words("a pixel art cat, plain white background, full body")
+    assert hit and "white background" not in p.lower()
+    assert p == "a pixel art cat, full body"
+    # 删完不能留悬空介词
+    assert g._strip_bg_words("a cat on a white background")[0] == "a cat"
+    # 没有冲突词就不该动
+    same, hit2 = g._strip_bg_words("a cat, golden armor")
+    assert not hit2 and same == "a cat, golden armor"

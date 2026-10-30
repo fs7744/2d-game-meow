@@ -86,18 +86,98 @@ def strip_fringe(alpha: np.ndarray, rgb: np.ndarray, bg: Iterable[int],
     return alpha
 
 
+def flatten_white(img: Image.Image) -> Image.Image:
+    """把透明区合成到**白底**上，返回 RGB。
+
+    **别用 `convert("RGB")`**：那只是丢掉 alpha 通道，透明区的 RGB 是什么就留
+    什么——Qwen 的透明输出在透明区常常是 VAE 解出来的噪声色（偏黑/偏品红）。
+    分割模型（isnet / birefnet）和色键都会把这片噪声当成主体或背景的一部分，
+    实测会直接把主体的白色部分咬掉一圈。合成到白底后，模型看到的和用户看到的
+    是同一张图。
+    """
+    rgba = img.convert("RGBA")
+    if rgba.getchannel("A").getextrema()[0] >= 250:
+        return rgba.convert("RGB")          # 本来就不透明，不必多一次拷贝
+    out = Image.new("RGB", rgba.size, (255, 255, 255))
+    out.paste(rgba, (0, 0), rgba)
+    return out
+
+
+def alpha_trust(rgba: Image.Image) -> tuple[bool, Dict[str, Any]]:
+    """判断「输入自带的 alpha 能不能直接用」。
+
+    场景：Qwen-Image-2.1 原生出透明底（VAE 第 4 通道），本来就不需要再抠。
+    但它的 alpha 也可能是一层雾（提示词和解耦声明打架时，实测 77% 的像素停在
+    半透明中间值）。所以要看三个数：
+
+      · `a0`   完全透明像素占比 —— 没有真透明区就谈不上「自带 alpha」
+      · `mid`  16~240 的中间值占比 —— 雾状 alpha 的指纹，正常 < 10%
+      · `fg`   前景占比 —— 低于 1% 是抠空了，高于 95% 等于没抠
+
+    返回 (是否可信, 观测值)。调用方把观测值写进 meta，出问题能查。
+    """
+    a = np.asarray(rgba.convert("RGBA").getchannel("A"))
+    a0 = float((a == 0).mean())
+    mid = float(((a >= 16) & (a <= 240)).mean())
+    fg = float((a > 127).mean())
+    ok = a0 >= 0.10 and mid <= 0.12 and 0.01 <= fg <= 0.95
+    return ok, {"a0": round(a0, 4), "mid": round(mid, 4), "fg": round(fg, 4)}
+
+
+def fill_holes(rgba: Image.Image, max_ratio: float = 0.08) -> Image.Image:
+    """把主体**内部**的空洞填回实心（只填不与画布边界连通的洞）。
+
+    为什么需要：白色/浅色主体配浅色背景时，分割模型会把脸上、胸口的高光一起
+    判成背景——实测白猫骑士的额头与脸颊被咬掉一块、胸前出现一个灰洞。
+    这类「洞」有两个特征：不与外界连通、面积远小于主体。补回来几乎不会误伤
+    （两腿之间的空隙是**通到边界**的，不会被填）。
+
+    `max_ratio` 是洞面积上限（相对全图），防的是「主体本来是环形的」被填死。
+    """
+    arr = np.asarray(rgba.convert("RGBA")).copy()
+    a = arr[..., 3]
+    fg = (a > 127).astype(np.uint8)
+    if fg.sum() == 0:
+        return rgba
+    h, w = fg.shape
+    # 补 1px 边框再从 (0,0) 泛洪：否则贴着画布边缘的背景填不到，整张图会被
+    # 当成一个洞填满（这是 flood fill 填洞的经典边界坑）。
+    padded = np.zeros((h + 2, w + 2), np.uint8)
+    padded[1:-1, 1:-1] = fg
+    ff = padded.copy()
+    cv2.floodFill(ff, np.zeros((h + 4, w + 4), np.uint8), (0, 0), 1)
+    holes = (ff[1:-1, 1:-1] == 0) & (fg == 0)
+    if not holes.any():
+        return rgba
+    n, lab, stats, _cent = cv2.connectedComponentsWithStats(
+        holes.astype(np.uint8), connectivity=4)
+    lim = max_ratio * h * w
+    filled = 0
+    for i in range(1, n):
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        if area <= lim:
+            arr[..., 3][lab == i] = 255
+            filled += area
+    if filled == 0:
+        return rgba
+    return Image.fromarray(arr, "RGBA")
+
+
 def matte(img: Image.Image, bg: Iterable[int] | None = None, tol: int = 32,
           fringe: bool = True, fringe_ratio: float = 3.0,
-          fringe_passes: int = 3) -> Image.Image:
+          fringe_passes: int = 3, holes: bool = True) -> Image.Image:
     """纯色背景抠图，返回 RGBA（alpha 只有 0/255）。
 
     bg: 背景色；None 时从画面四边自动估计。
     tol: 判为同色的最大通道差。
     fringe: 是否去掉混色边（白边/绿边）。
     fringe_ratio: 混色边判据的倍数（越大越保守）。
+    holes: 是否把主体内部的空洞补回实心（见 fill_holes）。
     """
-    rgb = np.asarray(img.convert("RGB")).astype(np.int16)
-    bg_arr = np.array(list(bg) if bg is not None else estimate_bg_color(img), dtype=np.int16)
+    flat = flatten_white(img) if img.mode == "RGBA" else img
+    rgb = np.asarray(flat.convert("RGB")).astype(np.int16)
+    bg_arr = np.array(list(bg) if bg is not None else estimate_bg_color(flat),
+                      dtype=np.int16)
     dist = np.abs(rgb - bg_arr).max(axis=2)
 
     near = (dist <= tol).astype(np.uint8)
@@ -113,7 +193,8 @@ def matte(img: Image.Image, bg: Iterable[int] | None = None, tol: int = 32,
         alpha = strip_fringe(alpha, rgb, bg_arr, tol, fringe_ratio, fringe_passes)
 
     out = np.dstack([rgb.astype(np.uint8), alpha])
-    return Image.fromarray(out, "RGBA")
+    rgba = Image.fromarray(out, "RGBA")
+    return fill_holes(rgba) if holes else rgba
 
 
 def despeckle(rgba: Image.Image, min_ratio: float = 0.05,
@@ -225,7 +306,8 @@ def load_ai_session(model_dir: str | Path, name: str = "isnet-general-use"):
 
 def matte_ai(img: Image.Image, model_dir: str | Path, name: str = "isnet-general-use",
              thresh: int = 128, session: Any = None, feather: int = 0,
-             fringe: bool = True, alpha_mode: str = "binary") -> Image.Image:
+             fringe: bool = True, alpha_mode: str = "binary",
+             holes: bool = True) -> Image.Image:
     """语义分割抠图，alpha 默认二值化（像素素材要硬边）。
 
     `alpha_mode="soft"`：保留分割模型给出的半透明边。**高清插画资产要用这个**——
@@ -234,19 +316,28 @@ def matte_ai(img: Image.Image, model_dir: str | Path, name: str = "isnet-general
 
     分割只给「这是不是主体」，不会顺手清掉被背景混过的那一圈边 —— 所以这里
     也要走一遍 strip_fringe，否则轮廓外残留一圈背景色块。
+
+    `holes`：把主体内部被误判成背景的洞补回实心（见 `fill_holes`）。
+    白色主体配浅色背景时（白猫＋白底），分割模型会把额头、胸口一起啃掉，
+    这不是"边界切多了"而是"内部挖洞"，只能靠填洞救。
     """
     sess = session or load_ai_session(model_dir, name)
     from rembg import remove
 
-    rgb = np.asarray(img.convert("RGB"))
-    cut = remove(img.convert("RGB"), session=sess, post_process_mask=True)
+    # 透明区要先合成到白底：直接 convert("RGB") 会让透明区保留 VAE 噪声色，
+    # 分割模型看到一片脏底，结果连主体的白色部分一起判成背景
+    flat = flatten_white(img)
+    rgb = np.asarray(flat)
+    cut = remove(flat, session=sess, post_process_mask=True)
     arr = np.asarray(cut.convert("RGBA")).copy()
     if alpha_mode != "soft":
         arr[..., 3] = np.where(arr[..., 3] >= thresh, 255, 0).astype(np.uint8)
 
     if fringe:
-        arr[..., 3] = strip_fringe(arr[..., 3], rgb, estimate_bg_color(img))
+        arr[..., 3] = strip_fringe(arr[..., 3], rgb, estimate_bg_color(flat))
     out = Image.fromarray(arr, "RGBA")
+    if holes:
+        out = fill_holes(out)
 
     if feather > 0:                        # 分割边一般已很干净，默认不羽化
         m = np.asarray(out.getchannel("A")).astype(np.float32) / 255.0
@@ -307,10 +398,17 @@ def matte_auto(img: Image.Image, backend: str = "auto",
     """统一入口。
 
     backend:
-      auto  — 有分割模型就用 u2net，**抠空了自动回退色键**（推荐）
+      auto  — 输入自带可信 alpha 就直接用；否则有分割模型就用 u2net，
+              **抠空了自动回退色键**（推荐）
       color — 强制纯色键控（快，但白袍角色会误伤）
       u2net — 强制语义分割（不判断、不回退，出了问题自己认）
     未知值退回 color：不该因为拼错就整单失败。
+
+    **`auto` 会先看「这张图是不是已经有 alpha」**：Qwen-Image-2.1 的 VAE 有第
+    4 通道，出图时勾了透明底就已经是抠好的 RGBA。再拿分割模型重猜一遍是纯损失
+    ——实测白猫骑士（白毛＋白底）会被 isnet 把额头、脸颊一起判成背景咬掉，
+    用户看到的就是「抠图把脸抠没了」。判据见 `alpha_trust`，
+    只有 alpha 是雾状（提示词和透明声明打架时会出现）才会真的重抠。
 
     为什么要回退：实测草稿档（256²/8 步）出的图，u2net 只留下 **0.44%** 的前景
     ——模型没认出那是主体，于是「抠图成功」地交出一张几乎全透明的图，下游的
@@ -321,11 +419,22 @@ def matte_auto(img: Image.Image, backend: str = "auto",
     # 两种后端的参数集不同（alpha_mode 只有分割后端认），混着传会 TypeError。
     # 这里按后端分流，避免以后加参数时又踩一次。
     ai_kw = {k: v for k, v in kw.items()
-             if k in ("thresh", "feather", "fringe", "alpha_mode", "session")}
+             if k in ("thresh", "feather", "fringe", "alpha_mode", "session",
+                      "holes")}
     color_kw = {k: v for k, v in kw.items()
-                if k in ("bg", "tol", "fringe", "fringe_ratio", "fringe_passes")}
-    want_ai = backend in ("u2net", "ai", "isnet", "birefnet")
+                if k in ("bg", "tol", "fringe", "fringe_ratio", "fringe_passes",
+                         "holes")}
+
     if backend == "auto":
+        rgba = img if img.mode == "RGBA" else img.convert("RGBA")
+        ok, obs = alpha_trust(rgba)
+        if ok:
+            # 自带 alpha 已经是答案：只做连通域清理（碎屑/孤立点），不再重猜
+            info.update(backend="alpha", fallback=False, alpha_reused=True, **obs)
+            return rgba.copy()
+        if obs["a0"] > 0.01:               # 有透明区但不可信（雾状）→ 留痕
+            info.update(alpha_rejected=True, **obs)
+
         if not ai_available(model_dir):
             info.update(backend="color", fallback=False)
             return matte(img, **color_kw)
@@ -339,6 +448,7 @@ def matte_auto(img: Image.Image, backend: str = "auto",
         info.update(backend="color" if pick_alt else _short(name), fallback=True)
         return alt if pick_alt else cut
 
+    want_ai = backend in ("u2net", "ai", "isnet", "birefnet")
     if want_ai and ai_available(model_dir):
         name = _model_name(model_dir)
         if backend == "birefnet" and not name.startswith("birefnet"):

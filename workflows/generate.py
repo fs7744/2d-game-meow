@@ -388,6 +388,45 @@ def _qwen_prompt(prompt: str, transparent: bool) -> str:
     return f"{QWEN_ALPHA_HEAD}{body}{QWEN_ALPHA_TAIL}"
 
 
+# 与「透明底」直接冲突的背景措辞。**必须清掉**：
+# 提示词里写 "plain white background" 时，Qwen 会把它当正面要求执行——
+# 实测同一个 seed，带这句时 alpha 全是中间值（81.5% 前景、77.5% 停在
+# 16~240 的半透明雾），不带这句时是干净的（31% 前景、67.8% 全透明、
+# 中间值只有 2.9%）。用户看到的「透明没生效 / 抠出来一圈白」多半就是这句。
+_QWEN_BG_WORDS = (
+    "plain white background", "pure white background", "white background",
+    "plain background", "simple background", "flat background",
+    "solid background", "clean background", "white backdrop", "white bg",
+)
+
+
+def _strip_bg_words(prompt: str) -> tuple[str, bool]:
+    """去掉与透明底冲突的背景描述词。返回 (新提示词, 是否改动过)。"""
+    import re
+
+    out = prompt or ""
+    hit = False
+    for w in _QWEN_BG_WORDS:
+        if re.search(re.escape(w), out, flags=re.I):
+            out = re.sub(re.escape(w), "", out, flags=re.I)
+            hit = True
+    if hit:
+        # 清掉因删除留下的 ", ,"、首尾逗号，以及句尾悬空的介词/冠词
+        # （"a cat on a white background" → "a cat on a" → "a cat"）
+        parts = []
+        dangling = {"on", "in", "at", "with", "over", "against", "of", "and",
+                    "a", "an", "the", "to", "for"}
+        for seg in out.split(","):
+            words = seg.split()
+            while words and words[-1].lower().strip(".") in dangling:
+                words.pop()
+            seg = " ".join(words).strip()
+            if seg:
+                parts.append(seg)
+        out = ", ".join(parts)
+    return out, hit
+
+
 def sanitize_alpha(img: Image.Image) -> Image.Image:
     """清理 Qwen 透明底的脏 alpha：半透明毛边全部二值化。
 
@@ -589,6 +628,11 @@ def _qwen_txt2img(eng: Engine, *, prompt: str, negative: Optional[str],
         else:
             prompt, negative = presets.build(prompt, negative, preset,
                                              max_tokens=presets.CHUNK_BUDGET)
+    stripped = False
+    if transparent:
+        # 透明底时把「白底/纯色底」这类措辞清掉：它们是和透明声明直接打架的
+        # 正面要求，留着会让 alpha 变成一层雾（见 _QWEN_BG_WORDS 的实测）
+        prompt, stripped = _strip_bg_words(prompt)
     if seed < 0:
         seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
     torch.cuda.reset_peak_memory_stats()
@@ -613,6 +657,8 @@ def _qwen_txt2img(eng: Engine, *, prompt: str, negative: Optional[str],
         "pixel_block": pixel, "palette": palette, "matte": matte,
         "matte_backend": matte_backend, "denoise": denoise, "clean_iso": clean_iso,
         "matte_used": info.get("backend"), "matte_fallback": info.get("fallback"),
+        "alpha_reused": info.get("alpha_reused"),
+        "prompt_bg_stripped": stripped or None,
         "edge_touch": edge, "model": model, "clip_skip": None,
         "subjects": subjects, "transparent": transparent,
         "hires": None, "distill": None, "refiner": False,
@@ -766,6 +812,9 @@ def _qwen_img2img(eng: Engine, *, init_image: str | Path, prompt: str,
     if preset and preset != "none":
         prompt, negative = presets.build(prompt, negative, preset,
                                          max_tokens=presets.CHUNK_BUDGET)
+    if transparent:
+        # 同文生图：透明底时清掉「白底」这类与透明声明打架的措辞
+        prompt, _stripped = _strip_bg_words(prompt)
     if scope:
         src = Path(init_image).resolve()
         own = scope_dir(scope).resolve()
@@ -1031,10 +1080,13 @@ def matte_bg(eng: Engine, *, init_image: str | Path,
     否则发丝/纱/光效会被压成一圈硬齿。`feather` 只对 soft 有意义。
     """
     src = Image.open(init_image).convert("RGBA")
-    # 抠图：与其它工作流共用同一套（含 u2net 抠空自动回退的保护）
+    # 抠图：与其它工作流共用同一套（含 u2net 抠空自动回退的保护）。
+    # info 要带出来：Qwen 出图自带 alpha 时这里会是 backend="alpha"（原样复用），
+    # 用户看到「没重抠」才知道不是漏了。
+    minfo: Dict[str, Any] = {}
     cut = matte_mod.despeckle(
         matte_mod.matte_auto(src, matte_backend, eng.matte_dir,
-                             alpha_mode=alpha_mode, feather=feather),
+                             info=minfo, alpha_mode=alpha_mode, feather=feather),
         denoise_iters=denoise)
     fg = float((np.asarray(cut)[..., 3] > 127).mean())
 
@@ -1068,6 +1120,11 @@ def matte_bg(eng: Engine, *, init_image: str | Path,
         "init_image": str(init_image), "background": bg_path,
         "bg_mode": mode, "bg_color": str(bg_color) if mode == "color" else None,
         "matte_backend": matte_backend, "fg_ratio": round(fg, 4),
+        # 实际用了哪个后端 / 是否复用了输入自带的 alpha（Qwen 出图常见）
+        "matte_used": minfo.get("backend"),
+        "matte_fallback": minfo.get("fallback"),
+        "alpha_reused": minfo.get("alpha_reused"),
+        "alpha_rejected": minfo.get("alpha_rejected"),
         "width": out.width, "height": out.height,
     }
     res = _save(out, name, "matte_bg", meta, scope=scope)
