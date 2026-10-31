@@ -19,6 +19,9 @@ assets/
 *.log
 *.jsonl
 
+# 例外：PoseStudio 的 MakeHuman 网格资产要入库（整套管线 clone 即用）
+!web/public/vnccs-pose/pose_studio/assets/
+
 # ---- 测试与验证脚本的产物 ----
 # 单独一个目录，不混进 assets/：assets/ 里放的是**项目要交付的东西**，
 # 这里放的是开发过程的对比图、基准数据、pytest 的中间产物。
@@ -51,10 +54,6 @@ dataset/
 # ---- 前端 SSR 构建产物（骨骼编辑器预览用，见 tools/render_skeleton_preview.mjs）----
 web/ssr-tmp/
 
-# VNCCS PoseStudio 大资产（CC0，从 ComfyUI_VNCCS_Utils 复制，不入库）。
-# 源码（core.js / morph_runtime.mjs / openpose.js / entry.mjs）与 vendor/three 入库；
-# 这两个目录（MakeHuman 网格 37MB + 皮肤贴图 11MB）需从官方仓库补：
-#   git clone https://github.com/AHEKOT/ComfyUI_VNCCS_Utils
-#   复制 web/pose_studio/assets/ 与 web/pose_studio/textures/ 到对应位置
-web/public/vnccs-pose/pose_studio/assets/
-web/public/vnccs-pose/pose_studio/textures/
+# VNCCS PoseStudio 的 MakeHuman 网格（37.8MB）与皮肤贴图（11MB）直接入库——
+# CC0 授权、且整套官方管线 clone 即用，不额外维护下载脚本。
+# （曾 gitignore，用户指出「从哪拿」太麻烦，改为入库。）
