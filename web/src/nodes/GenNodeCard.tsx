@@ -230,7 +230,7 @@ export const TALL_MAX = 1400
 export type NodePatch = Partial<
   Pick<GenNode,
     'x' | 'y' | 'w' | 'h' | 'params' | 'view' | 'job' | 'source' | 'image'
-    | 'charSource' | 'charSources' | 'skeleton'>
+    | 'charSource' | 'charSources' | 'skeleton' | 'mannequin'>
 >
 
 /**
@@ -275,6 +275,14 @@ type Props = {
   onSpawnImg2Img: () => void
   /** 骨骼编辑器导出的 PNG（Blob）→ 上传并挂到节点 image 上 */
   onExportSkeleton?: (blob: Blob) => void
+  /**
+   * 骨骼编辑器「导出人偶图」：渲染 + 上传 + 挂到节点 mannequin 上。
+   * 由 App 层用官方 PoseStudio（iframe）渲染，可能要等网格加载。
+   */
+  onExportMannequin?: (
+    joints: { x: number; y: number }[],
+    azimuth: number,
+  ) => void | Promise<void>
   /** 骨骼编辑器「从图片提取」，返回 Promise 以便节点显示"提取中" */
   onImportPose?: (file: File) => void | Promise<void>
   /** 图生图的上游节点（从 source.nodeId 解析而来） */
@@ -376,6 +384,7 @@ export default function GenNodeCard({
   defaultModel,
   onSpawnImg2Img,
   onExportSkeleton,
+  onExportMannequin,
   onImportPose,
   sourceNode,
   sourceOptions,
@@ -470,6 +479,7 @@ export default function GenNodeCard({
   const poseDirInfo = (poseDirs || []).find((d) => d.path === p.psDir)
   const [maskOpen, setMaskOpen] = useState(false)
   const [skelExporting, setSkelExporting] = useState(false)
+  const [mannequinExporting, setMannequinExporting] = useState(false)
   const [skelImporting, setSkelImporting] = useState(false)
   // 源图可以是上游节点的产物、图片节点的本地图，也可以是节点上直接记的绝对路径
   //
@@ -488,7 +498,9 @@ export default function GenNodeCard({
     node.source?.path
   )
   // 缩略图同理：image 优先（图片节点 / 骨架图），没有再看生成结果
-  const sourceThumb = sourceNode?.image?.url ?? sourceNode?.job?.url
+  // 缩略图：骨骼节点优先显示 3D 人偶图（那才是真正喂给模型的图），
+// 其次是本地图 / 出图结果
+  const sourceThumb = sourceNode?.mannequin?.url ?? sourceNode?.image?.url ?? sourceNode?.job?.url
   // 角色迁移的角色图缩略图（角色图节点或本地图）
   const charThumb = charThumbOf?.(node.charSource?.nodeId)
   // 角色迁移的引擎：只有 VNCCS 的提交带 `transparent`（旧版 wpc 没有这个字段）
@@ -753,7 +765,12 @@ export default function GenNodeCard({
         )}
         <div className="src-note">
           {sourceNode?.kind === 'poseedit'
-            ? '用导出的骨架图（OpenPose 18 点）'
+            ? sourceNode.mannequin?.path
+              ? '用 3D 人偶图（官方 PoseStudio 渲染，VNCCS 的 LoRA 就是在这个格式上训的）'
+              : sourceNode.image?.path
+                ? '用线框骨架图（OpenPose 18 点）。想要更好的姿态贴合，'
+                  + '去上游骨骼编辑节点导一张「人偶图（3D）」'
+                : '上游骨骼编辑节点还没导出图：导出「人偶图（3D）」效果最好'
             : sourceNode?.kind === 'image'
               ? '用这张本地图'
               : sourceNode?.job?.raw
@@ -984,11 +1001,22 @@ export default function GenNodeCard({
               setSkelImporting(true)
               try { await onImportPose?.(f) } finally { setSkelImporting(false) }
             }}
+            onExportMannequin={async (joints, azimuth) => {
+              setMannequinExporting(true)
+              try { await onExportMannequin?.(joints, azimuth) } finally { setMannequinExporting(false) }
+            }}
+            mannequinExporting={mannequinExporting}
           />
           {node.image?.url && (
             <div className="skel-preview">
               <img src={node.image.url} alt="导出的骨架图" />
-              <span>已导出 · {fileNameOf(node.image.path)}</span>
+              <span>线框骨架图 · {fileNameOf(node.image.path)}</span>
+            </div>
+          )}
+          {node.mannequin?.url && (
+            <div className="skel-preview">
+              <img src={node.mannequin.url} alt="导出的 3D 人偶图" />
+              <span>3D 人偶图 · {fileNameOf(node.mannequin.path)}（VNCCS 用这张）</span>
             </div>
           )}
         </div>

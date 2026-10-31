@@ -226,6 +226,21 @@ LoRA 是 `MIUProject/VNCCS_PoseStudio_QI2.1`（152MB，ComfyUI 格式，
   下拉（自动=跟骨骼编辑器的方位角 / 正面 / 8 个方向），提交时拼成
   `viewing direction: …`。同时修掉一个真 bug：角色迁移这条**漏了骨架转白底**，
   黑底骨架会被读成"背对镜头"，出来是背影（另两条 VNCCS 路线早就转了）。
+- **整套移植官方 PoseStudio（2026-11-01）**。上面那条"人偶渲染传不了朝向"的结论
+  其实是「我们自绘的人偶不在 LoRA 分布里」——换成**官方那套渲染器**（MakeHuman
+  网格 + Phong 材质 + 相机机位）后，朝向直接烘焙进图：0°/90°/180°/270° =
+  正面/侧面/背面/侧面，全部正确，**不用再写任何方位词**（写了反而压过姿势）。
+  - 官方源码整套入库 `web/public/vnccs-pose/`（core.js 8938 行 + morph_runtime +
+    openpose.js + vendor/three），MakeHuman 网格（CC0）与皮肤贴图一并入库；
+    `entry.mjs` 只是接线（约 100 行），**没有一行自己的 IK 或渲染**
+  - 骨骼编辑节点新增「导出人偶图（3D）」，产物存 `node.mannequin`
+    （与线框骨架 `node.image` 并存）；角色迁移的「动作参考」**优先用人偶图**，
+    没有才退回线框骨架
+  - **后端零改动**：`_vnccs_skeleton` 只把「低饱和+暗」的像素换成白底，
+    人偶图本就是白底灰人偶，判据 `mx<70` 不会命中
+  - 验证：真实浏览器（headless Edge + swiftshader）里 postMessage 往返拿到
+    169KB 的 768² PNG；主页面 iframe 零 console 错误；前端 smoke 383/383
+  - 详见 `docs/VNCCS-REAL.md` 第 6 节
 
 
 ### 全项目 review（2026-10-31 上午）
@@ -863,7 +878,7 @@ start.bat                   # Windows 双击或命令行
 cd web && npm ci && npm run build     # 构建
 cd .. && python app.py                # FastAPI 同时托管 dist 与 API → http://127.0.0.1:8000
 cd web && npm run dev                 # 或开发模式（:5173，代理到 8000）
-npm run smoke                         # 无浏览器渲染冒烟（jsdom，375 项断言）
+npm run smoke                         # 无浏览器渲染冒烟（jsdom，383 项断言）
 ```
 
 > `start.bat` 刻意保持**纯 ASCII**：cmd.exe 按 OEM 代码页解析 .bat，中文注释会切断命令行

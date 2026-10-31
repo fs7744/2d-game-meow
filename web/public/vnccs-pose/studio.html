@@ -2,12 +2,16 @@
 <html lang="zh">
 <head>
   <meta charset="UTF-8" />
-  <title>VNCCS PoseStudio 渲染验证</title>
+  <title>VNCCS PoseStudio</title>
   <style>
     body { background: #111; color: #eee; font: 14px/1.6 sans-serif; margin: 16px; }
     #status { color: #ffd54a; white-space: pre-wrap; margin-bottom: 12px; }
     #out { display: flex; gap: 12px; flex-wrap: wrap; }
     #out img { image-rendering: auto; background: #fff; }
+    /* 集成模式（被父页当 iframe 用）：只留画布，界面全部藏掉 */
+    body.integrated { margin: 0; background: #fff; }
+    body.integrated #status, body.integrated #out { display: none; }
+    body.integrated #stage { position: fixed; left: -10000px; top: 0; }
   </style>
 </head>
 <body>

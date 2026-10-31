@@ -81,18 +81,27 @@ window.addEventListener('message', async (e) => {
   if (!msg || msg.type !== 'render') return
   try {
     const dataURL = await renderMannequin(msg.joints, msg.azimuth ?? 0, msg.opts || {})
-    e.source?.postMessage({ type: 'result', dataURL }, '*')
+    e.source?.postMessage({ type: 'result', id: msg.id, dataURL }, '*')
   } catch (err) {
     e.source?.postMessage({ type: 'error', message: String(err?.message || err) }, '*')
   }
 })
 
+// ---- 预热：网格加载完就通知父页 ready（第一次要几秒：37.8MB 网格 + 解析）----
+const isTest = new URLSearchParams(location.search).get('test') === '1'
+const isSelftest = new URLSearchParams(location.search).get('selftest') === '1'
+if (!isTest && !isSelftest) document.body.classList.add('integrated')
+getViewer(isTest ? 'naked' : 'flat_color')
+  .then(() => { window.parent?.postMessage({ type: 'ready' }, '*') })
+  .catch((err) => {
+    window.parent?.postMessage({ type: 'error', message: String(err?.message || err) }, '*')
+  })
+
 // ---- 自检模式：?test=1 ----
-if (new URLSearchParams(location.search).get('test') === '1') {
+if (isTest) {
   ;(async () => {
     try {
       status.textContent = '加载中…'
-      const viewer = await getViewer('naked')
       for (const az of [0, 90, 180, 270]) {
         const url = await renderMannequin(STAND, az, { skinMode: 'naked' })
         const img = document.createElement('img')
@@ -103,6 +112,38 @@ if (new URLSearchParams(location.search).get('test') === '1') {
       status.textContent = 'done'
     } catch (e) {
       status.textContent = 'ERROR: ' + (e?.stack || e?.message || e)
+    }
+  })()
+}
+
+// ---- 集成自检：?selftest=1 ----
+// 走**和父页完全一样的 postMessage 通路**（自己给自己发一条 render），
+// 验证「父页 → iframe → 官方渲染 → 回 PNG」这条链在真实浏览器里通。
+if (new URLSearchParams(location.search).get('selftest') === '1') {
+  ;(async () => {
+    try {
+      status.textContent = 'selftest: 加载网格…'
+      await getViewer('flat_color')
+      status.textContent = 'selftest: 网格就绪，发 render…'
+      const got = await new Promise((resolve, reject) => {
+        const onMsg = (e) => {
+          const d = e.data
+          if (d?.type === 'result') resolve(d.dataURL)
+          if (d?.type === 'error') reject(new Error(d.message))
+        }
+        window.addEventListener('message', onMsg)
+        window.postMessage({
+          type: 'render', id: 'selftest',
+          joints: STAND, azimuth: 90, opts: { width: 768, height: 768 },
+        }, '*')
+        setTimeout(() => reject(new Error('selftest 超时')), 60000)
+      })
+      const img = document.createElement('img')
+      img.src = got
+      out.appendChild(img)
+      status.textContent = `selftest: OK dataURL ${got.length} 字节`
+    } catch (e) {
+      status.textContent = 'selftest ERROR: ' + (e?.stack || e?.message || e)
     }
   })()
 }

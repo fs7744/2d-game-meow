@@ -50,6 +50,19 @@ type Props = {
   /** 从用户提供的图片自动提骨架（上传 + DWPose 由节点侧负责） */
   onImportImage?: (file: File) => void
   importing?: boolean
+  /**
+   * 导出 3D 人偶图（VNCCS 官方条件图格式）。
+   *
+   * 官方 PoseStudio 用 MakeHuman 网格渲染「白底灰色人偶」当 image1，LoRA 是在
+   * 这种图上训的；线框骨架不在它的分布里，姿态跟随会弱很多（见 docs/VNCCS-REAL.md）。
+   * 这里的关节是编辑器的 0~1 坐标（x 右 / y 下），方位角决定朝向。
+   * 由节点侧调官方渲染器（iframe）完成，可能要等几秒。
+   */
+  onExportMannequin?: (
+    joints: { x: number; y: number }[],
+    azimuth: number,
+  ) => Promise<void>
+  mannequinExporting?: boolean
 }
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v))
@@ -356,6 +369,7 @@ export function renderSkeletonPNG(state: SkeletonState, size = 768): Promise<Blo
 
 export default function SkeletonEditor({
   state, onChange, onExport, exporting, onImportImage, importing,
+  onExportMannequin, mannequinExporting,
 }: Props) {
   const [dragIdx, setDragIdx] = useState<number | null>(null)
   const [selected, setSelected] = useState<number | null>(null)
@@ -427,6 +441,16 @@ export default function SkeletonEditor({
     const blob = await renderSkeletonPNG(state)
     onExport(blob)
   }, [state, onExport])
+
+  /**
+   * 导出 3D 人偶图。官方 PoseStudio 只吃 2D 关键点（OpenPose 的 COCO-18），
+   * 所以这里把编辑器的 x/y 原样传过去；编辑器的 z（前后深度）在官方那套
+   * 2D→骨旋转里用不到（朝向由方位角单独给）。
+   */
+  const doExportMannequin = useCallback(async () => {
+    if (!onExportMannequin) return
+    await onExportMannequin(state.points.map((p) => ({ x: p.x, y: p.y })), state.azimuth)
+  }, [state.points, state.azimuth, onExportMannequin])
 
   return (
     <div className="skel-editor" onPointerDown={(e) => e.stopPropagation()}>
@@ -532,6 +556,16 @@ export default function SkeletonEditor({
         <button className="mini wide" onClick={() => void doExport()} disabled={exporting}>
           {exporting ? '导出中…' : '导出骨架图'}
         </button>
+        <button
+          className="mini wide"
+          onClick={() => void doExportMannequin()}
+          disabled={mannequinExporting || !onExportMannequin}
+          title={'导出 3D 人偶图（白底灰人偶）。VNCCS 的姿态 LoRA 是在这种图上训的，\n'
+            + '比线框骨架贴合得好；朝向 = 当前的方位角（0° 正面 / 90° 侧面 / 180° 背面）。\n'
+            + '会调起官方 PoseStudio 渲染，第一次要等网格加载。'}
+        >
+          {mannequinExporting ? '渲染人偶…' : '导出人偶图（3D）'}
+        </button>
       </div>
       <input
         ref={fileRef}
@@ -546,9 +580,12 @@ export default function SkeletonEditor({
       />
       <div className="src-note">
         拖圆点摆关节；「从图片」自动提真人姿势（像素/插画认不出，用预设手动摆）。
-        方位角绕竖轴旋转（0° 正面 / 180° 背面）即可换视觉方向。
+        方位角绕竖轴旋转（0° 正面 / 90° 侧面 / 180° 背面）即可换视觉方向。
         「人形」是带体积的 3D 感显示，方便看清姿势像不像人、朝向对不对
-        （背面会有发际线、没有五官）；**导出始终是 OpenPose-18 线骨架**，格式不变。
+        （背面会有发际线、没有五官）。
+        <b>两种导出</b>：「导出骨架图」是 OpenPose-18 线骨架（ControlNet 系要这个）；
+        「导出人偶图」是白底灰 3D 人偶——VNCCS 的姿态 LoRA 就是在这种图上训的，
+        姿态贴合明显更好，做角色迁移请优先用它。
       </div>
     </div>
   )

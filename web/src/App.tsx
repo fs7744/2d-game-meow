@@ -22,6 +22,7 @@ import {
 } from './api'
 import ConfirmDialog from './components/ConfirmDialog'
 import Lightbox from './components/Lightbox'
+import { MannequinHost, type MannequinHandle } from './components/MannequinHost'
 import type { PoseDir } from './api'
 import type { ModelCaps } from './api'
 import type {
@@ -483,6 +484,9 @@ export default function App() {
   const currentIdRef = useRef(currentId)
   currentIdRef.current = currentId
 
+  // 官方 PoseStudio 宿主（隐藏 iframe）：骨骼编辑器「导出人偶图」用它渲染
+  const mannequinRef = useRef<MannequinHandle | null>(null)
+
   // 自动保存（防抖 400ms）：只写回**当前项目**，别的项目原封不动。
   //
   // **只写服务端磁盘**。浏览器不留任何项目内容。
@@ -878,6 +882,38 @@ export default function App() {
   }, [patchNode, currentId])
 
   /**
+   * 骨骼编辑器「导出人偶图」：调官方 PoseStudio 渲染 3D 人偶 → 上传 → 挂到
+   * node.mannequin。
+   *
+   * 为什么要单独存一个字段而不是覆盖 node.image：线框骨架（OpenPose-18）和 3D 人偶
+   * 是两种格式，各有用途（ControlNet 系要骨架、VNCCS 要人偶），下游按优先级取。
+   *
+   * 渲染走的是官方那套（iframe 里跑 MakeHuman 网格 + 官方 OpenPose→骨旋转），
+   * 第一次要等 37.8MB 网格加载，几秒。
+   */
+  const exportMannequin = useCallback(async (
+    id: string,
+    joints: { x: number; y: number }[],
+    azimuth: number,
+  ) => {
+    try {
+      const host = mannequinRef.current
+      if (!host) throw new Error('人偶渲染器未挂载')
+      const blob = await host.render(joints, azimuth, { width: 768, height: 768 })
+      const f = new File([blob], 'mannequin.png', { type: 'image/png' })
+      const up = await uploadImage(f, currentId)
+      patchNode(id, {
+        mannequin: { path: up.path, url: up.url, w: 768, h: 768 },
+      })
+      setNotice('3D 人偶图已导出：角色迁移会优先用它当动作参考（VNCCS 官方格式）')
+      window.setTimeout(() => setNotice(''), 6000)
+    } catch (e) {
+      setNotice(`导出人偶图失败：${e instanceof Error ? e.message : '未知错误'}`)
+      window.setTimeout(() => setNotice(''), 6000)
+    }
+  }, [patchNode, currentId])
+
+  /**
    * 骨骼编辑器「从图片提取」：上传原图 → 后端 DWPose 提 18 关节 → 2D 点补深度
    * 变成可旋转的 3D 骨架 → 写回节点。
    *
@@ -1047,6 +1083,24 @@ export default function App() {
     return up.job?.raw || up.job?.path
   }, [])
 
+  /**
+   * 姿态参考图（角色迁移的「动作参考」）。
+   *
+   * 骨骼编辑器节点可能有两种产物，**3D 人偶图优先**：
+   *  - `mannequin`：官方 PoseStudio 渲染的白底灰人偶——VNCCS 的姿态 LoRA 就是在
+   *    这种图上训的，线框骨架不在它的分布里，姿态贴合明显更弱；
+   *  - `image`：OpenPose-18 线框骨架（ControlNet 系要这个，也是没有渲染器时的兜底）。
+   *
+   * 非骨骼节点照旧走 sourcePathOf（图生图等场景要的是角色图，不是姿态图）。
+   */
+  const poseSourceOf = useCallback((n: GenNode): string | undefined => {
+    const up = n.source?.nodeId
+      ? nodesRef.current.find((x) => x.id === n.source!.nodeId)
+      : undefined
+    if (up?.kind === 'poseedit') return up.mannequin?.path || up.image?.path
+    return sourcePathOf(n)
+  }, [sourcePathOf])
+
   /** 角色迁移的「角色图」路径（身份来源）。角色图要用**成品**而不是 raw：
    *  IP-Adapter 学的是外观特征，raw 是未像素化的原图，学不到像素感。 */
   const charPathOf = useCallback((n: GenNode): string | undefined => {
@@ -1149,7 +1203,7 @@ export default function App() {
             basePath, refPaths[0], refPaths)
         jobId = r.job_id
       } else if (node.kind === 'poseclone') {
-        const posePath = sourcePathOf(node)
+        const posePath = poseSourceOf(node)
         const charPaths = charPathsOf(node)
         if (!posePath || charPaths.length === 0) {
           patchNode(id, {
@@ -1160,22 +1214,28 @@ export default function App() {
           })
           return
         }
-        // 动作参考来自「骨骼编辑」节点时：它导出的就是 OpenPose 骨架图，
-        // 必须走 skeleton 模式（auto 会因检不到人体降级成剪影，把骨架毁掉）。
+        // 动作参考来自「骨骼编辑」节点时：产物是 OpenPose 骨架图或 3D 人偶图，
+        // 两者都是**画好的条件图**，必须走 skeleton 模式（auto 会去跑 DWPose，
+        // 检不到人体就降级成剪影，把图毁掉）。
         //
-        // 朝向：骨架图本身分不清角度（正/背面在 2D 投影里互为镜像、90° 收成一条线），
-        // 所以必须**显式**补一句方向词。优先级：用户在下拉里选的 > 编辑器的方位角。
+        // 朝向：**人偶图的朝向已经烘焙在图里**（官方 PoseStudio 用相机机位渲染的，
+        // 0/90/180 出来的就是正面/侧面/背面），再补方向词只会重复——而且实测
+        // 任何 "front view" 类文字都会压过姿势。线框骨架才可能需要方向词补救。
         const upNode = node.source?.nodeId
           ? nodesRef.current.find((x) => x.id === node.source!.nodeId)
           : undefined
         const fromEditor = upNode?.kind === 'poseedit'
+        const hasMannequin = !!upNode?.mannequin?.path
         const pcParams: GenParams = { ...node.params }
         if (fromEditor) pcParams.pcRefMode = 'skeleton'
         // 朝向：**默认「自动」一个字都不写**（VNCCS 官方从不写方向词——方向长在
         // 渲染的相机机位里，prompt 只描述光照）。只有用户**手动选非正面**才补一句，
-        // 代价是方向词会压过骨架姿势（实测）。详见 docs/VNCCS-REAL.md。
+        // 代价是方向词会压过姿势（实测）。详见 docs/VNCCS-REAL.md。
+        //
+        // 用了 3D 人偶图时**一律不补**：朝向已经在图里，补了是重复指令，还会
+        // 把姿势压掉（实测 front view 会让分腿张臂的姿势退回站立）。
         const view = node.params.pcView ?? 'auto'
-        const phrase = view === 'auto' || view === 'front'
+        const phrase = hasMannequin || view === 'auto' || view === 'front'
           ? ''
           : PC_VIEW_PHRASES[view]
         if (phrase) {
@@ -1552,6 +1612,7 @@ export default function App() {
           onDropType={(t, world) => addNode(t, world)}
           onSpawnImg2Img={spawnImg2Img}
           onExportSkeleton={(id, blob) => void exportSkeleton(id, blob)}
+          onExportMannequin={(id, joints, azimuth) => exportMannequin(id, joints, azimuth)}
           onImportPose={(id, file) => importPoseFromImage(id, file)}
           onDropFiles={(files, world, targetId) => void handleFiles(files, world, targetId)}
           onConnect={onConnect}
@@ -1580,6 +1641,10 @@ export default function App() {
       {(uploadMsg || notice) && <div className="toast">{uploadMsg || notice}</div>}
 
       {preview && <Lightbox url={preview.url} name={preview.name} onClose={() => setPreview(null)} />}
+
+      {/* 官方 VNCCS PoseStudio 宿主：隐藏 iframe，挂载即预热网格。
+          骨骼编辑器「导出人偶图」通过 postMessage 让它渲染。 */}
+      <MannequinHost ref={mannequinRef} />
 
       {pendingProjectDelete && (() => {
         const proj = projectMeta.find((p) => p.id === pendingProjectDelete)

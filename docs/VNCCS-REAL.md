@@ -111,21 +111,47 @@ prompt 里一个字都不用写——和 VNCCS 官方完全一致。
 ① 18 关节 → 53 根 MakeHuman 骨的 IK；② 蒙皮（skin_indices/skin_weights 驱动顶点），
 现在只渲染静息 A-pose。
 
-## 6. 我们的取舍（现状）
+## 6. 已落地：整套移植官方 PoseStudio（2026-11-01）
 
-在没有"真 3D 人偶渲染器"之前：
+上面的「备选路线 1」不再需要自己造——官方 ComfyUI_VNCCS_Utils 里那套
+PoseStudio 是现成的、调校好的，整套搬过来即可：
 
-- 条件图继续用线框骨架（它至少**姿势能跟住**，这是精灵产线最需要的）。
-- 朝向：**默认不写任何方向词**（VNCCS 也从不写）。用户**手动选非正面**才补一句，
-  并明确提示"会削弱姿势贴合"。这是止损，不是正确解。
-- 已修的硬 bug：骨架转白底（否则画背影）、transparent 漏传后处理（否则白块）。
+| 文件 | 作用 |
+|---|---|
+| `web/public/vnccs-pose/pose_studio/core.js` | PoseViewerCore（8938 行）：渲染 + 骨骼 + morph + IK + 相机 |
+| `web/public/vnccs-pose/pose_studio/morph_runtime.mjs` | VNMHJS02 网格解析（MakeHuman CC0 网格） |
+| `web/public/vnccs-pose/pose_studio/imports/openpose.js` | `convertOpenPoseToPose`：18 关键点 → 53 根骨的欧拉角 |
+| `web/public/vnccs-pose/vendor/three/` | 官方 THREE 0.160（core.js 相对路径动态加载） |
+| `web/public/vnccs-pose/entry.mjs` | 我们的最小入口（只做接线，无自有 IK/渲染） |
 
-## 7. 要真正做好，需要补的（备选路线）
+链路（**全是官方现成的**）：
 
-1. **在浏览器里用 three.js 渲染真的人偶**（`web/pose_studio/assets` 那套 CC0 网格 +
-   皮肤贴图 + Phong 灯光），导出成 image1。工作量最大，但最忠实。
-2. **Python 侧软渲染人偶**：解析 MakeHuman `.bin.gz`（含蒙皮权重）+ 骨骼旋转，
-   用 numpy 做 Phong 栅格化。不引入浏览器依赖，但要写一个微型光栅器。
-3. 保持线框 + 显式朝向（现状），接受"侧面/背面只能靠文字、姿势会打折"。
+```
+loadMorphPack → solveMorph → buildStaticModelData → PoseViewerCore.loadData
+→ convertOpenPoseToPose(18 关节) → setPose → capture(yawDeg=朝向)
+```
 
-在选 1/2 之前，先把这里当"地面真相"，别再把方向词当万能药。
+三条之前踩过的坑，官方都已有正解：
+
+1. **不缩放骨长**：官方用纯旋转（两骨解析解 + 极点约束）摆姿态。
+   我们自写的「方向对齐 + 缩放骨长」会肩外展、肘外翻、手悬空（畸形）。
+2. **18 关节就是 COCO 格式**：`convertOpenPoseToPose` 直接吃，我们不用自己映射。
+3. **朝向用 capture 的 yawDeg**（相机机位），不是 modelRotation。
+   人偶图的朝向**烘焙在图里**，所以下游不该再补方向词——补了是重复指令，
+   还会压过姿势（实测 front view 会让分腿张臂退回站立）。
+
+界面接入：骨骼编辑节点新增「导出人偶图（3D）」，产物存 `node.mannequin`
+（与线框骨架 `node.image` 并存）。角色迁移的「动作参考」**优先用人偶图**，
+没有才退回线框骨架（`poseSourceOf`）。
+
+后端**零改动**：`_vnccs_skeleton` 只把「低饱和 + 暗」的像素换成白底，
+人偶图本就是白底灰人偶，判据 `mx < 70` 不会命中它。
+
+## 7. 仍需注意的
+
+- **没有 PoseStudio 渲染器时的兜底**：线框骨架仍可用（姿势能跟住，
+  是精灵产线最需要的），只是姿态贴合比人偶图弱一截。
+- **朝向**：人偶图自带朝向，线框骨架则分不清正/背面（2D 投影里互为镜像、
+  90° 收成一条线）。用线框骨架时只能靠文字补，代价是姿势打折。
+- **`tools/render_mannequin.py`**（我们早期写的 Python 软光栅）已被官方
+  PoseStudio 取代，保留仅作无浏览器环境下的对照参考。

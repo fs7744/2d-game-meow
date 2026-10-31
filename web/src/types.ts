@@ -263,6 +263,14 @@ export type GenNode = {
   /** 角色迁移节点：额外角色图（多角度参考）。空数组等同于只给 charSource */
   charSources?: NodeCharSource[]
   image?: NodeImage
+  /**
+   * 骨骼编辑器节点：**3D 人偶图**（白底灰人偶，官方 PoseStudio 渲染）。
+   *
+   * VNCCS 的姿态 LoRA 是在这种图上训的，线框骨架不在它的分布里，姿态贴合
+   * 明显更弱。所以下游（角色迁移 / 序列帧替换 / 姿态序列）优先用这张，
+   * 没有才退回 `image`（线框骨架）。
+   */
+  mannequin?: NodeImage
   /** 骨骼编辑器节点：关节坐标 + 方位角（导出过图时 image 上还有产物路径） */
   skeleton?: SkeletonState
   job?: JobState

@@ -52,10 +52,14 @@ function makeFetch() {
       }
     }
     if (String(url).includes('/upload')) {
+      // **按文件名返回不同的磁盘路径**：骨架图与 3D 人偶图要能区分开，
+      // 否则「提交的动作参考用的是人偶图」这条断言写不出来（两条 path 相同）。
+      const nm = decodeURIComponent(
+        /[?&]name=([^&]*)/.exec(String(url))?.[1] || 'abc_pic.png')
       return {
         ok: true,
         json: async () => ({
-          path: 'D:////x////uploads////abc_pic.png', url: '/files/uploads/abc_pic.png',
+          path: `D:////x////uploads////${nm}`, url: `/files/uploads/${nm}`,
           w: 256, h: 192, format: 'PNG',
         }),
       }
@@ -305,6 +309,8 @@ async function boot(search, seed) {
   vc.on('jsdomError', (e) => {
     const msg = String(e)
     if (msg.includes('Could not load link')) return   // jsdom 无静态服务器，CSS 拉不到属正常
+    // 同理：PoseStudio 宿主 iframe 也拉不到（真实浏览器里有 vite 静态服务）
+    if (msg.includes('Could not load iframe')) return
     errors.push(msg)
   })
   const dom = new JSDOM(html, {
@@ -987,7 +993,7 @@ function check(name, cond, extra = '') {
   const sub = calls.filter((c) => c.url.endsWith('/generate')).pop()
   const body = JSON.parse(sub.body)
   check('提交 workflow=w2 且用本地图当源',
-    body.workflow === 'w2' && body.params.init_image.includes('abc_pic.png'),
+    body.workflow === 'w2' && body.params.init_image.includes('pic.png'),
     JSON.stringify({ w: body.workflow, i: body.params.init_image }))
   check('提交带上了项目作用域（scope）',
     typeof body.params.scope === 'string' && body.params.scope.length > 0,
@@ -2574,6 +2580,7 @@ function check(name, cond, extra = '') {
   // 实测「front view」这类词会压过骨架姿势（分腿张臂的骨架会被画成站立），
   // 而正面本来就是模型的默认——写了只有害处。
   let body = await submitAndRead()
+
   check('自动 + 骨骼 0° 不写方位词（正面是默认，写了会压过姿势）',
     !String(body.params.prompt || '').includes('viewing direction'),
     body.params.prompt)
@@ -2614,6 +2621,63 @@ function check(name, cond, extra = '') {
     !String(body.params.prompt || '').includes('viewing direction'),
     body.params.prompt)
 
+  // 9. 导出 3D 人偶图（官方 PoseStudio 渲染），并验证下游改用它。
+  //
+  // 放在朝向测试**之后**：上面的方向词语义是「只有线框骨架时」的行为；
+  // 人偶图的朝向已经烘焙在图里，再补方向词是重复指令，还会压过姿势。
+  // 9. 导出 3D 人偶图（官方 PoseStudio 渲染）
+  //
+  // jsdom 不加载 iframe 内容，官方渲染器不会回话。把 contentWindow 打桩，
+  // 手动回一发 ready + result，模拟「网格加载完 → 渲染 → 回 PNG」。
+  // 这条链路的意义：**VNCCS 的 LoRA 是在人偶图上训的**，线框骨架不在分布里。
+  const manBtn = [...(skelNode?.querySelectorAll('button') || [])]
+    .find((b) => (b.textContent || '').includes('导出人偶图'))
+  check('骨骼节点有「导出人偶图（3D）」按钮', !!manBtn)
+  const mhFrame = doc.querySelector('iframe[title*="PoseStudio"]')
+  check('页面里挂着官方 PoseStudio 宿主 iframe', !!mhFrame)
+  if (mhFrame) {
+    const fakeWin = {
+      postMessage: (msg) => {
+        setTimeout(() => {
+          win.dispatchEvent(new win.MessageEvent('message', {
+            data: {
+              type: 'result', id: msg.id,
+              dataURL: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==',
+            },
+          }))
+        }, 30)
+      },
+    }
+    Object.defineProperty(mhFrame, 'contentWindow', { value: fakeWin, configurable: true })
+  }
+  // 官方那边网格加载完会 postMessage({type:'ready'})，这里手动补一发
+  win.dispatchEvent(new win.MessageEvent('message', { data: { type: 'ready' } }))
+  await new Promise((r) => setTimeout(r, 120))
+  manBtn?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 700))
+  const prevs = [...(skelNode?.querySelectorAll('.skel-preview') || [])]
+  check('导出人偶图后节点上有两份产物（骨架图 + 人偶图）',
+    prevs.length === 2, `previews=${prevs.length}`)
+  check('人偶图那条标注了「3D 人偶图」',
+    (prevs[1]?.textContent || '').includes('3D 人偶图'),
+    prevs[1]?.textContent || '（没有第二张）')
+  check('迁移节点的提示改成了「用 3D 人偶图」',
+    (pcNode?.querySelector('.src-note')?.textContent || '').includes('3D 人偶图'),
+    pcNode?.querySelector('.src-note')?.textContent)
+
+
+  body = await submitAndRead()
+
+  // **核心断言**：提交的动作参考必须是 3D 人偶图（VNCCS LoRA 的训练分布），
+  // 不是线框骨架——两者都在同一个节点上，靠 poseSourceOf 决定用哪个。
+  check('提交的动作参考用的是 3D 人偶图（不是线框骨架）',
+    String(body.params.pose_image || '').includes('mannequin.png'),
+    String(body.params.pose_image))
+  check('提交走的是 VNCCS 路线', body.workflow === 'wvnccs', String(body.workflow))
+  // 人偶图的朝向已经烘焙在图里，所以**不该**再补方向词
+  check('用了人偶图就不再补方向词（方向已在图里）',
+    !String(body.params.prompt || '').includes('viewing direction'),
+    String(body.params.prompt))
   // 8. 透明底：VNCCS 支持原生 alpha，但节点上以前没有这个开关
   //    （用户看到的是「底色」只有白/深两档，问「怎么没有透明」）
   const alphaBox = [...pcNode.querySelectorAll('details.adv label.check')]

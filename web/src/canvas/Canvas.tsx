@@ -42,6 +42,12 @@ type Props = {
   onSpawnImg2Img: (id: string) => void
   /** 骨骼编辑器导出 PNG（Blob），由 App 上传并挂到节点上 */
   onExportSkeleton?: (id: string, blob: Blob) => void
+  /** 骨骼编辑器「导出人偶图」：App 用官方 PoseStudio 渲染 + 上传 */
+  onExportMannequin?: (
+    id: string,
+    joints: { x: number; y: number }[],
+    azimuth: number,
+  ) => Promise<void>
   /** 骨骼编辑器「从图片提取」：上传 + DWPose 提关节 */
   onImportPose?: (id: string, file: File) => void | Promise<void>
   onDropFiles: (files: File[], world: { x: number; y: number }, targetId?: string) => void
@@ -80,6 +86,7 @@ export default function Canvas({
   onDropType,
   onSpawnImg2Img,
   onExportSkeleton,
+  onExportMannequin,
   onImportPose,
   onDropFiles,
   onConnect,
@@ -495,6 +502,7 @@ export default function Canvas({
             }
             onSpawnImg2Img={() => onSpawnImg2Img(n.id)}
             onExportSkeleton={(blob) => onExportSkeleton?.(n.id, blob)}
+            onExportMannequin={(joints, azimuth) => onExportMannequin?.(n.id, joints, azimuth)}
             onImportPose={(file) => onImportPose?.(n.id, file)}
             sourceNode={nodes.find((x) => x.id === n.source?.nodeId)}
             sourceOptions={sourceOptions}
