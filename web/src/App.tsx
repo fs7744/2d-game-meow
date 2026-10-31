@@ -907,10 +907,12 @@ export default function App() {
           })
           return
         }
-        // 角色图（可选）：不传就只靠提示词描述角色
-        const charPath = charPathOf(node)
+        // 角色图（可选）：不传就只靠提示词描述角色。
+        // VNCCS 引擎下**必须有角色图**（它的指令是"保留 <image 2> 的角色"）。
+        const charPaths = charPathsOf(node)
         const r = await submitPoseSeq(
-          node.params, { model: mdl, matteBackend, scope: currentId }, dir, charPath)
+          node.params, { model: mdl, matteBackend, scope: currentId },
+          dir, charPaths[0], charPaths, node.params.psEngine)
         jobId = r.job_id
       } else if (node.kind === 'pixelify') {
         const r = await submitPixelify(

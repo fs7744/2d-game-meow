@@ -1094,6 +1094,36 @@ export default function GenNodeCard({
               </div>
             </div>
           </div>
+
+          {/* 逐帧引擎：VNCCS（帧间身份更稳）/ 旧版 */}
+          <div className="pc-engine">
+            <label className="pc-engine-label">引擎</label>
+            <select
+              value={p.psEngine ?? 'wvnccs'}
+              onChange={(e) => setParam('psEngine', e.target.value as 'wpc' | 'wvnccs')}
+            >
+              <option value="wvnccs">VNCCS（帧间身份稳 · 推荐）</option>
+              <option value="wpc">旧版（动作更保守）</option>
+            </select>
+            <div className="src-note">
+              {p.psEngine === 'wpc'
+                ? '角色图 + 骨架图 + 自写指令：软引导，腿部常被角色图的站姿覆盖'
+                : '专用 LoRA + 官方指令：图序 [骨架, 角色]，帧间身份更稳'}
+            </div>
+            {(p.psEngine ?? 'wvnccs') === 'wvnccs' && !charThumb && (
+              <div className="src-note pc-warn">
+                VNCCS 需要角色图（它的指令是「保留角色的形象」）——先在上面选一张
+              </div>
+            )}
+            {(p.psEngine ?? 'wvnccs') === 'wvnccs' && charThumb && (
+              <div className="src-note pc-warn">
+                角色外观要写进提示词：模型会让 prompt 压过参考图
+              </div>
+            )}
+          </div>
+
+          {/* 同一角色的不同角度可以一起喂，身份更稳 */}
+          {extraRefBox}
           <div className="prompt-wrap">
             <textarea
               className="prompt"

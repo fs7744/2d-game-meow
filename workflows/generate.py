@@ -1541,6 +1541,29 @@ def _vnccs_fit(im: Image.Image, w: int, h: int) -> Image.Image:
     return canvas
 
 
+def _vnccs_skeleton(im: Image.Image) -> Image.Image:
+    """把黑底骨架图的背景换成白底。
+
+    **必须做**：OpenPose 骨架（DWPose / tools/make_pose.render）都是黑底，
+    整张贴到白底画布上之后，中间仍是一块**黑底矩形**——模型读到的是
+    "一个黑色剪影"，于是把角色画成背面（实测：黑底骨架 → 输出背影；
+    同一张骨架换白底 → 正面）。
+
+    判据用**饱和度**而不是亮度：OpenPose 的线是纯色（红黄绿青蓝），
+    背景是纯黑（无彩色分量）。深色的蓝线饱和度仍然很高，不会被误伤。
+    """
+    import numpy as np
+    arr = np.asarray(im.convert("RGB"), dtype=np.int16)
+    mx = arr.max(axis=2)
+    mn = arr.min(axis=2)
+    sat = mx - mn
+    dark = mx < 70
+    bg = (sat < 24) & dark                 # 无彩色分量且很暗 → 背景
+    out = arr.copy()
+    out[bg] = 255
+    return Image.fromarray(out.astype("uint8"), "RGB")
+
+
 def _vnccs_canvas_size(pose: Image.Image, width: int, height: int) -> tuple[int, int]:
     """画布尺寸。默认**取骨架的比例**，不走官方"取角色图"。
 
@@ -1767,7 +1790,8 @@ def _qwen_sprite_swap(eng: Engine, *, frames: Sequence[tuple],
             if use_vnccs:
                 # **不灰度化**：VNCCS LoRA 是按 PoseStudio 的彩色骨架训的，
                 # 灰度化会掉遵循度。等比贴入、不拉伸（拉伸会把腿压短）。
-                cond = _vnccs_fit(cond.convert("RGB"), width, height)
+                cond = _vnccs_fit(_vnccs_skeleton(cond.convert("RGB")),
+                                  width, height)
             else:
                 # 灰度化：彩色骨架会把颜色抄进成品（见 _qwen_cond_image）
                 cond = _qwen_cond_image(cond.resize((width, height)))
@@ -2116,6 +2140,8 @@ def _qwen_poseswap(eng: Engine, *, pose_images: Sequence[Path], prompt: str,
                    candidates: int, gate: bool, gate_min_points: int,
                    gate_retries: int, gate_seed_step: int, scope: str,
                    anim_name: str, fps: int, two_stage: bool = False,
+                   engine: str = "wpc", lora_scale: float = 1.0,
+                   char_images: Optional[Sequence[str]] = None,
                    tag: str = "w4") -> Dict[str, Any]:
     """Qwen 版姿态序列（W4）：逐帧「骨架图当参考 + 指令」软引导。
 
@@ -2151,8 +2177,21 @@ def _qwen_poseswap(eng: Engine, *, pose_images: Sequence[Path], prompt: str,
     sem = (prompt or "").strip()
     neg = (negative or "").strip() or QWEN_FRAME_NEG
 
+    use_vnccs = (engine or "wpc").lower() in ("vnccs", "wvnccs")
     char = None
-    if ref_image is not None:
+    chars: List[Image.Image] = []
+    if use_vnccs:
+        # VNCCS 路线：官方模板 + 专用 LoRA，图序 [骨架, 角色]。
+        # 模板本身就说清了"把 <image 2> 的姿势换成 <image 1> 的、保留 <image 2> 的角色"，
+        # 所以这里只要把骨架放前面、角色放后面。
+        char_paths = _ref_image_list(ref_image, char_images)
+        chars = [_vnccs_fit(Image.open(p).convert("RGBA"), width, height)
+                 for p in char_paths]
+        head = (f"{_VNCCS_TEMPLATE} {_qwen_backdrop(bg)}." + QWEN_FRAME_RULES)
+        if steps < 20:
+            # LoRA 是按完整采样训的，不是少步蒸馏：步数不够姿态和细节一起崩
+            steps = 20
+    elif ref_image is not None:
         char = refprep.prepare_reference(Image.open(ref_image).convert("RGBA"),
                                          size=max(width, height))
         head = head.replace(
@@ -2175,7 +2214,9 @@ def _qwen_poseswap(eng: Engine, *, pose_images: Sequence[Path], prompt: str,
         "rough draft showing the target body pose. Redraw the character from "
         "the first image in exactly the pose of the second image, full body, "
         "centered, " + _qwen_backdrop(bg) + "." + QWEN_FRAME_RULES)
-    use_two_stage = bool(two_stage) and char is not None
+    # VNCCS 本身就是「骨架 + 角色」双图路线，两阶段（先草图再换皮）是多余的，
+    # 而且两阶段的第二段用 [角色图, 草图]，与 VNCCS 的图序相反。
+    use_two_stage = bool(two_stage) and char is not None and not use_vnccs
 
     if seed < 0:
         seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
@@ -2199,80 +2240,105 @@ def _qwen_poseswap(eng: Engine, *, pose_images: Sequence[Path], prompt: str,
     non_humanoid = False
     torch.cuda.reset_peak_memory_stats()
 
-    for pose_path in pose_images:
-        cond = _qwen_cond_image(
-            Image.open(pose_path).convert("RGB").resize((width, height),
-                                                        Image.LANCZOS))
-        refs: Any = [char, cond] if char is not None else cond
-        spent = 0.0
-
-        def _gen(i: int) -> Tuple[Image.Image, Dict[str, Any]]:
-            """跑一个候选：出图 → 后处理 → 交给打分函数。"""
-            nonlocal spent
-            dt = _timer()
-            sd = seed + i * gate_seed_step
-            if use_two_stage:
-                # 阶段 1：只有骨架 + 文字（没人跟它抢姿态）
-                draft = _qwen_call(
-                    eng, prompt=solo_instr, negative=neg, ref_image=cond,
-                    width=width, height=height, steps=steps, cfg=cfg,
-                    seed=sd, model=model, label="w4-draft")
-                # 阶段 2：角色图在前、草图在后 → 换回身份，姿态保住
-                raw = _qwen_call(
-                    eng, prompt=reskin_instr, negative=neg,
-                    ref_image=[char, draft],
-                    width=width, height=height, steps=steps, cfg=cfg,
-                    seed=sd, model=model, label="w4-reskin")
+    # VNCCS 的 LoRA **整段循环外挂一次**（逐帧 load/unload 每帧多读 152MB）
+    vnccs_pipe = None
+    if use_vnccs:
+        vnccs_pipe = eng.txt2img_pipe(model)
+        lora_file = eng.lora_dir() / f"{eng.VNCCS_LORA}.safetensors"
+        if not lora_file.is_file():
+            raise FileNotFoundError(
+                f"缺 VNCCS LoRA：{lora_file}\n"
+                f"下载 MIUProject/VNCCS_PoseStudio_QI2.1 的 V1，用 "
+                f"tools/convert_lora.py 转成 diffusers 格式后放到 models/lora/")
+        eng.apply_loras(vnccs_pipe, [{"name": eng.VNCCS_LORA,
+                                      "scale": float(lora_scale)}])
+    try:
+        for pose_path in pose_images:
+            if use_vnccs:
+                # **不灰度化**：VNCCS LoRA 按彩色骨架训；**等比贴入**：拉伸会把腿压短
+                cond = _vnccs_fit(
+                _vnccs_skeleton(Image.open(pose_path).convert("RGB")),
+                width, height)
+                refs: Any = [cond, *chars]
             else:
-                raw = _qwen_call(
-                    eng, prompt=instr, negative=neg, ref_image=refs,
-                    width=width, height=height, steps=steps, cfg=cfg,
-                    seed=sd, model=model, label="w4")
-            info: Dict[str, Any] = {}
-            img, _edge, _subj = _postprocess(
-                raw, eng, matte=matte, matte_backend=matte_backend,
-                denoise=denoise, pixel=pixel, palette=palette,
-                clean_iso=clean_iso, info=info)
-            for k in ("backend", "fallback"):
-                if k in info:
-                    matte_info[k] = info[k]
-            gate_img = info.pop("pre_pixel", None) or img
-            spent += dt()
-            return img.convert("RGBA"), {"gate": gate_img.convert("RGBA"),
-                                         "subjects": _subj}
+                cond = _qwen_cond_image(
+                    Image.open(pose_path).convert("RGB").resize((width, height),
+                                                                Image.LANCZOS))
+                refs: Any = [char, cond] if char is not None else cond
+            spent = 0.0
 
-        def _score(img: Image.Image, info: Dict[str, Any]) -> Dict[str, Any]:
-            ev = quality.evaluate(info["gate"].convert("RGBA"), extractor,
-                                  prev=prev_gate,
-                                  min_points=gate_min_points)
-            # **单主体判据**：Qwen 偶尔会把头画丢、把帽子画成浮空的一块。
-            # 这种帧 DWPose 照样能检出 16 个关节（躯干还在），闸门放它过去；
-            # 但前景连通域数会变成 2+，这才是「缺件」的直接证据。
-            _subj = info.get("subjects")
-            if _subj is not None:
-                ev["blobs"] = _subj
-                if _subj > 1 and ev["passed"]:
-                    ev = {**ev, "passed": False,
-                          "score": ev["score"] - 20.0,
-                          "reject": f"前景有 {_subj} 块（头/手与身体分离）"}
-            return ev
+            def _gen(i: int) -> Tuple[Image.Image, Dict[str, Any]]:
+                """跑一个候选：出图 → 后处理 → 交给打分函数。"""
+                nonlocal spent
+                dt = _timer()
+                sd = seed + i * gate_seed_step
+                if use_two_stage:
+                    # 阶段 1：只有骨架 + 文字（没人跟它抢姿态）
+                    draft = _qwen_call(
+                        eng, prompt=solo_instr, negative=neg, ref_image=cond,
+                        width=width, height=height, steps=steps, cfg=cfg,
+                        seed=sd, model=model, label="w4-draft")
+                    # 阶段 2：角色图在前、草图在后 → 换回身份，姿态保住
+                    raw = _qwen_call(
+                        eng, prompt=reskin_instr, negative=neg,
+                        ref_image=[char, draft],
+                        width=width, height=height, steps=steps, cfg=cfg,
+                        seed=sd, model=model, label="w4-reskin")
+                else:
+                    raw = _qwen_call(
+                        eng, prompt=instr, negative=neg, ref_image=refs,
+                        width=width, height=height, steps=steps, cfg=cfg,
+                        seed=sd, model=model, label="w4",
+                        output_resolution=max(width, height),
+                        fast_lora=not use_vnccs)   # LoRA 槽位归 VNCCS
+                info: Dict[str, Any] = {}
+                img, _edge, _subj = _postprocess(
+                    raw, eng, matte=matte, matte_backend=matte_backend,
+                    denoise=denoise, pixel=pixel, palette=palette,
+                    clean_iso=clean_iso, info=info)
+                for k in ("backend", "fallback"):
+                    if k in info:
+                        matte_info[k] = info[k]
+                gate_img = info.pop("pre_pixel", None) or img
+                spent += dt()
+                return img.convert("RGBA"), {"gate": gate_img.convert("RGBA"),
+                                             "subjects": _subj}
 
-        frame, ev, finfo, used, nh = gate_mod.run_candidates(
-            generate=_gen, score=_score,
-            policy=gate_mod.GatePolicy(
-                candidates=candidates, retries=retries,
-                seed_step=gate_seed_step, stop_on_first_pass=False))
-        if nh and not non_humanoid:
-            non_humanoid = True
-            print("[warn] 主体不是人形（DWPose 检不出关节）："
-                  "关闭补提，后续帧只出 1 次")
-        if frame is None:
-            raise RuntimeError("这一帧没有产出任何候选")
-        prev_gate = finfo.get("gate")
-        frame_scores.append({**ev, "attempts": used})
-        attempts_used += used
-        per_frame.append(round(spent, 2))
-        frames.append(frame)
+            def _score(img: Image.Image, info: Dict[str, Any]) -> Dict[str, Any]:
+                ev = quality.evaluate(info["gate"].convert("RGBA"), extractor,
+                                      prev=prev_gate,
+                                      min_points=gate_min_points)
+                # **单主体判据**：Qwen 偶尔会把头画丢、把帽子画成浮空的一块。
+                # 这种帧 DWPose 照样能检出 16 个关节（躯干还在），闸门放它过去；
+                # 但前景连通域数会变成 2+，这才是「缺件」的直接证据。
+                _subj = info.get("subjects")
+                if _subj is not None:
+                    ev["blobs"] = _subj
+                    if _subj > 1 and ev["passed"]:
+                        ev = {**ev, "passed": False,
+                              "score": ev["score"] - 20.0,
+                              "reject": f"前景有 {_subj} 块（头/手与身体分离）"}
+                return ev
+
+            frame, ev, finfo, used, nh = gate_mod.run_candidates(
+                generate=_gen, score=_score,
+                policy=gate_mod.GatePolicy(
+                    candidates=candidates, retries=retries,
+                    seed_step=gate_seed_step, stop_on_first_pass=False))
+            if nh and not non_humanoid:
+                non_humanoid = True
+                print("[warn] 主体不是人形（DWPose 检不出关节）："
+                      "关闭补提，后续帧只出 1 次")
+            if frame is None:
+                raise RuntimeError("这一帧没有产出任何候选")
+            prev_gate = finfo.get("gate")
+            frame_scores.append({**ev, "attempts": used})
+            attempts_used += used
+            per_frame.append(round(spent, 2))
+            frames.append(frame)
+    finally:
+        if vnccs_pipe is not None:
+            eng.unload_loras(vnccs_pipe)
 
     # 尺度归一：Qwen 没有 ControlNet，逐帧「人物占多大」是模型自己决定的
     # （实测同一段 3 帧能差 3 倍，最小的那帧前景只占 2%，直接被产线判废）。
@@ -2283,9 +2349,16 @@ def _qwen_poseswap(eng: Engine, *, pose_images: Sequence[Path], prompt: str,
         "workflow": "w4", "scope": scope or "default",
         "prompt": instr, "prompt_body": sem or None, "negative": neg,
         "ref_image": str(ref_image) if ref_image else None,
-        "backend": "qwen-pose-ref", "approx": True,
+        "backend": "qwen-vnccs-lora" if use_vnccs else "qwen-pose-ref",
+        "approx": True,
+        "engine": "vnccs" if use_vnccs else "wpc",
+        "lora": (eng.VNCCS_LORA if use_vnccs else None),
+        "lora_scale": (float(lora_scale) if use_vnccs else None),
+        "n_chars": len(chars) if use_vnccs else (1 if char is not None else 0),
+        # 注意：这里原来还有一行 `"lora": None, "lora_scale": None`——
+        # 重复键会让上面刚写的 engine/lora **被静默覆盖成 None**。
         "condition": kind, "bg": bg, "cn_scale": None, "ipa_scale": None,
-        "lora": None, "lora_scale": None, "clip_skip": None,
+        "clip_skip": None,
         "steps": _eff_steps(eng, steps), **_fast_meta(eng), "cfg": cfg, "seed": seed, "frames": len(frames),
         "width": width, "height": height,
         "matte": matte, "matte_used": matte_info.get("backend"),
@@ -2329,6 +2402,8 @@ def _qwen_poseswap(eng: Engine, *, pose_images: Sequence[Path], prompt: str,
 
 def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
              negative: Optional[str] = None, ref_image: Optional[str | Path] = None,
+             char_images: Optional[Sequence[str]] = None,
+             engine: str = "wpc", lora_scale: float = 1.0,
              steps: int = 16, cfg: float = 1.0, seed: int = 20261027,
              width: int = 768, height: int = 768,
              cols: int = 8, pixel: int = 0, palette: int = 0,
@@ -2360,7 +2435,9 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
         cols = min(len(pose_images), 8)
     return _qwen_poseswap(
         eng, pose_images=pose_images, prompt=prompt, negative=negative,
-        ref_image=ref_image, steps=steps, cfg=cfg, seed=seed,
+        ref_image=ref_image, char_images=char_images,
+        engine=engine, lora_scale=lora_scale,
+        steps=steps, cfg=cfg, seed=seed,
         width=width, height=height, cols=cols, pixel=pixel, palette=palette,
         matte=matte, matte_backend=matte_backend, denoise=denoise,
         clean_iso=clean_iso, bg=bg, export=export, controlnet=controlnet,

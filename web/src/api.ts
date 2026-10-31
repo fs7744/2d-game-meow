@@ -513,9 +513,15 @@ export function submitPoseSeq(
   opts: SubmitOpts,
   poseDir: string,
   charImage?: string,
+  /** 额外角色参考图（正面/侧面），多图时身份更稳 */
+  charImages?: string[],
+  /** 逐帧引擎：wpc（旧） / wvnccs（LoRA + 官方指令） */
+  engine?: 'wpc' | 'wvnccs',
 ) {
   return post('w4', {
     pose_images: poseDir,
+    char_images: charImages && charImages.length > 1 ? charImages : undefined,
+    engine: engine || undefined,
     // 角色图（可选）：给了它帧间身份更一致，但也会「抢姿态」——
     // 想两全就开 two_stage（先出姿态草图，再拿角色图换皮）。
     ref_image: charImage || undefined,

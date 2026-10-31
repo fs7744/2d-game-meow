@@ -661,6 +661,10 @@ def test_sprite_swap_exposes_engine_switch():
     assert "engine" in params
     assert params["engine"].default == "wpc"      # 默认仍走旧路线
     assert "lora_scale" in params
+    # w4（姿态序列）也要能切引擎
+    assert "engine" in inspect.signature(g.poseswap).parameters
+    assert "char_images" in inspect.signature(g.poseswap).parameters
+    assert "lora_scale" in inspect.signature(g.poseswap).parameters
     # vnccs_pose 本身就是 VNCCS 路线，不需要 engine 开关，但要能调 LoRA 权重
     assert "lora_scale" in inspect.signature(g.vnccs_pose).parameters
     # 多图：姿态迁移两条路 + 换装 + 换脸都要接得住
@@ -688,3 +692,42 @@ def test_vnccs_lora_must_exist(eng):
     # 拆分后每块应该有 gate_layer 与 proj 两组
     assert [k for k in keys if "img_mlp.gate_layer" in k]
     assert [k for k in keys if "img_mlp.proj." in k]
+
+
+def test_skeleton_background_is_whitened():
+    """黑底骨架必须转白底，否则模型把角色画成背面（实测三帧全是背影）。
+
+    判据用饱和度：OpenPose 的线是纯色，背景是纯黑（无彩色分量）。
+    """
+    from PIL import Image as _Image, ImageDraw as _ImageDraw
+    import numpy as np
+    black = _Image.new("RGB", (64, 64), (0, 0, 0))
+    _ImageDraw.Draw(black).line([(10, 10), (50, 50)], fill=(255, 0, 0), width=6)
+    out = g._vnccs_skeleton(black)
+    arr = np.asarray(out)
+    assert arr[2, 2].tolist() == [255, 255, 255], "背景没被换成白色"
+    # 红线要保留
+    assert (arr[..., 0] > 200).any() and (arr[..., 1] < 60).any(), "彩色线被误伤了"
+    # 深蓝线（饱和度高）也要保留
+    blue = _Image.new("RGB", (64, 64), (0, 0, 0))
+    _ImageDraw.Draw(blue).line([(10, 10), (50, 50)], fill=(0, 0, 120), width=6)
+    barr = np.asarray(g._vnccs_skeleton(blue))
+    assert (barr[..., 2] > 80).any(), "深蓝线被当成背景抹掉了"
+
+
+def test_poseswap_meta_has_no_duplicate_lora_keys():
+    """meta 里不能有第二个 `lora` 键。
+
+    重复键会让前面写的值**静默被覆盖**——w4 之前就是这样，
+    engine 记成了 vnccs、lora 却显示 None，看不出用的哪个 LoRA。
+    """
+    import ast
+    import inspect
+    tree = ast.parse(inspect.getsource(g._qwen_poseswap))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        keys = [k.value for k in node.keys
+                if isinstance(k, ast.Constant) and isinstance(k.value, str)]
+        dup = {k for k in keys if keys.count(k) > 1}
+        assert not dup, f"meta 里有重复键：{dup}"

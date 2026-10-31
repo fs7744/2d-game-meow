@@ -164,6 +164,12 @@ export type GenParams = {
    * 字典序会把 10 帧以上排乱，动画顺序就错了。
    */
   psDir: string
+  /** 姿态序列的逐帧引擎：
+   *  - `wpc`（旧）—— 角色图 + 骨架图 + 自写指令。软引导，腿部常被角色图的站姿覆盖。
+   *  - `wvnccs` —— 挂 VNCCS LoRA、官方固定指令 `replace the pose of <image 2>...`、
+   *    图序 [骨架, 角色]。**帧间身份更稳**，但必须给角色图。
+   */
+  psEngine?: 'wpc' | 'wvnccs'
   ssVramProfile: VramProfile // 序列帧替换：显存档位（auto 自动降分辨率）
   /**
    * 透明背景：只有 Qwen-Image-2.1 原生支持（VAE 第 4 通道）。
