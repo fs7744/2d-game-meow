@@ -29,6 +29,7 @@ import type { Library } from './api'
 import ConfirmDialog from './components/ConfirmDialog'
 import Lightbox from './components/Lightbox'
 import LibraryDrawer, { type LibraryTab } from './components/LibraryDrawer'
+import CharactersPage from './components/CharactersPage'
 import type { PoseDir } from './api'
 import type { ModelCaps } from './api'
 import type {
@@ -258,6 +259,8 @@ export default function App() {
   const [lib, setLib] = useState<Library>({ prompts: [], poses: [], prefs: {} })
   /** 资料库浏览面板。tab 决定打开时先看哪个库 */
   const [libraryOpen, setLibraryOpen] = useState(false)
+  /** 一级视图：**画布** 与 **角色中心** 同级（角色库不属于任何一个画布） */
+  const [view, setView] = useState<'canvas' | 'characters'>('canvas')
   const [libraryTab, setLibraryTab] = useState<LibraryTab>('prompt')
   const openLibrary = useCallback((t: LibraryTab) => {
     setLibraryTab(t)
@@ -1649,15 +1652,35 @@ export default function App() {
         <div className="brand">
           <img className="logo" src="/icon.png" alt="可爱的喵助手" />
           <span className="title">可爱的喵助手</span>
+          {/* **项目名仍挂在 .brand 下**：它不是装饰，是"我现在改的是哪个项目"
+              的唯一提示；视图 tab 只是加在旁边，不能把它挤出 brand。 */}
           <span className="sub">
-            {projectMeta.find((p) => p.id === currentId)?.name ?? '画布'} · 文生图 / 图生图
+            {view === 'characters'
+              ? '角色中心 · 与官方 VNCCS 同一套目录与 config'
+              : `${projectMeta.find((p) => p.id === currentId)?.name ?? '画布'} · 文生图 / 图生图`}
           </span>
+        </div>
+        <div className="view-tabs">
+          <button
+            className={`view-tab${view === 'canvas' ? ' on' : ''}`}
+            onClick={() => setView('canvas')}
+            title="节点画布：把生成 / 抠图 / 转像素串成一条线"
+          >
+            画布
+          </button>
+          <button
+            className={`view-tab${view === 'characters' ? ' on' : ''}`}
+            onClick={() => setView('characters')}
+            title="角色中心：造角色 / 换装 / 表情，素材在 assets/characters/"
+          >
+            角色中心
+          </button>
         </div>
         <div className="spacer" />
         <span className={`gpu ${device && !device.includes('未连接') ? 'ok' : 'bad'}`} title={device}>
           {device || '连接中…'}
         </span>
-        <div className="zoom-group">
+        <div className="zoom-group" style={view === 'characters' ? { visibility: 'hidden' } : undefined}>
           <button onClick={() => zoomTo(Math.max(0.2, viewport.z / 1.2))}>−</button>
           <span className="zoom-val">{zoomLabel}</span>
           <button onClick={() => zoomTo(Math.min(2.4, viewport.z * 1.2))}>+</button>
@@ -1667,6 +1690,10 @@ export default function App() {
       </header>
 
       <main className="stage">
+        {view === 'characters' ? (
+          <CharactersPage onNotice={setNotice} />
+        ) : (
+        <>
         <Sidebar
           favs={lib.prompts}
           onOpenLibrary={openLibrary}
@@ -1731,6 +1758,8 @@ export default function App() {
           projectId={currentId}
         />
         <div className="badge-count">{nodes.length} 个节点</div>
+        </>
+        )}
       </main>
 
       <input

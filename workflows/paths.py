@@ -33,6 +33,17 @@ ASSETS = _env_dir("MEOW_ASSETS_DIR", ROOT / "assets")
 #: 各项目的产物目录（项目 id 作为子目录名）
 PROJECTS_DIR = ASSETS / "projects"
 
+#: 角色中心（VNCCS 角色库）：`assets/characters/<角色名>/`
+#
+# **必须在 assets 下**：前端要显示角色封面与 sprite，图片只能走 `/files/`，
+# 而那个端点按约定只服务 assets 内的路径（`app._readable_asset_path`）。
+# 放别处图就全裂了。
+#
+# 目录结构照搬 VNCCS `utils.py:405-487`：
+#   <角色>/{角色}_config.json + cache/ + Sprites/ Faces/ Sheets/
+#   Sprites/<服装>/<表情>/sprite_<表情>_0001.png
+CHARACTERS_DIR = ASSETS / "characters"
+
 #: 没有项目归属的上传（旧路径，保留兼容）
 UPLOAD_DIR = ASSETS / "uploads"
 

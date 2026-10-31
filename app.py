@@ -54,6 +54,7 @@ from PIL import Image
 
 from workflows import generate as gen
 from workflows import assetdb
+from workflows import characters
 from workflows import library
 from workflows import paths
 from workflows import poselib
@@ -787,6 +788,153 @@ def files(path: str, download: int = 0) -> FileResponse:
         # FileResponse(filename=…) 会设成 attachment；产物名已经带后缀
         return FileResponse(target, filename=target.name)
     return FileResponse(target)
+
+
+# ---------------- 角色中心 ----------------
+#
+# 角色的磁盘存储见 workflows/characters.py（移植自 VNCCS 的 utils.py，
+# 目录与 config 结构与官方一致）。这里只做 HTTP 编排。
+#
+# 封面 / sprite 的 URL 走 `/files/`（和产物同一条路），所以角色目录必须落在
+# assets 下 —— 见 paths.CHARACTERS_DIR 的注释。
+
+
+def _asset_url(path: str) -> str:
+    """磁盘绝对路径 → `/files/<相对 assets 的路径>`。"""
+    if not path:
+        return ""
+    try:
+        rel = Path(path).resolve().relative_to(ASSETS.resolve())
+    except (ValueError, OSError):
+        return ""
+    return "/files/" + "/".join(rel.parts)
+
+
+class CharacterCreateReq(BaseModel):
+    name: str
+    info: Dict[str, Any] = Field(default_factory=dict)
+
+
+class CharacterRenameReq(BaseModel):
+    name: str
+
+
+class CostumeReq(BaseModel):
+    data: Dict[str, Any] = Field(default_factory=dict)
+
+
+@app.get("/characters")
+def list_characters_api() -> Dict[str, Any]:
+    """角色库列表（扫目录，无索引文件）。"""
+    items = characters.list_character_summaries()
+    for it in items:
+        it["cover_url"] = _asset_url(it.pop("cover", "") or "")
+    return {"count": len(items), "items": items}
+
+
+@app.post("/characters")
+def create_character_api(req: CharacterCreateReq) -> Dict[str, Any]:
+    """建角色。已存在 → 409（不静默覆盖）。"""
+    try:
+        cfg = characters.create_character(req.name, req.info or None)
+    except characters.CharacterConflict as exc:
+        # **必须先判冲突**：CharacterConflict 是 ValueError 的子类，
+        # 顺序反了的话 409 会被 400 吃掉，前端就只能拿到一句"名字不合法"
+        raise HTTPException(409, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"name": req.name, "config": cfg}
+
+
+@app.get("/characters/{name}")
+def get_character_api(name: str) -> Dict[str, Any]:
+    """角色详情：config + 服装 + 已有素材。"""
+    try:
+        safe = characters.ensure_safe_name(name, "角色名")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not characters.character_exists(safe):
+        raise HTTPException(404, f"没有这个角色：{safe}")
+    cfg = characters.load_config(safe) or {}
+    costumes = characters.list_costumes(safe)
+    assets: Dict[str, Any] = {}
+    for c in costumes:
+        base = characters.safe_join_under(characters.character_dir(safe), "Sprites", c)
+        if not os.path.isdir(base):
+            continue
+        for sub in sorted(os.listdir(base)):
+            if not os.path.isdir(os.path.join(base, sub)):
+                continue
+            if characters.ARCHIVE_DIR_RE.match(sub):
+                continue          # 旧版本目录不混进当前素材
+            assets.setdefault(c, {})[sub] = [
+                _asset_url(p) for p in characters.list_sprite_images(safe, c, sub)]
+    return {
+        "name": safe,
+        "config": cfg,
+        "costumes": costumes,
+        "assets": assets,
+        "cover_url": _asset_url(characters.cover_image(safe) or ""),
+    }
+
+
+@app.put("/characters/{name}/info")
+def update_character_info(name: str, req: Dict[str, Any]) -> Dict[str, Any]:
+    """改角色属性（局部合并）。"""
+    try:
+        safe = characters.ensure_safe_name(name, "角色名")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    with characters.storage_lock(characters.character_dir(safe)):
+        cfg = characters.load_config(safe, strict=True)
+        if cfg is None:
+            raise HTTPException(404, f"没有这个角色：{safe}")
+        info = cfg.setdefault("character_info", {})
+        info.update({k: v for k, v in (req or {}).items() if k != "name"})
+        characters.save_config(safe, cfg)
+    return {"name": safe, "character_info": info}
+
+
+@app.put("/characters/{name}/rename")
+def rename_character_api(name: str, req: CharacterRenameReq) -> Dict[str, Any]:
+    try:
+        cfg = characters.rename_character(name, req.name)
+    except characters.CharacterConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"name": req.name, "config": cfg}
+
+
+@app.delete("/characters/{name}")
+def delete_character_api(name: str, files: int = 1) -> Dict[str, Any]:
+    """删角色。`files=0` 只删 config，素材留在盘上（用户只想从列表里去掉）。"""
+    try:
+        safe = characters.ensure_safe_name(name, "角色名")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    ok = characters.delete_character(safe, remove_files=files == 1)
+    if not ok:
+        raise HTTPException(404, f"没有这个角色：{safe}")
+    return {"deleted": safe, "files": files == 1}
+
+
+@app.put("/characters/{name}/costumes/{costume}")
+def save_costume_api(name: str, costume: str, req: CostumeReq) -> Dict[str, Any]:
+    try:
+        cfg = characters.save_costume_info(name, costume, req.data or {})
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"name": name, "costumes": cfg.get("costumes", {})}
+
+
+@app.delete("/characters/{name}/costumes/{costume}")
+def delete_costume_api(name: str, costume: str) -> Dict[str, Any]:
+    try:
+        characters.delete_costume(name, costume)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"deleted": costume, "costumes": characters.list_costumes(name)}
 
 
 # ---------------- 项目导入 / 导出 / 模板 ----------------

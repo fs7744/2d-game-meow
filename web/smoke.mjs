@@ -28,6 +28,8 @@ function makeFetch() {
   let jobsFailMode = false
   /** 服务端「磁盘」上的用户资料库（library/*.json）。**每个 fetch 一份**。 */
   const library = { prompts: [], poses: [], prefs: {} }
+  /** 服务端「磁盘」上的角色库（assets/characters/）。**每个 fetch 一份**。 */
+  const serverCharacters = new Set()
   // 分配项目 id 的计数器
   let serverSeq = 0
   // 保存时是否报冲突（模拟别的窗口改了同一个项目）
@@ -50,6 +52,36 @@ function makeFetch() {
           points: Array.from({ length: 18 }, (_, i) =>
             i === 0 ? [0.6, 0.05] : [0.5, 0.2]),
           joints: 18, azimuth_guess: 90,
+        }),
+      }
+    }
+    // ---- 角色中心（assets/characters/）----
+    if (String(url).endsWith('/characters') && (init.method || 'GET') === 'POST') {
+      const b = JSON.parse(init.body || '{}')
+      serverCharacters.add(b.name)
+      return { ok: true, json: async () => ({ name: b.name, config: { character_info: b.info } }) }
+    }
+    if (String(url).endsWith('/characters') && (init.method || 'GET') === 'GET') {
+      return {
+        ok: true,
+        json: async () => ({
+          count: serverCharacters.size,
+          items: [...serverCharacters].map((n) => ({
+            name: n, cover_url: '', sex: 'female', style: 'ghibli_miyazaki',
+            nsfw: false, costumes: ['Naked'], sprites: 0, config_version: '2.0',
+          })),
+        }),
+      }
+    }
+    if (String(url).includes('/characters/') && (init.method || 'GET') === 'GET') {
+      const name = decodeURIComponent(String(url).split('/characters/')[1].split('?')[0])
+      return {
+        ok: true,
+        json: async () => ({
+          name,
+          config: { character_info: { name, sex: 'female', age: 18 },
+            costumes: {}, costume_ids: {}, config_version: '2.0' },
+          costumes: ['Naked'], assets: {}, cover_url: '',
         }),
       }
     }
@@ -2964,6 +2996,74 @@ function check(name, cond, extra = '') {
     (section(doc, '资料库')?.textContent || '').includes('旧收藏的提示词'),
     (section(doc, '资料库')?.textContent || '').slice(0, 40))
   check('迁移场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 46) 角色中心：与画布同级的一级页面（移植自 VNCCS 的 Character Creator）
+//
+// 角色库不属于任何一个画布——同一个角色要在多个项目里复用，所以它跟画布**同级**，
+// 不是画布里的一个节点。
+{
+  const { dom, errors } = await boot('')
+  const doc = dom.window.document
+  const win = dom.window
+  await new Promise((r) => setTimeout(r, 400))
+
+  const tabs = [...doc.querySelectorAll('.view-tab')]
+  check('顶栏有「画布 / 角色中心」两个一级视图',
+    tabs.length === 2 && tabs[0].textContent.includes('画布')
+    && tabs[1].textContent.includes('角色中心'),
+    tabs.map((t) => t.textContent).join('/'))
+
+  tabs[1]?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 300))
+  check('切到角色中心后画布节点不见了', !doc.querySelector('.node'))
+  check('角色中心页面挂上了', !!doc.querySelector('.chars'))
+  check('去服务端读了角色列表',
+    calls.some((c) => c.url.endsWith('/characters')),
+    calls.map((c) => c.url).slice(-2).join())
+  check('空库时给出可照做的说明',
+    (doc.querySelector('.chars-empty')?.textContent || '').includes('assets/characters'),
+    (doc.querySelector('.chars-empty')?.textContent || '').slice(0, 40))
+
+  // 建一个角色：名字只能含字母/数字/空格/-/_（后端 ensure_safe_name 会挡路径穿越）
+  const input = doc.querySelector('.chars-new input')
+  check('有新建角色的输入框', !!input)
+  const setInput = (el, v) => {
+    Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value').set.call(el, v)
+    el.dispatchEvent(new win.Event('input', { bubbles: true }))
+  }
+  setInput(input, 'Alice')
+  await new Promise((r) => setTimeout(r, 80))
+  ;[...doc.querySelectorAll('.chars-new button')][0]
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 400))
+  const created = calls.find((c) => c.url.endsWith('/characters') && c.method === 'POST')
+  check('建角色打到服务端 POST /characters', !!created, created?.body)
+  check('角色出现在库里', [...doc.querySelectorAll('.chars-card-name')]
+    .some((n) => n.textContent === 'Alice'),
+  [...doc.querySelectorAll('.chars-card-name')].map((n) => n.textContent).join())
+
+  // 选中后右侧出详情：官方那套属性 + 四个 tab
+  const card = [...doc.querySelectorAll('.chars-card')]
+    .find((c) => (c.textContent || '').includes('Alice'))
+  card?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 400))
+  check('选中角色后拉详情',
+    calls.some((c) => c.url.includes('/characters/Alice')))
+  const subTabs = [...doc.querySelectorAll('.chars-tab')]
+  check('详情有 属性/服装/表情库/素材 四个 tab',
+    subTabs.length === 4, subTabs.map((t) => t.textContent).join('/'))
+  check('属性页有画风区（官方 358 条风格库）',
+    (doc.querySelector('.chars-style')?.textContent || '').includes('画风'),
+    (doc.querySelector('.chars-style')?.textContent || '').slice(0, 30))
+
+  // 切回画布
+  ;[...doc.querySelectorAll('.view-tab')][0]
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 300))
+  check('切回画布后角色中心收起', !doc.querySelector('.chars'))
+  check('角色中心场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 

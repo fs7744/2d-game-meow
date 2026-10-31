@@ -521,6 +521,150 @@ export function seedLibraryApi(legacy: {
   })
 }
 
+/* ------------------------------------------------------------------ *
+ * 角色中心（移植自 VNCCS 的 Character Creator / Cloner / Clothes / Emotion）
+ *
+ * 数据模型与目录结构跟官方一致（见 workflows/characters.py 的模块注释）
+ * —— 素材与 config 两边能互相读。
+ * ------------------------------------------------------------------ */
+
+export type CharacterSummary = {
+  name: string
+  cover_url: string
+  sex: string
+  style: string
+  nsfw: boolean
+  costumes: string[]
+  sprites: number
+  config_version: string
+}
+
+export type CharacterDetail = {
+  name: string
+  config: {
+    character_info?: Record<string, unknown>
+    costumes?: Record<string, Record<string, string>>
+    costume_ids?: Record<string, string>
+    folder_structure?: { main_directories?: string[]; emotions?: string[] }
+    config_version?: string
+  }
+  costumes: string[]
+  /** 服装 → 表情 → 图片 URL 列表 */
+  assets: Record<string, Record<string, string[]>>
+  cover_url: string
+}
+
+async function req<T>(path: string, init?: RequestInit): Promise<T> {
+  const r = await fetch(`${base}${path}`, {
+    ...init,
+    headers: { 'Content-Type': 'application/json', ...(init?.headers || {}) },
+  })
+  if (!r.ok) {
+    let msg = `HTTP ${r.status}`
+    try {
+      const j = await r.json()
+      if (j?.detail) msg = String(j.detail)
+    } catch { /* 不是 JSON，用状态码兜底 */ }
+    throw new Error(msg)
+  }
+  return r.json() as Promise<T>
+}
+
+/** 角色库列表（后端扫目录，无索引文件） */
+export function fetchCharacters(): Promise<{ count: number; items: CharacterSummary[] }> {
+  return req('/characters')
+}
+
+export function createCharacter(name: string,
+  info?: Record<string, unknown>): Promise<{ name: string; config: unknown }> {
+  return req('/characters', { method: 'POST', body: JSON.stringify({ name, info: info || {} }) })
+}
+
+export function fetchCharacter(name: string): Promise<CharacterDetail> {
+  return req(`/characters/${encodeURIComponent(name)}`)
+}
+
+/** 改角色属性（局部合并） */
+export function updateCharacterInfo(
+  name: string, patch: Record<string, unknown>,
+): Promise<{ name: string; character_info: Record<string, unknown> }> {
+  return req(`/characters/${encodeURIComponent(name)}/info`,
+    { method: 'PUT', body: JSON.stringify(patch) })
+}
+
+export function renameCharacter(name: string, next: string): Promise<{ name: string }> {
+  return req(`/characters/${encodeURIComponent(name)}/rename`,
+    { method: 'PUT', body: JSON.stringify({ name: next }) })
+}
+
+/** 删角色。`files=false` 只删 config，素材留在盘上 */
+export function deleteCharacter(name: string, files = true): Promise<{ deleted: string }> {
+  return req(`/characters/${encodeURIComponent(name)}?files=${files ? 1 : 0}`,
+    { method: 'DELETE' })
+}
+
+export function saveCostume(name: string, costume: string,
+  data: Record<string, string>): Promise<{ name: string; costumes: Record<string, unknown> }> {
+  return req(`/characters/${encodeURIComponent(name)}/costumes/${encodeURIComponent(costume)}`,
+    { method: 'PUT', body: JSON.stringify({ data }) })
+}
+
+export function deleteCostume(name: string,
+  costume: string): Promise<{ deleted: string; costumes: string[] }> {
+  return req(`/characters/${encodeURIComponent(name)}/costumes/${encodeURIComponent(costume)}`,
+    { method: 'DELETE' })
+}
+
+/** 官方风格库（静态 json，随项目发行）。358 条，13 个分组。 */
+export async function fetchStyleCatalog(): Promise<StyleCatalog> {
+  const r = await fetch('/vnccs/character_template/character_styles.json')
+  if (!r.ok) throw new Error(`取风格库失败：HTTP ${r.status}`)
+  return r.json() as Promise<StyleCatalog>
+}
+
+/** 官方表情库（静态 json，随项目发行）。157 条，9 个分类。 */
+export async function fetchEmotionCatalog(): Promise<EmotionCatalog> {
+  const r = await fetch('/vnccs/emotions/emotions.json')
+  if (!r.ok) throw new Error(`取表情库失败：HTTP ${r.status}`)
+  return r.json() as Promise<EmotionCatalog>
+}
+
+export type StyleEntry = {
+  id: string
+  label: string
+  prompt: string
+  description?: string
+  reference?: string
+}
+
+export type StyleCatalog = {
+  version?: string
+  default_style?: string
+  groups: Array<{ label?: string; name?: string; styles?: StyleEntry[] }>
+}
+
+export type EmotionEntry = {
+  key: string
+  description: string
+  safe_name: string
+  natural_prompt: string
+}
+
+export type EmotionCatalog = {
+  /** 分类名（带 emoji，如 "Anger 😠"）→ 该分类下的表情条目 */
+  [category: string]: EmotionEntry[]
+}
+
+/** 风格预览图的静态 URL（192px webp，已在仓库里） */
+export function stylePreviewUrl(id: string): string {
+  return `/vnccs/character_template/style_previews/${encodeURIComponent(id)}.webp`
+}
+
+/** 表情图标的静态 URL */
+export function emotionIconUrl(safeName: string): string {
+  return `/vnccs/emotions/images/${encodeURIComponent(safeName)}.webp`
+}
+
 /** /pose_library 返回的一条 VNCCS 官方姿势预设（随项目发行，静态目录里） */
 export type PresetPose = {
   id: string
