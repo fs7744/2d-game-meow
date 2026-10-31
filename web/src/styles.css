@@ -977,6 +977,8 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
 .skel-row label { display: flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--muted); }
 .skel-row select { flex: 1; min-width: 0; }
 .skel-size { font-family: var(--mono); font-size: 9px; color: var(--muted-2); }
+.skel-views { display: flex; gap: 4px; }
+.skel-views .mini { flex: 1; }
 .skel-dirs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 3px; }
 .skel-dir {
   font-size: 10px; padding: 3px 0; line-height: 1.2;

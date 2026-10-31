@@ -1919,7 +1919,8 @@ function check(name, cond, extra = '') {
   Object.defineProperty(input, 'files', { value: [file], configurable: true })
   input.dispatchEvent(new win.Event('change', { bubbles: true }))
   await new Promise((r) => setTimeout(r, 500))
-  const first = node?.querySelector('.skel-canvas circle')
+  // **要抓关节点**：`.skel-canvas circle` 现在第一个是人形的眼睛
+  const first = node?.querySelector('.skel-canvas circle.skel-joint')
   check('导入后关节坐标被替换（鼻 y=0.05 → SVG cy=5）',
     first?.getAttribute('cy') === '5', first?.getAttribute('cy'))
   check('提示带上提取到的 18/18 关节与朝向猜测',

@@ -39,3 +39,6 @@ desktop.ini
 
 # ---- 训练数据集 ----
 dataset/
+
+# ---- 前端 SSR 构建产物（骨骼编辑器预览用，见 tools/render_skeleton_preview.mjs）----
+web/ssr-tmp/
