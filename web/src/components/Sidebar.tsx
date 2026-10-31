@@ -29,7 +29,7 @@ type Props = {
     | 'outpaint' | 'outfit' | 'faceswap',
   ) => void
   canApply: boolean
-  onApplyFav: (text: string) => void
+  onApplyFav: (item: FavoritePrompt) => void
   onRemoveFav: (id: string) => void
   matteBackend: string
   onMatteBackend: (v: string) => void
@@ -482,10 +482,15 @@ export default function Sidebar({
                 <button
                   className="rail-item-main"
                   disabled={!canApply}
-                  title={canApply ? '填入选中的节点' : '先在画布上选中一个节点'}
-                  onClick={() => onApplyFav(f.text)}
+                  title={canApply
+                    ? '填入选中节点（正向与负向都会覆盖）'
+                    : '先在画布上选中一个节点'}
+                  onClick={() => onApplyFav(f)}
                 >
                   {f.text}
+                  {/* 负向词跟着正向一起收、一起填；缩成第二行灰字，
+                      不抢正向的位置。没有负向就不占行。 */}
+                  {f.negative ? <em>− {f.negative}</em> : null}
                 </button>
                 <button className="rail-del" title="删除" onClick={() => onRemoveFav(f.id)}>
                   ✕

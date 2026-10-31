@@ -544,6 +544,12 @@ function check(name, cond, extra = '') {
   await new Promise((r) => setTimeout(r, 80))
   check('英文不告警', !doc.querySelector('.lang-hint.bad'))
 
+  // 负向词在「更多设置」里（jsdom 不裁剪关闭的 details，能直接取到）
+  const negTa = doc.querySelector('details.fold textarea')
+  check('找到反向提示词输入框', !!negTa)
+  setValue(negTa, 'watermark, low quality')
+  await new Promise((r) => setTimeout(r, 80))
+
   const star = doc.querySelector('.star')
   check('星标可用', !!star && !star.disabled)
   star.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
@@ -554,9 +560,15 @@ function check(name, cond, extra = '') {
   check('列表文本正确',
     (favItems()[0]?.querySelector('.rail-item-main')?.textContent || '')
       .includes('white cat knight'))
+  // 负向词必须跟着一起收、一起显示（缩成第二行灰字）
+  check('收藏项带上负向词',
+    (favItems()[0]?.querySelector('.rail-item-main em')?.textContent || '')
+      .includes('watermark'),
+    favItems()[0]?.querySelector('.rail-item-main em')?.textContent || '（无）')
 
-  // 改成别的再点收藏条目，应能回填
+  // 正向与负向都改掉，再点收藏条目 —— 两项都必须被覆盖回来
   setValue(ta, 'blue slime')
+  setValue(negTa, 'changed by test')
   await new Promise((r) => setTimeout(r, 80))
   doc.querySelector('.node').dispatchEvent(new win.Event('pointerdown', { bubbles: true }))
   await new Promise((r) => setTimeout(r, 60))
@@ -565,6 +577,9 @@ function check(name, cond, extra = '') {
   check('点收藏条目回填到节点',
     doc.querySelector('textarea.prompt').value.includes('white cat knight'),
     doc.querySelector('textarea.prompt').value)
+  check('点收藏条目同时回填负向词',
+    (doc.querySelector('details.fold textarea')?.value || '').includes('watermark'),
+    doc.querySelector('details.fold textarea')?.value || '（空）')
 
   // 重复收藏不应出现两条
   doc.querySelector('.star').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))

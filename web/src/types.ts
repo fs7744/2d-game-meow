@@ -251,6 +251,15 @@ export type Viewport = { x: number; y: number; z: number }
 
 export type FavoritePrompt = {
   id: string
+  /** 正向提示词 */
   text: string
+  /**
+   * 收藏时节点上的负向提示词（可空）。
+   *
+   * **一起收**：负向词和正向词是一套搭配（"no text, watermark" 只对某些主体有意义），
+   * 只存正向、应用时把负向留成节点原样，等于收藏了个半成品。
+   * 旧存档没有这个字段，读回来按空串处理。
+   */
+  negative?: string
   at: number
 }

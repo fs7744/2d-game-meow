@@ -36,7 +36,7 @@ type Props = {
   onGenerate: (id: string) => void
   onDuplicate: (id: string) => void
   onDelete: (id: string) => void
-  isFavorite: (text: string) => boolean
+  isFavorite: (text: string, negative: string) => boolean
   onToggleFavorite: (id: string) => void
   onDropType: (type: string, world: { x: number; y: number }) => void
   onSpawnImg2Img: (id: string) => void
@@ -477,7 +477,7 @@ export default function Canvas({
             onGenerate={() => onGenerate(n.id)}
             onDuplicate={() => onDuplicate(n.id)}
             onDelete={() => onDelete(n.id)}
-            favorited={isFavorite(n.params.prompt)}
+            favorited={isFavorite(n.params.prompt, n.params.negative || '')}
             onToggleFavorite={() => onToggleFavorite(n.id)}
             model={n.params.model || model}
             onModel={(m, opts) => onNodeModel?.(n.id, m, opts?.keepNodes)}

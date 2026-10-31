@@ -1394,19 +1394,24 @@ export default function App() {
     })
   }, [])
 
-  // 收藏：以「提示词文本」为键去重，节点上的星标据此点亮
-  const isFavorite = useCallback((text: string) => hasPrompt(favs, text), [favs])
+  // 收藏：正向 + 负向**一起**算一条，节点上的星标据此点亮
+  const isFavorite = useCallback(
+    (text: string, negative: string) => hasPrompt(favs, text, negative), [favs])
 
   const toggleFavorite = useCallback((id: string) => {
     const n = nodesRef.current.find((x) => x.id === id)
     if (!n) return
-    setFavs((list) => togglePrompt(list, n.params.prompt))
+    // 负向词也一起收：它和正向词是一套搭配，只存正向等于收藏了个半成品
+    setFavs((list) => togglePrompt(list, n.params.prompt, n.params.negative || ''))
   }, [])
 
-  const applyFavorite = useCallback((text: string) => {
+  const applyFavorite = useCallback((item: FavoritePrompt) => {
     const n = nodesRef.current.find((x) => x.id === selectedId)
     if (!n) return
-    patchNode(n.id, { params: { ...n.params, prompt: text } })
+    // 两项一起填：只填正向会把节点上原有的负向词留下，等于用别人的负向词配自己的提示词
+    patchNode(n.id, {
+      params: { ...n.params, prompt: item.text, negative: item.negative || '' },
+    })
   }, [patchNode, selectedId])
 
   const removeFavorite = useCallback((id: string) => {
