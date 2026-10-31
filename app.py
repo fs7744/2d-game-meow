@@ -11,6 +11,17 @@
   GET  /files/{path}      取产物（?download=1 带 Content-Disposition 直接下载）
   POST /upload            上传本机图片（原始字节）→ 磁盘路径 + 展示 URL
   POST /mask              保存局部重绘的蒙版（PNG，项目目录 masks/ 下同名覆盖）
+  GET  /library            整个用户资料库（提示词收藏 + 姿势库 + 界面偏好，均在磁盘）
+  POST /library/seed       把浏览器 localStorage 里的旧存档搬进磁盘（只补不覆盖）
+  POST /library/prompts    收藏一条提示词（正向+负向）
+  DELETE /library/prompts/{pid}
+  POST /library/poses      存一条姿势（官方 pose JSON + 预览图）
+  PUT  /library/poses/{pid}  改名
+  DELETE /library/poses/{pid}
+  PUT  /library/prefs      写界面偏好
+  GET  /pose_library       随项目发行的 VNCCS 官方姿势库清单（191 个）
+  POST /pose/extract       一张图 → OpenPose-18 归一化关节点
+  GET  /pose_dirs          可以当 W4 输入的骨架帧目录
   DELETE /assets          真删：删磁盘产物 + 清索引
 """
 from __future__ import annotations
@@ -43,7 +54,9 @@ from PIL import Image
 
 from workflows import generate as gen
 from workflows import assetdb
+from workflows import library
 from workflows import paths
+from workflows import poselib
 from workflows import projectio
 from workflows import projectstore
 from workflows.assetdb import AssetIndex
@@ -372,6 +385,106 @@ def pose_extract(req: PoseExtractReq) -> Dict[str, Any]:
         # 肩膀在画面上几乎重叠 → 原图接近侧面。鼻尖相对颈的方向决定朝左/朝右。
         guess = 90 if (0 in pts and 1 in pts and pts[0][0] >= pts[1][0]) else 270
     return {"points": points, "joints": len(pts), "azimuth_guess": guess}
+
+
+@app.get("/library")
+def get_library() -> Dict[str, Any]:
+    """整个用户资料库一次给全（提示词收藏 + 姿势库 + 界面偏好）。
+
+    冷启动只发一次请求，省得界面为了画三个面板连发三次。
+    见 workflows/library.py 的模块注释：这些都**只落在服务端磁盘**。
+    """
+    return library.snapshot()
+
+
+class PromptReq(BaseModel):
+    text: str
+    negative: str = ""
+
+
+class PoseReq(BaseModel):
+    name: str
+    pose: Any
+    yaw: int = 0
+    #: 预览图（dataURL，可选）。没有也能存，只是库里不显示缩略图。
+    preview: str = ""
+
+
+class PoseRenameReq(BaseModel):
+    name: str
+
+
+class LibrarySeedReq(BaseModel):
+    """从 localStorage 迁移过来的旧数据。缺哪个字段就不动哪个库。"""
+    prompts: Optional[List[Dict[str, Any]]] = None
+    poses: Optional[List[Dict[str, Any]]] = None
+    prefs: Optional[Dict[str, Any]] = None
+
+
+@app.post("/library/prompts")
+def library_add_prompt(req: PromptReq) -> Dict[str, Any]:
+    """收藏一条提示词（正向 + 负向一起去重）。返回新的完整列表。"""
+    try:
+        return {"prompts": library.add_prompt(req.text, req.negative)}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.delete("/library/prompts/{pid}")
+def library_remove_prompt(pid: str) -> Dict[str, Any]:
+    return {"prompts": library.remove_prompt(pid)}
+
+
+@app.post("/library/poses")
+def library_add_pose(req: PoseReq) -> Dict[str, Any]:
+    """存一条姿势。**同名覆盖**（用户改完胳膊想原地更新）。"""
+    try:
+        return {"poses": library.add_pose(req.name, req.pose, req.yaw,
+                                          req.preview)}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.put("/library/poses/{pid}")
+def library_rename_pose(pid: str, req: PoseRenameReq) -> Dict[str, Any]:
+    return {"poses": library.rename_pose(pid, req.name)}
+
+
+@app.delete("/library/poses/{pid}")
+def library_remove_pose(pid: str) -> Dict[str, Any]:
+    return {"poses": library.remove_pose(pid)}
+
+
+@app.put("/library/prefs")
+def library_put_prefs(req: Dict[str, Any]) -> Dict[str, Any]:
+    """写界面偏好（蒙版颜色/透明度等）。局部合并，不传的键不动。"""
+    if not isinstance(req, dict):
+        raise HTTPException(400, "偏好必须是对象")
+    return {"prefs": library.save_prefs(req)}
+
+
+@app.post("/library/seed")
+def library_seed(req: LibrarySeedReq) -> Dict[str, Any]:
+    """把浏览器里剩下的旧存档搬进磁盘，**只补不覆盖**。
+
+    用户可能在两个浏览器里都攒过东西；谁也不该被谁覆盖。搬完由前端清掉
+    localStorage —— 那里从此一个字都不留。
+    """
+    return library.seed_library(req.prompts, req.poses, req.prefs)
+
+
+@app.get("/pose_library")
+def pose_library_list(refresh: int = 0) -> Dict[str, Any]:
+    """随项目发行的 VNCCS 官方姿势库清单（191 个）。
+
+    返回的是**指路信息**（静态 URL），不给姿势本体：本体 7MB，一次性塞进
+    JSON 里首屏就废了；用户点哪个才取哪个 json（每个几 KB）。
+
+    `refresh=1` 强制重扫（往目录里丢了新姿势时用）。
+    """
+    items = poselib.list_presets(force=refresh == 1)
+    return {"count": len(items), "items": items,
+            "categories": poselib.categories()}
 
 
 @app.get("/pose_dirs")

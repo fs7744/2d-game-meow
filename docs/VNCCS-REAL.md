@@ -140,27 +140,41 @@ loadMorphPack → solveMorph → buildStaticModelData → PoseViewerCore.loadDat
    人偶图的朝向**烘焙在图里**，所以下游不该再补方向词——补了是重复指令，
    还会压过姿势（实测 front view 会让分腿张臂退回站立）。
 
-界面接入：骨骼编辑节点新增「**编辑 3D 人偶**」，打开官方的**编辑会话**（弹窗）。
-交互与官方 UniCanvas 的 pose layer 一致：
+界面接入（2026-11-01 二次改造）：**3D 人偶就是「人偶姿势」节点的正文**，
+不再是旁边那个「编辑 3D 人偶」按钮。2D 伪 3D 骨架编辑器
+（`SkeletonEditor.tsx`）已整个删除——都有官方 3D 人偶了，没必要再摆 2D 关节。
 
-- 3D 视口里**直接拖橙色关节点**摆姿势（官方 raycast + IK + 极点约束，
-  肘/膝的弯向由官方保证）；
-- 右键拖 = 轨道旋转视角、中键平移、滚轮缩放（官方 OrbitControls）；
-  视角只是「检查视图」，**不影响输出**——导出用的是「朝向」下拉定的机位
-  （官方同理：capture framing 与导航相机分离）；
-- 点「导出人偶图」→ 官方 `capture()` 输出白底灰人偶 PNG。
+- 内嵌 iframe：`studio.html?embed=1`（只留画布，朝向 / 导出 / 姿势库由宿主提供）。
+  「放大」是把容器改成 `position:fixed`，**不动 iframe 的 DOM 位置**——一动浏览器
+  就会重载，37MB 的人偶模型要重新解算一遍；
+- 产物只有 `node.image`（白底灰人偶 PNG）。线框骨架不再产出，
+  `node.mannequin` 只为读老工程保留；
+- 存档用官方 `getPose()` JSON（骨骼欧拉角 + IK effector + 极点），不是 18 个 2D 点；
+- 「从图片」提的 2D 点交给官方 `convertOpenPoseToPose` 反解成 3D 骨骼。
 
-产物存 `node.mannequin`（与线框骨架 `node.image` 并存）。角色迁移的
-「动作参考」**优先用人偶图**，没有才退回线框骨架（`poseSourceOf`）。
+**导出图的背景必须干净**（实测踩过）：官方 `capture()` 会隐藏 gridHelper /
+skeletonHelper / 关节标记 / capture frame，但**没有**隐藏方向天穹
+`VNCCS_DirectionalSkydome`（那个彩虹经纬球）。不处理的话每张条件图背景都带一层
+彩色网格（占画面 4.2%），会直接把白底灰人偶毁掉。修法是 capture 期间临时藏掉
+（见 `entry.js` 的 `renderOut`）—— 实测导出 PNG 从 132KB 降到 39KB，彩色像素 0%。
 
 后端**零改动**：`_vnccs_skeleton` 只把「低饱和 + 暗」的像素换成白底，
 人偶图本就是白底灰人偶，判据 `mx < 70` 不会命中它。
 
+### 6b. 官方姿势库（191 个）已入库
+
+`web/public/vnccs-pose/PoseLibrary/`：4 个来源仓库共 195 个 json + 186 张 webp。
+顶层字段就是 `getPose()` 那套（`bones` / `modelRotation` / `ikEffectorPositions` /
+`poleTargetPositions` / `hipBonePosition`），`setPose()` 直接吃。
+
+`GET /pose_library` 只给清单（**路径 + 标签**，7MB 本体按需取），标签里写着
+`front view` / `side view` / `rear view`，所以默认值机位按标签给：侧面 90°、背面 180°。
+
 ## 7. 仍需注意的
 
-- **没有 PoseStudio 渲染器时的兜底**：线框骨架仍可用（姿势能跟住，
-  是精灵产线最需要的），只是姿态贴合比人偶图弱一截。
-- **朝向**：人偶图自带朝向，线框骨架则分不清正/背面（2D 投影里互为镜像、
-  90° 收成一条线）。用线框骨架时只能靠文字补，代价是姿势打折。
+- **朝向**：人偶图自带朝向（相机机位烘焙在图里），所以下游不该再补方向词——
+  补了是重复指令，还会压过姿势。
 - **`tools/render_mannequin.py`**（我们早期写的 Python 软光栅）已被官方
   PoseStudio 取代，保留仅作无浏览器环境下的对照参考。
+- **预览图有 5 个姿势没有同名 webp**（官方库自己缺的），浏览面板显示「无预览」，
+  姿势本身照常可用。

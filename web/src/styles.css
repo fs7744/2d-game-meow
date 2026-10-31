@@ -484,14 +484,6 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
 }
 .modal-head { display: flex; align-items: center; }
 
-/* ---- 3D 人偶编辑器弹窗（官方 VNCCS PoseStudio）---- */
-.mannequin-modal { width: 840px; max-width: 96vw; }
-.mannequin-frame { display: flex; justify-content: center; }
-.mannequin-frame iframe {
-  width: 800px; height: 700px; border: 1px solid var(--line-strong);
-  background: #0d0f16;
-}
-.mannequin-status { flex: 1; font-size: 11px; color: var(--muted); line-height: 1.6; }
 .node-kind.danger { color: var(--pink); }
 .modal-summary { margin: 0; font-size: 12px; color: var(--white); line-height: 1.6; }
 .modal-files {
@@ -981,47 +973,146 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
 .rail-scan:hover:not(:disabled) { background: rgba(0, 255, 136, 0.18); }
 .rail-scan:disabled { opacity: 0.5; cursor: default; }
 
-/* ---------------- 骨骼编辑器节点 ----------------
-   编辑器画在节点正文里，宽度跟着节点走（默认 300 → 内容 280）。
-   SVG 用 viewBox 0 0 100 100，拖拽坐标与画布缩放无关。 */
-.skel-editor { display: flex; flex-direction: column; gap: 6px; }
-.skel-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
-.skel-row label { display: flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--muted); }
-.skel-row select { flex: 1; min-width: 0; }
-.skel-size { font-family: var(--mono); font-size: 9px; color: var(--muted-2); }
-.skel-views { display: flex; gap: 4px; }
-.skel-views .mini { flex: 1; }
-.skel-dirs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 3px; }
-.skel-dir {
-  font-size: 10px; padding: 3px 0; line-height: 1.2;
-  border: 1px solid var(--line); background: rgba(255, 255, 255, 0.02);
-  color: var(--muted); cursor: pointer; border-radius: 2px;
+/* ---------------- 3D 人偶编辑器节点（官方 VNCCS PoseStudio）----------------
+   编辑器是块 iframe，画在节点正文里，宽度跟着节点走（默认 300 → 内容 280）。
+   「放大」只是把这个容器改成 position:fixed —— **不移动 iframe 节点**，
+   一旦 re-parent 浏览器会重载 iframe，37MB 的人偶模型要重新解算一遍。 */
+.pose-editor { display: flex; flex-direction: column; gap: 6px; }
+.pose-stage {
+  position: relative; width: 100%; aspect-ratio: 1 / 1;
+  border: 1px solid var(--line); background: #0d0f16; border-radius: 3px;
+  overflow: hidden;
 }
-.skel-dir:hover { border-color: var(--line-strong); color: var(--white); }
-.skel-dir.on { border-color: var(--cyan); color: var(--cyan); background: rgba(0, 208, 255, 0.1); }
-.skel-range {
-  display: flex; align-items: center; gap: 6px;
-  font-size: 10px; color: var(--muted);
+.pose-stage iframe {
+  display: block; width: 100%; height: 100%; border: 0; background: #fff;
 }
-.skel-range b { font-family: var(--mono); font-weight: 400; color: var(--cyan); min-width: 34px; }
-.skel-range input[type='range'] { flex: 1; min-width: 0; height: 16px; }
-.skel-canvas {
-  display: block; width: 100%; aspect-ratio: 1 / 1;
-  border: 1px solid var(--line); background: #08080b; border-radius: 3px;
-  touch-action: none; cursor: default;
+/* 放大：整个浮层盖住画布。挂在正文里的 iframe 保持同一个 DOM 位置，不会重载。 */
+.pose-stage.expanded {
+  position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: min(92vw, 900px); height: min(92vh, 900px);
+  aspect-ratio: auto; z-index: 400;
+  box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.72);
 }
-.skel-actions { display: flex; gap: 6px; }
-.skel-actions .wide { flex: 1; }
-.skel-preview {
+.pose-expanded-bar {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 6px 10px; background: rgba(10, 10, 12, 0.86);
+  border-top: 1px solid var(--line); font-size: 11px; color: var(--muted);
+}
+.pose-expanded-bar button {
+  background: transparent; border: 1px solid var(--line-strong); color: var(--white);
+  border-radius: 2px; padding: 3px 8px; font-size: 11px; cursor: pointer;
+}
+.pose-status { font-size: 10.5px; color: var(--muted); line-height: 1.5; }
+.pose-err {
+  font-size: 10.5px; color: var(--pink); line-height: 1.5;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pose-lib, .pose-row, .pose-actions, .pose-save {
+  display: flex; align-items: center; gap: 5px;
+}
+.pose-row { font-size: 10.5px; color: var(--muted); }
+.pose-lib-sel, .pose-row select { flex: 1; min-width: 0; }
+.pose-row select { flex: 1; }
+.pose-save input {
+  flex: 1; min-width: 0; background: var(--bg-3); color: var(--white);
+  border: 1px solid var(--line-strong); border-radius: 2px;
+  padding: 3px 6px; font: inherit; font-size: 11px;
+}
+.pose-preview {
   display: flex; align-items: center; gap: 7px;
   border: 1px solid var(--line); padding: 5px;
   font-size: 10px; color: var(--muted);
 }
-.skel-preview img {
+.pose-preview img {
   width: 46px; height: 46px; object-fit: contain;
-  background: #08080b; border: 1px solid var(--line);
+  background: #fff; border: 1px solid var(--line);
 }
 
+/* ---- 资料库浏览面板（提示词收藏 + 姿势库）---- */
+.lib-mask {
+  position: fixed; inset: 0; z-index: 500;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex; align-items: center; justify-content: center;
+}
+.lib-modal { width: min(96vw, 880px); max-height: 88vh; gap: 8px; }
+.lib-path { flex: 1; font-family: var(--mono); font-size: 10px; color: var(--muted-2); }
+.lib-tabs { display: flex; align-items: center; gap: 6px; }
+.lib-tab {
+  background: transparent; border: 1px solid var(--line); color: var(--muted);
+  border-radius: 2px; padding: 4px 10px; font-size: 12px; cursor: pointer;
+}
+.lib-tab.on { border-color: var(--green); color: var(--green); background: rgba(0, 255, 136, 0.1); }
+.lib-tab b { font-family: var(--mono); font-weight: 400; font-size: 10px; }
+.lib-search {
+  width: 200px; background: var(--bg-3); color: var(--white);
+  border: 1px solid var(--line-strong); border-radius: 2px;
+  padding: 4px 8px; font: inherit; font-size: 11px;
+}
+.lib-src { display: flex; align-items: center; gap: 6px; }
+.lib-src-btn {
+  background: transparent; border: 1px solid var(--line); color: var(--muted);
+  border-radius: 2px; padding: 3px 10px; font-size: 11.5px; cursor: pointer;
+}
+.lib-src-btn.on { border-color: var(--cyan); color: var(--cyan); background: rgba(0, 208, 255, 0.1); }
+.lib-src-btn b { font-family: var(--mono); font-weight: 400; font-size: 10px; }
+.lib-cat, .lib-grid select {
+  background: var(--bg-3); color: var(--white);
+  border: 1px solid var(--line-strong); border-radius: 2px;
+  padding: 3px 6px; font: inherit; font-size: 11px;
+}
+.lib-cat { flex: none; min-width: 120px; }
+.lib-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 8px; overflow: auto; padding: 2px; min-height: 120px;
+}
+.lib-card {
+  display: flex; flex-direction: column; gap: 5px;
+  border: 1px solid var(--line); background: var(--bg-2); padding: 7px;
+}
+.lib-card-text {
+  font-size: 12px; color: var(--white); line-height: 1.45;
+  overflow: hidden; text-overflow: ellipsis; display: -webkit-box;
+  -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+  word-break: break-word;
+}
+.lib-card-text em {
+  display: inline-block; margin-left: 4px; font-style: normal;
+  font-family: var(--mono); font-size: 9.5px; color: var(--cyan);
+}
+.lib-card-sub {
+  font-size: 10px; color: var(--muted-2); line-height: 1.4;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.lib-tags { display: flex; flex-wrap: wrap; gap: 3px; white-space: normal; }
+.lib-tag {
+  border: 1px solid var(--line); border-radius: 2px; padding: 0 4px;
+  font-family: var(--mono); font-size: 9px; color: var(--muted);
+}
+.lib-thumb {
+  aspect-ratio: 1 / 1; background: #fff; border: 1px solid var(--line);
+  display: grid; place-items: center; overflow: hidden;
+}
+.lib-thumb img { width: 100%; height: 100%; object-fit: contain; }
+.lib-thumb span { color: #7a7a88; font-size: 10px; }
+.lib-card-actions { display: flex; gap: 4px; margin-top: auto; }
+.lib-rename {
+  width: 100%; background: var(--bg-3); color: var(--white);
+  border: 1px solid var(--cyan); border-radius: 2px;
+  padding: 2px 5px; font: inherit; font-size: 11px;
+}
+.lib-empty { grid-column: 1 / -1; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.lib-foot {
+  font-size: 10.5px; color: var(--muted-2); line-height: 1.5;
+  border-top: 1px solid var(--line); padding-top: 6px;
+}
+.rail-lib { display: flex; flex-direction: column; gap: 4px; margin-bottom: 6px; }
+.rail-lib .rail-item-main { display: block; text-align: left; }
+.rail-lib .rail-item-main em {
+  display: block; font-style: normal; font-size: 10px; color: var(--muted-2);
+}
+
+/* ---------------- 方向按钮（扩图节点也在用）---------------- */
 /* ---------------- 侧栏 LoRA 面板 ----------------
    LoRA 是**全局状态**：挂上后对所有生成生效，所以放在侧栏而不是节点里。
    （节点级的微调要等 LoRA 参数走通生成链路再说。） */

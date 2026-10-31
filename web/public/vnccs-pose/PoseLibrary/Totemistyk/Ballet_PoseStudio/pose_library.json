@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "title": "VNCCS Pose Library",
+  "repo_id": "Totemistyk/Ballet_PoseStudio",
+  "updated_at": "2026-06-09T09:26:09.213016+00:00",
+  "poses": [
+    {
+      "name": "Arabesque",
+      "category": "Ballet",
+      "tags": [
+        "ballet",
+        "arabesque"
+      ],
+      "json_path": "poses/Ballet/Arabesque.json",
+      "preview_path": "previews/Ballet/Arabesque.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "0ab40b3a6f01fffca61eda8dd3b5ef08b9ffec5934f1b0d4f54bd38436f230d8",
+      "preview_sha256": "604d33f21ed38144db3c4a12d9ec5eac06ea53618f611c3faec7df1bd6f76f6b",
+      "updated_at": "2026-06-09T09:26:09.213016+00:00"
+    },
+    {
+      "name": "Dancing_on_knees",
+      "category": "Ballet",
+      "tags": [
+        "dancing",
+        "knees"
+      ],
+      "json_path": "poses/Ballet/Dancing_on_knees.json",
+      "preview_path": "previews/Ballet/Dancing_on_knees.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "e81de13218b8badbca5f4f16d83b55d586fa97ad44426281e270663fec97fc64",
+      "preview_sha256": "8cd09dadb545981504b79c879ebf6adf42f251ffaa93d53d8d93783685423d3a",
+      "updated_at": "2026-06-09T09:26:09.213016+00:00"
+    },
+    {
+      "name": "Splits_1",
+      "category": "Ballet",
+      "tags": [
+        "splits",
+        "ballet",
+        "hands_up"
+      ],
+      "json_path": "poses/Ballet/Splits_1.json",
+      "preview_path": "previews/Ballet/Splits_1.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "154eb99fa9e306b90a44b5bacc9d93e62f87354594ecb89dd6db8e1893f9f9cc",
+      "preview_sha256": "58ef871771f5739f70d740559c19c0ce452fb892f7fea19cd5427a3be2640506",
+      "updated_at": "2026-06-09T09:26:09.213016+00:00"
+    }
+  ]
+}

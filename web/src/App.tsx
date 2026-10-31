@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Canvas, { type LinkField } from './canvas/Canvas'
 import Sidebar from './components/Sidebar'
-import { hasPrompt, loadPrompts, removePrompt, savePrompts, togglePrompt } from './store/prompts'
+import { findPromptId, hasPrompt } from './store/prompts'
+import { clearLegacy, hasLegacy, readLegacy } from './store/legacy'
+import { hydratePrefs } from './store/prefs'
 import {
   makeProject, metaOf, takeLegacyProject, archiveOf, projectFromImported,
   type Project, type ProjectMeta,
@@ -9,9 +11,12 @@ import {
 import {
   deleteAssets, fetchJob, fetchModels, health, submitAiRepaint, submitImg2Img,
   fetchPoseDirs, submitToPixel, submitInpaint, submitMatte,
+  fetchPosePresets, type PresetPose,
   submitPixelify, submitPoseClone,
   submitPoseSeq,
   submitSpriteSwap, submitTxt2Img, uploadImage, extractPose,
+  getLibrary, seedLibraryApi, addPromptApi, removePromptApi,
+  renamePoseApi, removePoseApi, addPoseApi,
   fetchLoras, applyLoras, setFastMode, type QwenLora, type ActiveLora,
   submitOutpaint, submitOutfitSwap, submitFaceSwap, submitVnccsPose,
   exportProject, importProject, fetchTemplates, saveTemplate, instantiateTemplate,
@@ -20,18 +25,18 @@ import {
   revealProject,
   saveWorkspace, allocateProjectId,
 } from './api'
+import type { Library } from './api'
 import ConfirmDialog from './components/ConfirmDialog'
 import Lightbox from './components/Lightbox'
-import { MannequinHost } from './components/MannequinHost'
+import LibraryDrawer, { type LibraryTab } from './components/LibraryDrawer'
 import type { PoseDir } from './api'
 import type { ModelCaps } from './api'
 import type {
   FavoritePrompt, GenNode, GenParams, ModelRecommend, NodeImage, NodeCharSource,
-  NodeKind, NodeSource, Viewport,
+  NodeKind, NodeSource, PosePreset, Viewport,
 } from './types'
 import type { NodePatch } from './nodes/GenNodeCard'
 import { styleFromParams } from './genStyles'
-import { defaultSkeleton, skeletonFromPoints } from './components/SkeletonEditor'
 import { NODE_W } from './nodes/GenNodeCard'
 
 /**
@@ -188,8 +193,9 @@ function makeNode(
     source,
     image,
     params: { ...DEFAULT_PARAMS, ...params },
-    // 骨骼编辑器节点：初始给一个「张手正面」骨架，打开就能拖
-    ...(kind === 'poseedit' ? { skeleton: defaultSkeleton() } : {}),
+    // 人偶编辑器节点：初始就是官方的站姿（0° 正面）。**不给 pose**——
+    // 子窗起来时按自己的初始状态开始，`init` 时不套任何东西。
+    ...(kind === 'poseedit' ? { yaw: 0 } : {}),
   }
 }
 
@@ -249,7 +255,14 @@ export default function App() {
   const [viewport, setViewport] = useState<Viewport>({ x: 120, y: 90, z: 1 })
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [device, setDevice] = useState<string>('')
-  const [favs, setFavs] = useState<FavoritePrompt[]>(() => loadPrompts())
+  const [lib, setLib] = useState<Library>({ prompts: [], poses: [], prefs: {} })
+  /** 资料库浏览面板。tab 决定打开时先看哪个库 */
+  const [libraryOpen, setLibraryOpen] = useState(false)
+  const [libraryTab, setLibraryTab] = useState<LibraryTab>('prompt')
+  const openLibrary = useCallback((t: LibraryTab) => {
+    setLibraryTab(t)
+    setLibraryOpen(true)
+  }, [])
   const [models, setModels] = useState<string[]>(['qwen-image-2.1'])
   // 每个底模的推荐采样参数，由后端 /models 给出（见 types.ts 的 ModelRecommend）
   const [recommend, setRecommend] = useState<Record<string, ModelRecommend>>({})
@@ -309,8 +322,6 @@ export default function App() {
   const [pendingProjectDelete, setPendingProjectDelete] = useState<string | null>(null)
   const [preview, setPreview] = useState<{ url: string; name: string } | null>(null)
   const pickFiles = useRef<HTMLInputElement | null>(null)
-
-  useEffect(() => savePrompts(favs), [favs])
 
   // ---------------- 项目落盘（服务端磁盘） ----------------
   //
@@ -446,6 +457,46 @@ export default function App() {
     fetchPoseDirs().then(setPoseDirs).catch(() => setPoseDirs([]))
   }, [])
   useEffect(() => { reloadPoseDirs() }, [reloadPoseDirs])
+  /**
+   * 用户资料库：**唯一的载入点**。
+   *
+   * 顺序很关键——先拉服务端那份权威数据，再把浏览器里可能残留的旧存档补进去
+   * （`/library/seed` 只补不覆盖），清 localStorage 放到最后：万一迁移请求失败，
+   * 数据还在浏览器里，下次启动还能重试一次，不会凭空丢。
+   */
+  useEffect(() => {
+    let alive = true
+    getLibrary()
+      .then((r) => {
+        if (!alive) return
+        setLib({
+          prompts: r.prompts ?? [], poses: r.poses ?? [], prefs: r.prefs ?? {},
+        })
+        hydratePrefs(r.prefs ?? {})
+      })
+      .catch(() => { /* 拿不到就当空库：界面照用，只是收藏列表是空的 */ })
+      .then(() => {
+        if (!alive) return
+        const legacy = readLegacy()
+        if (!hasLegacy(legacy)) return
+        // **只在这时**才发起迁移请求——什么都没有就别打扰后端。
+        // 注意这里 readLegacy 不删浏览器数据：请求失败时东西还在，下回还能再试一次。
+        return seedLibraryApi(legacy)
+          .then((r) => {
+            if (!alive) return
+            setLib({
+              prompts: r.prompts ?? [], poses: r.poses ?? [], prefs: r.prefs ?? {},
+            })
+            hydratePrefs(r.prefs ?? {})
+            clearLegacy()          // 服务端确认收到了，浏览器里才可以一个字不留
+            setNotice(`已从浏览器迁来 ${legacy.prompts.length} 条提示词、`
+              + `${legacy.poses.length} 个姿势（现在都在磁盘 library/ 里了）`)
+            window.setTimeout(() => setNotice(''), 5000)
+          })
+      })
+      .catch(() => { /* 迁移失败不打断使用：服务端那份还能用 */ })
+    return () => { alive = false }
+  }, [])
   useEffect(() => { reloadLoras() }, [reloadLoras])
 
   useEffect(() => {
@@ -483,13 +534,6 @@ export default function App() {
   viewportRef.current = viewport
   const currentIdRef = useRef(currentId)
   currentIdRef.current = currentId
-
-  // 官方 PoseStudio 编辑会话（弹窗）：骨骼编辑器「编辑 3D 人偶」打开它
-  const [mannequinEditor, setMannequinEditor] = useState<{
-    nodeId: string
-    joints?: { x: number; y: number }[]
-    azimuth?: number
-  } | null>(null)
 
   // 自动保存（防抖 400ms）：只写回**当前项目**，别的项目原封不动。
   //
@@ -865,85 +909,71 @@ export default function App() {
   }, [models, recommend, caps, model])
 
   /**
-   * 骨骼编辑器「导出骨架图」：前端画好 OpenPose-18 PNG → 上传 → 挂到节点 image 上。
+   * 人偶编辑器「导出人偶图」：官方 PoseStudio 渲染的白底灰人偶 PNG
+   * → 上传 → 挂到节点 `image` 上。
    *
    * 挂 image 是关键：画布的连线与「源候选」只认有 image.path / job.path 的节点，
-   * 有了它这张骨架图才能像普通图片节点一样连到角色迁移的「动作参考」输入。
+   * 有了它这张人偶图才能像普通图片节点一样连到角色迁移的「动作参考」输入。
+   *
+   * **不再有第二种产物**：以前 `image` 是 OpenPose-18 线框骨架、`mannequin`
+   * 是人偶图，下游要按优先级猜。实测人偶图在 VNCCS 路线上姿态贴合明显更好，
+   * 线框骨架已经整个删掉，所以这里只有一个产物、一个字段。
    */
-  const exportSkeleton = useCallback(async (id: string, blob: Blob) => {
+  const exportMannequin = useCallback(async (id: string, blob: Blob) => {
     try {
-      const f = new File([blob], 'skeleton.png', { type: 'image/png' })
+      const f = new File([blob], 'mannequin.png', { type: 'image/png' })
       const up = await uploadImage(f, currentId)
       patchNode(id, {
-        image: { path: up.path, url: up.url, w: 300, h: 300 },
+        image: { path: up.path, url: up.url, w: 768, h: 768 },
       })
-      setNotice('骨架图已导出：把它连到角色迁移节点的「动作参考」输入即可')
+      setNotice('人偶图已导出：把它连到角色迁移节点的「动作参考」输入即可')
       window.setTimeout(() => setNotice(''), 5000)
     } catch (e) {
-      setNotice(`导出骨架图失败：${e instanceof Error ? e.message : '未知错误'}`)
+      setNotice(`导出人偶图失败：${e instanceof Error ? e.message : '未知错误'}`)
       window.setTimeout(() => setNotice(''), 5000)
     }
   }, [patchNode, currentId])
 
   /**
-   * 骨骼编辑器「编辑 3D 人偶」：**打开官方 PoseStudio 的编辑会话**。
+   * 人偶编辑器「从图片」：上传原图 → 后端 DWPose 提 18 关节 → **交给官方转换器**
+   * 变成真正的 3D 骨骼（`convertOpenPoseToPose`）。
    *
-   * 官方 UniCanvas 的 pose layer 就是这个交互：插一个人偶图层 → 进编辑会话 →
-   * 在 3D 视口里摆姿势 → Save pose。我们照搬：编辑器是官方的
-   * （MakeHuman 网格 + 53 根骨 + IK + 可拖的关节标记），我们只提供弹窗与通信。
+   * 不改 node.image：那个字段挂的是**导出的人偶图**（连线源）。把原图写进去
+   * 会让下游角色迁移拿到原图而不是人偶图。
    *
-   * 为什么要单独存一个字段而不是覆盖 node.image：线框骨架（OpenPose-18）和 3D 人偶
-   * 是两种格式，各有用途（ControlNet 系要骨架、VNCCS 要人偶），下游按优先级取。
-   */
-  const openMannequinEditor = useCallback((id: string) => {
-    const node = nodesRef.current.find((n) => n.id === id)
-    setMannequinEditor({
-      nodeId: id,
-      joints: node?.skeleton?.points.map((p) => ({ x: p.x, y: p.y })),
-      azimuth: node?.skeleton?.azimuth ?? 0,
-    })
-  }, [])
-
-  /** 编辑器里导出后：上传 → 挂到 node.mannequin → 关弹窗 */
-  const onMannequinResult = useCallback(async (blob: Blob) => {
-    const ed = mannequinEditor
-    if (!ed) return
-    try {
-      const f = new File([blob], 'mannequin.png', { type: 'image/png' })
-      const up = await uploadImage(f, currentId)
-      patchNode(ed.nodeId, {
-        mannequin: { path: up.path, url: up.url, w: 768, h: 768 },
-      })
-      setMannequinEditor(null)
-      setNotice('3D 人偶图已导出：角色迁移会优先用它当动作参考（VNCCS 官方格式）')
-      window.setTimeout(() => setNotice(''), 6000)
-    } catch (e) {
-      setNotice(`导出人偶图失败：${e instanceof Error ? e.message : '未知错误'}`)
-      window.setTimeout(() => setNotice(''), 6000)
-    }
-  }, [mannequinEditor, patchNode, currentId])
-
-  /**
-   * 骨骼编辑器「从图片提取」：上传原图 → 后端 DWPose 提 18 关节 → 2D 点补深度
-   * 变成可旋转的 3D 骨架 → 写回节点。
-   *
-   * 不改 node.image：那个字段挂的是**导出的骨架图**（连线源）。把原图写进去
-   * 会让下游角色迁移拿到原图而不是骨架，方向也就无从谈起。
+   * 也不在这里算姿势：3D 反解必须在渲染器里做（需要官方骨骼的静止长度），
+   * 所以只把点投递给节点里的编辑器，由它转。
    */
   const importPoseFromImage = useCallback(async (id: string, file: File) => {
     try {
       const up = await uploadImage(file, currentId)
       const r = await extractPose(up.path)
-      patchNode(id, { skeleton: skeletonFromPoints(r.points, r.azimuth_guess) })
+      patchNode(id, {
+        poseImport: { points: r.points, tick: Date.now() },
+      })
       const dir = r.azimuth_guess === 90 ? '右侧'
         : r.azimuth_guess === 270 ? '左侧' : '正面'
-      setNotice(`已从图片提取 ${r.joints}/18 个关节（原图疑似${dir}）；`
-        + '点上方方向按钮换视觉方向，再导出骨架图')
+      setNotice(`已从图片提取 ${r.joints}/18 个关节（原图疑似${dir}），`
+        + '已按官方转换器解成 3D 骨骼；导出前可在上面微调')
     } catch (e) {
-      setNotice(`提取骨架失败：${e instanceof Error ? e.message : '未知错误'}`)
+      setNotice(`提取姿势失败：${e instanceof Error ? e.message : '未知错误'}`)
     }
     window.setTimeout(() => setNotice(''), 7000)
   }, [patchNode, currentId])
+
+  /** 存当前姿势进库（带一张缩略图，浏览时能一眼认出来）。 */
+  const savePoseToLibrary = useCallback(async (
+    name: string, pose: unknown, yaw: number, preview: string,
+  ) => {
+    try {
+      const r = await addPoseApi(name, pose, yaw, preview)
+      setLib((l) => ({ ...l, poses: r.poses ?? l.poses }))
+      setNotice(`姿势「${name}」已存入资料库（disk: library/poses.json）`)
+    } catch (e) {
+      setNotice(`存姿势失败：${e instanceof Error ? e.message : '未知错误'}`)
+    }
+    window.setTimeout(() => setNotice(''), 4000)
+  }, [])
 
   /** 以某个节点的产物为源，在它右边新建一个图生图节点。 */
   const spawnImg2Img = useCallback((id: string) => {
@@ -1524,14 +1554,24 @@ export default function App() {
 
   // 收藏：正向 + 负向**一起**算一条，节点上的星标据此点亮
   const isFavorite = useCallback(
-    (text: string, negative: string) => hasPrompt(favs, text, negative), [favs])
+    (text: string, negative: string) => hasPrompt(lib.prompts, text, negative),
+    [lib.prompts])
 
+  /** 收藏/取消收藏。**服务端是唯一真源**：本地不维护列表，改完用返回值覆盖。 */
   const toggleFavorite = useCallback((id: string) => {
     const n = nodesRef.current.find((x) => x.id === id)
     if (!n) return
-    // 负向词也一起收：它和正向词是一套搭配，只存正向等于收藏了个半成品
-    setFavs((list) => togglePrompt(list, n.params.prompt, n.params.negative || ''))
-  }, [])
+    const text = n.params.prompt
+    const negative = n.params.negative || ''
+    const existing = findPromptId(lib.prompts, text, negative)
+    const req = existing
+      ? removePromptApi(existing)
+      // 负向词也一起收：它和正向词是一套搭配，只存正向等于收藏了个半成品
+      : addPromptApi(text, negative)
+    void req
+      .then((r) => setLib((l) => ({ ...l, prompts: r.prompts ?? l.prompts })))
+      .catch((e) => setNotice(`收藏失败：${e instanceof Error ? e.message : '未知错误'}`))
+  }, [lib.prompts])
 
   const applyFavorite = useCallback((item: FavoritePrompt) => {
     const n = nodesRef.current.find((x) => x.id === selectedId)
@@ -1540,13 +1580,68 @@ export default function App() {
     patchNode(n.id, {
       params: { ...n.params, prompt: item.text, negative: item.negative || '' },
     })
+    setNotice('已把收藏的提示词（含负向）填进选中节点')
+    window.setTimeout(() => setNotice(''), 3000)
   }, [patchNode, selectedId])
 
   const removeFavorite = useCallback((id: string) => {
-    setFavs((list) => removePrompt(list, id))
+    void removePromptApi(id)
+      .then((r) => setLib((l) => ({ ...l, prompts: r.prompts ?? l.prompts })))
+      .catch((e) => setNotice(`删除收藏失败：${e instanceof Error ? e.message : '未知错误'}`))
+  }, [])
+
+  // ---- 姿势库 ----
+  /** 随项目发行的 VNCCS 官方姿势库清单（191 条，只在打开姿势页时才拉） */
+  const [presets, setPresets] = useState<PresetPose[]>([])
+  const [presetCats, setPresetCats] = useState<string[]>([])
+  const loadPresets = useCallback(() => {
+    void fetchPosePresets()
+      .then((r) => {
+        setPresets(r.items ?? [])
+        setPresetCats(r.categories ?? [])
+      })
+      .catch(() => setPresets([]))
+  }, [])
+
+  /** 把姿势套到选中节点：连同朝向一起还原。 */
+  const applyPose = useCallback((p: PosePreset) => {
+    const n = nodesRef.current.find((x) => x.id === selectedId)
+    if (!n || n.kind !== 'poseedit') return
+    patchNode(n.id, {
+      pose: p.pose,
+      yaw: p.yaw,
+      // tick 变化才能让节点里的编辑器知道「外面换姿势了」——它只在 ready 时
+      // 灌一次存档姿势，之后是单向往外推的。带 nodeId：别的人偶节点不能跟着动。
+      poseApply: { nodeId: n.id, pose: p.pose, yaw: p.yaw, tick: Date.now() },
+    })
+    setNotice(`已把「${p.name}」套到选中节点（含 ${p.yaw}° 朝向）`)
+    window.setTimeout(() => setNotice(''), 3000)
+  }, [patchNode, selectedId])
+
+  const renamePose = useCallback((id: string, name: string) => {
+    void renamePoseApi(id, name)
+      .then((r) => setLib((l) => ({ ...l, poses: r.poses ?? l.poses })))
+      .catch((e) => setNotice(`改名失败：${e instanceof Error ? e.message : '未知错误'}`))
+  }, [])
+
+  const removePose = useCallback((id: string) => {
+    void removePoseApi(id)
+      .then((r) => setLib((l) => ({ ...l, poses: r.poses ?? l.poses })))
+      .catch((e) => setNotice(`删除姿势失败：${e instanceof Error ? e.message : '未知错误'}`))
   }, [])
 
   const zoomLabel = useMemo(() => `${Math.round(viewport.z * 100)}%`, [viewport.z])
+
+  /** 当前选中的节点（资料库「应用」要落在它身上）。用 nodes 而不是 ref：
+   *  界面上的按钮可用性必须跟着选择变化重算。 */
+  const selectedNode = useMemo(
+    () => nodes.find((n) => n.id === selectedId) ?? null, [nodes, selectedId])
+
+  /** 选中节点能不能接提示词：只有带 params.prompt 的那几类节点行。 */
+  const canApplyPrompt = useMemo(() => {
+    const k = selectedNode?.kind
+    return !!selectedNode && k !== 'image'
+  }, [selectedNode])
 
   return (
     <div className="app">
@@ -1573,7 +1668,8 @@ export default function App() {
 
       <main className="stage">
         <Sidebar
-          favs={favs}
+          favs={lib.prompts}
+          onOpenLibrary={openLibrary}
           projects={projectMeta}
           currentProject={currentId}
           onSwitchProject={switchProject}
@@ -1621,8 +1717,12 @@ export default function App() {
           onToggleFavorite={toggleFavorite}
           onDropType={(t, world) => addNode(t, world)}
           onSpawnImg2Img={spawnImg2Img}
-          onExportSkeleton={(id, blob) => void exportSkeleton(id, blob)}
-          onExportMannequin={(id) => openMannequinEditor(id)}
+          onExportSkeleton={(id, blob) => void exportMannequin(id, blob)}
+          poses={lib.poses}
+          poseApply={selectedNode?.poseApply}
+          onSavePose={(name, pose, yaw, preview) =>
+            void savePoseToLibrary(name, pose, yaw, preview)}
+          onOpenPoseLibrary={() => openLibrary('pose')}
           onImportPose={(id, file) => importPoseFromImage(id, file)}
           onDropFiles={(files, world, targetId) => void handleFiles(files, world, targetId)}
           onConnect={onConnect}
@@ -1652,13 +1752,29 @@ export default function App() {
 
       {preview && <Lightbox url={preview.url} name={preview.name} onClose={() => setPreview(null)} />}
 
-      {/* 官方 VNCCS PoseStudio 编辑会话：3D 人偶编辑器（摆姿势 → 导出）*/}
-      <MannequinHost
-        open={!!mannequinEditor}
-        onClose={() => setMannequinEditor(null)}
-        onResult={(blob) => void onMannequinResult(blob)}
-        joints={mannequinEditor?.joints}
-        azimuth={mannequinEditor?.azimuth}
+      {/* 资料库浏览面板：提示词收藏 + 姿势库（都在服务端磁盘 library/） */}
+      <LibraryDrawer
+        open={libraryOpen}
+        tab={libraryTab}
+        onTab={setLibraryTab}
+        onClose={() => setLibraryOpen(false)}
+        prompts={lib.prompts}
+        poses={lib.poses}
+        presets={presets}
+        presetCategories={presetCats}
+        onLoadPresets={loadPresets}
+        canApplyPrompt={canApplyPrompt}
+        canApplyPose={selectedNode?.kind === 'poseedit'}
+        applyHint={selectedNode
+          ? '选中节点不是「人偶姿势」节点，姿势只能套到人偶上'
+          : '先在画布上选中一个节点'}
+        onApplyPrompt={applyFavorite}
+        onRemovePrompt={removeFavorite}
+        onApplyPose={applyPose}
+        onRenamePose={renamePose}
+        onRemovePose={removePose}
+        onSavePresetAsMine={(name, pose, yaw, preview) =>
+          void savePoseToLibrary(name, pose, yaw, preview)}
       />
 
       {pendingProjectDelete && (() => {

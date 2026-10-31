@@ -1,11 +1,12 @@
 import { useRef, useState } from 'react'
-import { hasCJK } from '../store/prompts'
 import MaskEditor from '../components/MaskEditor'
 import MaskPreview from '../components/MaskPreview'
-import SkeletonEditor, { defaultSkeleton } from '../components/SkeletonEditor'
+import PoseStudio from '../components/PoseStudio'
 import type { ModelCaps, PoseDir } from '../api'
 import { fileNameOf } from '../fileName'
-import { MAX_CHAR_SOURCES, type GenNode, type GenParams } from '../types'
+import {
+  MAX_CHAR_SOURCES, type GenNode, type GenParams, type PosePreset,
+} from '../types'
 import { GEN_STYLES, styleFromParams } from '../genStyles'
 
 /**
@@ -230,7 +231,7 @@ export const TALL_MAX = 1400
 export type NodePatch = Partial<
   Pick<GenNode,
     'x' | 'y' | 'w' | 'h' | 'params' | 'view' | 'job' | 'source' | 'image'
-    | 'charSource' | 'charSources' | 'skeleton' | 'mannequin'>
+    | 'charSource' | 'charSources' | 'pose' | 'yaw' | 'poseImport' | 'poseApply'>
 >
 
 /**
@@ -273,14 +274,17 @@ type Props = {
   /** 侧栏的「新节点默认底模」，下拉里显示成「跟随默认（xxx）」 */
   defaultModel?: string
   onSpawnImg2Img: () => void
-  /** 骨骼编辑器导出的 PNG（Blob）→ 上传并挂到节点 image 上 */
+  /** 人偶编辑器导出的 PNG（Blob）→ 由 App 上传并挂到节点 image 上 */
   onExportSkeleton?: (blob: Blob) => void
-  /**
-   * 骨骼编辑器「编辑 3D 人偶」：打开官方 PoseStudio 的编辑会话（弹窗）。
-   * 用户在里面摆好姿势并导出后，App 层上传并挂到节点 mannequin 上。
-   */
-  onExportMannequin?: (id: string) => void
-  /** 骨骼编辑器「从图片提取」，返回 Promise 以便节点显示"提取中" */
+  /** 姿势库（跨节点共享，落在服务端磁盘）；列表变化时子组件要跟着重 render */
+  poses?: PosePreset[]
+  /** 外部（姿势库）套过来的姿势；只认 nodeId 是本节点的 */
+  poseApply?: { nodeId: string; pose: unknown; yaw: number; tick: number } | null
+  /** 把当前姿势存进库（缩略图一并提交，浏览面板要用） */
+  onSavePose?: (name: string, pose: unknown, yaw: number, preview: string) => void
+  /** 打开资料库的姿势页（那里能一眼翻完、改名、删除） */
+  onOpenPoseLibrary?: () => void
+  /** 人偶编辑器「从图片」：上传 + DWPose 提关节，返回 Promise 以便显示"提取中" */
   onImportPose?: (file: File) => void | Promise<void>
   /** 图生图的上游节点（从 source.nodeId 解析而来） */
   sourceNode?: GenNode
@@ -381,7 +385,10 @@ export default function GenNodeCard({
   defaultModel,
   onSpawnImg2Img,
   onExportSkeleton,
-  onExportMannequin,
+  poses,
+  poseApply,
+  onSavePose,
+  onOpenPoseLibrary,
   onImportPose,
   sourceNode,
   sourceOptions,
@@ -475,16 +482,15 @@ export default function GenNodeCard({
   // 当前选中的骨架目录（可能是手填的通配，那就匹配不到，只是没有帧数提示）
   const poseDirInfo = (poseDirs || []).find((d) => d.path === p.psDir)
   const [maskOpen, setMaskOpen] = useState(false)
-  const [skelExporting, setSkelExporting] = useState(false)
-  const [mannequinExporting, setMannequinExporting] = useState(false)
-  const [skelImporting, setSkelImporting] = useState(false)
+  const [poseExporting, setPoseExporting] = useState(false)
+  const [poseImporting, setPoseImporting] = useState(false)
   // 源图可以是上游节点的产物、图片节点的本地图，也可以是节点上直接记的绝对路径
   //
   // **上游的图有两个落点，必须都认**：
   //   · `job.raw / job.path` —— 各类生成节点的产物
-  //   · `image.path`         —— 图片节点，以及**骨骼编辑节点导出的骨架图**
+  //   · `image.path`         —— 图片节点，以及**人偶编辑器导出的人偶图**
   // 以前这里写成 `sourceNode?.kind === 'image' && sourceNode.image?.path`，漏了
-  // poseedit：骨架图明明连上了，卡片却显示「无源图」，`迁移角色` 按钮一直是禁用的
+  // poseedit：人偶图明明连上了，卡片却显示「无源图」，`迁移角色` 按钮一直是禁用的
   // ——用户看到的现象就是「骨骼编辑连线，无法迁移角色」。
   // 判断改成看「有没有图」而不是「是不是某一种节点」，以后新增存 image 的节点也不会再漏。
   const upImagePath = sourceNode?.image?.path
@@ -494,9 +500,8 @@ export default function GenNodeCard({
     upImagePath ||
     node.source?.path
   )
-  // 缩略图同理：image 优先（图片节点 / 骨架图），没有再看生成结果
-  // 缩略图：骨骼节点优先显示 3D 人偶图（那才是真正喂给模型的图），
-// 其次是本地图 / 出图结果
+  // 缩略图：老工程里人偶图存在 `mannequin` 字段上（那时 image 是线框骨架），
+  // 先认它；新工程只有 `image`（就是人偶图）。其次是本地图 / 出图结果。
   const sourceThumb = sourceNode?.mannequin?.url ?? sourceNode?.image?.url ?? sourceNode?.job?.url
   // 角色迁移的角色图缩略图（角色图节点或本地图）
   const charThumb = charThumbOf?.(node.charSource?.nodeId)
@@ -762,12 +767,11 @@ export default function GenNodeCard({
         )}
         <div className="src-note">
           {sourceNode?.kind === 'poseedit'
-            ? sourceNode.mannequin?.path
+            ? sourceNode.image?.path || sourceNode.mannequin?.path
+              // 人偶编辑器现在只有**一种**产物：官方 PoseStudio 渲染的白底灰 3D 人偶。
+              // 线框骨架（OpenPose-18）已经删掉了——它不在姿态 LoRA 的训练分布里。
               ? '用 3D 人偶图（官方 PoseStudio 渲染，VNCCS 的 LoRA 就是在这个格式上训的）'
-              : sourceNode.image?.path
-                ? '用线框骨架图（OpenPose 18 点）。想要更好的姿态贴合，'
-                  + '去上游骨骼编辑节点导一张「人偶图（3D）」'
-                : '上游骨骼编辑节点还没导出图：导出「人偶图（3D）」效果最好'
+              : '上游人偶姿势节点还没导出图：在那边摆好姿势，点「导出人偶图」'
             : sourceNode?.kind === 'image'
               ? '用这张本地图'
               : sourceNode?.job?.raw
@@ -842,7 +846,7 @@ export default function GenNodeCard({
           }${isToPixel ? ' topixel' : ''}`}
         >
           {isOutpaint ? '扩图' : isOutfit ? '换装' : isFaceSwap ? '换脸'
-            : isPoseEdit ? '骨骼编辑' : isImg ? '图片' : isBg ? '抠图' : isPixelify ? '像素转换'
+            : isPoseEdit ? '人偶姿势' : isImg ? '图片' : isBg ? '抠图' : isPixelify ? '像素转换'
             : isToPixel ? '转像素'
             : isPoseClone ? '角色迁移'
               : isPoseSwap ? '姿态序列'
@@ -983,39 +987,33 @@ export default function GenNodeCard({
 
       {isPoseEdit ? (
         <div className="node-body">
-          <SkeletonEditor
-            state={node.skeleton ?? defaultSkeleton()}
-            onChange={(st) => onPatch({ skeleton: st })}
+          <PoseStudio
+            pose={node.pose}
+            yaw={node.yaw ?? 0}
+            onPose={(pose) => onPatch({ pose })}
+            onYaw={(yaw) => onPatch({ yaw })}
             onExport={(blob) => {
-              setSkelExporting(true)
+              setPoseExporting(true)
               try { onExportSkeleton?.(blob) } finally {
-                window.setTimeout(() => setSkelExporting(false), 600)
+                window.setTimeout(() => setPoseExporting(false), 600)
               }
             }}
-            exporting={skelExporting}
-            importing={skelImporting}
+            exporting={poseExporting}
+            importing={poseImporting}
             onImportImage={async (f) => {
-              setSkelImporting(true)
-              try { await onImportPose?.(f) } finally { setSkelImporting(false) }
+              setPoseImporting(true)
+              try { await onImportPose?.(f) } finally { setPoseImporting(false) }
             }}
-            onExportMannequin={() => {
-              setMannequinExporting(true)
-              try { onExportMannequin?.(node.id) } finally {
-                window.setTimeout(() => setMannequinExporting(false), 400)
-              }
-            }}
-            mannequinExporting={mannequinExporting}
+            importPoints={node.poseImport?.points ?? null}
+            poses={poses ?? []}
+            poseApply={poseApply?.nodeId === node.id ? poseApply : null}
+            onSavePose={onSavePose}
+            onOpenPoseLibrary={onOpenPoseLibrary}
           />
           {node.image?.url && (
-            <div className="skel-preview">
-              <img src={node.image.url} alt="导出的骨架图" />
-              <span>线框骨架图 · {fileNameOf(node.image.path)}</span>
-            </div>
-          )}
-          {node.mannequin?.url && (
-            <div className="skel-preview">
-              <img src={node.mannequin.url} alt="导出的 3D 人偶图" />
-              <span>3D 人偶图 · {fileNameOf(node.mannequin.path)}（VNCCS 用这张）</span>
+            <div className="pose-preview">
+              <img src={node.image.url} alt="导出的人偶图" />
+              <span>3D 人偶图 · {fileNameOf(node.image.path)}</span>
             </div>
           )}
         </div>
@@ -2425,7 +2423,7 @@ export default function GenNodeCard({
               两段文案都不带告警色：中文不是错误，只是"契约词由后端补"这一点
               值得提一句。 */}
           <div className="lang-hint">
-            {hasCJK(p.prompt)
+            {/[一-鿿]/.test(p.prompt)
               ? '中文没问题（Qwen 的编码器支持中文）；全身/纯背景这类构图契约由后端自动补'
               : '中英文都行；用一句话描述主体 + 特征 + 视角（整句或逗号分隔都可以）'}
           </div>

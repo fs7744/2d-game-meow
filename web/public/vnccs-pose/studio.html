@@ -8,7 +8,9 @@
       font: 13px/1.5 "PingFang SC", "Microsoft YaHei", system-ui, sans-serif; }
     #wrap { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 10px; }
     #status { color: #ffd54a; min-height: 18px; }
-    #stage { display: block; background: #fff; border-radius: 4px; touch-action: none; }
+    #stagewrap { line-height: 0; }
+    #stage { display: block; width: 768px; height: 768px; background: #fff;
+      border-radius: 4px; touch-action: none; }
     #bar { display: flex; gap: 8px; align-items: center; }
     #bar select, #bar button {
       background: #1b2030; color: #e8eaf2; border: 1px solid #2e3648;
@@ -19,12 +21,24 @@
     #hint { color: #8a90a6; font-size: 12px; }
     #out { display: flex; gap: 12px; flex-wrap: wrap; }
     #out img { background: #fff; }
+
+    /* ---- 嵌入模式（?embed=1）：只留画布，控制条交给宿主 ----
+       宿主要把编辑器塞进节点卡片里，自己的状态栏/工具栏会抢地方，
+       所以这里整块隐藏，只让画布填满 iframe。 */
+    html.embed, html.embed body { height: 100%; overflow: hidden; }
+    html.embed #wrap { padding: 0; gap: 0; height: 100%; align-items: stretch; }
+    html.embed #stagewrap { flex: 1; min-height: 0; }
+    html.embed #stage { width: 100%; height: 100%; border-radius: 0; }
+    html.embed #status,
+    html.embed #bar,
+    html.embed #hint,
+    html.embed #out { display: none; }
   </style>
 </head>
 <body>
   <div id="wrap">
     <div id="status">正在加载…</div>
-    <canvas id="stage" width="768" height="768"></canvas>
+    <div id="stagewrap"><canvas id="stage" width="768" height="768"></canvas></div>
     <div id="bar">
       <label>朝向 <select id="yaw"></select></label>
       <button id="btn-reset" type="button">重置视角</button>

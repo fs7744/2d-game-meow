@@ -26,6 +26,8 @@ function makeFetch() {
   let serverCurrent = ''
   // 任务查询是否一直失败（模拟服务端异常）
   let jobsFailMode = false
+  /** 服务端「磁盘」上的用户资料库（library/*.json）。**每个 fetch 一份**。 */
+  const library = { prompts: [], poses: [], prefs: {} }
   // 分配项目 id 的计数器
   let serverSeq = 0
   // 保存时是否报冲突（模拟别的窗口改了同一个项目）
@@ -50,6 +52,94 @@ function makeFetch() {
           joints: 18, azimuth_guess: 90,
         }),
       }
+    }
+    // ---- 用户资料库（提示词收藏 / 姿势库 / 偏好）----
+    //
+    // **权威副本在服务端**：前端只在启动时拉一次，之后的增删改都是发请求、
+    // 用返回值覆盖本地。mock 因此在 fetch 实例上存一份「磁盘」。
+    if (/\/library\/prompts\/[^/]+$/.test(String(url))
+        && (init.method || 'GET') === 'DELETE') {
+      const id = decodeURIComponent(String(url).split('/').pop())
+      library.prompts = library.prompts.filter((p) => p.id !== id)
+      return { ok: true, json: async () => ({ prompts: library.prompts }) }
+    }
+    if (String(url).endsWith('/library/prompts') && (init.method || 'GET') === 'POST') {
+      const b = JSON.parse(init.body || '{}')
+      const t = String(b.text || '').trim()
+      const n = String(b.negative || '').trim()
+      const key = `${t}\u0000${n}`
+      if (t && !library.prompts.some((p) => `${p.text}\u0000${p.negative}` === key)) {
+        library.prompts.unshift({ id: `p${library.prompts.length + 1}`, text: t,
+          negative: n, at: Date.now() })
+      }
+      return { ok: true, json: async () => ({ prompts: library.prompts }) }
+    }
+    if (/\/library\/poses\/[^/]+$/.test(String(url))
+        && (init.method || 'GET') === 'DELETE') {
+      const id = decodeURIComponent(String(url).split('/').pop())
+      library.poses = library.poses.filter((p) => p.id !== id)
+      return { ok: true, json: async () => ({ poses: library.poses }) }
+    }
+    if (/\/library\/poses\/[^/]+$/.test(String(url))) {           // 改名（PUT）
+      const id = decodeURIComponent(String(url).split('/').pop())
+      const nm = String(JSON.parse(init.body || '{}').name || '').trim()
+      library.poses = library.poses.map((p) => (p.id === id ? { ...p, name: nm } : p))
+      return { ok: true, json: async () => ({ poses: library.poses }) }
+    }
+    if (String(url).endsWith('/library/poses') && (init.method || 'GET') === 'POST') {
+      const b = JSON.parse(init.body || '{}')
+      const nm = String(b.name || '').trim() || '姿势'
+      const hit = library.poses.find((p) => p.name === nm)
+      if (hit) Object.assign(hit, { pose: b.pose, yaw: b.yaw, preview: b.preview })
+      else {
+        library.poses.unshift({ id: `z${library.poses.length + 1}`, name: nm,
+          pose: b.pose, yaw: Number(b.yaw) || 0, preview: b.preview || '', at: Date.now() })
+      }
+      return { ok: true, json: async () => ({ poses: library.poses }) }
+    }
+    if (String(url).endsWith('/library/prefs') && (init.method || 'GET') === 'PUT') {
+      library.prefs = { ...library.prefs, ...JSON.parse(init.body || '{}') }
+      return { ok: true, json: async () => ({ prefs: library.prefs }) }
+    }
+    // 迁移：浏览器里剩下的旧存档（只补不覆盖）
+    if (String(url).endsWith('/library/seed')) {
+      const b = JSON.parse(init.body || '{}')
+      for (const p of (b.prompts || [])) {
+        if (!library.prompts.some((x) => x.text === p.text && x.negative === p.negative)) {
+          library.prompts.push({ ...p, id: `s${library.prompts.length + 1}` })
+        }
+      }
+      for (const p of (b.poses || [])) library.poses.push(p)
+      library.prefs = { ...(b.prefs || {}), ...library.prefs }
+      return { ok: true, json: async () => ({ ...library }) }
+    }
+    if (String(url).endsWith('/library')) {
+      return { ok: true, json: async () => ({ ...library }) }
+    }
+    // 随项目发行的 VNCCS 官方姿势清单（只给路径，不给本体）
+    if (String(url).includes('/pose_library')) {
+      return {
+        ok: true,
+        json: async () => ({
+          count: 3,
+          items: [
+            { id: 'a.json', name: 'Arabesque', category: 'Ballet', tags: ['ballet'],
+              yaw: 0, json: '/vnccs-pose/PoseLibrary/a.json',
+              preview: '/vnccs-pose/PoseLibrary/a.webp' },
+            { id: 'b.json', name: 'Crawling', category: 'Crawling',
+              tags: ['side view'], yaw: 90, json: '/vnccs-pose/PoseLibrary/b.json',
+              preview: '/vnccs-pose/PoseLibrary/b.webp' },
+            { id: 'c.json', name: 'Fighting Stance', category: 'Fighting',
+              tags: ['rear view'], yaw: 180, json: '/vnccs-pose/PoseLibrary/c.json',
+              preview: '' },
+          ],
+          categories: ['Ballet', 'Crawling', 'Fighting'],
+        }),
+      }
+    }
+    // 取一条官方姿势的本体（PoseStudio 原生 json）
+    if (String(url).includes('/vnccs-pose/PoseLibrary/') && String(url).endsWith('.json')) {
+      return { ok: true, json: async () => ({ bones: { upperarm_r: [10, 20, 30] } }) }
     }
     if (String(url).includes('/upload')) {
       // **按文件名返回不同的磁盘路径**：骨架图与 3D 人偶图要能区分开，
@@ -372,11 +462,12 @@ function check(name, cond, extra = '') {
   const doc = dom.window.document
   check('渲染出顶栏品牌', doc.querySelector('.brand .title')?.textContent?.includes('喵助手'))
   check('空状态引导可见', !!doc.querySelector('.canvas-empty .empty-card'))
-  // 不写死数量：加节点类型时忘改这里会误报。只断言「有骨骼编辑」这项新入口
+  // 不写死数量：加节点类型时忘改这里会误报。只断言「有人偶姿势」这项入口
   check('侧栏存在（节点分组含骨骼编辑）',
     !!section(doc, '节点')?.querySelectorAll('.rail-item').length
     && [...section(doc, '节点').querySelectorAll('.rail-item')]
-      .some((x) => (x.textContent || '').includes('骨骼编辑')),
+      
+      .some((x) => (x.textContent || '').includes('人偶姿势')),
     String(section(doc, '节点')?.querySelectorAll('.rail-item').length))
   check('有「项目」分组（独立画布）', !!section(doc, '项目'))
   check('缩放显示 100%', doc.querySelector('.zoom-val')?.textContent === '100%')
@@ -568,7 +659,7 @@ function check(name, cond, extra = '') {
   check('星标可用', !!star && !star.disabled)
   star.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
   await new Promise((r) => setTimeout(r, 80))
-  const favItems = () => section(doc, '提示词收藏').querySelectorAll('.rail-item')
+  const favItems = () => section(doc, '资料库').querySelectorAll('.rail-item')
   check('收藏后出现在列表', favItems().length === 1)
   check('星标点亮', !!doc.querySelector('.star.on'))
   check('列表文本正确',
@@ -603,7 +694,7 @@ function check(name, cond, extra = '') {
   // 再收藏一次后删除
   doc.querySelector('.star').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
   await new Promise((r) => setTimeout(r, 80))
-  section(doc, '提示词收藏').querySelector('.rail-del')
+  section(doc, '资料库').querySelector('.rail-del')
     ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
   await new Promise((r) => setTimeout(r, 80))
   check('删除收藏', favItems().length === 0)
@@ -714,8 +805,8 @@ function check(name, cond, extra = '') {
   // 底模选择已移到每个节点自己的卡头上，侧栏不再有「底模」分组；
   // 「LoRA」是新增的（Qwen 现在支持 LoRA，见 engine.available_loras）；
   // 「模板」是项目预设模板区（存模板 / 从模板新建）。
-  check('六个菜单分组：项目/模板/节点/收藏/LoRA/设置',
-    JSON.stringify(titles) === JSON.stringify(['项目', '模板', '节点', '提示词收藏', 'LoRA', '设置']),
+  check('六个菜单分组：项目/模板/节点/资料库/LoRA/设置',
+    JSON.stringify(titles) === JSON.stringify(['项目', '模板', '节点', '资料库', 'LoRA', '设置']),
     JSON.stringify(titles))
 
   // 分组可折叠
@@ -2281,66 +2372,104 @@ function check(name, cond, extra = '') {
 
 // 32) 原本是 Refiner 精修开关用例，已随 SD 一起删除（Qwen 没有精修器）。
 
-// 37) 骨骼编辑节点：可拖关节 + 8 方向 + 导出入口
+// 37) 人偶姿势节点：正文是官方 3D 人偶编辑器（iframe），朝向 + 导出入口
+//
+// **这里不放 SVG 骨架了**：2D 伪 3D 骨架编辑器已经整个删掉，节点正文换成官方
+// PoseStudio 的内嵌壳（浏览器里是 WebGL 渲染的 3D 人偶）。jsdom 里 iframe 拉不到，
+// 所以这里只断言**宿主这一层**：编辑器挂上了、朝向有 8 个、导出按钮在。
 {
   const { dom, errors } = await boot('?demo=1')
   const doc = dom.window.document
   const win = dom.window
   await new Promise((r) => setTimeout(r, 500))
   const add = [...doc.querySelectorAll('.rail-add')].find((b) =>
-    (b.closest('.rail-item')?.textContent || '').includes('骨骼编辑'))
-  check('侧栏有「骨骼编辑」入口', !!add)
+    (b.closest('.rail-item')?.textContent || '').includes('人偶姿势'))
+  check('侧栏有「人偶姿势」入口', !!add)
   add?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
   await new Promise((r) => setTimeout(r, 250))
   const node = [...doc.querySelectorAll('.node')].find((n) =>
-    (n.querySelector('.node-kind')?.textContent || '').includes('骨骼编辑'))
-  check('能创建骨骼编辑节点', !!node)
-  // 18 关节 × 2（可见圆点 + 透明大热区）+ 可能的热区
-  check('SVG 里渲染出 18 个关节点',
-    (node?.querySelectorAll('.skel-canvas circle').length || 0) >= 36,
-    String(node?.querySelectorAll('.skel-canvas circle').length))
-  check('有 8 个方向按钮', node?.querySelectorAll('.skel-dir').length === 8,
-    String(node?.querySelectorAll('.skel-dir').length))
-  const side = [...(node?.querySelectorAll('.skel-dir') || [])]
-    .find((b) => (b.textContent || '') === '右侧')
-  side?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 150))
-  check('点「右侧」后高亮（方位角切到 90°）', !!side?.classList.contains('on'),
-    side?.className)
-  check('有导出骨架图按钮',
-    [...(node?.querySelectorAll('button') || [])]
-      .some((b) => (b.textContent || '').includes('导出骨架图')))
-  check('骨骼编辑场景无脚本错误', errors.length === 0, errors[0] || '')
+    (n.querySelector('.node-kind')?.textContent || '').includes('人偶姿势'))
+  check('能创建人偶姿势节点', !!node)
+
+  // 编辑器本体：官方 PoseStudio 的嵌入模式（只留画布，控制条在宿主这边）
+  const frame = node?.querySelector('.pose-stage iframe')
+  check('节点正文挂着 3D 人偶编辑器', !!frame,
+    frame?.getAttribute('src') || '（没有 iframe）')
+  check('编辑器走官方 PoseStudio 的嵌入模式',
+    (frame?.getAttribute('src') || '').includes('/vnccs-pose/studio.html?embed=1'),
+    frame?.getAttribute('src'))
+  check('加载中给出提示（37MB 人偶模型要等）',
+    (node?.querySelector('.pose-status')?.textContent || '').includes('人偶模型'),
+    node?.querySelector('.pose-status')?.textContent || '（无）')
+
+  // 朝向 = 导出机位。8 个精灵常用方向，正面是默认。
+  const yawSel = node?.querySelector('.pose-row select')
+  check('朝向有 8 个方向', yawSel?.options.length === 8, String(yawSel?.options.length))
+  check('朝向默认正面', yawSel?.value === '0', yawSel?.value)
+  const setSel = (el, v) => {
+    Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value')
+      .set.call(el, v)
+    el.dispatchEvent(new win.Event('change', { bubbles: true }))
+  }
+  setSel(yawSel, '90')
+  await new Promise((r) => setTimeout(r, 120))
+  check('朝向切到 90° 后回显', yawSel?.value === '90', yawSel?.value)
+
+  // 导出按钮：**没就绪时必须是禁用的**（不然点了没反应，也没人告诉用户为什么）
+  const buttons = [...(node?.querySelectorAll('button') || [])]
+  check('有「导出人偶图」按钮',
+    buttons.some((b) => (b.textContent || '').includes('导出人偶图')))
+  const exportBtn = buttons.find((b) => (b.textContent || '').includes('导出人偶图'))
+  check('渲染器没就绪时导出按钮禁用（不给无声的失败）', exportBtn?.disabled === true,
+    String(exportBtn?.disabled))
+  check('有「从图片」提姿势的入口', !!node?.querySelector('input[type=file]'))
+  check('说明提到导出的是 3D 人偶',
+    (node?.querySelector('.src-note')?.textContent || '').includes('3D 人偶'),
+    (node?.querySelector('.src-note')?.textContent || '').slice(0, 40))
+  check('人偶节点场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 
-// 38) 骨骼编辑：从图片自动提取 18 个关节（DWPose 由后端 mock）
+// 38) 人偶姿势：从图片自动提姿势（DWPose 由后端 mock，2D 点交给官方转换器）
+//
+// 断言的是**投递**：提取到的 18 个点要进 `node.poseImport`，节点里的编辑器
+// 收到后走官方 convertOpenPoseToPose 解成 3D 骨骼。3D 反解必须在渲染器里做
+// （要用官方骨骼的静止长度），所以前端这里只负责把点送进去。
 {
   const { dom, errors } = await boot('?demo=1')
   const doc = dom.window.document
   const win = dom.window
   await new Promise((r) => setTimeout(r, 500))
   const add = [...doc.querySelectorAll('.rail-add')].find((b) =>
-    (b.closest('.rail-item')?.textContent || '').includes('骨骼编辑'))
+    (b.closest('.rail-item')?.textContent || '').includes('人偶姿势'))
   add?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
   await new Promise((r) => setTimeout(r, 250))
   const node = [...doc.querySelectorAll('.node')].find((n) =>
-    (n.querySelector('.node-kind')?.textContent || '').includes('骨骼编辑'))
+    (n.querySelector('.node-kind')?.textContent || '').includes('人偶姿势'))
+
   const input = node?.querySelector('input[type=file]')
-  check('编辑器有「从图片提取」的文件入口', !!input)
+  check('编辑器有「从图片」的文件入口', !!input)
   const file = new win.File([new Uint8Array([1, 2, 3])], 'pose.png', { type: 'image/png' })
   Object.defineProperty(input, 'files', { value: [file], configurable: true })
   input.dispatchEvent(new win.Event('change', { bubbles: true }))
   await new Promise((r) => setTimeout(r, 500))
-  // **要抓关节点**：`.skel-canvas circle` 现在第一个是人形的眼睛
-  const first = node?.querySelector('.skel-canvas circle.skel-joint')
-  check('导入后关节坐标被替换（鼻 y=0.05 → SVG cy=5）',
-    first?.getAttribute('cy') === '5', first?.getAttribute('cy'))
-  check('提示带上提取到的 18/18 关节与朝向猜测',
-    (doc.querySelector('.toast')?.textContent || '').includes('18/18')
-    && (doc.querySelector('.toast')?.textContent || '').includes('右侧'),
+
+  const up = calls.filter((c) => c.url.includes('/upload')).pop()
+  check('先把原图传上去', !!up, up?.url)
+  const ex = calls.find((c) => c.url.endsWith('/pose/extract'))
+  check('调了 /pose/extract', !!ex, ex?.url)
+  // 画布上是 demo 节点 + 新建的人偶节点两个，别按下标取，**按有没有 poseImport 找**
+  const saved = JSON.parse(
+    calls.filter((c) => c.url.includes('/projects/') && c.method === 'PUT').pop()
+      ?.body || '{}')
+  const savedPose = (saved?.nodes || []).find((n) => n?.poseImport?.points)
+  check('提取结果写进节点（poseImport，18 个点）',
+    savedPose?.poseImport?.points?.length === 18,
+    String(savedPose?.poseImport?.points?.length))
+  check('提示带上提取到的 18/18 关节',
+    (doc.querySelector('.toast')?.textContent || '').includes('18/18'),
     doc.querySelector('.toast')?.textContent)
-  check('从图片提取场景无脚本错误', errors.length === 0, errors[0] || '')
+  check('从图片提姿势场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 
@@ -2452,10 +2581,10 @@ function check(name, cond, extra = '') {
   dom.window.close()
 }
 
-// 42) 骨骼编辑 → 角色迁移：骨架图连上后「迁移角色」必须可点
+// 42) 人偶姿势 → 角色迁移：人偶图连上后「迁移角色」必须可点
 //
 // 用户报的原话：「骨骼编辑连线，无法迁移角色」。根因是卡片判断"有没有源图"时
-// 只认 `job` 和 `kind === 'image'`，而**骨骼编辑节点把导出的骨架图放在 `image` 上、
+// 只认 `job` 和 `kind === 'image'`，而**人偶编辑器把导出的人偶图放在 `image` 上、
 // 却不是 image 类型、也没有 job** → 明明连上了，卡片显示「无源图」、
 // 「迁移角色」按钮一直是禁用的。这条用例把那个组合钉死。
 {
@@ -2464,31 +2593,44 @@ function check(name, cond, extra = '') {
   const win = dom.window
   await new Promise((r) => setTimeout(r, 400))
 
-  // 1. 建骨骼编辑节点
+  // 1. 建人偶姿势节点
   const skelAdd = [...doc.querySelectorAll('.rail-add')].find((b) =>
-    (b.closest('.rail-item')?.textContent || '').includes('骨骼编辑'))
-  check('有「骨骼编辑」入口', !!skelAdd)
+    (b.closest('.rail-item')?.textContent || '').includes('人偶姿势'))
+  check('有「人偶姿势」入口', !!skelAdd)
   skelAdd?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
   await new Promise((r) => setTimeout(r, 250))
 
-  // 2. jsdom 没有 2D 上下文：给画布补一个空实现，否则「导出骨架图」直接失败
-  //    （renderSkeletonPNG 里的 getContext 返回 null 就 reject）
-  const cvProto = win.HTMLCanvasElement.prototype
-  cvProto.getContext = () => new Proxy({}, {
-    get: (t, k) => (k in t ? t[k] : () => {}),
-    set: (t, k, v) => { t[k] = v; return true },
-  })
-  cvProto.toBlob = function (cb) { cb(new win.Blob(['x'], { type: 'image/png' })) }
-
   const skelNode = [...doc.querySelectorAll('.node')].find((n) =>
-    (n.querySelector('.node-kind')?.textContent || '').includes('骨骼编辑'))
+    (n.querySelector('.node-kind')?.textContent || '').includes('人偶姿势'))
+
+  // 2. 导出人偶图：走的是**节点里那块 iframe 的 postMessage 链路**。
+  //    jsdom 不加载 iframe 内容，所以把 contentWindow 换成空壳（吞掉父页的 init），
+  //    再手动喂官方那侧的两条消息：ready（模型加载完）→ result（用户点了导出）。
+  //    组件按 e.source 认自己的子窗，所以 source 要带上这个空壳。
+  const frame = skelNode?.querySelector('.pose-stage iframe')
+  const fakeWin = { postMessage: () => {} }
+  if (frame) {
+    Object.defineProperty(frame, 'contentWindow', {
+      value: fakeWin, configurable: true,
+    })
+  }
+  win.dispatchEvent(new win.MessageEvent('message',
+    { data: { type: 'ready' }, source: fakeWin }))
+  await new Promise((r) => setTimeout(r, 150))
   const exportBtn = [...(skelNode?.querySelectorAll('button') || [])]
-    .find((b) => (b.textContent || '').includes('导出骨架图'))
+    .find((b) => (b.textContent || '').includes('导出人偶图'))
+  check('渲染器就绪后导出按钮可点', exportBtn?.disabled === false,
+    String(exportBtn?.disabled))
   exportBtn?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 400))
-  check('导出骨架图后节点上有产物（image 字段）',
-    !!skelNode?.querySelector('.skel-preview img'),
-    skelNode?.querySelector('.skel-preview')?.textContent || '（没有 .skel-preview）')
+  await new Promise((r) => setTimeout(r, 120))
+  win.dispatchEvent(new win.MessageEvent('message', {
+    data: { type: 'result', dataURL: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==' },
+    source: fakeWin,
+  }))
+  await new Promise((r) => setTimeout(r, 800))
+  check('导出人偶图后节点上有产物（image 字段）',
+    !!skelNode?.querySelector('.pose-preview img'),
+    skelNode?.querySelector('.pose-preview')?.textContent || '（没有 .pose-preview）')
 
   // 3. 建角色迁移节点
   const pcAdd = [...doc.querySelectorAll('.rail-add')].find((b) =>
@@ -2501,7 +2643,7 @@ function check(name, cond, extra = '') {
   check('一开始「迁移角色」是禁用的（还没连）',
     pcNode?.querySelector('.gen-btn')?.disabled === true)
 
-  // 4. 连一条线：骨骼编辑的输出 → 角色迁移的「动作参考」
+  // 4. 连一条线：人偶姿势节点的输出 → 角色迁移的「动作参考」
   skelNode?.querySelector('.conn.out')
     .dispatchEvent(new win.PointerEvent('pointerdown', { bubbles: true, button: 0 }))
   await new Promise((r) => setTimeout(r, 60))
@@ -2511,15 +2653,15 @@ function check(name, cond, extra = '') {
   await new Promise((r) => setTimeout(r, 200))
 
   const srcSel = pcNode.querySelector('.src-box select')
-  check('连线上后动作参考选了骨骼节点',
+  check('连线上后动作参考选了人偶节点',
     srcSel?.value === skelNode?.getAttribute('data-node-id'),
     `select=${srcSel?.value} skel=${skelNode?.getAttribute('data-node-id')}`)
   // **关键断言**：骨架图在 `image` 上，卡片必须认它，缩略图要出来
   check('动作参考的缩略图出来了（不再显示「无源图」）',
     !!pcNode?.querySelector('.src-thumb img'),
     pcNode?.querySelector('.src-thumb')?.textContent || '（空）')
-  check('提示说明用的是导出的骨架图',
-    (pcNode?.querySelector('.src-note')?.textContent || '').includes('骨架图'),
+  check('提示说明用的是导出的 3D 人偶图',
+    (pcNode?.querySelector('.src-note')?.textContent || '').includes('3D 人偶图'),
     pcNode?.querySelector('.src-note')?.textContent)
 
   // 5. 角色图：拖一张本地图进来当身份来源
@@ -2549,7 +2691,8 @@ function check(name, cond, extra = '') {
     runBtn?.disabled === false,
     runBtn?.disabled ? `仍然禁用（title=${runBtn?.title}）` : 'ok')
 
-  // 7. 朝向：骨架图分不清角度，必须把方向词写进指令（实测这是唯一有效的线索）
+  // 7. 朝向：人偶图的朝向**已经烘焙在图里**（相机机位渲染的），
+  //    所以默认「自动」一个字都不写——补方向词是重复指令，还会压过姿势。
   const viewSel = [...pcNode.querySelectorAll('label.bg-mode')]
     .find((l) => (l.textContent || '').trim().startsWith('朝向'))?.querySelector('select')
   check('节点上有「朝向」下拉', !!viewSel,
@@ -2558,7 +2701,7 @@ function check(name, cond, extra = '') {
     viewSel?.value === 'auto',
     viewSel?.options?.[0]?.textContent)
 
-  // 自动：上游是骨骼编辑器（默认方位角 0°）→ 应带 front view
+  // 自动：上游是人偶编辑器（默认机位 0° 正面）
   const genCalls = () => calls.filter((c) => c.url.endsWith('/generate'))
   const submitAndRead = async () => {
     // 上一次提交后节点会短暂处于 running（按钮禁用），必须等**新的一条**请求，
@@ -2581,21 +2724,20 @@ function check(name, cond, extra = '') {
   // 而正面本来就是模型的默认——写了只有害处。
   let body = await submitAndRead()
 
-  check('自动 + 骨骼 0° 不写方位词（正面是默认，写了会压过姿势）',
+  check('自动 + 人偶 0° 不写方位词（正面是默认，写了会压过姿势）',
     !String(body.params.prompt || '').includes('viewing direction'),
     body.params.prompt)
 
-  // 把骨骼编辑器切到「右侧」（90°）→ 「自动」仍然不写方向词
-  // （VNCCS 官方从不写方向词，方向长在渲染里；写文字会压过骨架姿势）
-  const sideBtn = [...(skelNode?.querySelectorAll('.skel-dir') || [])]
-    .find((b) => (b.textContent || '') === '右侧')
-  sideBtn?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  // 把人偶的导出机位切到「右侧」（90°）→ 「自动」仍然不写方向词
+  // （VNCCS 官方从不写方向词，方向长在渲染的机位里；写文字会压过姿势）
+  const yawSel2 = skelNode?.querySelector('.pose-row select')
+  Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value')
+    .set.call(yawSel2, '90')
+  yawSel2?.dispatchEvent(new win.Event('change', { bubbles: true }))
   await new Promise((r) => setTimeout(r, 200))
-  check('骨骼方位角切到 90° 后「自动」仍是不写方向词',
-    (viewSel?.options?.[0]?.textContent || '').trim() === '自动',
-    viewSel?.options?.[0]?.textContent)
+  check('人偶机位切到 90°（界面回显）', yawSel2?.value === '90', yawSel2?.value)
   body = await submitAndRead()
-  check('自动（即使骨骼 90°）也不写方向词',
+  check('自动（即使人偶 90°）也不写方向词',
     !String(body.params.prompt || '').includes('viewing direction'),
     body.params.prompt)
 
@@ -2621,48 +2763,13 @@ function check(name, cond, extra = '') {
     !String(body.params.prompt || '').includes('viewing direction'),
     body.params.prompt)
 
-  // 9. 导出 3D 人偶图（官方 PoseStudio 渲染），并验证下游改用它。
-  //
-  // 放在朝向测试**之后**：上面的方向词语义是「只有线框骨架时」的行为；
-  // 人偶图的朝向已经烘焙在图里，再补方向词是重复指令，还会压过姿势。
-  // 9. 打开官方 3D 人偶编辑器（编辑会话），导出后下游改用人偶图
-  //
-  // 交互与官方 UniCanvas 的 pose layer 一致：进编辑会话 → 摆姿势 → 导出。
-  // jsdom 不加载 iframe 内容，所以把 contentWindow 换成空壳（吞掉父页的 init），
-  // 再手动模拟官方那侧的两条消息：ready（加载完）→ result（用户点了导出）。
-  const manBtn = [...(skelNode?.querySelectorAll('button') || [])]
-    .find((b) => (b.textContent || '').includes('编辑 3D 人偶'))
-  check('骨骼节点有「编辑 3D 人偶」按钮', !!manBtn)
-  manBtn?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 300))
-  const modal = doc.querySelector('.mannequin-modal')
-  check('点开后会弹出 3D 人偶编辑器（官方 PoseStudio）', !!modal)
-  const mhFrame = doc.querySelector('.mannequin-frame iframe')
-  check('弹窗里挂着官方 PoseStudio iframe', !!mhFrame)
-  if (mhFrame) {
-    Object.defineProperty(mhFrame, 'contentWindow', {
-      value: { postMessage: () => {} }, configurable: true,
-    })
-  }
-  win.dispatchEvent(new win.MessageEvent('message', { data: { type: 'ready' } }))
-  await new Promise((r) => setTimeout(r, 150))
-  win.dispatchEvent(new win.MessageEvent('message', {
-    data: { type: 'result', dataURL: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==' },
-  }))
-  await new Promise((r) => setTimeout(r, 800))
-  const prevs = [...(skelNode?.querySelectorAll('.skel-preview') || [])]
-  check('导出人偶图后节点上有两份产物（骨架图 + 人偶图）',
-    prevs.length === 2, `previews=${prevs.length}`)
-  check('人偶图那条标注了「3D 人偶图」',
-    (prevs[1]?.textContent || '').includes('3D 人偶图'),
-    prevs[1]?.textContent || '（没有第二张）')
-  check('迁移节点的提示改成了「用 3D 人偶图」',
-    (pcNode?.querySelector('.src-note')?.textContent || '').includes('3D 人偶图'),
-    pcNode?.querySelector('.src-note')?.textContent)
-
-
-  body = await submitAndRead()
-
+  // 9. 人偶图已经是这个节点**唯一的产物**（线框骨架随 2D 编辑器一起删了），
+  //    所以只看它落地之后下游怎么用。
+  const prevs = [...(skelNode?.querySelectorAll('.pose-preview') || [])]
+  check('节点上只有人偶图这一个产物', prevs.length === 1, `previews=${prevs.length}`)
+  check('产物标注了「3D 人偶图」',
+    (prevs[0]?.textContent || '').includes('3D 人偶图'),
+    prevs[0]?.textContent || '（没有预览条）')
   // **核心断言**：提交的动作参考必须是 3D 人偶图（VNCCS LoRA 的训练分布），
   // 不是线框骨架——两者都在同一个节点上，靠 poseSourceOf 决定用哪个。
   check('提交的动作参考用的是 3D 人偶图（不是线框骨架）',
@@ -2697,6 +2804,166 @@ function check(name, cond, extra = '') {
     body.params.transparent === true, String(body.params.transparent))
 
   check('骨骼→迁移场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 44) 资料库：提示词与姿势的浏览面板 + **localStorage 一个字不留**
+//
+// 用户明确要求：项目内容与收藏都不许留在浏览器里（清一次站点数据就全没了）。
+// 现在提示词收藏 / 姿势库 / 界面偏好全在服务端磁盘（library/*.json），
+// 这一组用例把「落点」钉死：收藏走 /library/prompts，界面里不留 meow.* 的键。
+{
+  const { dom, errors } = await boot('?demo=1')
+  const doc = dom.window.document
+  const win = dom.window
+  await new Promise((r) => setTimeout(r, 500))
+
+  // 1. 收藏一条 → 必须打到服务端，不能只写 localStorage
+  const ta = doc.querySelector('textarea.prompt')
+  const setValue = (el, v) => {
+    const setter = Object.getOwnPropertyDescriptor(win.HTMLTextAreaElement.prototype, 'value').set
+    setter.call(el, v)
+    el.dispatchEvent(new win.Event('input', { bubbles: true }))
+  }
+  setValue(ta, 'red panda ranger')
+  await new Promise((r) => setTimeout(r, 80))
+  doc.querySelector('.star').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 200))
+  const addCall = calls.find((c) => c.url.endsWith('/library/prompts') && c.method === 'POST')
+  check('收藏打到服务端 /library/prompts（不写 localStorage）', !!addCall, addCall?.url)
+
+  // 2. 打开资料库面板：两个 tab（提示词 / 姿势）
+  const openLib = [...doc.querySelectorAll('.rail-lib .rail-item-main')]
+    .find((b) => (b.textContent || '').includes('提示词收藏'))
+  check('侧栏有资料库入口', !!openLib)
+  openLib?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 200))
+  const modal = doc.querySelector('.lib-modal')
+  check('打开资料库浏览面板', !!modal)
+  check('面板上有两个 tab（提示词 / 姿势）',
+    [...(doc.querySelectorAll('.lib-tab') || [])].length === 2,
+    String(doc.querySelectorAll('.lib-tab').length))
+  const cards = () => [...doc.querySelectorAll('.lib-modal .lib-card')]
+  check('提示词页显示刚收藏的那条',
+    cards().some((c) => (c.textContent || '').includes('red panda ranger')),
+    `cards=${cards().length}`)
+  check('每条提示词都有「应用」与「删除」',
+    !!cards()[0]?.textContent?.includes('应用') && !!cards()[0]?.textContent?.includes('删除'))
+
+  // 3. 搜索框：按关键词过滤。
+  //    **必须走原生 setter**：受控 input 直接赋 .value 会被 React 改回去，
+  //    那样两边断言都"恰好"通过（收藏本来就只有一条），等于没测。
+  const search = doc.querySelector('.lib-search')
+  const setInput = (el, v) => {
+    Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value').set.call(el, v)
+    el.dispatchEvent(new win.Event('input', { bubbles: true }))
+  }
+  setInput(search, 'red panda')
+  await new Promise((r) => setTimeout(r, 120))
+  check('搜索命中的是那一条', cards().length === 1, `cards=${cards().length}`)
+  setInput(search, 'zzz-不存在')
+  await new Promise((r) => setTimeout(r, 120))
+  check('搜不到时一条都不显示', cards().length === 0, `cards=${cards().length}`)
+  check('搜不到时给出空态说明',
+    (doc.querySelector('.lib-empty')?.textContent || '').includes('zzz-不存在'),
+    doc.querySelector('.lib-empty')?.textContent || '（无空态）')
+  setInput(search, '')
+  await new Promise((r) => setTimeout(r, 100))
+
+  // 4. 切到姿势页 → 官方库清单是**懒加载**的（只有真要看才拉）
+  const poseTab = [...doc.querySelectorAll('.lib-tab')]
+    .find((b) => (b.textContent || '').includes('姿势'))
+  poseTab?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 300))
+  check('切到姿势页才去取官方库清单',
+    calls.some((c) => c.url.includes('/pose_library')), calls.map((c) => c.url).slice(-2).join())
+  const srcBtns = [...doc.querySelectorAll('.lib-src-btn')]
+  check('姿势页有「VNCCS 官方库 / 我存的」两个来源',
+    srcBtns.length === 2 && srcBtns[0].textContent.includes('VNCCS'),
+    srcBtns.map((b) => b.textContent).join(' | '))
+  check('官方库按分类列出（带预览缩略图）',
+    doc.querySelectorAll('.lib-modal .lib-thumb img').length === 2,
+    String(doc.querySelectorAll('.lib-modal .lib-thumb img').length))
+  check('卡片上带标签（挑姿势时知道是不是要的角度）',
+    (doc.querySelector('.lib-tags')?.textContent || '').length > 0,
+    doc.querySelector('.lib-tags')?.textContent || '（无标签）')
+  const catSel = doc.querySelector('.lib-cat')
+  check('有分类筛选下拉', !!catSel && catSel.options.length === 4,
+    String(catSel?.options.length))
+
+  // 5. 应用一条官方姿势：先取本体 json，再写进**选中的人偶节点**。
+  //    没有选中人偶节点时按钮必须是禁用的（不然点了什么都没发生，也没人说明原因）。
+  const applyBtn0 = [...doc.querySelectorAll('.lib-modal .lib-card')]
+    .find((c) => (c.textContent || '').includes('Crawling'))
+    ?.querySelector('.lib-card-actions button')
+  check('没选人偶节点时「应用」禁用并说明原因', applyBtn0?.disabled === true,
+    applyBtn0?.title || String(applyBtn0?.disabled))
+
+  // 建一个「人偶姿势」节点并选中它
+  ;[...doc.querySelectorAll('.rail-add')].find((b) =>
+    (b.closest('.rail-item')?.textContent || '').includes('人偶姿势'))
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 250))
+  const poseNode = [...doc.querySelectorAll('.node')].find((n) =>
+    (n.querySelector('.node-kind')?.textContent || '').includes('人偶姿势'))
+  poseNode?.dispatchEvent(new win.Event('pointerdown', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 150))
+  const applyBtn = [...doc.querySelectorAll('.lib-modal .lib-card')]
+    .find((c) => (c.textContent || '').includes('Crawling'))
+    ?.querySelector('.lib-card-actions button')
+  applyBtn?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 400))
+  check('应用官方姿势时先去取它的 json',
+    calls.some((c) => c.url.includes('/vnccs-pose/PoseLibrary/') && c.url.endsWith('.json')),
+    calls.map((c) => c.url).slice(-3).join())
+  // 自动保存有 400ms 防抖，等它落盘再看服务端收到了什么
+  await new Promise((r) => setTimeout(r, 900))
+  const applied = JSON.parse(
+    calls.filter((c) => c.url.includes('/projects/') && c.method === 'PUT').pop()?.body || '{}')
+  const appliedNode = (applied?.nodes || []).find((n) => n?.poseApply)
+  check('取回来的官方姿势写进人偶节点（带朝向）',
+    appliedNode?.poseApply?.yaw === 90 && !!appliedNode?.pose,
+    JSON.stringify(appliedNode?.poseApply || {}).slice(0, 80))
+
+  // 6. Esc 能关掉浮层（临时的面板不该只能去找 ×）
+  win.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+  await new Promise((r) => setTimeout(r, 150))
+  check('Esc 关闭资料库面板', !doc.querySelector('.lib-modal'))
+
+  // 7. **核心**：浏览器里不该再有任何 meow.* 的键
+  const left = Object.keys(win.localStorage).filter((k) => k.startsWith('meow.'))
+  check('localStorage 里不剩任何 meow.* 的键', left.length === 0, left.join(','))
+  check('资料库场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 45) 旧存档迁移：浏览器里有老数据 → 搬进磁盘（/library/seed）后才清掉
+{
+  const legacy = {
+    'meow.prompts.v1': JSON.stringify([
+      { id: 'lp1', text: '旧收藏的提示词', negative: 'blurry', at: 1 },
+    ]),
+    'meow.maskColor': '#ff3b6b',
+  }
+  const { dom, errors } = await boot('', legacy)
+  const doc = dom.window.document
+  await new Promise((r) => setTimeout(r, 600))
+  const seedCall = calls.find((c) => c.url.endsWith('/library/seed'))
+  check('把浏览器里的旧存档交给服务端 /library/seed', !!seedCall, seedCall?.url)
+  if (seedCall) {
+    const b = JSON.parse(seedCall.body)
+    check('迁的是旧提示词（含负向词）',
+      b.prompts?.[0]?.text === '旧收藏的提示词' && b.prompts?.[0]?.negative === 'blurry',
+      JSON.stringify(b.prompts?.[0]))
+    check('旧偏好也一起迁', b.prefs?.['meow.maskColor'] === '#ff3b6b',
+      JSON.stringify(b.prefs))
+  }
+  const left = Object.keys(dom.window.localStorage).filter((k) => k.startsWith('meow.'))
+  check('服务端确认后浏览器里的旧键被清掉', left.length === 0, left.join(','))
+  check('迁过来的提示词出现在侧栏',
+    (section(doc, '资料库')?.textContent || '').includes('旧收藏的提示词'),
+    (section(doc, '资料库')?.textContent || '').slice(0, 40))
+  check('迁移场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 

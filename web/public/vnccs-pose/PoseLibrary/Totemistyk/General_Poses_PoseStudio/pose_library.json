@@ -1,0 +1,791 @@
+{
+  "schema_version": 2,
+  "title": "Totemistyk/General_Poses_PoseStudio",
+  "repo_id": "Totemistyk/General_Poses_PoseStudio",
+  "updated_at": "2026-08-12T14:22:18.395040+00:00",
+  "poses": [
+    {
+      "name": "Peace Sign - Close Up",
+      "category": "Close Up",
+      "tags": [
+        "front view",
+        "close up",
+        "peace"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Close Up/Peace Sign - Close Up.json",
+      "preview_path": "previews/Close Up/Peace Sign - Close Up.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "7c1c2fd649fba868a7d330d22ef7d43f3b4675c830ff65ddbf0cc86dc2eb5f63",
+      "preview_sha256": "c4b3df13b0297ac19fb72d3d08909104739c85544e7e6c30a975696fc2864e15",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Crawling",
+      "category": "Crawling",
+      "tags": [
+        "crawling",
+        "front view"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Crawling/Crawling.json",
+      "preview_path": "previews/Crawling/Crawling.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "0be7c24ff7c6f44415cc5bf308d2923f45f84a12947e976db7122ef1c725a918",
+      "preview_sha256": "0cbcab7b7bf93a821718eb293abfd0e85327765826f1653ad8dbf76f3bf0a07e",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Crawling - Rear View",
+      "category": "Crawling",
+      "tags": [
+        "crawling",
+        "rear view"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Crawling/Crawling - Rear View.json",
+      "preview_path": "previews/Crawling/Crawling - Rear View.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "54c9891facf09e77baf748a9daf36f11cb6b3315ebbb32afcef538947e18d1e8",
+      "preview_sha256": "bf89373ed9a5f90f50b6558baea17856fe8103525b8f984290440f6df1c9a4a1",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Crouching - Side View",
+      "category": "Crouching",
+      "tags": [
+        "side view",
+        "crouching"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Crouching/Crouching - Side View.json",
+      "preview_path": "previews/Crouching/Crouching - Side View.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "3b08298efb8b94a889acbdb91a1dd581b17e01de3cf873c44f5c89e49faf913f",
+      "preview_sha256": "301e7f17b0c8f64dd2c36fafeafc6f31c20947599e496a6ddf39e671fe72e6c5",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Boxing Stance",
+      "category": "Fighting",
+      "tags": [
+        "fighting",
+        "boxing",
+        "front view"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Fighting/Boxing Stance.json",
+      "preview_path": "previews/Fighting/Boxing Stance.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "dd6d65eb5f6ed0f0542516e5dd61a72333b5a66e402e816b6207e162b7109601",
+      "preview_sha256": "8d7305e8ac95bf23f0e2586895497a953a3a9e831c2017856ca2ccf2df43096e",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Fighting - Right Jab",
+      "category": "Fighting",
+      "tags": [
+        "fighting",
+        "jab",
+        "front view"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Fighting/Fighting - Right Jab.json",
+      "preview_path": "previews/Fighting/Fighting - Right Jab.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "ea0f9361b497eb1b47a65b512b7f40deccaf41405563ca63f3bebd128111967d",
+      "preview_sha256": "a17d727af2615b1c5401085da44cd1c763d3af5ccefec0908d59523881ded3fc",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Handstand",
+      "category": "Gymnastics",
+      "tags": [
+        "gym",
+        "handstand"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Gymnastics/Handstand.json",
+      "preview_path": "previews/Gymnastics/Handstand.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "c1c7d2a388e92d98ae25b46682b99db69760f9eedb67326a7ed80556ca4cf892",
+      "preview_sha256": "32fb45b7b848ac88c08544525c07af7ce7b81a811d46d76436155f6737fcb477",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Middle Splits",
+      "category": "Gymnastics",
+      "tags": [
+        "gym",
+        "middle splits",
+        "splits"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Gymnastics/Middle Splits.json",
+      "preview_path": "previews/Gymnastics/Middle Splits.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "493f4a866d16ab90d2e057735220cce492c91c407504f61a8e36ec2f706302d7",
+      "preview_sha256": "99a7a2fbc43216de38495b73abdb74ab58864968bb297cabcdf7dfedbe3c5364",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Kneeling - Side View",
+      "category": "Kneeling",
+      "tags": [
+        "side view",
+        "kneeling"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Kneeling/Kneeling - Side View.json",
+      "preview_path": "previews/Kneeling/Kneeling - Side View.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "e865eed7d37cb2fdd9384a180cbb4ada20f754992addf9066d1f862c4c30dfc2",
+      "preview_sha256": "dbd5e0cdec5d7983df1ac5ca25cfa14b5c7205019933111d04a8febdf1552039",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Kneeling on One Knee",
+      "category": "Kneeling",
+      "tags": [
+        "kneeling",
+        "one knee",
+        "front view"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Kneeling/Kneeling on One Knee.json",
+      "preview_path": "previews/Kneeling/Kneeling on One Knee.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "83433608625eec8e37887df455b6242d7b0186e24ed073557bced6ba36f62a08",
+      "preview_sha256": "c76eb20c000258a834efad5f7ecdf991ee1e25cc26d44888debfab71f18171fd",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Seiza",
+      "category": "Kneeling",
+      "tags": [
+        "front view",
+        "kneeling",
+        "seiza"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Kneeling/Seiza.json",
+      "preview_path": "previews/Kneeling/Seiza.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "a908d9485a81379c46969963d7438a9dbec411641809667a0e5296545264fedc",
+      "preview_sha256": "c2de2608fe80a642ccf67c0a9fc3126e13e76ece2b0a1277dadef77192eb56ff",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Fetal Position - Overhead",
+      "category": "Laying",
+      "tags": [
+        "laying",
+        "fetal",
+        "overhead"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Laying/Fetal Position - Overhead.json",
+      "preview_path": "previews/Laying/Fetal Position - Overhead.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "22194efbb74f0474a69de8fd5a5147e742f9857f78890c5a8f597d073251636e",
+      "preview_sha256": "9297f4ac79bcc0d0bd883e901c02999c0a9589dff3c00332d216ab77ebf1b24c",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Close Up - Overhead View",
+      "category": "Sitting",
+      "tags": [
+        "close up",
+        "overhead"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Sitting/Close Up - Overhead View.json",
+      "preview_path": "previews/Sitting/Close Up - Overhead View.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "6153464f4629d14bb41f0a866c70d910ac11149bf9a67e65ef73588b771812bc",
+      "preview_sha256": "6e309a61d7ed8fb5f6e981ee8ca0feced83e0e8c944f0ee1c04052cb541b3918",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Fetal Position - Rear View",
+      "category": "Sitting",
+      "tags": [
+        "sitting",
+        "rear view",
+        "fetal position"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Sitting/Fetal Position - Rear View.json",
+      "preview_path": "previews/Sitting/Fetal Position - Rear View.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "cca1bcd0473b6087ab4e3d38ada10d08b2f55459309b755c70db715c29059088",
+      "preview_sha256": "975f834854df10065c520e5782703cfd24d260d79dae31f07a14f38d8ee552d1",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Leaning Back",
+      "category": "Sitting",
+      "tags": [
+        "Leaning back",
+        "Sitting",
+        "legs akimbo",
+        "front view"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Sitting/Leaning Back.json",
+      "preview_path": "previews/Sitting/Leaning Back.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "7113085135d19e927562d7e7676ea875e447b7ff25b418793c2181c214775538",
+      "preview_sha256": "9f83cf9295fb55d4add86930a92e35bd250370930ab0521ba9ceef9eef20955d",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Sitting",
+      "category": "Sitting",
+      "tags": [
+        "front  view",
+        "sitting"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Sitting/Sitting.json",
+      "preview_path": "previews/Sitting/Sitting.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "3c2bf9495376faf985998cf8a0d7b2af660ee143cd486bf27faecf02a0784dc2",
+      "preview_sha256": "0f51e909ceb0a346f820d73f6f7e01addb4b63e5a0c30c65661358843944c86b",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Sitting - Rear View",
+      "category": "Sitting",
+      "tags": [
+        "sitting",
+        "rear view"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Sitting/Sitting - Rear View.json",
+      "preview_path": "previews/Sitting/Sitting - Rear View.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "dc93fffa6567e71e06946ae3ace4166cc70299850375b6dcd9ce6d279c6a01ef",
+      "preview_sha256": "3f9ab7ab2b0622e8ff56ab967ead9e18c15b4e8dcf1cb8cb0380fc3a42fdd465",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Sitting - Side View",
+      "category": "Sitting",
+      "tags": [
+        "sitting",
+        "side view"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Sitting/Sitting - Side View.json",
+      "preview_path": "previews/Sitting/Sitting - Side View.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "9132caf5f5761fd0a2eac04fcb39a746d7ebb1ae4ed7d6b00f3141190ee4ceda",
+      "preview_sha256": "a4e4761d9d0f6da40d92e6406662d8fc9b8aa1c277f59ed5e295bfcf9d344a48",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Sitting Cross Legged",
+      "category": "Sitting",
+      "tags": [
+        "front view",
+        "sitting",
+        "cross legged"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Sitting/Sitting Cross Legged.json",
+      "preview_path": "previews/Sitting/Sitting Cross Legged.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "d17467805519b5d3ce9706358b77e44c9f993fb9ba186295d2bc733b711ad2c2",
+      "preview_sha256": "5ae856aa3857099747f14d8e244523ed5550113d0d078e4c7bbace5164048c97",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Arms Behind Back - Side View",
+      "category": "Standing",
+      "tags": [
+        "arms behind back",
+        "side view"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Standing/Arms Behind Back - Side View.json",
+      "preview_path": "previews/Standing/Arms Behind Back - Side View.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "82aaf2d8f70a5fd460463c4870a32ea451a5e3a674b018d21f2b646f0e8f4626",
+      "preview_sha256": "2f676518600a385093455d8f906147d7ab9545c5c257cae06b544da95aca7b10",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Arms Crossed",
+      "category": "Standing",
+      "tags": [
+        "front view",
+        "standing",
+        "arms crossed"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Standing/Arms Crossed.json",
+      "preview_path": "previews/Standing/Arms Crossed.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "ca6a660842613c3b6792460611dca1bc3fef120adbb6d945c22813711651cbc7",
+      "preview_sha256": "0cbb27a2f77ef256e21500bf0313a4cdd7b3f16a67e8f6a7bf22c4e4939bca6f",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Arms Extended Backwards - Side View",
+      "category": "Standing",
+      "tags": [
+        "arms extended backwards",
+        "side view"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Standing/Arms Extended Backwards - Side View.json",
+      "preview_path": "previews/Standing/Arms Extended Backwards - Side View.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "fbb8a9fd76a6628dadbb2d76ceb741708410b966ed00e7ba56f159983d58ab3f",
+      "preview_sha256": "9ac395220e180404ddc19e193e885afbc7cce50646fd31f4092ade3f063d02ff",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Arms Extended Forward - Side View",
+      "category": "Standing",
+      "tags": [
+        "standing",
+        "side view",
+        "arms extended"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Standing/Arms Extended Forward - Side View.json",
+      "preview_path": "previews/Standing/Arms Extended Forward - Side View.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "7bbcb7a232c395e238f8970a99072ad76f6c22691a1a9f29ea12b2d41538531a",
+      "preview_sha256": "2a315cfde0f2c8602217282a8b2bc6709e14a4de474d20de15edb040bbefb33d",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Arms Outstretched",
+      "category": "Standing",
+      "tags": [
+        "front view",
+        "standing",
+        "arms outstretched"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Standing/Arms Outstretched.json",
+      "preview_path": "previews/Standing/Arms Outstretched.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "3af5ff38be3ab7f577a89d0b7978b93e872a149cf4bcab7893685faba0af8ef2",
+      "preview_sha256": "fc0a0ff55ac339dfb87e2b59dbddc7e93c8520a3e8627617b0b1a759f9d630b9",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Arms Raised",
+      "category": "Standing",
+      "tags": [
+        "front view",
+        "standing",
+        "arms raised"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Standing/Arms Raised.json",
+      "preview_path": "previews/Standing/Arms Raised.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "a8b38eafacacae066a6679a6eb12a89c3e895f3712e2f03606892b360b3461a4",
+      "preview_sha256": "1510278cdebb313144f516f23a0ba626171deb290914e32198cf137c85cf1337",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Arms Up",
+      "category": "Standing",
+      "tags": [
+        "standing",
+        "arms up",
+        "tiptoes"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Standing/Arms Up.json",
+      "preview_path": "previews/Standing/Arms Up.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "cf0ad9f950a147af09e78eaba2daf7cb283e3bc0742f45f51f2dab434bc697dd",
+      "preview_sha256": "bc31c2a7ace71d70f262121be74a1cddb6f14ac881e78eb76a6b844dd4766293",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Contrapposto",
+      "category": "Standing",
+      "tags": [
+        "front view",
+        "contrapposto",
+        "standing"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Standing/Contrapposto.json",
+      "preview_path": "previews/Standing/Contrapposto.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "5c659612e708c309eda026a2751e11c27528666d9f39daa445343bec7729b9be",
+      "preview_sha256": "50277cbf920237d02fe46ae5e1bf62e8e573fff283b0d4210fc52e29fa4a1183",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Contrapposto - Hand on Hip",
+      "category": "Standing",
+      "tags": [
+        "contrapposto",
+        "standing",
+        "front view",
+        "hand on hip"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Standing/Contrapposto - Hand on Hip.json",
+      "preview_path": "previews/Standing/Contrapposto - Hand on Hip.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "4a6fd2c6cbabf11ba9276d4547f07391929f53eed3d99a2780f9223830686434",
+      "preview_sha256": "19c13fb1ca0cf2adb00ef6b60895e46c7090cee29b650d2f8e15f0266f7746b7",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Contrapposto - Rear View",
+      "category": "Standing",
+      "tags": [
+        "contrapposto",
+        "rear view",
+        "standing"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Standing/Contrapposto - Rear View.json",
+      "preview_path": "previews/Standing/Contrapposto - Rear View.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "edf90811c1bfcc553000047bdb95220845aba6808d9b6d39352c7fa5b3f5df8d",
+      "preview_sha256": "5727bea6d4438fd73a4d76b2c5218decb670a1ae03a9cb8182c7ae2fa60aa9d8",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Feet Apart - Side View",
+      "category": "Standing",
+      "tags": [
+        "side view",
+        "feet apart"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Standing/Feet Apart - Side View.json",
+      "preview_path": "previews/Standing/Feet Apart - Side View.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "3e37b97c5e1b7f8378d71bf754e7778e2fb24fa76dcb8e30c1ec053aee0273de",
+      "preview_sha256": "52b07b9d053368b27ff0a96ce3971988471b55e981ee9ab994e077fb8f75c5c8",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Hands on hips - Rear View",
+      "category": "Standing",
+      "tags": [
+        "standing",
+        "rear view",
+        "hands on hips"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Standing/Hands on hips - Rear View.json",
+      "preview_path": "previews/Standing/Hands on hips - Rear View.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "6e7630a01fc4b11958370da65ece2ca761fa4466e524531bf0974c28e653c27b",
+      "preview_sha256": "6a3929cc3b6622ef81c1d649da4bf4030f72fc1f960b871c196df4897c7ee738",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Leaning Back - Side View",
+      "category": "Standing",
+      "tags": [
+        "side view",
+        "leaning back"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Standing/Leaning Back - Side View.json",
+      "preview_path": "previews/Standing/Leaning Back - Side View.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "616ab15b07584988433e3c8ebbcf6f606ce99a17edc355dc2b2d0569195c6af7",
+      "preview_sha256": "ff9b8db42e154eaeeae8627a67a29bd897e5700a7e9ded195071a3fa354c57ce",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Leaning Forward",
+      "category": "Standing",
+      "tags": [
+        "standing",
+        "leaning forward",
+        "front view"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Standing/Leaning Forward.json",
+      "preview_path": "previews/Standing/Leaning Forward.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "cd06f5bb78a83a71101190eb34a73272c32d4ce12948eea9f834d3147d7a7e8f",
+      "preview_sha256": "7672fe10b9e895a61975436be140a6e557c7c3d21db8f1c458c33b83f50dad78",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Leaning Forward - Side View",
+      "category": "Standing",
+      "tags": [
+        "standing",
+        "leaning forward",
+        "side view"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Standing/Leaning Forward - Side View.json",
+      "preview_path": "previews/Standing/Leaning Forward - Side View.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "87fd02face9ab3c2b26d0fd02a0948a3fed01569fc0cf964507f20b28345f2b3",
+      "preview_sha256": "6722ae7ba7684609fae4f169347e79b509649ff4cdafc666018f7a92f539d36c",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "One Arm Raised",
+      "category": "Standing",
+      "tags": [
+        "front view",
+        "standing",
+        "one arm raised"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Standing/One Arm Raised.json",
+      "preview_path": "previews/Standing/One Arm Raised.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "ebe321b4e8d5def667987c0919539515fb4787187b23b92ec60e69b0663ebd04",
+      "preview_sha256": "24623ca019cc95674f8b7c10cdd21f68d758a5d5a4d7bab232d91c161479f809",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "One Hand on Hip",
+      "category": "Standing",
+      "tags": [
+        "front view",
+        "standing",
+        "hand on hip"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Standing/One Hand on Hip.json",
+      "preview_path": "previews/Standing/One Hand on Hip.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "5b33decb87cbda8f8dcab591dc75663413eef2cb3653674f07420ab2ba3792ab",
+      "preview_sha256": "659a5d6f796804e5f99efb2c16cf12fcb9dd615c69c00812a746ba37ff940824",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Slight Lean Back",
+      "category": "Standing",
+      "tags": [
+        "slight lean back",
+        "standing",
+        "front view"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Standing/Slight Lean Back.json",
+      "preview_path": "previews/Standing/Slight Lean Back.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "c63ad6ff167194c272fcafddf182c9c8812d02c740138bb1cfeb3becb77f5868",
+      "preview_sha256": "bb50627052b005b330dc17c7013ca1b7f338b0dd1f1a64f72d69217681f2e52b",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Standing",
+      "category": "Standing",
+      "tags": [
+        "front view",
+        "standing"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Standing/Standing.json",
+      "preview_path": "previews/Standing/Standing.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "cf5885d8128c96f62659145f807cc8769269d49c885ffbb5e3a557017af1a2c8",
+      "preview_sha256": "3ea4fe4d81ed9b7f1d8b822f0684ad43c925301ad244f8d1d0e4c4d001553d75",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Standing - Hands Behind Back",
+      "category": "Standing",
+      "tags": [
+        "standing",
+        "front view",
+        "hands behind back"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Standing/Standing - Hands Behind Back.json",
+      "preview_path": "previews/Standing/Standing - Hands Behind Back.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "3764cfdcd294d5aec608a24bb36d974fb010380b33dfad40417a83ea913e7bbb",
+      "preview_sha256": "79a53391d394958d31518165f0c312a8a473c2989bc80db2858c831367123c3c",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Standing - Leaning Forward",
+      "category": "Standing",
+      "tags": [
+        "front view",
+        "standing",
+        "leaning"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Standing/Standing - Leaning Forward.json",
+      "preview_path": "previews/Standing/Standing - Leaning Forward.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "81cab262246029c5d39f2a3960a5d598644419d4ddeecab29ee7853efb05b541",
+      "preview_sha256": "e4afe2f4a908132ff29ae74ba1d073c4041a8b72cdaab671e346d4e0f0b0bcb2",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Standing - Rear View",
+      "category": "Standing",
+      "tags": [
+        "standing",
+        "rear view"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Standing/Standing - Rear View.json",
+      "preview_path": "previews/Standing/Standing - Rear View.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "5e144ef4fa188174f617f71d3b2b7b6706ebef1bc5f5c9c1d53e4c15be4d349d",
+      "preview_sha256": "29081878600aa9ee412669118f20a2d3caf92a7fe8ceae537c174ecfe411fe2b",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Standing - Side View",
+      "category": "Standing",
+      "tags": [
+        "standing",
+        "side view"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Standing/Standing - Side View.json",
+      "preview_path": "previews/Standing/Standing - Side View.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "7340fb3be44a0010e6155a8c79938563076878d6bcf9631df40d74644cbb6e23",
+      "preview_sha256": "8ffc0630956e5af2367c655fcb3b0be90d1bb6ac1929e9e44ed8eb1c2f5ff693",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Stepping",
+      "category": "Standing",
+      "tags": [
+        "stepping",
+        "front view"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Standing/Stepping.json",
+      "preview_path": "previews/Standing/Stepping.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "3a0fa10dfacf671849b606116730e6a2a088832dc0c8110898782765a2e86b8b",
+      "preview_sha256": "a2148e872d8f896e3249b04ff1a0d03d043d806ae5a0a4fae3e18a1aec090198",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Touching Toes - Side View",
+      "category": "Standing",
+      "tags": [
+        "standing",
+        "touching toes",
+        "side view"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Standing/Touching Toes - Side View.json",
+      "preview_path": "previews/Standing/Touching Toes - Side View.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "44c6e968b08aa4dae398d10c75824ab5226fdea57164b4e43d743b10e5946bcd",
+      "preview_sha256": "94b7a600db980515622d71a55eab07d580d52b3fa149f21fef2c454e4c32e3cf",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Waving - Overhead View",
+      "category": "Standing",
+      "tags": [
+        "overhead view",
+        "waving",
+        "standing"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Standing/Waving - Overhead View.json",
+      "preview_path": "previews/Standing/Waving - Overhead View.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "858679a1520a1d7f04f486d06a66536b74b0b3bc535c05dde47c37a0301d1abf",
+      "preview_sha256": "c7d162429c400cda6c85a7aca5f51677ee035be5a741752396864a5cb1d4347b",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Weight on One Leg - Side View",
+      "category": "Standing",
+      "tags": [
+        "side view",
+        "weight on one leg"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Standing/Weight on One Leg - Side View.json",
+      "preview_path": "previews/Standing/Weight on One Leg - Side View.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "87750faa97d09b02dd4670d7e4193b41279ff547178b0df4748cd05e765e3482",
+      "preview_sha256": "e91ca38163af3932886b864f0241d24d785f3126928603494df9c8ca87f79534",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Squatting",
+      "category": "Uncategorized",
+      "tags": [
+        "front view",
+        "squatting"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Uncategorized/Squatting.json",
+      "preview_path": "previews/Uncategorized/Squatting.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "403c0e178089c7c1d940fc6c8d5b3b03a180e887433c72c5d0a6ea804c00e5c2",
+      "preview_sha256": "36454858afc785aa19d7b0874290e5579a0f487eda734142b751f002f703265b",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Downward Dog",
+      "category": "Yoga",
+      "tags": [
+        "yoga",
+        "downward dog",
+        "side view"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Yoga/Downward Dog.json",
+      "preview_path": "previews/Yoga/Downward Dog.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "e4ce204341c93b40d33bb7d4ab458e2b5f061cb2faa5b8a7f5d9147c7a9f3e58",
+      "preview_sha256": "12be04c75aca6ef5c5f9190106e4e90773cafddf9de3e3ab0fffe321e536e24e",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Warrior",
+      "category": "Yoga",
+      "tags": [
+        "warrior",
+        "side view",
+        "yoga"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/Yoga/Warrior.json",
+      "preview_path": "previews/Yoga/Warrior.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "273cb67772e88fb5d786104e9ac2dd5f87deb970accef0c07dfcb8caa334e35a",
+      "preview_sha256": "d799c5ade1f1bbbce1418394a5f656362686922d2039332343d2757d58986446",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    },
+    {
+      "name": "Kneeling Legs Spread",
+      "category": "kneeling",
+      "tags": [
+        "front view",
+        "kneeling",
+        "legs spread"
+      ],
+      "asset_type": "pose",
+      "json_path": "poses/kneeling/Kneeling Legs Spread.json",
+      "preview_path": "previews/kneeling/Kneeling Legs Spread.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "1fc9ab0030271863a69dd7a3b7029599480c21e3a060ac0739a144186ec6422a",
+      "preview_sha256": "27c9c6628316caa15149ca50c55f02075a752016e32bd1b202401eacf67217f7",
+      "updated_at": "2026-08-12T14:22:18.395040+00:00"
+    }
+  ]
+}

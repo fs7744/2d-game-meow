@@ -1,4 +1,6 @@
-import type { GenParams, JobState, ModelRecommend } from './types'
+import type {
+  FavoritePrompt, GenParams, JobState, ModelRecommend, PosePreset,
+} from './types'
 
 const base = ''                                   // 生产同源；开发由 vite proxy 转发
 
@@ -426,6 +428,129 @@ export type PoseExtract = {
   joints: number
   /** 只用来提示：2D 图分不出正面/背面，只有肩宽很窄时才有把握说是侧面 */
   azimuth_guess: number
+}
+
+/* ------------------------------------------------------------------ *
+ * 用户资料库（提示词收藏 / 姿势库 / 界面偏好）
+ *
+ * **全部在服务端磁盘**（见 workflows/library.py）：localStorage 里一个字都不留。
+ * 迁移时前端把浏览器里剩下的旧存档一次性 POST /library/seed，搬完清干净。
+ * ------------------------------------------------------------------ */
+
+export type Library = {
+  prompts: FavoritePrompt[]
+  poses: PosePreset[]
+  prefs: Record<string, unknown>
+}
+
+export type Prefs = Record<string, unknown>
+
+async function libraryReq<T>(path: string, init?: RequestInit): Promise<T> {
+  const r = await fetch(`${base}${path}`, {
+    ...init,
+    headers: { 'Content-Type': 'application/json', ...(init?.headers || {}) },
+  })
+  if (!r.ok) {
+    let msg = `HTTP ${r.status}`
+    try {
+      const j = await r.json()
+      if (j?.detail) msg = String(j.detail)
+    } catch { /* 响应不是 JSON，用状态码兜底 */ }
+    throw new Error(msg)
+  }
+  return r.json() as Promise<T>
+}
+
+/** 整个库一次给全（冷启动只需一次请求） */
+export function getLibrary(): Promise<Library> {
+  return libraryReq<Library>('/library')
+}
+
+/** 收藏一条提示词。返回新的完整列表（服务端是唯一真源，别在本地算） */
+export function addPromptApi(text: string, negative = ''): Promise<Library> {
+  return libraryReq<Library>('/library/prompts', {
+    method: 'POST',
+    body: JSON.stringify({ text, negative }),
+  })
+}
+
+export function removePromptApi(id: string): Promise<Library> {
+  return libraryReq<Library>(`/library/prompts/${encodeURIComponent(id)}`,
+    { method: 'DELETE' })
+}
+
+/** 存一条姿势：官方 pose JSON + 可选的缩略图（dataURL） */
+export function addPoseApi(
+  name: string, pose: unknown, yaw: number, preview = '',
+): Promise<Library> {
+  return libraryReq<Library>('/library/poses', {
+    method: 'POST',
+    body: JSON.stringify({ name, pose, yaw, preview }),
+  })
+}
+
+export function renamePoseApi(id: string, name: string): Promise<Library> {
+  return libraryReq<Library>(`/library/poses/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: JSON.stringify({ name }),
+  })
+}
+
+export function removePoseApi(id: string): Promise<Library> {
+  return libraryReq<Library>(`/library/poses/${encodeURIComponent(id)}`,
+    { method: 'DELETE' })
+}
+
+/** 写界面偏好（局部合并） */
+export function savePrefsApi(patch: Prefs): Promise<{ prefs: Prefs }> {
+  return libraryReq<{ prefs: Prefs }>('/library/prefs', {
+    method: 'PUT',
+    body: JSON.stringify(patch),
+  })
+}
+
+/** 把 localStorage 里的旧存档搬进磁盘（只补不覆盖） */
+export function seedLibraryApi(legacy: {
+  prompts?: FavoritePrompt[]
+  poses?: PosePreset[]
+  prefs?: Prefs
+}): Promise<Library> {
+  return libraryReq<Library>('/library/seed', {
+    method: 'POST',
+    body: JSON.stringify(legacy),
+  })
+}
+
+/** /pose_library 返回的一条 VNCCS 官方姿势预设（随项目发行，静态目录里） */
+export type PresetPose = {
+  id: string
+  name: string
+  category: string
+  tags: string[]
+  /** 从标签猜的默认导出机位（0 / 90 / 180） */
+  yaw: number
+  /** 姿势本体（PoseStudio 原生 json）的静态 URL */
+  json: string
+  /** 预览图 URL；没有预览的条目是空串 */
+  preview: string
+}
+
+/** 随项目发行的 VNCCS 官方姿势库清单（191 个）。目录内容不变时后端有缓存。 */
+export async function fetchPosePresets(refresh = false): Promise<{
+  count: number
+  items: PresetPose[]
+  categories: string[]
+}> {
+  const r = await fetch(`${base}/pose_library${refresh ? '?refresh=1' : ''}`)
+  if (!r.ok) throw new Error(`取姿势库清单失败：HTTP ${r.status}`)
+  return r.json() as Promise<{ count: number; items: PresetPose[]; categories: string[] }>
+}
+
+/** 取一条预设的姿势本体（几 KB 的 PoseStudio 原生 json）。 */
+export async function fetchPoseBody(url: string): Promise<unknown> {
+  const r = await fetch(url)
+  if (!r.ok) throw new Error(`取姿势失败：HTTP ${r.status}`)
+  return r.json() as Promise<unknown>
 }
 
 /** 骨骼编辑器「从图片提取」：上传后拿磁盘路径，让后端跑 DWPose 提 18 个关节 */

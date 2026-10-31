@@ -40,6 +40,22 @@ UPLOAD_DIR = ASSETS / "uploads"
 # 项目时复用），不属于任何一个项目的产物，所以不放 assets 下。
 TEMPLATES_DIR = _env_dir("MEOW_TEMPLATES_DIR", ROOT / "templates")
 
+#: 用户资料库：**提示词收藏 / 姿势库 / 界面偏好** 在这里落盘。
+#
+# **为什么不留在 localStorage**：浏览器存储会在「换浏览器 / 清缓存 / 无痕窗口」
+# 时凭空消失，而这些都是用户攒了很久的资产；落盘后能备份、能换机器拷走、
+# 也不会因为清站点数据全丢。templates 已经是「跨项目共享的用户资源」的路子，
+# 库跟它放在一起。
+#
+# 测试用 MEOW_LIBRARY_DIR 覆盖（conftest 里设），避免跑测试时写真目录。
+LIBRARY_DIR = _env_dir("MEOW_LIBRARY_DIR", ROOT / "library")
+
+#: 随项目发行的 **VNCCS 官方姿势库**（191 个预设 json + webp 预览）。
+#: 放在静态目录下由浏览器直接取，不用拷进 runtime assets；清单扫描见
+#: workflows/poselib.py。
+POSE_LIBRARY_DIR = Path(os.environ.get("MEOW_POSE_LIBRARY_DIR")
+                        or (ROOT / "web" / "public" / "vnccs-pose" / "PoseLibrary"))
+
 #: 测试产物根：pytest 与 tools/ 下的验证脚本的输出都往这里放，
 #: 不再往 `assets/` 里丢（那里只留项目必须的东西）。
 TEST_OUT = ROOT / "tests" / "_out"

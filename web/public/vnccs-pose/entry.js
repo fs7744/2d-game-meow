@@ -3,7 +3,12 @@
  *
  * 引擎全是官方的（web/public/vnccs-pose/pose_studio/core.js 的 PoseViewerCore）：
  * 网格、53 根骨、IK、关节标记（每根骨一个可拖的球体）、相机轨道、渲染。
- * **这里只写外壳**：一块画布、一条工具栏、两个按钮、一套 postMessage 协议。
+ * **这里只写外壳**：一块画布、一套 postMessage 协议、两个模式。
+ *
+ * 两种用法：
+ *  - 独立页（studio.html）：自带状态栏 / 朝向下拉 / 导出按钮，直接开页也能用；
+ *  - 嵌入模式（studio.html?embed=1）：只留一块填满 iframe 的画布，
+ *    朝向与导出由宿主页（节点卡片）提供 —— 这是产线上的用法。
  *
  * 交互与官方 UniCanvas 的 pose layer 一致：
  * - 直接在画布上拖橙色关节点摆姿势（官方 raycast + IK，肘/膝的弯向有极点约束）
@@ -13,20 +18,33 @@
  * - 「导出人偶图」输出白底灰人偶 PNG —— VNCCS 的姿态 LoRA 就是在这个格式上训的
  *
  * 协议：
- *   父 → 子：{ type:'init', joints?, azimuth? }   设定初始姿态（可选）
- *   子 → 父：{ type:'ready' } | { type:'result', dataURL }
- *           | { type:'error', message } | { type:'progress', text }
+ *   父 → 子：
+ *     { type:'init', pose?, joints?, yaw? }  初始化（pose = 官方 getPose() 的 JSON）
+ *     { type:'setPose', pose }               套用官方姿势 JSON
+ *     { type:'joints', points }              2D 关节点（0~1）→ 官方 convertOpenPoseToPose
+ *     { type:'setYaw', yaw }                 改导出机位（度）
+ *     { type:'export', yaw?, size? }         导出人偶图 → 回 result
+ *     { type:'preview', yaw?, size? }        只要一张小缩略图（存姿势库用）→ 回 preview
+ *     { type:'getPose' }                     回 { type:'pose', pose, yaw }
+ *     { type:'resetPose' } / { type:'resetView' }
+ *   子 → 父：
+ *     { type:'ready' } | { type:'progress', text }
+ *     | { type:'result', dataURL } | { type:'pose', pose, yaw }
+ *     | { type:'error', message }
  */
 import { PoseViewerCore } from './pose_studio/core.js'
 import { loadMorphPack, solveMorph, buildStaticModelData } from './pose_studio/morph_runtime.js'
 import { convertOpenPoseToPose } from './pose_studio/imports/openpose.js'
 
+const EMBED = new URLSearchParams(location.search).get('embed') === '1'
+
 const statusEl = document.getElementById('status')
 const outEl = document.getElementById('out')
 const canvas = document.getElementById('stage')
+const stageWrap = document.getElementById('stagewrap')
 const yawSel = document.getElementById('yaw')
 
-/** COCO-18 顺序，与骨骼编辑器的 18 个关节完全一致 */
+/** COCO-18 顺序，与后端 /pose/extract 返回的 points 完全一致 */
 const COCO_NAMES = [
   'nose', 'neck', 'r_shoulder', 'r_elbow', 'r_wrist',
   'l_shoulder', 'l_elbow', 'l_wrist', 'r_hip', 'r_knee',
@@ -34,7 +52,18 @@ const COCO_NAMES = [
   'l_eye', 'r_ear', 'l_ear',
 ]
 
-/** 朝向（相机机位绕 Y 的角度，度）。数值与 2D 骨架编辑器的方位角同号同义。 */
+/**
+ * 站立参考（0~1）。DWPose 漏检的关节用它补 —— 官方转换器里算角度要
+ * 成对的关键点，缺一个会让整条肢体摆到奇怪的方向。
+ */
+const STAND = [
+  [0.50, 0.075], [0.50, 0.155], [0.42, 0.180], [0.39, 0.339], [0.38, 0.497],
+  [0.58, 0.180], [0.61, 0.339], [0.62, 0.497], [0.46, 0.520], [0.45, 0.720],
+  [0.44, 0.930], [0.54, 0.520], [0.55, 0.720], [0.56, 0.930], [0.47, 0.069],
+  [0.53, 0.069], [0.45, 0.075], [0.55, 0.075],
+]
+
+/** 朝向（相机机位绕 Y 的角度，度）。0 正面 / 90 右侧面 / 180 背面 / 270 左侧面 */
 const YAW_LABELS = [
   [0, '正面'], [45, '右前 3/4'], [90, '右侧面'], [135, '右后 3/4'],
   [180, '背面'], [225, '左后 3/4'], [270, '左侧面'], [315, '左前 3/4'],
@@ -43,6 +72,58 @@ const YAW_LABELS = [
 let viewerPromise = null
 let viewer = null
 let currentYaw = 0
+
+/* ------------------------------------------------------------------ *
+ * 画布尺寸
+ *
+ * 嵌入模式下画布跟着 iframe 走（dam 卡片里 280px、放大后 ~900px），
+ * 所以要看容器，不能写死 768。
+ *
+ * 官方 resize() 只会分配一次 WebGL 缓冲（_viewportBufferLocked），
+ * 放大到全屏时画面会糊 —— 这里在调用前临时解锁，让它按当前尺寸重分配。
+ * ------------------------------------------------------------------ */
+function measure() {
+  if (!EMBED || !stageWrap) return { w: 768, h: 768 }
+  const r = stageWrap.getBoundingClientRect()
+  if (!(r.width > 0 && r.height > 0)) return { w: 768, h: 768 }
+  const dpr = Math.min(window.devicePixelRatio || 1, 2)
+  return {
+    w: Math.max(64, Math.round(r.width * dpr)),
+    h: Math.max(64, Math.round(r.height * dpr)),
+  }
+}
+
+/** 把画布的内部缓冲调到容器尺寸。返回是否变化。 */
+function applyCanvasSize() {
+  const { w, h } = measure()
+  if (canvas.width === w && canvas.height === h) return false
+  canvas.width = w
+  canvas.height = h
+  return true
+}
+
+let sizeRaf = 0
+function syncViewerSize() {
+  if (!viewer) return
+  const { w, h } = measure()
+  if (viewer.width === w && viewer.height === h) return
+  canvas.width = w
+  canvas.height = h
+  viewer._viewportBufferLocked = false
+  viewer.resize(w, h)
+}
+
+if (stageWrap && typeof ResizeObserver !== 'undefined') {
+  const ro = new ResizeObserver(() => {
+    // 宿主把编辑器从卡片放大到全屏时会连续触发，一帧一次够了
+    if (sizeRaf) return
+    sizeRaf = requestAnimationFrame(() => {
+      sizeRaf = 0
+      if (applyCanvasSize()) syncViewerSize()
+    })
+  })
+  ro.observe(stageWrap)
+}
 
 function buildModelData(result, staticData) {
   const bones = staticData.bones.map((bone, i) => {
@@ -62,6 +143,7 @@ function buildModelData(result, staticData) {
 async function getViewer() {
   if (viewerPromise) return viewerPromise
   viewerPromise = (async () => {
+    applyCanvasSize()
     const morphPack = await loadMorphPack()
     const result = solveMorph(morphPack, {})
     const staticData = buildStaticModelData(morphPack, result.includeGenitals)
@@ -70,8 +152,17 @@ async function getViewer() {
       // 编辑时要看得见骨架线与关节点（导出时官方 capture 会自动藏起来）
       showSkeletonHelper: true,
       ikEnabled: true,
+      // 'end' = 拖动过程中不打扰宿主，松手才算一次变更（宿主据此存档）
+      syncMode: 'end',
+      onPoseChange: (pose) => post({ type: 'pose', pose, yaw: currentYaw }),
     })
     await v.init()
+    // **方向天穹（彩虹网格球）在嵌入模式下一律关掉**，理由有两条：
+    //  · 编辑时：节点卡片只有 280px，人身后糊一层彩虹网格纯属干扰；
+    //  · 导出时：官方 `capture()` 会隐藏 gridHelper / skeletonHelper / 关节标记，
+    //    但**没有**隐藏它 —— 不关就是每张条件图背景都带一层彩色网格
+    //    （实测占画面 4%，直接把白底灰人偶毁了）。导出那条路再兜一次底。
+    if (EMBED) v.setDirectionalSkydomeVisible?.(false)
     v.loadData(buildModelData(result, staticData))
     // 关节标记是官方给的（每根骨一个球体），确保可见——拖它们就能摆姿势
     v.updateMarkers?.()
@@ -83,20 +174,58 @@ async function getViewer() {
   return viewerPromise
 }
 
-/** 18 关节（编辑器 0~1 坐标）→ 官方骨骼欧拉角 */
-function applyJoints(v, joints) {
-  const j = (i) => ({ x: joints[i].x * 512, y: joints[i].y * 512, c: 1 })
-  const parsedJoints = {}
-  COCO_NAMES.forEach((name, i) => { parsedJoints[name] = j(i) })
-  const pose = convertOpenPoseToPose({ joints: parsedJoints, canvasWidth: 512, canvasHeight: 512 }, v)
-  if (pose) v.setPose(pose, true)
+/** 官方姿势 JSON → 人偶。`{}` 会把所有骨归零（= 初始站姿）。 */
+function applyPose(v, pose) {
+  if (!pose || typeof pose !== 'object') return
+  v.setPose(pose, true)
+  v.updateMarkers?.()
+  v.jointMarkers?.forEach((m) => { m.visible = true })
   v.requestRender()
 }
 
-/** 导出：官方 capture（自动隐藏骨架线/关节标记、白底、按 yawDeg 定机位） */
-function exportMannequin() {
+/**
+ * 2D 关节点（0~1，后端 DWPose 提的）→ 官方骨骼欧拉角。
+ *
+ * 走的是官方的 convertOpenPoseToPose：它会先用两骨 IK 解四肢，再按
+ * 父子段配躯干（含自动补 mid_hip），不是把 2D 点直接投影到骨头上。
+ * 漏检的点用站立参考补，避免某条肢体角度算歪。
+ */
+function applyPoints(v, points) {
+  const joints = {}
+  COCO_NAMES.forEach((name, i) => {
+    const p = Array.isArray(points?.[i]) ? points[i] : null
+    const src = p || STAND[i]
+    joints[name] = { x: src[0] * 512, y: src[1] * 512, c: p ? 1 : 0.2 }
+  })
+  const pose = convertOpenPoseToPose(
+    { joints, canvasWidth: 512, canvasHeight: 512 }, v)
+  if (pose) {
+    v.setPose(pose, true)
+    v.updateMarkers?.()
+    v.jointMarkers?.forEach((m) => { m.visible = true })
+    v.requestRender()
+  }
+  return !!pose
+}
+
+/**
+ * 出图（导出 / 缩略图都走这里）。
+ *
+ * **天穹必须在 capture 期间藏起来**：官方只会隐藏 gridHelper /
+ * skeletonHelper / 关节标记，彩虹网格球不在那份清单里。capture 是同步的
+ * （`canvas.toDataURL`），所以 try/finally 兜得住。
+ */
+function renderOut(size, yaw) {
   if (!viewer) return null
-  return viewer.capture(768, 768, 1.0, [255, 255, 255], 0, 0, currentYaw, 0)
+  const n = Math.max(256, Math.min(2048, Math.round(size) || 768))
+  const prevSky = viewer.directionalSkydomeVisible
+  try {
+    viewer.setDirectionalSkydomeVisible?.(false)
+    // 官方 capture：自动隐藏骨架线与关节标记、白底、按 yaw 定机位
+    return viewer.capture(n, n, 1.0, [255, 255, 255], 0, 0, yaw, 0)
+  } finally {
+    viewer.setDirectionalSkydomeVisible?.(prevSky)
+  }
 }
 
 /**
@@ -133,6 +262,11 @@ function setStatus(text, isError = false) {
   }
 }
 
+function setYaw(deg) {
+  currentYaw = ((Math.round(Number(deg) || 0) % 360) + 360) % 360
+  if (yawSel) yawSel.value = String(currentYaw)
+}
+
 // ---- 朝向下拉 ----
 if (yawSel) {
   for (const [deg, label] of YAW_LABELS) {
@@ -142,12 +276,12 @@ if (yawSel) {
     yawSel.appendChild(opt)
   }
   yawSel.value = '0'
-  yawSel.addEventListener('change', () => { currentYaw = Number(yawSel.value) || 0 })
+  yawSel.addEventListener('change', () => setYaw(yawSel.value))
 }
 
-// ---- 工具栏按钮 ----
+// ---- 工具栏按钮（独立页模式）----
 document.getElementById('btn-export')?.addEventListener('click', () => {
-  const url = exportMannequin()
+  const url = renderOut(768, currentYaw)
   if (url) post({ type: 'result', dataURL: url })
 })
 document.getElementById('btn-reset')?.addEventListener('click', resetCamera)
@@ -160,14 +294,43 @@ window.addEventListener('message', async (e) => {
     if (msg.type === 'init' || msg.type === 'render') {
       const v = await getViewer()
       viewer = v
-      if (Array.isArray(msg.joints) && msg.joints.length >= 18) {
-        applyJoints(v, msg.joints)
+      syncViewerSize()
+      if (typeof msg.yaw === 'number') setYaw(msg.yaw)
+      if (msg.pose) applyPose(v, msg.pose)
+      else if (Array.isArray(msg.joints) && msg.joints.length >= 18) {
+        applyPoints(v, msg.joints.map((p) => [p.x, p.y]))
       }
-      if (typeof msg.azimuth === 'number' && yawSel) {
-        currentYaw = msg.azimuth
-        yawSel.value = String(currentYaw)
-      }
-      post({ type: 'ready' })
+      post({ type: 'ready', yaw: currentYaw })
+      return
+    }
+    // 下面这些都要 viewer：还没就绪就排队等，别丢消息
+    const v = await getViewer()
+    viewer = v
+    if (msg.type === 'setPose') {
+      applyPose(v, msg.pose)
+    } else if (msg.type === 'joints') {
+      applyPoints(v, msg.points)
+    } else if (msg.type === 'setYaw') {
+      setYaw(msg.yaw)
+      post({ type: 'pose', pose: v.getPose(), yaw: currentYaw })
+    } else if (msg.type === 'getPose') {
+      post({ type: 'pose', pose: v.getPose(), yaw: currentYaw })
+    } else if (msg.type === 'resetPose') {
+      applyPose(v, { bones: {}, bonePositions: {} })
+      post({ type: 'pose', pose: v.getPose(), yaw: currentYaw })
+    } else if (msg.type === 'resetView') {
+      resetCamera()
+    } else if (msg.type === 'preview') {
+      // 存库时要一张小缩略图，浏览面板得靠它认人。**走和导出同一条通路**
+      // （同一个 capture），只是尺寸小、不算正式产物，所以单独回一个类型。
+      if (typeof msg.yaw === 'number') setYaw(msg.yaw)
+      const url = renderOut(msg.size || 256, currentYaw)
+      if (url) post({ type: 'preview', dataURL: url })
+    } else if (msg.type === 'export') {
+      if (typeof msg.yaw === 'number') setYaw(msg.yaw)
+      const url = renderOut(msg.size, currentYaw)
+      if (url) post({ type: 'result', dataURL: url, yaw: currentYaw })
+      else post({ type: 'error', message: 'capture 没出图（渲染器还没就绪？）' })
     }
   } catch (err) {
     post({ type: 'error', message: String(err?.message || err) })
@@ -177,11 +340,13 @@ window.addEventListener('message', async (e) => {
 // ---- 自举：直接打开这个页面时也可用 ----
 ;(async () => {
   try {
+    applyCanvasSize()
     setStatus('正在加载人偶模型（37MB，首次约十几秒）…')
     post({ type: 'progress', text: '正在加载人偶模型（37MB，首次约十几秒）…' })
     viewer = await getViewer()
-    setStatus('就绪：拖橙色关节点摆姿势，右键拖动转视角')
-    post({ type: 'ready' })
+    syncViewerSize()
+    setStatus(EMBED ? '' : '就绪：拖橙色关节点摆姿势，右键拖动转视角')
+    post({ type: 'ready', yaw: currentYaw })
     if (outEl) outEl.style.display = 'none'
   } catch (e) {
     setStatus('加载失败：' + (e?.message || e), true)
@@ -190,7 +355,7 @@ window.addEventListener('message', async (e) => {
 })()
 
 // ---- 自检：?selftest=1 ----
-// 走**和父页完全一样的通路**：ready → 收到 init → 应用关节 → 点导出 → 收到 result。
+// 走**和父页完全一样的通路**：ready → 收到 init → 应用关节 → 导出 → 收到 result。
 // 用来在真实浏览器里验证 iframe 侧整条链（网格加载 → 骨骼 → 渲染 → 回 PNG）。
 if (new URLSearchParams(location.search).get('selftest') === '1') {
   window.addEventListener('message', (e) => {
@@ -199,7 +364,7 @@ if (new URLSearchParams(location.search).get('selftest') === '1') {
     const img = document.createElement('img')
     img.src = d.dataURL
     img.style.width = '256px'
-    if (outEl) outEl.appendChild(img)
+    if (outEl) { outEl.style.display = 'flex'; outEl.appendChild(img) }
     setStatus(`selftest: OK dataURL ${String(d.dataURL).length} 字节`)
   })
   ;(async () => {
@@ -212,13 +377,8 @@ if (new URLSearchParams(location.search).get('selftest') === '1') {
       setStatus('selftest ERROR: viewer 未就绪', true)
       return
     }
-    const STAND = [
-      { x: 0.5, y: 0.075 }, { x: 0.5, y: 0.155 }, { x: 0.42, y: 0.18 }, { x: 0.39, y: 0.339 }, { x: 0.38, y: 0.497 },
-      { x: 0.58, y: 0.18 }, { x: 0.61, y: 0.339 }, { x: 0.62, y: 0.497 }, { x: 0.46, y: 0.52 }, { x: 0.45, y: 0.72 },
-      { x: 0.44, y: 0.93 }, { x: 0.54, y: 0.52 }, { x: 0.55, y: 0.72 }, { x: 0.56, y: 0.93 }, { x: 0.47, y: 0.069 },
-      { x: 0.53, y: 0.069 }, { x: 0.45, y: 0.075 }, { x: 0.55, y: 0.075 },
-    ]
-    window.postMessage({ type: 'init', joints: STAND, azimuth: 90 }, '*')
+    window.postMessage({ type: 'init', joints: STAND.map(([x, y]) => ({ x, y })),
+      yaw: 90 }, '*')
     await new Promise((r) => setTimeout(r, 400))
     // 模拟用户点「导出人偶图」
     document.getElementById('btn-export')?.click()

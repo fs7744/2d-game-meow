@@ -1,0 +1,252 @@
+{
+  "schema_version": 1,
+  "title": "VNCCS Pose Library",
+  "repo_id": "MIUProject/VNCCS_PoseLibrary_Main",
+  "updated_at": "2026-05-23T22:32:53.471063+00:00",
+  "poses": [
+    {
+      "name": "Fighting A",
+      "category": "Fighting",
+      "tags": [
+        "Fighting",
+        "standing",
+        "full body"
+      ],
+      "json_path": "poses/Fighting/Fighting A.json",
+      "preview_path": "previews/Fighting/Fighting A.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "cc507915997cd894d58ca08097bcb7bc7364522cd4a9cf73246828de59cd6b9b",
+      "preview_sha256": "dc505c10336fa504a4a9941e2cc15366ff6c2c34dbc02325fa0d21fb654f6c4f",
+      "updated_at": "2026-05-23T22:32:53.471063+00:00"
+    },
+    {
+      "name": "Fighting B",
+      "category": "Fighting",
+      "tags": [
+        "Fighting",
+        "standing",
+        "full body"
+      ],
+      "json_path": "poses/Fighting/Fighting B.json",
+      "preview_path": "previews/Fighting/Fighting B.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "e3729f29f1270247e0d8bb978101cc42ec8fe161646c578ae4708a417e091099",
+      "preview_sha256": "1205adb78d6f03fd0062c9a1a54e1dd08ab6f747a8032461e0511028d5804396",
+      "updated_at": "2026-05-23T22:32:53.471063+00:00"
+    },
+    {
+      "name": "Fighting C",
+      "category": "Fighting",
+      "tags": [
+        "Fighting",
+        "standing",
+        "full body"
+      ],
+      "json_path": "poses/Fighting/Fighting C.json",
+      "preview_path": "previews/Fighting/Fighting C.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "62deb7bcb55718e8c8dd8f20679a501e458bd4fa289379f44a5777bdb5ae1055",
+      "preview_sha256": "33a83bed81dea7adbc0079bfeb6cb837754c8d4292efbc1a80f9b705b000db5c",
+      "updated_at": "2026-05-23T22:32:53.471063+00:00"
+    },
+    {
+      "name": "Fighting D",
+      "category": "Fighting",
+      "tags": [
+        "Fighting",
+        "standing",
+        "full body"
+      ],
+      "json_path": "poses/Fighting/Fighting D.json",
+      "preview_path": "previews/Fighting/Fighting D.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "685bd14332018d82fade8779afe4f2a4f4dddfa2b71fb02b4a34d6128cf60be4",
+      "preview_sha256": "e32e870b5a5059a98221ec1c1ac382e0ff3e6cf999725952d435dcc428106f8a",
+      "updated_at": "2026-05-23T22:32:53.471063+00:00"
+    },
+    {
+      "name": "CloseUp  B",
+      "category": "Rest",
+      "tags": [
+        "closeup",
+        "rest",
+        "standing"
+      ],
+      "json_path": "poses/Rest/CloseUp  B.json",
+      "preview_path": "previews/Rest/CloseUp  B.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "6134653701def9451c3288702a94087b9915d4145a5918db38613984f50df6ed",
+      "preview_sha256": "417a5556e41b78d7557760156863a13e30f078d6cf0ea4bdc574eba4d93f1281",
+      "updated_at": "2026-05-23T22:32:53.471063+00:00"
+    },
+    {
+      "name": "CloseUp  C",
+      "category": "Rest",
+      "tags": [
+        "closeup",
+        "rest",
+        "standing"
+      ],
+      "json_path": "poses/Rest/CloseUp  C.json",
+      "preview_path": "previews/Rest/CloseUp  C.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "0b363f9b5a3d9a301108af3c3bf5a995bec0cb31321a651037f48a4658e6efb5",
+      "preview_sha256": "ec2fb5ff61ab2ec045bb109960990d6b8674d4cd9401d6d0b2e1d29300d38c93",
+      "updated_at": "2026-05-23T22:32:53.471063+00:00"
+    },
+    {
+      "name": "CloseUp  D",
+      "category": "Rest",
+      "tags": [
+        "closeup",
+        "rest",
+        "standing"
+      ],
+      "json_path": "poses/Rest/CloseUp  D.json",
+      "preview_path": "previews/Rest/CloseUp  D.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "f16163dd486a69075e1f30167a2dd5941bd3a3b5581aea887934a89da70c5004",
+      "preview_sha256": "d037832f98580ac2ef41efdf2af9d16a28129d373c3afbdd19b7b70ac1734c15",
+      "updated_at": "2026-05-23T22:32:53.471063+00:00"
+    },
+    {
+      "name": "CloseUp A",
+      "category": "Rest",
+      "tags": [
+        "closeup",
+        "rest",
+        "standing"
+      ],
+      "json_path": "poses/Rest/CloseUp A.json",
+      "preview_path": "previews/Rest/CloseUp A.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "6bd6046842e768e8bed6334d52a24dc0c1b7081cab528df7c5663c8182974f9e",
+      "preview_sha256": "284af155e81f975b8a0c695b4995f45cc042c1ba582bd1ea4afdae048dbf0a19",
+      "updated_at": "2026-05-23T22:32:53.471063+00:00"
+    },
+    {
+      "name": "Lying A",
+      "category": "Rest",
+      "tags": [
+        "calm",
+        "lying",
+        "rest"
+      ],
+      "json_path": "poses/Rest/Lying A.json",
+      "preview_path": "previews/Rest/Lying A.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "ea322aead4809b243b4567b54dcff5366c6a644bcee7430d8cc85d0421a5caa8",
+      "preview_sha256": "5f1404a1867b7793ce2168df2aa9f476d855090e212cf6757066371cc6704e60",
+      "updated_at": "2026-05-23T22:32:53.471063+00:00"
+    },
+    {
+      "name": "Lying B",
+      "category": "Rest",
+      "tags": [
+        "calm",
+        "lying",
+        "rest"
+      ],
+      "json_path": "poses/Rest/Lying B.json",
+      "preview_path": "previews/Rest/Lying B.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "c66dccf32e56e390b269297aee8fa885adae863ac1d557ac4a3437d85d07a663",
+      "preview_sha256": "8d32763cd13a14484b128fad878de5d54a2007cba274a4ab7b2bc61db4dfa8f0",
+      "updated_at": "2026-05-23T22:32:53.471063+00:00"
+    },
+    {
+      "name": "Lying C",
+      "category": "Rest",
+      "tags": [
+        "calm",
+        "lying",
+        "rest"
+      ],
+      "json_path": "poses/Rest/Lying C.json",
+      "preview_path": "previews/Rest/Lying C.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "47c8ffcf267b8cf0c61f4737d1a660917810188b74d80f0f1260f35a8bb8b5fa",
+      "preview_sha256": "f69e193125b9b734e2e837b811b3ef3b002f1275954af1b9e117d17b39fa33c7",
+      "updated_at": "2026-05-23T22:32:53.471063+00:00"
+    },
+    {
+      "name": "Lying D",
+      "category": "Rest",
+      "tags": [
+        "calm",
+        "lying",
+        "rest"
+      ],
+      "json_path": "poses/Rest/Lying D.json",
+      "preview_path": "previews/Rest/Lying D.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "117dae735d64f06ff5394ad8a9ab4b3d4bcbff4e511c735a7b3402a6c1f4bb09",
+      "preview_sha256": "e72f146f826e970ffed6399ec61f8d853ee109e374a779377c34c7c9e5fefaa3",
+      "updated_at": "2026-05-23T22:32:53.471063+00:00"
+    },
+    {
+      "name": "Standing A",
+      "category": "Standing",
+      "tags": [
+        "standing",
+        "rest",
+        "relaxed",
+        "posing"
+      ],
+      "json_path": "poses/Standing/Standing A.json",
+      "preview_path": "previews/Standing/Standing A.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "452263e6203f9489a89969bbca4f848bf6dfc0650489c405fcc45777ed9732dd",
+      "preview_sha256": "819d338d24c9f15fe35f49d895718ec152f132ca3b11ffac4d59a8c5fbcbcbc2",
+      "updated_at": "2026-05-23T22:32:53.471063+00:00"
+    },
+    {
+      "name": "Standing B",
+      "category": "Standing",
+      "tags": [
+        "standing",
+        "rest",
+        "relaxed",
+        "posing"
+      ],
+      "json_path": "poses/Standing/Standing B.json",
+      "preview_path": "previews/Standing/Standing B.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "d053d7cd9433eae173648191cedf00f6747d4b783d1ac3b73a97e0c10224bc3b",
+      "preview_sha256": "ec1970a7de0122e1ffe80ad25511fb5467e243e3d933c81161124c3a9051d85c",
+      "updated_at": "2026-05-23T22:32:53.471063+00:00"
+    },
+    {
+      "name": "Standing C",
+      "category": "Standing",
+      "tags": [
+        "standing",
+        "rest",
+        "relaxed",
+        "posing"
+      ],
+      "json_path": "poses/Standing/Standing C.json",
+      "preview_path": "previews/Standing/Standing C.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "3954ed502e0d1f7adb6a8d9991648afc05cb8337ca15490d46f7b0d601542d26",
+      "preview_sha256": "1e6404e8fd20a7de60c4d762f847113e7b1d6525dc79ccfeff17b76c13267a34",
+      "updated_at": "2026-05-23T22:32:53.471063+00:00"
+    },
+    {
+      "name": "Standing D",
+      "category": "Standing",
+      "tags": [
+        "standing",
+        "rest",
+        "relaxed",
+        "posing"
+      ],
+      "json_path": "poses/Standing/Standing D.json",
+      "preview_path": "previews/Standing/Standing D.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "c2eb81d7ef6ba37c629f22c2aef22a030bc18cfc67e8ce6353af33442795b437",
+      "preview_sha256": "f49b87f66bc13a88879250bf23f38c393ef44dd3379f4cb5616c4568364e026e",
+      "updated_at": "2026-05-23T22:32:53.471063+00:00"
+    }
+  ]
+}

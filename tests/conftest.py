@@ -34,6 +34,11 @@ os.environ["MEOW_ASSETS_DIR"] = str(TEST_OUT / "assets")
 #: 测试残留，没有一个是用户建的。
 os.environ["MEOW_TEMPLATES_DIR"] = str(TEST_OUT / "templates")
 
+#: **用户资料库同理**。提示词收藏 / 姿势库 / 界面偏好现在改写在磁盘上
+#: （用户明确要求 localStorage 一个字不留），测试若不隔离，跑一轮就在用户的
+#: 收藏列表和姿势库里多出一堆自己都不知道哪来的条目。
+os.environ["MEOW_LIBRARY_DIR"] = str(TEST_OUT / "library")
+
 from workflows import paths                                    # noqa: E402
 
 #: 资产根（测试期间指向 tests/_out/assets）
@@ -53,7 +58,8 @@ def _assert_isolated():
     """
     out = TEST_OUT.resolve()
     for name, p in (("MEOW_ASSETS_DIR", paths.ASSETS),
-                    ("MEOW_TEMPLATES_DIR", paths.TEMPLATES_DIR)):
+                    ("MEOW_TEMPLATES_DIR", paths.TEMPLATES_DIR),
+                    ("MEOW_LIBRARY_DIR", paths.LIBRARY_DIR)):
         assert out in Path(p).resolve().parents, (
             f"{name} 没有指向 tests/_out（实际 {p}）——测试会写脏用户的真实目录。"
             f"检查 conftest 里两个环境变量是否在 import workflows 之前设置。")

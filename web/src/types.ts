@@ -6,15 +6,31 @@ export type NodeKind =
   | 'poseclone' | 'spriteswap' | 'poseswap' | 'topixel' | 'poseedit'
   | 'outpaint' | 'outfit' | 'faceswap'
 
-/** 骨骼编辑器节点的一个关节：x/y 归一化 0~1，z 是前后深度（伪 3D） */
-export type Joint3 = { x: number; y: number; z: number }
+/**
+ * 3D 人偶编辑器（poseedit）节点的持久化状态。
+ *
+ * **存的是官方 PoseStudio 的 pose JSON，不是 18 个 2D 点**：同一组 2D 点反解
+ * 出来的三维骨骼旋转有无穷多种（肩膀朝里还是朝外，深度全靠猜），每次重开都
+ * 会差一点。官方 `getPose()` 给的是骨骼欧拉角 + IK effector + 极点，
+ * `setPose()` 能精确到弧度地还原。
+ */
+export type PoseStudioState = {
+  /** 官方 getPose() 的 JSON（不透明：格式归官网，我们不解析也不改） */
+  pose?: unknown
+  /** 导出机位（度）：0 正面 / 90 右侧 / 180 背面 / 270 左侧 */
+  yaw: number
+}
 
-/** 骨骼编辑器节点的状态（可持久化，重新打开还能继续编辑） */
-export type SkeletonState = {
-  points: Joint3[]
-  /** 方位角（度）：0 正面 / 90 右侧 / 180 背面 / 270 左侧 */
-  azimuth: number
-  preset: string
+/**
+ * 后端「从图片」提好的一次 2D 关节点。
+ *
+ * 只是**一次性投递**：节点编辑器收到后走官方转换器变成 3D 骨骼，之后真正存
+ * 档的是运动员后的 pose JSON。每次提取换一个新引用，组件据此判断"有新东西"。
+ */
+export type PoseImportRequest = {
+  points: (number[] | null)[]
+  /** 递增的时间戳，用来区分"又一次导入" */
+  tick: number
 }
 
 /** 角色迁移 / 序列帧替换：动作参考图的解释方式 */
@@ -264,15 +280,26 @@ export type GenNode = {
   charSources?: NodeCharSource[]
   image?: NodeImage
   /**
-   * 骨骼编辑器节点：**3D 人偶图**（白底灰人偶，官方 PoseStudio 渲染）。
+   * 人偶编辑器节点：导出的**白底灰 3D 人偶图**（官方 PoseStudio capture）。
    *
-   * VNCCS 的姿态 LoRA 是在这种图上训的，线框骨架不在它的分布里，姿态贴合
-   * 明显更弱。所以下游（角色迁移 / 序列帧替换 / 姿态序列）优先用这张，
-   * 没有才退回 `image`（线框骨架）。
+   * VNCCS 的姿态 LoRA 就是在这种图上训的；以前那张 OpenPose-18 线框骨架
+   * 不在它的分布里，姿态贴合明显更弱，所以现在只留人偶图这一个产物。
+   *
+   * 老工程里可能还留着这个字段（那时它指人偶图、image 是线框骨架），保留类型
+   * 是为了能干净地读回旧存档，新代码不再往里写。
    */
   mannequin?: NodeImage
-  /** 骨骼编辑器节点：关节坐标 + 方位角（导出过图时 image 上还有产物路径） */
-  skeleton?: SkeletonState
+  /** 3D 人偶编辑器的姿势与机位（官方 pose JSON + yaw） */
+  pose?: unknown
+  /** 导出机位（度）。和 pose 一块存，重开时能还原当时选的朝向 */
+  yaw?: number
+  /** 「从图片」提好的 2D 关节点，投递给 iframe 用（收完就被 pose 取代） */
+  poseImport?: PoseImportRequest | null
+  /**
+   * 外部（姿势库）套过来的姿势。**带目标 nodeId**：一次只给一个节点，
+   * 别的人偶节点必须忽略它。`tick` 变化才触发应用（避免重复套用）。
+   */
+  poseApply?: { nodeId: string; pose: unknown; yaw: number; tick: number } | null
   job?: JobState
 }
 
@@ -290,5 +317,23 @@ export type FavoritePrompt = {
    * 旧存档没有这个字段，读回来按空串处理。
    */
   negative?: string
+  at: number
+}
+
+/**
+ * 姿势库里的一条。
+ *
+ * 用户的**复用资产**，不是项目内容：同一个「挥剑姿势」要在十个角色上用，
+ * 存进项目里等于每个工程复制一份。所以跟提示词收藏一样放 localStorage。
+ */
+export type PosePreset = {
+  id: string
+  name: string
+  /** 官方 PoseStudio 的 pose JSON（不透明） */
+  pose: unknown
+  /** 存下当时的导出机位：某些姿势换个朝向就不是那个动作了 */
+  yaw: number
+  /** 缩略图（dataURL，可选）。没有也能存，只是浏览面板里没有预览 */
+  preview?: string
   at: number
 }

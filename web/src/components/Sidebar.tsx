@@ -33,6 +33,8 @@ type Props = {
   canApply: boolean
   onApplyFav: (item: FavoritePrompt) => void
   onRemoveFav: (id: string) => void
+  /** 打开资料库浏览面板（提示词 / 姿势两个 tab） */
+  onOpenLibrary: (tab: 'prompt' | 'pose') => void
   matteBackend: string
   onMatteBackend: (v: string) => void
   scanning?: boolean
@@ -141,7 +143,7 @@ function ProjectRow({
  * 占满、互相挤压。改成一条可收起的侧栏后，画布的可视区域稳定了，也能放下设置。
  */
 export default function Sidebar({
-  favs, onAddNode, canApply, onApplyFav, onRemoveFav,
+  favs, onAddNode, canApply, onApplyFav, onRemoveFav, onOpenLibrary,
   matteBackend, onMatteBackend,
   loras, activeLoras, onLorasChange, fastMode, onFastMode,
   projects, currentProject, onSwitchProject, onCreateProject, onRenameProject, onDeleteProject,
@@ -332,11 +334,12 @@ export default function Sidebar({
               e.dataTransfer.setData('application/x-node-type', 'poseedit')
               e.dataTransfer.effectAllowed = 'copy'
             }}
-            title="骨骼编辑：拖关节摆姿势，方位角换正面/侧面/背面，导出 OpenPose 骨架图"
+            title="人偶姿势：官方 VNCCS PoseStudio 的 3D 人偶，拖关节摆姿势、
+选朝向，导出白底灰人偶图（姿态 LoRA 的训练分布）"
           >
             <span className="rail-item-main">
-              <b>骨骼编辑</b>
-              <em>拖关节 · 换视觉方向</em>
+              <b>人偶姿势</b>
+              <em>3D 人偶 · 摆姿势导出</em>
             </span>
             <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('poseedit')}>+</button>
           </div>
@@ -483,13 +486,23 @@ export default function Sidebar({
           </p>
         </Section>
 
-        <Section icon="☆" title="提示词收藏" count={favs.length}>
+        <Section icon="☆" title="资料库" count={favs.length}>
+          <div className="rail-lib">
+            <button className="rail-item-main" onClick={() => onOpenLibrary('prompt')}>
+              提示词收藏 <b>{favs.length}</b>
+              <em>浏览 / 搜索 / 填入选中节点</em>
+            </button>
+            <button className="rail-item-main" onClick={() => onOpenLibrary('pose')}>
+              姿势库
+              <em>复用官方 3D 人偶姿势</em>
+            </button>
+          </div>
           {favs.length === 0 ? (
             <p className="rail-tip">
-              在节点的提示词框点 <b>☆</b> 收藏。收藏后点这里可填回选中的节点。
+              在节点的提示词框点 <b>☆</b> 收藏。收藏后可以在这里填回选中的节点。
             </p>
           ) : (
-            favs.map((f) => (
+            favs.slice(0, 4).map((f) => (
               <div className="rail-item" key={f.id}>
                 <button
                   className="rail-item-main"
@@ -509,6 +522,11 @@ export default function Sidebar({
                 </button>
               </div>
             ))
+          )}
+          {favs.length > 4 && (
+            <button className="rail-new" onClick={() => onOpenLibrary('prompt')}>
+              看全部 {favs.length} 条 →
+            </button>
           )}
         </Section>
 

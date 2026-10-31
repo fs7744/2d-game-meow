@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ModelCaps, PoseDir } from '../api'
 import { fileNameOf } from '../fileName'
-import type { GenNode, ModelRecommend, Viewport } from '../types'
+import type { GenNode, ModelRecommend, PosePreset, Viewport } from '../types'
 import GenNodeCard, { NODE_W, PORT_CHAR_Y, PORT_SRC_Y, type NodePatch } from '../nodes/GenNodeCard'
 
 /** 连线指向节点的哪个输入：source（源图/动作参考）还是 charSource（角色图） */
@@ -40,12 +40,18 @@ type Props = {
   onToggleFavorite: (id: string) => void
   onDropType: (type: string, world: { x: number; y: number }) => void
   onSpawnImg2Img: (id: string) => void
-  /** 骨骼编辑器导出 PNG（Blob），由 App 上传并挂到节点上 */
+  /** 人偶编辑器导出的白底灰人偶 PNG（Blob），由 App 上传并挂到节点上 */
   onExportSkeleton?: (id: string, blob: Blob) => void
-  /** 骨骼编辑器「编辑 3D 人偶」：打开官方 PoseStudio 编辑会话 */
-  onExportMannequin?: (id: string) => void
-  /** 骨骼编辑器「从图片提取」：上传 + DWPose 提关节 */
+  /** 人偶编辑器「从图片」：上传 + DWPose 提关节，点投递给编辑器转 3D 骨骼 */
   onImportPose?: (id: string, file: File) => void | Promise<void>
+  /** 姿势库（跨节点共享，落在服务端磁盘） */
+  poses?: PosePreset[]
+  /** 外部（姿势库）套过来的姿势请求，带目标 nodeId；tick 变化触发应用 */
+  poseApply?: { nodeId: string; pose: unknown; yaw: number; tick: number } | null
+  /** 把当前姿势存进库（带缩略图） */
+  onSavePose?: (name: string, pose: unknown, yaw: number, preview: string) => void
+  /** 打开资料库的姿势页 */
+  onOpenPoseLibrary?: () => void
   onDropFiles: (files: File[], world: { x: number; y: number }, targetId?: string) => void
   /** 连线落点：field 决定接到源图还是角色图 */
   onConnect: (from: string, to: string, field: LinkField) => void
@@ -82,8 +88,11 @@ export default function Canvas({
   onDropType,
   onSpawnImg2Img,
   onExportSkeleton,
-  onExportMannequin,
   onImportPose,
+  poses,
+  poseApply,
+  onSavePose,
+  onOpenPoseLibrary,
   onDropFiles,
   onConnect,
   onDisconnect,
@@ -203,7 +212,7 @@ export default function Canvas({
       || ((n.kind === 'image' || n.kind === 'poseedit') && n.image?.path)
       || referencedIds.has(n.id))
     .map((n) => {
-      const kindLabel = n.kind === 'image' ? '图片' : n.kind === 'poseedit' ? '骨骼'
+      const kindLabel = n.kind === 'image' ? '图片' : n.kind === 'poseedit' ? '人偶姿势'
         : n.kind === 'outpaint' ? '扩图' : n.kind === 'outfit' ? '换装'
           : n.kind === 'faceswap' ? '换脸' : n.kind === 'gen' ? '图生成' : '图'
       const name = (n.kind === 'image' || n.kind === 'poseedit')
@@ -498,8 +507,12 @@ export default function Canvas({
             }
             onSpawnImg2Img={() => onSpawnImg2Img(n.id)}
             onExportSkeleton={(blob) => onExportSkeleton?.(n.id, blob)}
-            onExportMannequin={() => onExportMannequin?.(n.id)}
             onImportPose={(file) => onImportPose?.(n.id, file)}
+            poses={poses}
+            // 带着 nodeId 往下传：只有目标节点会套用，别的节点必须忽略
+            poseApply={poseApply}
+            onSavePose={onSavePose}
+            onOpenPoseLibrary={onOpenPoseLibrary}
             sourceNode={nodes.find((x) => x.id === n.source?.nodeId)}
             sourceOptions={sourceOptions}
             bgOptions={bgOptions}

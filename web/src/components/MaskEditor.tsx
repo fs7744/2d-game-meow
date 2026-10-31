@@ -15,6 +15,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { saveMask } from '../api'
+import { PREF_MASK_ALPHA, PREF_MASK_COLOR, getPref, setPref } from '../store/prefs'
 
 type Tool = 'brush' | 'eraser' | 'rect'
 
@@ -69,14 +70,14 @@ export default function MaskEditor({
 }: Props) {
   const [tool, setTool] = useState<Tool>('brush')
   const [size, setSize] = useState(24)
-  const [overlayHex, setOverlayHex] = useState(() => {
-    try { return localStorage.getItem('meow.maskColor') || '#ff3b6b' } catch { return '#ff3b6b' }
-  })
+  // 蒙版画笔的颜色/透明度是**跨会话记住的偏好**，存在服务端资料库里
+  // （localStorage 一个字不留 —— 用户明确要求）。
+  const [overlayHex, setOverlayHex] = useState(
+    () => getPref<string>(PREF_MASK_COLOR, '#ff3b6b'))
   const [overlayAlpha, setOverlayAlpha] = useState(() => {
-    try {
-      const v = Number(localStorage.getItem('meow.maskAlpha'))
-      return Number.isFinite(v) && v >= OVERLAY_ALPHA_MIN && v <= 1 ? v : OVERLAY_ALPHA_DEFAULT
-    } catch { return OVERLAY_ALPHA_DEFAULT }
+    const v = getPref<number>(PREF_MASK_ALPHA, OVERLAY_ALPHA_DEFAULT)
+    return Number.isFinite(v) && v >= OVERLAY_ALPHA_MIN && v <= 1
+      ? v : OVERLAY_ALPHA_DEFAULT
   })
   const [peek, setPeek] = useState(false)
   const [zoom, setZoom] = useState(1)
@@ -100,12 +101,8 @@ export default function MaskEditor({
 
   const overlaySolid = useMemo(() => tint(overlayHex, 1), [overlayHex])
 
-  useEffect(() => {
-    try { localStorage.setItem('meow.maskColor', overlayHex) } catch { /* 隐私模式忽略 */ }
-  }, [overlayHex])
-  useEffect(() => {
-    try { localStorage.setItem('meow.maskAlpha', String(overlayAlpha)) } catch { /* 同上 */ }
-  }, [overlayAlpha])
+  useEffect(() => { setPref(PREF_MASK_COLOR, overlayHex) }, [overlayHex])
+  useEffect(() => { setPref(PREF_MASK_ALPHA, overlayAlpha) }, [overlayAlpha])
 
   const ensureBase = useCallback((w: number, h: number) => {
     let b = baseRef.current

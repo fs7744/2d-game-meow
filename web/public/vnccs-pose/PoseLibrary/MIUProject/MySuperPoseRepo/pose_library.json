@@ -1,0 +1,187 @@
+{
+  "schema_version": 1,
+  "title": "VNCCS Pose Library",
+  "repo_id": "MIUProject/MySuperPoseRepo",
+  "updated_at": "2026-05-20T20:53:01.748873+00:00",
+  "poses": [
+    {
+      "name": "CloseUp  B",
+      "category": "Rest",
+      "tags": [
+        "closeup",
+        "rest",
+        "standing"
+      ],
+      "json_path": "poses/Rest/CloseUp  B.json",
+      "preview_path": "previews/Rest/CloseUp  B.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "c92330425ef0c3b295813b118fc957e2ce42bfae1480e26c65e07681d6b9ab49",
+      "preview_sha256": "16c637582beab53c40a42f17c5dc80f40baf4dd0decb2517a26c953dec4ab6b8",
+      "updated_at": "2026-05-20T20:53:01.748873+00:00"
+    },
+    {
+      "name": "CloseUp  C",
+      "category": "Rest",
+      "tags": [
+        "closeup",
+        "rest",
+        "standing"
+      ],
+      "json_path": "poses/Rest/CloseUp  C.json",
+      "preview_path": "previews/Rest/CloseUp  C.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "f5068b99a8d5c3845c1aa3692516950f5130e3ec4f1cc79b3907ea0f7d0c41a4",
+      "preview_sha256": "e5bb04a18ead9a48788d8443dcbc2826af7ab9d6764e925339decec48429669c",
+      "updated_at": "2026-05-20T20:53:01.748873+00:00"
+    },
+    {
+      "name": "CloseUp  D",
+      "category": "Rest",
+      "tags": [
+        "closeup",
+        "rest",
+        "standing"
+      ],
+      "json_path": "poses/Rest/CloseUp  D.json",
+      "preview_path": "previews/Rest/CloseUp  D.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "5668be04956b401097dbce94357cb3021425282dfd1b7ede07b69664b0b2c5ca",
+      "preview_sha256": "fea607a60d44121a318c2c7f5d1ca133409dfd0493eac3afd5d2345b28887224",
+      "updated_at": "2026-05-20T20:53:01.748873+00:00"
+    },
+    {
+      "name": "CloseUp A",
+      "category": "Rest",
+      "tags": [
+        "closeup",
+        "rest",
+        "standing"
+      ],
+      "json_path": "poses/Rest/CloseUp A.json",
+      "preview_path": "previews/Rest/CloseUp A.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "3e6d9d0ab7af14fcdbe15e362655cd7adbb4d8d80e93d0b0eca165ced245ebbf",
+      "preview_sha256": "f1733cf27cab2cd0006be7e83469488fb1380b02d27ae6cbed6aa15946b09f50",
+      "updated_at": "2026-05-20T20:53:01.748873+00:00"
+    },
+    {
+      "name": "Sit on chair A",
+      "category": "Rest",
+      "tags": [
+        "calm",
+        "sit",
+        "rest"
+      ],
+      "json_path": "poses/Rest/Sit on chair A.json",
+      "preview_path": "previews/Rest/Sit on chair A.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "2ea494570542feb04259c8f2a3a0259cf5ebfd0d92aa6b5b18d1b7e049fb98ba",
+      "preview_sha256": "c4780357e053f277a948d66362381aa81d0fa3321266ea051867026f9b51d9a6",
+      "updated_at": "2026-05-20T20:53:01.748873+00:00"
+    },
+    {
+      "name": "Sit on chair B",
+      "category": "Rest",
+      "tags": [
+        "calm",
+        "sit",
+        "rest"
+      ],
+      "json_path": "poses/Rest/Sit on chair B.json",
+      "preview_path": "previews/Rest/Sit on chair B.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "b803d6131bcccbcd697e16e4d9beed7a741180d8eba4d0654f1a59a18572c184",
+      "preview_sha256": "295d07181c1c7ac541c1281fb81498239ec28b5591f85dc230a79d6c277526b8",
+      "updated_at": "2026-05-20T20:53:01.748873+00:00"
+    },
+    {
+      "name": "Sit on chair D",
+      "category": "Rest",
+      "tags": [
+        "calm",
+        "sit",
+        "rest"
+      ],
+      "json_path": "poses/Rest/Sit on chair D.json",
+      "preview_path": "previews/Rest/Sit on chair D.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "cd1e701a5b26260e15ef09fe7049dcf70a1e2f97703f80f9e07b9af6b0084936",
+      "preview_sha256": "69bf09b825048773ed462bede9f08debb95d24081682f32b31c0b000e7ac4348",
+      "updated_at": "2026-05-20T20:53:01.748873+00:00"
+    },
+    {
+      "name": "Sit on chair С",
+      "category": "Rest",
+      "tags": [
+        "calm",
+        "sit",
+        "rest"
+      ],
+      "json_path": "poses/Rest/Sit on chair С.json",
+      "preview_path": "previews/Rest/Sit on chair С.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "c1618292952cde1f9c9445165e5800023ddd3e634cc99048beaa799b46502569",
+      "preview_sha256": "70e715dd91d80588838abc015a2dc1381f52f16d31aefd80c8b8f4bfb5447f9b",
+      "updated_at": "2026-05-20T20:53:01.748873+00:00"
+    },
+    {
+      "name": "Standing A",
+      "category": "Rest",
+      "tags": [
+        "standing",
+        "rest",
+        "relaxed",
+        "posing"
+      ],
+      "json_path": "poses/Rest/Standing A.json",
+      "preview_path": "previews/Rest/Standing A.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "0c8e7bb340a8eff21c8d96ed42d6a0657a867e1995dd4ce6e53f43b005da5035",
+      "preview_sha256": "100ba62ef38a6b3aff86d3f8fe777c4830fab8d1e3b61e084ac26f2c140f9c83",
+      "updated_at": "2026-05-20T20:53:01.748873+00:00"
+    },
+    {
+      "name": "Standing B",
+      "category": "Rest",
+      "tags": [
+        "standing",
+        "rest",
+        "relaxed",
+        "posing"
+      ],
+      "json_path": "poses/Rest/Standing B.json",
+      "preview_path": "previews/Rest/Standing B.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "90f609cca3ddc97103052e5ebeaa407276859a305e56f9d5472f27a05ed6c6e8",
+      "preview_sha256": "d8621b4871b80aebe02522ec57d750c0ef80d18ae576e0ccf8b5119929a0ed11",
+      "updated_at": "2026-05-20T20:53:01.748873+00:00"
+    },
+    {
+      "name": "Standing C",
+      "category": "Rest",
+      "tags": [],
+      "json_path": "poses/Rest/Standing C.json",
+      "preview_path": "previews/Rest/Standing C.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "8eef9168c47ebf3b5d62135ed16da474d2a8b25e427a51cef3f6978b52dd9ea9",
+      "preview_sha256": "8ae69b96cc7c7cf3d84d51cd786eb13842266db9a92d5d1da959276ea0a6baec",
+      "updated_at": "2026-05-20T20:53:01.748873+00:00"
+    },
+    {
+      "name": "Standing D",
+      "category": "Rest",
+      "tags": [
+        "standing",
+        "rest",
+        "relaxed",
+        "posing"
+      ],
+      "json_path": "poses/Rest/Standing D.json",
+      "preview_path": "previews/Rest/Standing D.webp",
+      "preview_type": "image/webp",
+      "json_sha256": "c5ff1ae678457fae555a6acde836af3997e6ef37357adda1db86b4b124633c66",
+      "preview_sha256": "d3d5b213583d8f93b96406cc8bbc05c3e2de9c1c69b42bff2716c91845655f8e",
+      "updated_at": "2026-05-20T20:53:01.748873+00:00"
+    }
+  ]
+}
