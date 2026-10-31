@@ -2543,6 +2543,50 @@ function check(name, cond, extra = '') {
     runBtn?.disabled === false,
     runBtn?.disabled ? `仍然禁用（title=${runBtn?.title}）` : 'ok')
 
+  // 7. 朝向：骨架图分不清角度，必须把方向词写进指令（实测这是唯一有效的线索）
+  const viewSel = [...pcNode.querySelectorAll('label.bg-mode')]
+    .find((l) => (l.textContent || '').trim().startsWith('朝向'))?.querySelector('select')
+  check('节点上有「朝向」下拉', !!viewSel,
+    viewSel ? [...viewSel.options].map((o) => o.value).join(',') : '（没有）')
+  check('朝向默认「自动」并带出骨骼方位角',
+    viewSel?.value === 'auto' && (viewSel.options[0]?.textContent || '').includes('骨骼'),
+    viewSel?.options?.[0]?.textContent)
+
+  // 自动：上游是骨骼编辑器（默认方位角 0°）→ 应带 front view
+  const genCalls = () => calls.filter((c) => c.url.endsWith('/generate'))
+  const submitAndRead = async () => {
+    // 上一次提交后节点会短暂处于 running（按钮禁用），必须等**新的一条**请求，
+    // 否则读到的是上一发的 payload——这里踩过一次，断言会假阳性。
+    const before = genCalls().length
+    for (let i = 0; i < 40; i++) {
+      if (!runBtn?.disabled) break
+      await new Promise((r) => setTimeout(r, 25))
+    }
+    runBtn?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+    for (let i = 0; i < 60 && genCalls().length === before; i++) {
+      await new Promise((r) => setTimeout(r, 25))
+    }
+    const last = genCalls().pop()
+    return last ? JSON.parse(last.body) : { params: {} }
+  }
+
+  let body = await submitAndRead()
+  check('「自动」用骨骼编辑器的方位角（front view）',
+    String(body.params.prompt || '').includes('viewing direction: front view'),
+    body.params.prompt)
+
+  // 手动选「右侧面」→ 必须换成 side view, facing right
+  Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value')
+    .set.call(viewSel, 'side_r')
+  viewSel?.dispatchEvent(new win.Event('change', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 150))
+  check('朝向下拉切到右侧面', viewSel?.value === 'side_r', viewSel?.value)
+
+  body = await submitAndRead()
+  check('手动选「右侧面」写进指令（side view, facing right）',
+    String(body.params.prompt || '').includes('viewing direction: side view, facing right'),
+    body.params.prompt)
+
   check('骨骼→迁移场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }

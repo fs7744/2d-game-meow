@@ -359,7 +359,8 @@ export default function SkeletonEditor({
 }: Props) {
   const [dragIdx, setDragIdx] = useState<number | null>(null)
   const [selected, setSelected] = useState<number | null>(null)
-  // 显示层：人形（3D 感）/ 线框 / 叠加。**导出永远是线框骨架**。
+  // 显示层：人形（3D 感）/ 线框 / 叠加。**导出永远是线框骨架**
+  // （"人偶渲染带朝向"实测无效，见 types.ts 的 PcView 注释）。
   const [view, setView] = useState<'human' | 'wire' | 'both'>('both')
   const svgRef = useRef<SVGSVGElement | null>(null)
   const fileRef = useRef<HTMLInputElement | null>(null)

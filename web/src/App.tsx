@@ -148,21 +148,34 @@ let seq = 0
 const newId = () => `n${Date.now().toString(36)}${(seq++).toString(36)}`
 
 /**
- * 骨骼编辑节点的方位角 → 方向提示词。
+ * 角色的朝向短语。**这是模型唯一可靠的朝向线索。**
  *
- * 骨架图本身已经带上朝向信息（肩膀叠合、鼻子偏一侧），但 Qwen 有时会把
- * "侧面骨架"仍理解成正面人物。方位角是编辑器里的确定值，直接补一句方向词
- * 是零成本的双保险——不改用户写的 prompt，只在提交时附加。
+ * 实测（同 seed、同角色、VNCCS、白底骨架）：
+ *   · 90° 侧面骨架 + 无方位词 → 出**正面**（错）
+ *   · 同一张图 + `side view, facing right` → 出**右侧面**（对）
+ *   · 换成"3D 人偶"渲染当条件图（VNCCS 的做法）→ 0°/90° 都被还原成正面（错）
+ *
+ * 也就是说 VNCCS 那种"角度长在图里"的路线，在我们的渲染风格下不成立
+ * （那个 LoRA 是在他们自己的 PoseStudio 渲染上训的）。所以角度做成**显式输入**：
+ * 骨骼编辑器的方位角，或用户自己在下拉里选。
  */
+const PC_VIEW_PHRASES = {
+  front: 'front view, facing the viewer',
+  q34front_r: 'three-quarter front view from the right',
+  side_r: 'side view, facing right',
+  q34back_r: 'three-quarter rear view from the right',
+  back: 'back view, seen from behind',
+  q34back_l: 'three-quarter rear view from the left',
+  side_l: 'side view, facing left',
+  q34front_l: 'three-quarter front view from the left',
+} as const
+
+/** 按 45° 排列（0/45/…/315），与方位角一一对应 */
 const VIEW_PHRASES = [
-  'front view, facing the viewer',
-  'three-quarter front view from the right',
-  'side view, facing right',
-  'three-quarter rear view from the right',
-  'back view, seen from behind',
-  'three-quarter rear view from the left',
-  'side view, facing left',
-  'three-quarter front view from the left',
+  PC_VIEW_PHRASES.front, PC_VIEW_PHRASES.q34front_r,
+  PC_VIEW_PHRASES.side_r, PC_VIEW_PHRASES.q34back_r,
+  PC_VIEW_PHRASES.back, PC_VIEW_PHRASES.q34back_l,
+  PC_VIEW_PHRASES.side_l, PC_VIEW_PHRASES.q34front_l,
 ]
 function viewPhrase(az: number): string {
   const a = ((Math.round(az) % 360) + 360) % 360
@@ -1160,18 +1173,23 @@ export default function App() {
           return
         }
         // 动作参考来自「骨骼编辑」节点时：它导出的就是 OpenPose 骨架图，
-        // 必须走 skeleton 模式（auto 会因检不到人体降级成剪影，把骨架毁掉），
-        // 并把编辑器的方位角补成方向词，让「换视觉方向」稳定生效。
+        // 必须走 skeleton 模式（auto 会因检不到人体降级成剪影，把骨架毁掉）。
+        //
+        // 朝向：骨架图本身分不清角度（正/背面在 2D 投影里互为镜像、90° 收成一条线），
+        // 所以必须**显式**补一句方向词。优先级：用户在下拉里选的 > 编辑器的方位角。
         const upNode = node.source?.nodeId
           ? nodesRef.current.find((x) => x.id === node.source!.nodeId)
           : undefined
         const fromEditor = upNode?.kind === 'poseedit'
         const pcParams: GenParams = { ...node.params }
-        if (fromEditor) {
-          pcParams.pcRefMode = 'skeleton'
+        if (fromEditor) pcParams.pcRefMode = 'skeleton'
+        const view = node.params.pcView ?? 'auto'
+        const phrase = view === 'auto'
+          ? (fromEditor ? viewPhrase(upNode?.skeleton?.azimuth ?? 0) : '')
+          : PC_VIEW_PHRASES[view]
+        if (phrase) {
           pcParams.prompt = [node.params.prompt.trim(),
-            `viewing direction: ${viewPhrase(upNode?.skeleton?.azimuth ?? 0)}`]
-            .filter(Boolean).join('. ')
+            `viewing direction: ${phrase}`].filter(Boolean).join('. ')
         }
         // 两条引擎：
         //   wpc    —— 角色图 + 姿态条件图，自写指令（旧路线，姿态硬、外观容易飘）

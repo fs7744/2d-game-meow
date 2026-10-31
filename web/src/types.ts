@@ -23,6 +23,14 @@ export type BgTone = 'white' | 'dark'
 
 export type RefMode = 'auto' | 'pose' | 'outline' | 'skeleton'
 
+/**
+ * 角色迁移的朝向。`auto` 跟着上游骨骼编辑器的方位角；其余 8 个是固定方向，
+ * 写进指令（英文短语，见 App 的 VIEW_PHRASES）。
+ */
+export type PcView =
+  | 'auto' | 'front' | 'q34front_r' | 'side_r' | 'q34back_r'
+  | 'back' | 'q34back_l' | 'side_l' | 'q34front_l'
+
 /** 序列帧替换：怎么处理角色 */
 export type SwapMode = 'generate' | 'recolor'
 
@@ -135,6 +143,19 @@ export type GenParams = {
    *             （画风不变、头不丢、不多腿），代价是姿态精度略低。
    */
   pcEngine?: 'wpc' | 'wvnccs'
+  /**
+   * 角色迁移：人物的**朝向**（写进指令，是模型唯一可靠的朝向线索）。
+   *
+   * 为什么必须有这个输入：骨架图本身分不清角度——正/背面在 2D 投影里互为镜像，
+   * 90° 侧面又收成一条竖线。实测（同 seed、同角色、VNCCS）：
+   *   白底骨架 90° + 无方位词 → 出**正面**（错）；
+   *   同一张图 + `side view, facing right` → 出**右侧面**（对）。
+   * 也试过 VNCCS 的"人偶渲染"路线（3D 人形 / 人偶+骨架叠加），两种都被还原成
+   * 正面——我们的渲染不是那个 LoRA 的训练格式，它读不出来。
+   * 所以角度按 VNCCS 的本意做成**显式输入**，而不是让模型猜。
+   * `auto` = 上游是骨骼编辑器时用它的方位角。
+   */
+  pcView?: PcView
   twoStage: boolean       // 姿态序列：两阶段（先出姿态草图再换皮），动作更准但慢一倍
   bgTone: BgTone          // 逐帧生成用的底色：white=白底（默认）/ dark=深色底（白毛角色用）
   ssCols: number          // 序列帧替换：精灵图列数（0 = 自动检测）

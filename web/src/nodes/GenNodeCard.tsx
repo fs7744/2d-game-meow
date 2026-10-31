@@ -491,6 +491,10 @@ export default function GenNodeCard({
   const sourceThumb = sourceNode?.image?.url ?? sourceNode?.job?.url
   // 角色迁移的角色图缩略图（角色图节点或本地图）
   const charThumb = charThumbOf?.(node.charSource?.nodeId)
+  // 上游是骨骼编辑器时，它的方位角就是默认朝向（"朝向"下拉里显示出来）
+  const upAzimuth = sourceNode?.kind === 'poseedit'
+    ? (sourceNode.skeleton?.azimuth ?? 0)
+    : undefined
   // 可全屏预览的图（图片节点的本地图 / 生成节点的产物）
   const previewUrl = isImg ? node.image?.url : job?.url
   const previewName = previewUrl
@@ -1604,6 +1608,33 @@ export default function GenNodeCard({
               onChange={(e) => setParam('prompt', e.target.value)}
             />
           </div>
+
+          {/* 朝向：**必选输入，不是可选项**。
+              骨架图本身分不清角度——正/背面在 2D 投影里互为镜像，90° 侧面收成一条
+              竖线，实测同一张 90° 骨架不加方位词会被画成正面、加一句 side view 才是
+              侧面。所以这里把它做成显式选择，默认跟骨骼编辑器的方位角。 */}
+          <label className="bg-mode" title={'人物的朝向。骨架图本身看不出角度'
+            + '（正/背面互为镜像、侧面收成一条线），必须明确告诉模型。\n'
+            + '「自动」= 跟随上游骨骼编辑器里选的方位角；上游不是骨骼编辑器时'
+            + '自动等于「不指定」，模型会按正面画。'}>
+            朝向
+            <select
+              value={p.pcView ?? 'auto'}
+              onChange={(e) => setParam('pcView', e.target.value as typeof p.pcView)}
+            >
+              <option value="auto">
+                自动{upAzimuth !== undefined ? `（骨骼 ${upAzimuth}°）` : ''}
+              </option>
+              <option value="front">正面</option>
+              <option value="q34front_r">右前 3/4</option>
+              <option value="side_r">右侧面</option>
+              <option value="q34back_r">右后 3/4</option>
+              <option value="back">背面</option>
+              <option value="q34back_l">左后 3/4</option>
+              <option value="side_l">左侧面</option>
+              <option value="q34front_l">左前 3/4</option>
+            </select>
+          </label>
           <details className="adv">
             <summary>更多设置</summary>
             {/* 「姿态」「身份」两根强度滑块是 SD 那条路（ControlNet / IP-Adapter）

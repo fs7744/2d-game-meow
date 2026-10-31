@@ -1777,7 +1777,12 @@ def _qwen_vnccs(eng: Engine, *, pose_image: str | Path,
     实测（768×1152）：画风与参考图一致、服装发型全保住、姿态能跟住。
     代价是姿态精度不如 ControlNet 的硬约束。
     """
-    pose = Image.open(pose_image).convert("RGB")
+    # **骨架必须转白底**（和序列帧替换 / 姿态序列两条路一致）。
+    # 漏这一步的后果是「朝向反了」：黑底骨架贴进白画布后中间仍是一块黑色矩形，
+    # 模型把它读成「一个黑色剪影 / 背对镜头的人」，于是把角色画成**背影**。
+    # 用户报的「纯骨架图分不清角度」里有一半是这个——不是它猜错角度，是我们把
+    # 一张"背光剪影"塞给了它。判据与理由见 `_vnccs_skeleton`。
+    pose = _vnccs_skeleton(Image.open(pose_image).convert("RGB"))
     char_paths = _ref_image_list(char_image, char_images)
     chars = [Image.open(p).convert("RGB") for p in char_paths]
     w, h = _vnccs_canvas_size(pose, width, height)

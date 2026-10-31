@@ -219,6 +219,13 @@ LoRA 是 `MIUProject/VNCCS_PoseStudio_QI2.1`（152MB，ComfyUI 格式，
 - **透明底可用**：实测主体占比 16.6%、半透明 2.1%、背景 83% 全透
   （`tools/verify_vnccs_alpha.py`）。之前"VNCCS 不能配透明底"是错的，
   那是 ControlNet 路线的结论连坐过来的
+- **朝向必须写进指令**（2026-10-31 实测）。骨架图分不清角度：白底骨架 90° 不加
+  方位词会被画成**正面**，加一句 `side view, facing right` 就是标准右侧面。
+  也试过 VNCCS 那种"3D 人偶渲染带朝向"，0°/90° 都被还原成正面——那个 LoRA 只在
+  他们自己的 PoseStudio 渲染上训过，认不出我们画的人偶。所以节点上多了「朝向」
+  下拉（自动=跟骨骼编辑器的方位角 / 正面 / 8 个方向），提交时拼成
+  `viewing direction: …`。同时修掉一个真 bug：角色迁移这条**漏了骨架转白底**，
+  黑底骨架会被读成"背对镜头"，出来是背影（另两条 VNCCS 路线早就转了）。
 
 
 ### 全项目 review（2026-10-31 上午）
@@ -856,7 +863,7 @@ start.bat                   # Windows 双击或命令行
 cd web && npm ci && npm run build     # 构建
 cd .. && python app.py                # FastAPI 同时托管 dist 与 API → http://127.0.0.1:8000
 cd web && npm run dev                 # 或开发模式（:5173，代理到 8000）
-npm run smoke                         # 无浏览器渲染冒烟（jsdom，361 项断言）
+npm run smoke                         # 无浏览器渲染冒烟（jsdom，366 项断言）
 ```
 
 > `start.bat` 刻意保持**纯 ASCII**：cmd.exe 按 OEM 代码页解析 .bat，中文注释会切断命令行
