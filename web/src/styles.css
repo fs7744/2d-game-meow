@@ -772,10 +772,7 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
    太小等于没写。10.5px 是「不挤爆 300px 卡片」的下限。 */
 .src-note { font-size: 10.5px; line-height: 1.55; color: var(--muted-2); }
 
-.lang-hint.bad {
-  color: #ffb3c4; border-left-color: var(--pink);
-  background: rgba(255, 51, 102, 0.08); padding: 5px 6px;
-}
+/* `.lang-hint.bad`（中文转红警告）已删：Qwen 支持中文，那个状态不存在了。 */
 
 /* ---------------- LoRA 选择 ---------------- */
 .lora-box {

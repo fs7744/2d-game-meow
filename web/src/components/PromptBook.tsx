@@ -17,7 +17,7 @@ export default function PromptBook({ items, canApply, onApply, onRemove }: Props
 
       {items.length === 0 ? (
         <div className="book-empty">
-          在节点的提示词框右上角点 <b>☆</b> 收藏常用提示词（英文）。
+          在节点的提示词框右上角点 <b>☆</b> 收藏常用提示词（中英文都行）。
         </div>
       ) : (
         <div className="book-list">

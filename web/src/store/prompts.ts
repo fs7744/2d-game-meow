@@ -49,7 +49,13 @@ export function hasPrompt(list: FavoritePrompt[], text: string): boolean {
   return !!t && list.some((x) => x.text === t)
 }
 
-/** 含中日韩字符 → SD1.5 的 CLIP 词表里没有，会被拆成字节级乱 token。 */
+/**
+ * 含中日韩字符。
+ *
+ * **只用来换提示文案，不是用来告警的**：SD 时代（CLIP 词表没有中文）它会把
+ * 输入框转红警告「会被拆成乱 token」；现在底模是 Qwen-Image（文本编码器
+ * Qwen3-VL），中文可以直接写，那个结论已随 SD 管线作废。
+ */
 export function hasCJK(text: string): boolean {
   return /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/.test(text)
 }

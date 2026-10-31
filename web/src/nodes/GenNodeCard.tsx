@@ -2305,7 +2305,7 @@ export default function GenNodeCard({
             <textarea
               className="prompt"
               rows={3}
-              placeholder="English prompt, e.g. white cat knight, red cape, katana, front view"
+              placeholder="中英文都行，如：白猫骑士，红披风，武士刀，正面全身"
               value={p.prompt}
               onChange={(e) => setParam('prompt', e.target.value)}
             />
@@ -2321,10 +2321,15 @@ export default function GenNodeCard({
               {favorited ? '★' : '☆'}
             </button>
           </div>
-          <div className={`lang-hint${hasCJK(p.prompt) ? ' bad' : ''}`}>
+          {/* **中文可以用**：Qwen-Image 的文本编码器是 Qwen3-VL，不是 SD 的
+              CLIP。SD 时代这里会转红警告"中文会被拆成乱 token"——那条结论
+              随 SD 管线一起作废了，别再按它把中文劝退。
+              两段文案都不带告警色：中文不是错误，只是"契约词由后端补"这一点
+              值得提一句。 */}
+          <div className="lang-hint">
             {hasCJK(p.prompt)
-              ? '⚠ 检测到中文：SD1.5 的 CLIP 只认英文，中文会被拆成乱 token，出图基本靠猜'
-              : 'SD1.5 只支持英文提示词；逗号分隔，主体 + 特征 + 视角'}
+              ? '中文没问题（Qwen 的编码器支持中文）；全身/纯背景这类构图契约由后端自动补'
+              : '中英文都行；用一句话描述主体 + 特征 + 视角（整句或逗号分隔都可以）'}
           </div>
 
           {(isI2I || isBg) && sourceBox}

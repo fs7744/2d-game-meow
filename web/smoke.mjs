@@ -518,10 +518,7 @@ function check(name, cond, extra = '') {
   const win = dom.window
   await new Promise((r) => setTimeout(r, 400))
 
-  const hint = doc.querySelector('.lang-hint')
-  check('默认提示英文约束', (hint?.textContent || '').includes('英文'))
-
-  // 受控 textarea：必须走原生 setter + input 事件
+  // 受控 textarea：必须走原生 setter + input 事件（下面的断言要用，先定义）
   const ta = doc.querySelector('textarea.prompt')
   const setValue = (el, v) => {
     const setter = Object.getOwnPropertyDescriptor(win.HTMLTextAreaElement.prototype, 'value').set
@@ -529,9 +526,19 @@ function check(name, cond, extra = '') {
     el.dispatchEvent(new win.Event('input', { bubbles: true }))
   }
 
+  // demo 画布里已经有中文提示词，所以先清空才能看到"空提示"那一版文案
+  setValue(ta, '')
+  await new Promise((r) => setTimeout(r, 80))
+  check('空提示时说明中英都行',
+        (doc.querySelector('.lang-hint')?.textContent || '').includes('中英文都行'))
+
   setValue(ta, '背剑侠客')
   await new Promise((r) => setTimeout(r, 80))
-  check('中文触发警告', !!doc.querySelector('.lang-hint.bad'))
+  // Qwen 的文本编码器是 Qwen3-VL，中文可以直接写。SD 时代这里会转红告警
+  // （「会被拆成乱 token」），那条断言随 SD 管线一起作废了。
+  check('中文不告警', !doc.querySelector('.lang-hint.bad'))
+  check('中文提示说明可直接写',
+        (doc.querySelector('.lang-hint')?.textContent || '').includes('中文没问题'))
 
   setValue(ta, 'white cat knight, red cape, front view')
   await new Promise((r) => setTimeout(r, 80))
