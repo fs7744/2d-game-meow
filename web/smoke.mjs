@@ -2446,6 +2446,107 @@ function check(name, cond, extra = '') {
   dom.window.close()
 }
 
+// 42) 骨骼编辑 → 角色迁移：骨架图连上后「迁移角色」必须可点
+//
+// 用户报的原话：「骨骼编辑连线，无法迁移角色」。根因是卡片判断"有没有源图"时
+// 只认 `job` 和 `kind === 'image'`，而**骨骼编辑节点把导出的骨架图放在 `image` 上、
+// 却不是 image 类型、也没有 job** → 明明连上了，卡片显示「无源图」、
+// 「迁移角色」按钮一直是禁用的。这条用例把那个组合钉死。
+{
+  const { dom, errors } = await boot('')
+  const doc = dom.window.document
+  const win = dom.window
+  await new Promise((r) => setTimeout(r, 400))
+
+  // 1. 建骨骼编辑节点
+  const skelAdd = [...doc.querySelectorAll('.rail-add')].find((b) =>
+    (b.closest('.rail-item')?.textContent || '').includes('骨骼编辑'))
+  check('有「骨骼编辑」入口', !!skelAdd)
+  skelAdd?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 250))
+
+  // 2. jsdom 没有 2D 上下文：给画布补一个空实现，否则「导出骨架图」直接失败
+  //    （renderSkeletonPNG 里的 getContext 返回 null 就 reject）
+  const cvProto = win.HTMLCanvasElement.prototype
+  cvProto.getContext = () => new Proxy({}, {
+    get: (t, k) => (k in t ? t[k] : () => {}),
+    set: (t, k, v) => { t[k] = v; return true },
+  })
+  cvProto.toBlob = function (cb) { cb(new win.Blob(['x'], { type: 'image/png' })) }
+
+  const skelNode = [...doc.querySelectorAll('.node')].find((n) =>
+    (n.querySelector('.node-kind')?.textContent || '').includes('骨骼编辑'))
+  const exportBtn = [...(skelNode?.querySelectorAll('button') || [])]
+    .find((b) => (b.textContent || '').includes('导出骨架图'))
+  exportBtn?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 400))
+  check('导出骨架图后节点上有产物（image 字段）',
+    !!skelNode?.querySelector('.skel-preview img'),
+    skelNode?.querySelector('.skel-preview')?.textContent || '（没有 .skel-preview）')
+
+  // 3. 建角色迁移节点
+  const pcAdd = [...doc.querySelectorAll('.rail-add')].find((b) =>
+    (b.closest('.rail-item')?.textContent || '').includes('角色迁移'))
+  pcAdd?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 250))
+  const pcNode = [...doc.querySelectorAll('.node')].find((n) =>
+    (n.querySelector('.node-kind')?.textContent || '') === '角色迁移')
+  check('新建出角色迁移节点', !!pcNode)
+  check('一开始「迁移角色」是禁用的（还没连）',
+    pcNode?.querySelector('.gen-btn')?.disabled === true)
+
+  // 4. 连一条线：骨骼编辑的输出 → 角色迁移的「动作参考」
+  skelNode?.querySelector('.conn.out')
+    .dispatchEvent(new win.PointerEvent('pointerdown', { bubbles: true, button: 0 }))
+  await new Promise((r) => setTimeout(r, 60))
+  pcNode.dispatchEvent(new win.PointerEvent('pointerover', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 60))
+  win.dispatchEvent(new win.PointerEvent('pointerup', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 200))
+
+  const srcSel = pcNode.querySelector('.src-box select')
+  check('连线上后动作参考选了骨骼节点',
+    srcSel?.value === skelNode?.getAttribute('data-node-id'),
+    `select=${srcSel?.value} skel=${skelNode?.getAttribute('data-node-id')}`)
+  // **关键断言**：骨架图在 `image` 上，卡片必须认它，缩略图要出来
+  check('动作参考的缩略图出来了（不再显示「无源图」）',
+    !!pcNode?.querySelector('.src-thumb img'),
+    pcNode?.querySelector('.src-thumb')?.textContent || '（空）')
+  check('提示说明用的是导出的骨架图',
+    (pcNode?.querySelector('.src-note')?.textContent || '').includes('骨架图'),
+    pcNode?.querySelector('.src-note')?.textContent)
+
+  // 5. 角色图：拖一张本地图进来当身份来源
+  const viewport = doc.querySelector('.canvas-viewport')
+  const file = new win.File([new Uint8Array([1])], 'char.png', { type: 'image/png' })
+  const ev = new win.Event('drop', { bubbles: true })
+  Object.defineProperties(ev, {
+    clientX: { value: 320 }, clientY: { value: 220 },
+    dataTransfer: { value: { types: ['Files'], files: [file], getData: () => '' } },
+  })
+  viewport.dispatchEvent(ev)
+  await new Promise((r) => setTimeout(r, 400))
+
+  const imgNode = [...doc.querySelectorAll('.node')].find((n) =>
+    (n.querySelector('.node-kind')?.textContent || '') === '图片')
+  check('拖进来的图成了图片节点（角色图来源）', !!imgNode)
+  const charSel = pcNode.querySelectorAll('.src-box select')[1]
+  const charSet = Object.getOwnPropertyDescriptor(
+    win.HTMLSelectElement.prototype, 'value').set
+  charSet.call(charSel, imgNode.getAttribute('data-node-id') || '')
+  charSel.dispatchEvent(new win.Event('change', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 200))
+
+  // 6. **这就是用户要的**：两个源都齐了，按钮必须能点
+  const runBtn = pcNode.querySelector('.gen-btn')
+  check('两个源齐了之后「迁移角色」可以点',
+    runBtn?.disabled === false,
+    runBtn?.disabled ? `仍然禁用（title=${runBtn?.title}）` : 'ok')
+
+  check('骨骼→迁移场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
 const failed = results.filter((r) => !r.ok)
 console.log(`\n${results.length - failed.length}/${results.length} 通过`)
 process.exit(failed.length ? 1 : 0)

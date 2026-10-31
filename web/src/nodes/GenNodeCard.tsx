@@ -472,15 +472,23 @@ export default function GenNodeCard({
   const [skelExporting, setSkelExporting] = useState(false)
   const [skelImporting, setSkelImporting] = useState(false)
   // 源图可以是上游节点的产物、图片节点的本地图，也可以是节点上直接记的绝对路径
+  //
+  // **上游的图有两个落点，必须都认**：
+  //   · `job.raw / job.path` —— 各类生成节点的产物
+  //   · `image.path`         —— 图片节点，以及**骨骼编辑节点导出的骨架图**
+  // 以前这里写成 `sourceNode?.kind === 'image' && sourceNode.image?.path`，漏了
+  // poseedit：骨架图明明连上了，卡片却显示「无源图」，`迁移角色` 按钮一直是禁用的
+  // ——用户看到的现象就是「骨骼编辑连线，无法迁移角色」。
+  // 判断改成看「有没有图」而不是「是不是某一种节点」，以后新增存 image 的节点也不会再漏。
+  const upImagePath = sourceNode?.image?.path
   const hasSource = !!(
     sourceNode?.job?.raw ||
     sourceNode?.job?.path ||
-    (sourceNode?.kind === 'image' && sourceNode.image?.path) ||
+    upImagePath ||
     node.source?.path
   )
-  // 缩略图：图片节点用自己的图，其它节点用出图结果
-  const sourceThumb =
-    sourceNode?.kind === 'image' ? sourceNode.image?.url : sourceNode?.job?.url
+  // 缩略图同理：image 优先（图片节点 / 骨架图），没有再看生成结果
+  const sourceThumb = sourceNode?.image?.url ?? sourceNode?.job?.url
   // 角色迁移的角色图缩略图（角色图节点或本地图）
   const charThumb = charThumbOf?.(node.charSource?.nodeId)
   // 可全屏预览的图（图片节点的本地图 / 生成节点的产物）
@@ -742,13 +750,15 @@ export default function GenNodeCard({
           </p>
         )}
         <div className="src-note">
-          {sourceNode?.kind === 'image'
-            ? '用这张本地图'
-            : sourceNode?.job?.raw
-              ? '用原图（未像素化），保留细节'
-              : hasSource
-                ? '用成品，像素块会被重新糊开'
-                : '把别的节点连过来，或直接把本地图拖到这个节点上'}
+          {sourceNode?.kind === 'poseedit'
+            ? '用导出的骨架图（OpenPose 18 点）'
+            : sourceNode?.kind === 'image'
+              ? '用这张本地图'
+              : sourceNode?.job?.raw
+                ? '用原图（未像素化），保留细节'
+                : hasSource
+                  ? '用成品，像素块会被重新糊开'
+                  : '把别的节点连过来，或直接把本地图拖到这个节点上'}
         </div>
       </div>
     </div>
