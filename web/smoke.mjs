@@ -2548,8 +2548,8 @@ function check(name, cond, extra = '') {
     .find((l) => (l.textContent || '').trim().startsWith('朝向'))?.querySelector('select')
   check('节点上有「朝向」下拉', !!viewSel,
     viewSel ? [...viewSel.options].map((o) => o.value).join(',') : '（没有）')
-  check('朝向默认「自动」并带出骨骼方位角',
-    viewSel?.value === 'auto' && (viewSel.options[0]?.textContent || '').includes('骨骼'),
+  check('朝向默认「自动」',
+    viewSel?.value === 'auto',
     viewSel?.options?.[0]?.textContent)
 
   // 自动：上游是骨骼编辑器（默认方位角 0°）→ 应带 front view
@@ -2570,12 +2570,29 @@ function check(name, cond, extra = '') {
     return last ? JSON.parse(last.body) : { params: {} }
   }
 
+  // 自动 + 骨骼 0°：**不该写方位词**。
+  // 实测「front view」这类词会压过骨架姿势（分腿张臂的骨架会被画成站立），
+  // 而正面本来就是模型的默认——写了只有害处。
   let body = await submitAndRead()
-  check('「自动」用骨骼编辑器的方位角（front view）',
-    String(body.params.prompt || '').includes('viewing direction: front view'),
+  check('自动 + 骨骼 0° 不写方位词（正面是默认，写了会压过姿势）',
+    !String(body.params.prompt || '').includes('viewing direction'),
     body.params.prompt)
 
-  // 手动选「右侧面」→ 必须换成 side view, facing right
+  // 把骨骼编辑器切到「右侧」（90°）→ 「自动」仍然不写方向词
+  // （VNCCS 官方从不写方向词，方向长在渲染里；写文字会压过骨架姿势）
+  const sideBtn = [...(skelNode?.querySelectorAll('.skel-dir') || [])]
+    .find((b) => (b.textContent || '') === '右侧')
+  sideBtn?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 200))
+  check('骨骼方位角切到 90° 后「自动」仍是不写方向词',
+    (viewSel?.options?.[0]?.textContent || '').trim() === '自动',
+    viewSel?.options?.[0]?.textContent)
+  body = await submitAndRead()
+  check('自动（即使骨骼 90°）也不写方向词',
+    !String(body.params.prompt || '').includes('viewing direction'),
+    body.params.prompt)
+
+  // 手动选「右侧面」→ 同样写 side view（不依赖骨骼的方位角）
   Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value')
     .set.call(viewSel, 'side_r')
   viewSel?.dispatchEvent(new win.Event('change', { bubbles: true }))
@@ -2585,6 +2602,16 @@ function check(name, cond, extra = '') {
   body = await submitAndRead()
   check('手动选「右侧面」写进指令（side view, facing right）',
     String(body.params.prompt || '').includes('viewing direction: side view, facing right'),
+    body.params.prompt)
+
+  // 手动选「正面」→ 回到不写（不然会把姿势压掉）
+  Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value')
+    .set.call(viewSel, 'front')
+  viewSel?.dispatchEvent(new win.Event('change', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 150))
+  body = await submitAndRead()
+  check('手动选「正面」也不写方位词',
+    !String(body.params.prompt || '').includes('viewing direction'),
     body.params.prompt)
 
   // 8. 透明底：VNCCS 支持原生 alpha，但节点上以前没有这个开关

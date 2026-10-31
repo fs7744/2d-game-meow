@@ -491,10 +491,6 @@ export default function GenNodeCard({
   const sourceThumb = sourceNode?.image?.url ?? sourceNode?.job?.url
   // 角色迁移的角色图缩略图（角色图节点或本地图）
   const charThumb = charThumbOf?.(node.charSource?.nodeId)
-  // 上游是骨骼编辑器时，它的方位角就是默认朝向（"朝向"下拉里显示出来）
-  const upAzimuth = sourceNode?.kind === 'poseedit'
-    ? (sourceNode.skeleton?.azimuth ?? 0)
-    : undefined
   // 角色迁移的引擎：只有 VNCCS 的提交带 `transparent`（旧版 wpc 没有这个字段）
   const isVnccs = (node.params.pcEngine ?? 'wvnccs') === 'wvnccs'
   // 可全屏预览的图（图片节点的本地图 / 生成节点的产物）
@@ -1611,22 +1607,24 @@ export default function GenNodeCard({
             />
           </div>
 
-          {/* 朝向：**必选输入，不是可选项**。
-              骨架图本身分不清角度——正/背面在 2D 投影里互为镜像，90° 侧面收成一条
-              竖线，实测同一张 90° 骨架不加方位词会被画成正面、加一句 side view 才是
-              侧面。所以这里把它做成显式选择，默认跟骨骼编辑器的方位角。 */}
-          <label className="bg-mode" title={'人物的朝向。骨架图本身看不出角度'
-            + '（正/背面互为镜像、侧面收成一条线），必须明确告诉模型。\n'
-            + '「自动」= 跟随上游骨骼编辑器里选的方位角；上游不是骨骼编辑器时'
-            + '自动等于「不指定」，模型会按正面画。'}>
+          {/* 朝向：**默认不写任何方向词**（和 VNCCS 官方一致）。
+              官方条件是「打好光的 3D 人偶 + 相机机位」，方向长在图里，prompt 只写
+              光照；他们从不写 "front view"。我们没有那套渲染，只能用文字补方向，
+              而实测文字会**压过骨架姿势**：同一张分腿张臂骨架，不加词照做，
+              加 "front view"（或更弱的 "viewed from the front"）就变回站立。
+              所以：正面 / 自动 0° 一律不写；只有选了非正面方向才补一句，并提示代价。 */}
+          <label className="bg-mode" title={'人物的朝向。\n'
+            + '默认「自动」不加任何方向词——VNCCS 官方也是这么做的：方向由渲染的\n'
+            + '相机机位决定，prompt 里不写视角。我们的骨架图没有那层 3D 渲染，\n'
+            + '所以「侧面 / 背面」只能用文字补一句。\n'
+            + '代价：方向词会压过骨架的姿势（实测加了 front view 的分腿骨架会被\n'
+            + '画成站立）。要姿势优先就别选方向；要换视角再选。'}>
             朝向
             <select
               value={p.pcView ?? 'auto'}
               onChange={(e) => setParam('pcView', e.target.value as typeof p.pcView)}
             >
-              <option value="auto">
-                自动{upAzimuth !== undefined ? `（骨骼 ${upAzimuth}°）` : ''}
-              </option>
+              <option value="auto">自动</option>
               <option value="front">正面</option>
               <option value="q34front_r">右前 3/4</option>
               <option value="side_r">右侧面</option>
@@ -1637,6 +1635,13 @@ export default function GenNodeCard({
               <option value="q34front_l">左前 3/4</option>
             </select>
           </label>
+          {/* 选了非正面才写方向词：把代价说清楚，别让人以为是免费的 */}
+          {p.pcView && p.pcView !== 'auto' && p.pcView !== 'front' && (
+            <p className="src-note">
+              会额外补一句方向词给模型——视角更准，但**姿势贴合会下降**。
+              要动作优先就选「自动」。
+            </p>
+          )}
           <details className="adv">
             <summary>更多设置</summary>
             {/* 「姿态」「身份」两根强度滑块是 SD 那条路（ControlNet / IP-Adapter）

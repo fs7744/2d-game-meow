@@ -170,18 +170,6 @@ const PC_VIEW_PHRASES = {
   q34front_l: 'three-quarter front view from the left',
 } as const
 
-/** 按 45° 排列（0/45/…/315），与方位角一一对应 */
-const VIEW_PHRASES = [
-  PC_VIEW_PHRASES.front, PC_VIEW_PHRASES.q34front_r,
-  PC_VIEW_PHRASES.side_r, PC_VIEW_PHRASES.q34back_r,
-  PC_VIEW_PHRASES.back, PC_VIEW_PHRASES.q34back_l,
-  PC_VIEW_PHRASES.side_l, PC_VIEW_PHRASES.q34front_l,
-]
-function viewPhrase(az: number): string {
-  const a = ((Math.round(az) % 360) + 360) % 360
-  return VIEW_PHRASES[Math.round(a / 45) % 8]
-}
-
 function makeNode(
   x: number,
   y: number,
@@ -1183,9 +1171,12 @@ export default function App() {
         const fromEditor = upNode?.kind === 'poseedit'
         const pcParams: GenParams = { ...node.params }
         if (fromEditor) pcParams.pcRefMode = 'skeleton'
+        // 朝向：**默认「自动」一个字都不写**（VNCCS 官方从不写方向词——方向长在
+        // 渲染的相机机位里，prompt 只描述光照）。只有用户**手动选非正面**才补一句，
+        // 代价是方向词会压过骨架姿势（实测）。详见 docs/VNCCS-REAL.md。
         const view = node.params.pcView ?? 'auto'
-        const phrase = view === 'auto'
-          ? (fromEditor ? viewPhrase(upNode?.skeleton?.azimuth ?? 0) : '')
+        const phrase = view === 'auto' || view === 'front'
+          ? ''
           : PC_VIEW_PHRASES[view]
         if (phrase) {
           pcParams.prompt = [node.params.prompt.trim(),
