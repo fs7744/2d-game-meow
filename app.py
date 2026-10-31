@@ -43,6 +43,7 @@ from workflows import generate as gen
 from workflows import assetdb
 from workflows import paths
 from workflows import projectio
+from workflows import projectstore
 from workflows.assetdb import AssetIndex
 from workflows.engine import Engine
 
@@ -133,10 +134,25 @@ def _run(job_id: str, workflow: str, params: Dict[str, Any]) -> None:
 
 
 def _worker() -> None:
+    """取任务并执行。
+
+    **整个执行过程包在 try 里**：`_run` 自己已经处理了业务异常，但万一它
+    自己在收尾时炸了（比如 `_jobs` 被并发改动），任务就会永远停在
+    `queued` —— 前端那边节点就一直显示「排队中…」，按钮禁用，用户干等。
+    这里兜住最后一道：任何漏网的异常都把任务标成 failed。
+    """
     while True:
         job_id, workflow, params = _q.get()
-        _run(job_id, workflow, params)
-        _q.task_done()
+        try:
+            _run(job_id, workflow, params)
+        except BaseException as exc:       # noqa: BLE001 —— worker 不能死
+            job = _jobs.get(job_id)
+            if job is not None:
+                job.update(status="failed",
+                           error=f"任务执行异常：{type(exc).__name__}: {exc}")
+                job["finished"] = time.time()
+        finally:
+            _q.task_done()
 
 
 threading.Thread(target=_worker, daemon=True, name="gen-worker").start()
@@ -403,8 +419,15 @@ def submit(job: Job) -> Dict[str, Any]:
 
 @app.get("/jobs/{job_id}")
 def get_job(job_id: str) -> Dict[str, Any]:
+    """查任务状态。
+
+    **查不到时返回 404，并带上 `status: "failed"`**：前端轮询拿到 404 就知道
+    这个任务已经没了（服务重启、任务被淘汰），可以把节点从「执行中」放出来。
+    以前直接 404 而不带状态，前端只能一直等——节点永远卡在「生成中…」，
+    按钮也是禁用的，用户只能刷新页面。
+    """
     if job_id not in _jobs:
-        raise HTTPException(404, "not found")
+        raise HTTPException(404, "任务不存在或已被淘汰")
     return _jobs[job_id]
 
 
@@ -671,6 +694,105 @@ class ProjectImportReq(BaseModel):
     data: str = Field("", description=".mproj 文件内容（base64）")
 
 
+class ProjectDocReq(BaseModel):
+    """项目定义的保存请求体（前端自动保存用）。"""
+
+    id: str = Field("", description="项目 id")
+    name: str = Field("", description="项目名")
+    created: str = Field("", description="创建时间（ISO）")
+    updated: str = Field("", description="更新时间（ISO）")
+    nodes: list = Field(default_factory=list, description="节点列表")
+    viewport: Dict[str, Any] = Field(default_factory=dict)
+
+
+def _persist_imported(scope: str, meta: Dict[str, Any],
+                       payload: Dict[str, Any]) -> None:
+    """导入 / 模板实例化后，把项目定义**落盘**。
+
+    不落盘的话，导入出来的项目只在浏览器内存里——刷新一下就没了，
+    用户会以为「导入没成功」。
+    """
+    nodes = payload.get("nodes")
+    if not isinstance(nodes, list):
+        return
+    try:
+        projectstore.save_project(scope, {
+            "id": scope,
+            "name": str(meta.get("name") or scope),
+            "created": str(meta.get("created") or ""),
+            "updated": str(meta.get("updated") or time.strftime("%Y-%m-%dT%H:%M:%S")),
+            "nodes": nodes,
+            "viewport": payload.get("viewport") or {"x": 120, "y": 90, "z": 1},
+        })
+    except (OSError, ValueError):
+        # 落盘失败不该让导入整体失败：素材已经拷好了，
+        # 用户至少能在这次会话里用（前端仍会再保存一次）。
+        pass
+
+
+# ---------------- 项目落盘存储 ----------------
+#
+# 项目定义落在 `assets/projects/<id>/project.json`（服务端本地磁盘），
+# 不是浏览器 localStorage。localStorage 降级为「即时加载的缓存」：
+# 前端先用缓存把画布画出来，再拉服务端版本覆盖。
+
+
+@app.get("/projects")
+def list_projects() -> Dict[str, Any]:
+    """磁盘上所有项目（摘要，不带节点）。
+
+    前端启动时拉这个列表来决定侧栏显示什么。
+    """
+    items = projectstore.list_projects()
+    ws = projectstore.load_workspace()
+    return {"count": len(items), "items": items, "current": ws.get("current", "")}
+
+
+@app.get("/projects/{scope}")
+def get_project(scope: str) -> Dict[str, Any]:
+    """读一个项目的完整定义（节点 + 视口）。"""
+    doc = projectstore.load_project(scope)
+    if doc is None:
+        raise HTTPException(404, "项目不存在")
+    return doc
+
+
+@app.put("/projects/{scope}")
+def put_project(scope: str, req: ProjectDocReq) -> Dict[str, Any]:
+    """保存一个项目的定义（原子写）。
+
+    前端在改动画布后防抖调用。**这是幂等的**——同一个项目反复保存不会
+    产生垃圾文件（同一个 path 覆盖）。
+    """
+    try:
+        info = projectstore.save_project(scope, req.model_dump())
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(500, f"保存项目失败：{exc}") from exc
+    return info
+
+
+@app.delete("/projects/{scope}")
+def delete_project(scope: str, files: int = 1) -> Dict[str, Any]:
+    """删项目。
+
+    `files=1`（默认）连整个项目目录一起删（产物、上传、蒙版）；
+    `files=0` 只删 project.json，产物留在盘上。
+    """
+    ok = projectstore.delete_project(scope, remove_files=bool(files))
+    if not ok:
+        raise HTTPException(404, "项目不存在")
+    return {"deleted": projectstore.safe_scope(scope), "files": bool(files)}
+
+
+@app.put("/workspace")
+def put_workspace(req: Dict[str, Any]) -> Dict[str, Any]:
+    """记「当前打开的是哪个项目」——重开浏览器时回到同一个画布。"""
+    projectstore.save_workspace(req)
+    return {"ok": True}
+
+
 @app.post("/projects/export")
 def export_project(req: ProjectArchiveReq) -> Response:
     """把项目打包成 `.mproj` 下载。
@@ -719,6 +841,7 @@ def import_project(req: ProjectImportReq) -> Dict[str, Any]:
     payload = dict(result["payload"])
     if req.name.strip():
         meta["name"] = req.name.strip()
+    _persist_imported(req.scope, meta, payload)
     return {"meta": meta, "payload": payload,
             "imported_files": result["imported_files"]}
 
@@ -759,6 +882,7 @@ def instantiate_template(tid: str, req: ProjectImportReq) -> Dict[str, Any]:
     payload = dict(result["payload"])
     if req.name.strip():
         meta["name"] = req.name.strip()
+    _persist_imported(req.scope, meta, payload)
     return {"meta": meta, "payload": payload,
             "imported_files": result["imported_files"]}
 

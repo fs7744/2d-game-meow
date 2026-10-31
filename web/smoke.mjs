@@ -14,8 +14,19 @@ const calls = []
 // 用例可临时注入额外的 meta 字段（模拟后端返回的序列帧统计）
 let extraMeta = null
 let jobSeq = 0
+/**
+ * 服务端「磁盘」：模拟 `assets/projects/<id>/project.json`。
+ *
+ * **每个 boot 一份**（挂在返回的 fetch 上）：全局共享会污染后续用例——
+ * 前一个用例往磁盘上写了项目，后一个用例启动时就会拉到它，画布不再是空的，
+ * 于是「新建出 X 节点」这类断言全错（而且错得莫名其妙）。
+ */
 function makeFetch() {
-  return async (url, init = {}) => {
+  const serverProjects = new Map()
+  let serverCurrent = ''
+  // 任务查询是否一直失败（模拟服务端异常）
+  let jobsFailMode = false
+  const fetchFn = async (url, init = {}) => {
     calls.push({ url: String(url), method: init.method || 'GET', body: init.body })
     if (String(url).endsWith('/health')) {
       return { ok: true, json: async () => ({ ok: true, engine: { device: 'Fake GPU 24GB' } }) }
@@ -52,6 +63,11 @@ function makeFetch() {
       return { ok: true, json: async () => ({ job_id: `job-${jobSeq}` }) }
     }
     if (String(url).includes('/jobs/')) {
+      // **服务端异常模式**：模拟任务查询一直失败（服务挂了 / 网络断）。
+      // 节点必须能自己从「执行中」退出来，不能一直转圈。
+      if (jobsFailMode) {
+        return { ok: false, status: 500, json: async () => ({ detail: '服务端内部错误' }) }
+      }
       return {
         ok: true,
         json: async () => ({
@@ -169,6 +185,56 @@ function makeFetch() {
       return { ok: true, json: async () => ({}) }
     }
     // ---- 项目导入 / 导出 / 模板 ----
+    // **顺序要紧**：`/projects/export` 与 `/projects/import` 也含 `/projects/`，
+    // 必须先判掉，否则会被下面的「按 id 读项目」分支抢走。
+    if (String(url).endsWith('/projects/export')) {
+      return { ok: true, blob: async () => new Blob([new Uint8Array([80, 75, 3, 4])]) }
+    }
+    if (String(url).endsWith('/projects/import')) {
+      return {
+        ok: true,
+        json: async () => ({
+          meta: { name: '导入的项目' },
+          payload: { nodes: [{ id: 'in1', kind: 'gen', x: 0, y: 0, view: 'expanded',
+            params: { prompt: '导入节点' } }], viewport: { x: 0, y: 0, z: 1 } },
+          imported_files: 3,
+        }),
+      }
+    }
+    // ---- 项目落盘存储（服务端磁盘）----
+    if (String(url).endsWith('/projects') && (init.method || 'GET') === 'GET') {
+      return {
+        ok: true,
+        json: async () => ({
+          count: serverProjects.size,
+          items: [...serverProjects.values()].map((p) => ({
+            id: p.id, name: p.name, created: p.created, updated: p.updated,
+            count: (p.nodes || []).length,
+          })),
+          current: serverCurrent,
+        }),
+      }
+    }
+    if (String(url).endsWith('/workspace')) {
+      return { ok: true, json: async () => ({ ok: true }) }
+    }
+    if (String(url).includes('/projects/') && (init.method || 'GET') === 'PUT') {
+      const id = decodeURIComponent(String(url).split('/projects/')[1].split('?')[0])
+      const doc = JSON.parse(init.body || '{}')
+      serverProjects.set(id, { ...doc, id })
+      return { ok: true, json: async () => ({ id, name: doc.name, count: (doc.nodes || []).length }) }
+    }
+    if (String(url).includes('/projects/') && (init.method || 'GET') === 'GET') {
+      const id = decodeURIComponent(String(url).split('/projects/')[1].split('?')[0])
+      const doc = serverProjects.get(id)
+      if (!doc) return { ok: false, status: 404, json: async () => ({}) }
+      return { ok: true, json: async () => doc }
+    }
+    if (String(url).includes('/projects/') && (init.method || 'GET') === 'DELETE') {
+      const id = decodeURIComponent(String(url).split('/projects/')[1].split('?')[0])
+      serverProjects.delete(id)
+      return { ok: true, json: async () => ({ deleted: id }) }
+    }
     if (String(url).endsWith('/templates') && (init.method || 'GET') === 'GET') {
       return {
         ok: true,
@@ -195,22 +261,13 @@ function makeFetch() {
     if (String(url).includes('/templates/') && (init.method || 'GET') === 'DELETE') {
       return { ok: true, json: async () => ({ deleted: 'x' }) }
     }
-    if (String(url).endsWith('/projects/export')) {
-      return { ok: true, blob: async () => new Blob([new Uint8Array([80, 75, 3, 4])]) }
-    }
-    if (String(url).endsWith('/projects/import')) {
-      return {
-        ok: true,
-        json: async () => ({
-          meta: { name: '导入的项目' },
-          payload: { nodes: [{ id: 'in1', kind: 'gen', x: 0, y: 0, view: 'expanded',
-            params: { prompt: '导入节点' } }], viewport: { x: 0, y: 0, z: 1 } },
-          imported_files: 3,
-        }),
-      }
-    }
     return { ok: false, status: 404, json: async () => ({}) }
   }
+  // 让用例能检查「服务端磁盘」上的东西
+  fetchFn.serverProjects = serverProjects
+  fetchFn.setServerCurrent = (v) => { serverCurrent = v }
+  fetchFn.setJobsFail = (v) => { jobsFailMode = v }
+  return fetchFn
 }
 
 async function boot(search, seed) {
@@ -259,7 +316,7 @@ async function boot(search, seed) {
   script.textContent = code
   dom.window.document.body.appendChild(script)
   await new Promise((r) => setTimeout(r, 600))
-  return { dom, errors }
+  return { dom, errors, fetch: dom.window.fetch }
 }
 
 /** 按分组标题找侧栏分组（分组会增减，别用下标写死） */
@@ -316,6 +373,34 @@ function check(name, cond, extra = '') {
   dom.window.close()
 }
 
+
+// 2b) 服务端异常：节点不能永远卡在「执行中」
+{
+  const { dom, errors, fetch: f } = await boot('?demo=gen')
+  const doc = dom.window.document
+  // 让任务查询一直失败（模拟后端挂掉 / 网络断）
+  f.setJobsFail(true)
+  await new Promise((r) => setTimeout(r, 1200))
+
+  const btn = doc.querySelector('.gen-btn')
+  check('节点有生成按钮', !!btn)
+  // 提交成功后节点进入「生成中…」
+  const busyText = () => (btn?.textContent || '')
+  await new Promise((r) => setTimeout(r, 3000))
+
+  // **关键断言**：查询失败 3 次后（约 2 秒）节点必须自己退出「执行中」
+  check('查询失败后节点不再显示「生成中…」',
+    !busyText().includes('生成中'), busyText())
+  check('节点不再显示「排队中…」',
+    !busyText().includes('排队中'), busyText())
+  check('按钮恢复可点（不再 disabled）', btn && !btn.disabled, String(btn?.disabled))
+  check('节点上有失败提示', (doc.querySelector('.node')?.textContent || '').includes('失败')
+    || (doc.querySelector('.node')?.textContent || '').includes('无法查询'),
+    (doc.querySelector('.node')?.textContent || '').slice(0, 120))
+
+  check('服务端异常场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
 
 // 3) 交互：只看图切换 / 复制 / 加号新建 / 删除
 {
@@ -989,6 +1074,74 @@ function check(name, cond, extra = '') {
   dom.window.close()
 }
 
+// 16b) 项目落盘：编辑后写到服务端磁盘
+{
+  const { dom, errors, fetch: f } = await boot('?demo=1')
+  const serverProjects = f.serverProjects
+  const doc = dom.window.document
+  const win = dom.window
+  await new Promise((r) => setTimeout(r, 600))
+
+  const projSec = () => section(doc, '项目')
+  const projRows = () => [...(projSec()?.querySelectorAll('.project-item') || [])]
+
+  // 启动时会拉 /projects —— 空列表时把缓存里的项目写上去
+  check('启动时拉了项目列表',
+    calls.some((c) => c.url.endsWith('/projects') && (c.method || 'GET') === 'GET'),
+    JSON.stringify(calls.slice(0, 5).map((c) => `${c.method} ${c.url}`)))
+  check('服务端没有项目时前端会建一个并落盘',
+    serverProjects.size >= 1, String(serverProjects.size))
+  // **浏览器里不留任何项目内容**：localStorage 的每个键都不含节点数据
+  const lsKeys = Object.keys(win.localStorage)
+  const lsDump = lsKeys.map((k) => `${k}=${win.localStorage.getItem(k) || ''}`).join('|')
+  check('浏览器 localStorage 里没有项目内容',
+    !lsDump.includes('nodes') && !lsDump.includes('viewport'),
+    lsKeys.join(','))
+  // 改内容 -> 防抖后 PUT 到服务端
+  const before = serverProjects.size
+  const ta = doc.querySelector('textarea.prompt')
+  if (ta) {
+    const setter = Object.getOwnPropertyDescriptor(win.HTMLTextAreaElement.prototype, 'value').set
+    setter.call(ta, '落盘测试提示词')
+    ta.dispatchEvent(new win.Event('input', { bubbles: true }))
+  }
+  await new Promise((r) => setTimeout(r, 800))
+  const putCalls = calls.filter((c) => c.method === 'PUT' && c.url.includes('/projects/'))
+  check('编辑后调用了 PUT /projects/<id>', putCalls.length > 0,
+    JSON.stringify(calls.slice(-4).map((c) => `${c.method} ${c.url}`)))
+  const saved = [...serverProjects.values()].find((p) =>
+    JSON.stringify(p.nodes || []).includes('落盘测试提示词'))
+  check('提示词真的写进了服务端项目定义', !!saved,
+    JSON.stringify([...serverProjects.keys()]))
+  check('保存的项目带节点', (saved?.nodes || []).length > 0, String(saved?.nodes?.length))
+
+  // 新建项目 -> 立刻落盘（空项目也要在磁盘上占位）
+  serverProjects.clear()
+  projSec().querySelector('.rail-new').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 600))
+  check('新建项目也落盘了', serverProjects.size >= 1, String(serverProjects.size))
+
+  // 删项目 -> 服务端也要删（否则刷新后项目又冒出来）
+  serverProjects.clear()
+  await new Promise((r) => setTimeout(r, 300))
+  const delTarget = projRows()[0]
+  if (delTarget) {
+    delTarget.querySelector('.rail-del')
+      .dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+    await new Promise((r) => setTimeout(r, 150))
+    const onlyRemove = [...doc.querySelectorAll('.modal-actions button')]
+      .find((b) => (b.textContent || '').includes('仅从列表移除'))
+    onlyRemove?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+    await new Promise((r) => setTimeout(r, 400))
+  }
+  check('删项目调用了 DELETE /projects/<id>',
+    calls.some((c) => c.method === 'DELETE' && c.url.includes('/projects/')),
+    JSON.stringify(calls.slice(-4).map((c) => `${c.method} ${c.url}`)))
+
+  check('项目落盘场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
 // 17) 老存档迁移：meow.canvas.v1 的一份 nodes+viewport 要变成第一个项目
 {
   const legacy = {
@@ -1002,7 +1155,7 @@ function check(name, cond, extra = '') {
     }],
     viewport: { x: 33, y: 44, z: 1.5 },
   }
-  const { dom, errors } = await boot('', { 'meow.canvas.v1': JSON.stringify(legacy) })
+  const { dom, errors, fetch: f } = await boot('', { 'meow.canvas.v1': JSON.stringify(legacy) })
   const doc = dom.window.document
   await new Promise((r) => setTimeout(r, 500))
 
@@ -1018,6 +1171,17 @@ function check(name, cond, extra = '') {
   check('老视口被带过来了（缩放 1.5）',
     (doc.querySelector('.zoom-val')?.textContent || '') === '150%',
     doc.querySelector('.zoom-val')?.textContent)
+  // **迁移完要从浏览器删掉**：项目内容不该继续留在浏览器里
+  check('老存档已从浏览器删除',
+    dom.window.localStorage.getItem('meow.canvas.v1') === null,
+    String(dom.window.localStorage.getItem('meow.canvas.v1')))
+  // 迁移后的项目要落到服务端磁盘
+  check('迁移的项目落到了服务端',
+    f.serverProjects.size >= 1, String(f.serverProjects.size))
+  const migrated = [...f.serverProjects.values()][0]
+  check('服务端存下了迁移过来的节点',
+    JSON.stringify(migrated?.nodes || []).includes('legacy knight'),
+    JSON.stringify(migrated?.nodes || []).slice(0, 80))
 
   check('迁移场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()

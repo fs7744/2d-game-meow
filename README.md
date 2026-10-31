@@ -893,9 +893,38 @@ npm run smoke                         # 无浏览器渲染冒烟（jsdom，209 �
     一起从磁盘删掉，不可恢复。
 - **最后一个项目不能删光**：删光了会自动补一个空的「我的项目」。
 
-存储：全部项目存在 `localStorage` 的 `meow.projects.v2` 一个键里（原子读写，
-不会出现「切了一半」的中间态）。老存档 `meow.canvas.v1`（只有一份 nodes+viewport
-的时代）会自动迁移成第一个项目「我的项目」，不丢用户已有的画布。
+**存储：项目内容只在服务端磁盘上，浏览器里什么都不存。**
+
+```
+assets/projects/<项目id>/
+├── project.json             项目定义（节点 + 视口 + 元信息）
+├── w1_..._0000.png          产物
+├── uploads/                 本项目拖进来的本地图
+└── masks/                   局部重绘的蒙版
+```
+
+- **为什么落盘**：项目原先只存在浏览器 `localStorage` 里，实际问题很具体——
+  容量就 5MB 左右，一个大项目直接写不进去（`saveStore` 只能默默吞掉异常，
+  用户毫无察觉，改动全丢）；换浏览器 / 换机器 / 清缓存，项目就没了。
+- **写入是原子的**：先写临时文件再 `os.replace`。半截的 JSON 会让项目打不开，
+  而自动保存是高频触发的，不能冒这个险。
+- **浏览器零存储**：`localStorage` 里只剩提示词收藏这类界面偏好，
+  **没有任何项目内容**。
+- **老存档迁移**：旧版本时代的 `meow.canvas.v1` 会在启动时读一次、传到服务端、
+  然后**从浏览器删掉**——迁移完不留副本。
+
+**接口**：
+
+| 端点 | 作用 |
+|---|---|
+| `GET /projects` | 项目列表（摘要，不带节点）+ 当前打开哪个 |
+| `GET /projects/<id>` | 读完整定义（节点 + 视口） |
+| `PUT /projects/<id>` | 保存定义（原子写，幂等） |
+| `DELETE /projects/<id>?files=1` | 删项目（files=1 连产物目录一起删） |
+| `PUT /workspace` | 记「当前打开哪个项目」 |
+
+前端启动时拉服务端列表 → 逐个拉完整定义 → 侧栏与画布就位；
+改动后防抖 400ms 写回服务端。
 
 **产物也隔离**：每个项目的文件都在自己的目录里：
 
@@ -1590,6 +1619,7 @@ MEOW_SLOW=1 pytest tests -m slow                  # 真跑 Qwen 的端到端组�
 | `workflows/postprocess.py` / `pixelfy.py` | test_postprocess test_pixelfy test_sheet | 15s |
 | `app.py` / `workflows/assetdb.py` | test_api test_review_p2 | 15s |
 | `workflows/projectio.py` / `paths.py` | test_projects | 5s |
+| `workflows/projectstore.py`（项目落盘） | test_project_store | 3s |
 | `tools/*` `docs/*` `README` | 不跑（工具靠自身输出验证） | — |
 | 合并 / 发版前 | 全量 | 150s |
 
@@ -1610,6 +1640,7 @@ test_stability 的 free 与泄漏、test_matte 的缓存素材）需要 GPU。
 | `tests/test_matte.py` | 背景估计、连通域不误抠内部同色区、去白边、alpha 二值、**u2net 抠空自动回退**、**已有 alpha 复用（IoU 1.000）**、**雾状 alpha 仍重抠**、**补内部洞但不动通到边界的缺口** | 17 |
 | `tests/test_api.py` | 各工作流队列往返、**未知 workflow 报错**、蒙版端点、上传端点、真删（连带 sidecar/raw、路径穿越）、资产按项目过滤、**参数按签名过滤并记 params_ignored** | 28 |
 | `tests/test_projects.py` | **项目归档往返**（.mproj 打包/解包）、**目录与通配引用还原成同构目录**、**路径与 URL 一起重算**、缺失素材清空而非报错、**Windows 反斜杠相对路径**、模板存/列/实例化/删 | 14 |
+| `tests/test_project_store.py` | **项目落盘存取往返**、**原子写（不留半截 JSON / 临时文件）**、**路径穿越被清洗**、坏文件不让列表 500、删项目（保留/连产物）、**HTTP 增删改查**、**任务 404 带明确文案** | 17 |
 | `tests/test_models.py` | **只剩一个底模时接口自洽**：available / arch / recommend / caps.approx / refiner=false、未知底模报错 | 5 |
 | `tests/test_postprocess.py` | 锚点、逐帧对齐、打包几何、色板上限、alpha 二值、像素块单色性、前景块计数 | 11 |
 | `tests/test_pixelfy.py` | 网格检测、每格一色、共享色板、噪点清理、网格吸附 | 20 |
@@ -1649,6 +1680,7 @@ W4 侧对应的兜底是上面那套**质量闸门**（生成后再检一遍，�
 ├── workflows/
 │   ├── paths.py            统一路径解析（资产根 / 模板根，可用环境变量覆盖）
 │   ├── projectio.py        项目归档 .mproj：打包 / 解包 / 模板
+│   ├── projectstore.py     项目落盘存储（assets/projects/<id>/project.json）
 │   ├── engine.py           pipeline 懒加载、显存守卫、LoRA 热切换
 │   ├── generate.py         w1/w2/w3/w4 四个工作流
 │   ├── quality.py          帧质量评分（关节数 / 占比 / 贴边 / 漂移）——挑帧与闸门
@@ -1697,6 +1729,26 @@ python -m venv .venv
     --index-url https://download.pytorch.org/whl/cu124
 .venv/Scripts/python -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
+
+## 任务失败时，节点不会卡在「执行中」
+
+生成是异步的（提交 → 排队 → 出图 → 轮询）。中间任何一环出问题，
+节点都**必须能自己退出「执行中」状态**，否则按钮一直禁用、进度条一直转，
+用户只能刷新页面（刷新后节点还在，还是卡着）。
+
+三道兜底：
+
+| 情况 | 处理 |
+|---|---|
+| **提交请求挂住** | `fetch` 加 30 秒超时（`AbortController`）。没有超时的话，服务端不响应时请求会挂到天荒地老，节点永远「排队中…」 |
+| **轮询查询失败** | 连续 3 次失败（约 2 秒）就判定失败，节点退出「执行中」并显示原因 |
+| **任务消失 / 卡死** | 服务端返回 404（任务被淘汰或服务重启）→ 判定失败；超过 30 分钟没结束 → 判定超时 |
+
+后端侧也做了兜底：worker 线程的整个执行过程包在 `try` 里，任何漏网的异常
+都把任务标成 `failed`（以前任务会永远停在 `queued`，前端那边节点就一直排队）。
+
+> 「执行中」判定只看 `job.status` 是 `queued` 还是 `running`，
+> 失败（`failed`）与完成（`done`）都会让按钮恢复可点。
 
 ## 快速开始
 

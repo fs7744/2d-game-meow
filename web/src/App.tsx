@@ -3,7 +3,7 @@ import Canvas, { type LinkField } from './canvas/Canvas'
 import Sidebar from './components/Sidebar'
 import { hasPrompt, loadPrompts, removePrompt, savePrompts, togglePrompt } from './store/prompts'
 import {
-  loadStore, makeProject, metaOf, saveStore, archiveOf, projectFromImported,
+  makeProject, metaOf, takeLegacyProject, archiveOf, projectFromImported,
   type Project, type ProjectMeta,
 } from './store/projects'
 import {
@@ -16,6 +16,8 @@ import {
   submitOutpaint, submitOutfitSwap, submitFaceSwap, submitVnccsPose,
   exportProject, importProject, fetchTemplates, saveTemplate, instantiateTemplate,
   deleteTemplate, type TemplateInfo,
+  fetchServerProjects, fetchServerProject, saveServerProject, deleteServerProject,
+  saveWorkspace,
 } from './api'
 import ConfirmDialog from './components/ConfirmDialog'
 import Lightbox from './components/Lightbox'
@@ -224,14 +226,14 @@ function migrate(n: GenNode): GenNode {
 const DEMO = new URLSearchParams(location.search).get('demo')
 
 export default function App() {
-  // 项目：每个项目是一套独立的节点 + 视口。store 里存全部项目的完整数据，
-  // 内存里只留当前项目的（切项目就是把另一套换上）。
-  const storeRef = useRef<{ current: string; projects: Project[] }>(loadStore())
-  const [currentId, setCurrentId] = useState<string>(storeRef.current.current)
-  const [projectMeta, setProjectMeta] = useState<ProjectMeta[]>(
-    () => storeRef.current.projects.map(metaOf),
-  )
-  const initial = storeRef.current.projects.find((p) => p.id === storeRef.current.current)
+  // 项目：每个项目是一套独立的节点 + 视口。
+  //
+  // **项目内容只存在服务端磁盘**（`assets/projects/<id>/project.json`），
+  // 浏览器里什么都不存。storeRef 只是**内存里的工作副本**（切项目就是把
+  // 另一套换上），启动时从服务端拉，改动后写回服务端。
+  const storeRef = useRef<{ current: string; projects: Project[] }>({ current: '', projects: [] })
+  const [currentId, setCurrentId] = useState<string>('')
+  const [projectMeta, setProjectMeta] = useState<ProjectMeta[]>([])
   const [nodes, setNodes] = useState<GenNode[]>(() => {
     if (DEMO) {
       return [{
@@ -239,11 +241,9 @@ export default function App() {
         params: { ...DEFAULT_PARAMS, prompt: '白色猫骑士，红披风，武士刀，正面全身' },
       }]
     }
-    return (initial?.nodes ?? []).map(migrate)
+    return []
   })
-  const [viewport, setViewport] = useState<Viewport>(
-    () => initial?.viewport ?? { x: 120, y: 90, z: 1 },
-  )
+  const [viewport, setViewport] = useState<Viewport>({ x: 120, y: 90, z: 1 })
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [device, setDevice] = useState<string>('')
   const [favs, setFavs] = useState<FavoritePrompt[]>(() => loadPrompts())
@@ -309,6 +309,111 @@ export default function App() {
 
   useEffect(() => savePrompts(favs), [favs])
 
+  // ---------------- 项目落盘（服务端磁盘） ----------------
+  //
+  // 权威副本在 `assets/projects/<id>/project.json`。**浏览器里不留副本**：
+  // 启动时从服务端拉，改动后写回服务端。
+
+  /** 把一个项目写到服务端磁盘。 */
+  const persistProject = useCallback(async (p: Project) => {
+    await saveServerProject({
+      id: p.id,
+      name: p.name,
+      created: p.created,
+      updated: p.updated,
+      nodes: p.nodes as unknown[],
+      viewport: p.viewport as unknown as Record<string, unknown>,
+    })
+  }, [])
+
+  /**
+   * 启动时从服务端拉项目。
+   *
+   * **服务端是唯一真相**：浏览器里没有任何项目内容，所以这里拉到什么就是什么。
+   * 服务端一个项目都没有（第一次用）→ 顺手建一个空的「我的项目」。
+   *
+   * **老存档迁移**：浏览器里可能还留着 `meow.canvas.v1`（旧版本时代的
+   * localStorage 存档）。读一次、传到服务端、然后**从浏览器删掉**——
+   * 项目内容不该继续留在浏览器里。
+   *
+   * 拉不到（后端没连上）→ 提示用户，不静默。
+   */
+  useEffect(() => {
+    let alive = true
+    ;(async () => {
+      const { items, current: srvCurrent, reachable } = await fetchServerProjects()
+      if (!alive) return
+      if (!reachable) {
+        if (!DEMO) {
+          setNotice('后端未连接：项目无法读取，请先启动服务')
+          window.setTimeout(() => setNotice(''), 6000)
+        }
+        return
+      }
+      // **demo 模式**：靠 URL 参数现场造节点，不能被服务端版本覆盖。
+      // 但项目列表照常同步（侧栏要能看到项目、能切）。
+      const legacy = DEMO ? null : takeLegacyProject()
+      if (legacy) {
+        await persistProject(legacy)
+      }
+      // 服务端有 → 逐个拉完整定义
+      const loaded: Project[] = []
+      for (const meta of items) {
+        const full = await fetchServerProject(meta.id)
+        if (full) {
+          loaded.push({
+            id: full.id || meta.id,
+            name: full.name || meta.name,
+            created: full.created || meta.created,
+            updated: full.updated || meta.updated,
+            nodes: (full.nodes || []) as GenNode[],
+            viewport: (full.viewport || { x: 120, y: 90, z: 1 }) as Viewport,
+          })
+        }
+      }
+      if (legacy) loaded.push(legacy)
+      if (!alive) return
+      // 一个项目都没有 → 建一个空的
+      if (loaded.length === 0) {
+        const fresh = makeProject('我的项目')
+        await persistProject(fresh)
+        loaded.push(fresh)
+      }
+      // 当前打开哪个：服务端记的优先，否则第一个
+      const current = loaded.some((p) => p.id === srvCurrent) ? srvCurrent : loaded[0].id
+      storeRef.current = { current, projects: loaded }
+      setProjectMeta(loaded.map(metaOf))
+      if (!DEMO) void saveWorkspace(current)
+      // **demo 模式不替换初始画布内容**（它靠 URL 参数现场造节点），
+      // 但切换项目时仍然用服务端的内容（不然 demo 下切项目全是空画布）。
+      if (current !== currentIdRef.current && !DEMO) {
+        const target = loaded.find((p) => p.id === current)
+        if (target) {
+          setCurrentId(current)
+          setNodes(target.nodes.map(migrate))
+          setViewport(target.viewport)
+          setSelectedId(null)
+        }
+      }
+      // **demo 模式也要把服务端内容装进内存 store**：切项目时要用它
+      // （`switchProject` 从 store 里取目标项目的节点）。只影响内存，
+      // 初始画布仍然是 demo 自己造的节点。
+      if (DEMO && current !== currentIdRef.current) {
+        const target = loaded.find((p) => p.id === current)
+        if (target) {
+          storeRef.current = {
+            current: currentIdRef.current,
+            projects: loaded.map((p) => (p.id === current
+              ? { ...p, nodes: nodesRef.current, viewport: viewportRef.current }
+              : p)),
+          }
+          setCurrentId(current)
+        }
+      }
+    })()
+    return () => { alive = false }
+  }, [persistProject])
+
   // 骨架目录一次拉完即可（后端 20ms 扫完 assets 两层）；失败就空列表，
   // 节点里仍然可以手填路径，功能不因这个接口挂掉而消失。
   const reloadPoseDirs = useCallback(() => {
@@ -353,7 +458,9 @@ export default function App() {
   const currentIdRef = useRef(currentId)
   currentIdRef.current = currentId
 
-  // 自动保存（防抖 400ms）：只写回**当前项目**，别的项目原封不动
+  // 自动保存（防抖 400ms）：只写回**当前项目**，别的项目原封不动。
+  //
+  // **只写服务端磁盘**。浏览器不留任何项目内容。
   useEffect(() => {
     const t = setTimeout(() => {
       const st = storeRef.current
@@ -363,8 +470,10 @@ export default function App() {
           : p,
       )
       storeRef.current = { current: currentId, projects }
-      saveStore(currentId, projects)
       setProjectMeta(projects.map(metaOf))
+      // 落盘到服务端
+      const cur = projects.find((p) => p.id === currentId)
+      if (cur) void persistProject(cur)
     }, 400)
     return () => clearTimeout(t)
   }, [nodes, viewport, currentId])
@@ -396,35 +505,42 @@ export default function App() {
     const target = projects.find((p) => p.id === id)
     if (!target) return
     storeRef.current = { current: id, projects }
-    saveStore(id, projects)
     setProjectMeta(projects.map(metaOf))
     setCurrentId(id)
     setNodes(target.nodes)
     setViewport(target.viewport)
     setSelectedId(null)
-  }, [flushCurrent])
+    // 切走之前把旧项目落盘（自动保存的防抖可能还没触发）
+    const prev = projects.find((p) => p.id === currentIdRef.current)
+    if (prev) void persistProject(prev)
+    void saveWorkspace(id)
+  }, [flushCurrent, persistProject])
 
   const createProject = useCallback((name?: string) => {
     const projects = flushCurrent()
     const p = makeProject(name?.trim() || `项目 ${projects.length + 1}`)
     const next = [...projects, p]
     storeRef.current = { current: p.id, projects: next }
-    saveStore(p.id, next)
     setProjectMeta(next.map(metaOf))
     setCurrentId(p.id)
     setNodes([])
     setViewport({ x: canvasBox().left + 40, y: 90, z: 1 })
     setSelectedId(null)
-  }, [flushCurrent])
+    // 立刻落盘：空项目也要在磁盘上占个位（不然刷新就没了）
+    void persistProject(p)
+    void saveWorkspace(p.id)
+  }, [flushCurrent, persistProject])
 
   const renameProject = useCallback((id: string, name: string) => {
     const projects = flushCurrent().map((p) =>
       p.id === id ? { ...p, name: name.trim() || p.name } : p,
     )
     storeRef.current = { ...storeRef.current, projects }
-    saveStore(storeRef.current.current, projects)
     setProjectMeta(projects.map(metaOf))
-  }, [flushCurrent])
+    // 改名也要落盘：下次从磁盘拉回来的名字得是新的
+    const renamed = projects.find((p) => p.id === id)
+    if (renamed) void persistProject(renamed)
+  }, [flushCurrent, persistProject])
 
   /** 删项目：hard=true 时连这个项目的产物文件一起删（不可恢复）。 */
   const deleteProject = useCallback(async (id: string, hard: boolean) => {
@@ -440,12 +556,13 @@ export default function App() {
         window.setTimeout(() => setUploadMsg(''), 5000)
       }
     }
+    // 服务端也要删：否则刷新后项目又从磁盘冒出来了
+    void deleteServerProject(id, hard)
     let next = projects.filter((p) => p.id !== id)
     if (next.length === 0) next = [makeProject('我的项目')]   // 至少留一个空项目
     const wasCurrent = currentIdRef.current === id
     const current = wasCurrent ? next[0].id : currentIdRef.current
     storeRef.current = { current, projects: next }
-    saveStore(current, next)
     setProjectMeta(next.map(metaOf))
     if (wasCurrent) {
       setCurrentId(next[0].id)
@@ -510,27 +627,29 @@ export default function App() {
   /** 导入一个 `.mproj` → 新项目。 */
   const importOneProject = useCallback(async (file: File) => {
     try {
-      // **先建好项目再导入**：导入的素材要落到 `assets/projects/<新id>/`，
-      // 所以 id 必须先定下来。
+      // **先定好 id 再导入**：导入的素材要落到 `assets/projects/<id>/`，
+      // 项目定义也写在这个 id 下——两边必须同一个 id。
       const projects = flushCurrent()
       const p = makeProject(file.name.replace(/\.mproj$/i, '') || '导入的项目')
       const imp = await importProject(file, p.id)
-      const merged = projectFromImported(imp, p.name)
+      const merged = projectFromImported(imp, p.id, p.name)
       const next = [...projects, merged]
       storeRef.current = { current: merged.id, projects: next }
-      saveStore(merged.id, next)
       setProjectMeta(next.map(metaOf))
       setCurrentId(merged.id)
       setNodes(merged.nodes.map(migrate))
       setViewport(merged.viewport)
       setSelectedId(null)
+      // 落盘（后端已写了一份，这里再写一次确保前端状态与磁盘一致）
+      void persistProject(merged)
+      void saveWorkspace(merged.id)
       setNotice(`已导入「${merged.name}」（${imp.imported_files} 份素材）`)
       window.setTimeout(() => setNotice(''), 4000)
     } catch (e) {
       setUploadMsg(`导入失败：${e instanceof Error ? e.message : '未知错误'}`)
       window.setTimeout(() => setUploadMsg(''), 6000)
     }
-  }, [flushCurrent])
+  }, [flushCurrent, persistProject])
 
   /** 从模板新建一个项目。 */
   const useTemplate = useCallback(async (tid: string) => {
@@ -538,22 +657,23 @@ export default function App() {
       const projects = flushCurrent()
       const p = makeProject('新项目')
       const imp = await instantiateTemplate(tid, p.id)
-      const merged = projectFromImported(imp, p.name)
+      const merged = projectFromImported(imp, p.id, p.name)
       const next = [...projects, merged]
       storeRef.current = { current: merged.id, projects: next }
-      saveStore(merged.id, next)
       setProjectMeta(next.map(metaOf))
       setCurrentId(merged.id)
       setNodes(merged.nodes.map(migrate))
       setViewport(merged.viewport)
       setSelectedId(null)
+      void persistProject(merged)
+      void saveWorkspace(merged.id)
       setNotice(`已从模板新建「${merged.name}」`)
       window.setTimeout(() => setNotice(''), 4000)
     } catch (e) {
       setUploadMsg(`从模板新建失败：${e instanceof Error ? e.message : '未知错误'}`)
       window.setTimeout(() => setUploadMsg(''), 6000)
     }
-  }, [flushCurrent])
+  }, [flushCurrent, persistProject])
 
   /** 删模板。 */
   const removeTemplate = useCallback(async (tid: string) => {
@@ -1082,10 +1202,22 @@ export default function App() {
   }, [generate])
 
   // 轮询：只查还在排队/生成中的节点
+  //
+  // **必须有失败兜底**：以前 `r.status !== 'fulfilled'` 就原样返回节点，
+  // 于是网络断一次 / 服务端重启，节点永远停在「生成中…」——按钮禁用、
+  // 进度条不动，用户只能刷新页面（刷新后节点还在，还是卡着）。
+  //
+  // 现在两条兜底：
+  //   1. 连续查询失败 → 判定失败，节点退出「执行中」；
+  //   2. 超过最长时间（默认 30 分钟）→ 判定超时，退出「执行中」。
   useEffect(() => {
+    // 连续失败计数（按节点 id 记）。用 ref 而不是 state：高频更新 state
+    // 会导致整棵树重渲染。
+    const failCount = new Map<string, number>()
     const timer = setInterval(async () => {
       const active = nodesRef.current.filter(
-        (n) => n.job && (n.job.status === 'queued' || n.job.status === 'running') && n.job.id !== 'pending',
+        (n) => n.job && (n.job.status === 'queued' || n.job.status === 'running')
+          && n.job.id !== 'pending',
       )
       if (active.length === 0) return
       const results = await Promise.allSettled(active.map((n) => fetchJob(n.job!.id)))
@@ -1094,11 +1226,61 @@ export default function App() {
           const idx = active.findIndex((a) => a.id === n.id)
           if (idx < 0) return n
           const r = results[idx]
-          if (r.status !== 'fulfilled') return n
-          return { ...n, job: { ...n.job!, ...r.value, startedAt: n.job?.startedAt } }
+          if (r.status === 'fulfilled') {
+            failCount.delete(n.id)
+            return { ...n, job: { ...n.job!, ...r.value, startedAt: n.job?.startedAt } }
+          }
+          // 查询失败：连续 3 次（约 2 秒）就判定失败，不再无限等
+          const c = (failCount.get(n.id) || 0) + 1
+          failCount.set(n.id, c)
+          if (c < 3) return n
+          failCount.delete(n.id)
+          return {
+            ...n,
+            job: {
+              ...n.job!,
+              status: 'failed' as const,
+              error: r.reason instanceof Error
+                ? `无法查询任务状态：${r.reason.message}`
+                : '无法查询任务状态（服务端可能已断开）',
+            },
+          }
         }),
       )
     }, 700)
+    return () => clearInterval(timer)
+  }, [])
+
+  // 看门狗：执行中的节点超过 MAX_RUN_MS 还没结束 → 判定超时
+  //
+  // **为什么需要**：Qwen 单帧要 24~28 秒，逐帧路线（8 帧 + 候选择优）能跑
+  // 十几分钟。但也不能无限等——任务可能已经被服务端淘汰（404），也可能
+  // 后端卡死了。30 分钟是「肯定出问题了」的上限。
+  useEffect(() => {
+    const MAX_RUN_MS = 30 * 60 * 1000
+    const timer = setInterval(() => {
+      const now = Date.now()
+      setNodes((list) => {
+        let changed = false
+        const next = list.map((n) => {
+          if (!n.job) return n
+          const busy = n.job.status === 'queued' || n.job.status === 'running'
+          if (!busy || n.job.id === 'pending') return n
+          const started = n.job.startedAt || 0
+          if (!started || now - started < MAX_RUN_MS) return n
+          changed = true
+          return {
+            ...n,
+            job: {
+              ...n.job,
+              status: 'failed' as const,
+              error: '任务超时（超过 30 分钟未完成，可能已被服务端淘汰）',
+            },
+          }
+        })
+        return changed ? next : list
+      })
+    }, 5000)
     return () => clearInterval(timer)
   }, [])
 

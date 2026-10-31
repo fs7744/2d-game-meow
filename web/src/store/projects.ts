@@ -1,11 +1,22 @@
 /**
- * 项目（= 独立画布）的本地存储。
+ * 项目（= 独立画布）的存储。
  *
  * 一个项目就是一套自己的节点 + 自己的视口，切项目互不干涉。
- * 全部存在 localStorage 一个键里（原子读写，不会出现「切了一半」的中间态）。
  *
- * 老存档（meow.canvas.v1，只有一份 nodes+viewport）会自动迁移成第一个项目，
- * 不丢用户已有的画布。
+ * **项目内容只存在服务端磁盘上**（`assets/projects/<id>/project.json`）。
+ *
+ * **浏览器里什么都不存**——不存 localStorage、不存 sessionStorage、
+ * 不写 IndexedDB。之前把整个项目（几千个节点的 JSON）塞进 localStorage，
+ * 问题很实际：
+ *
+ *   · 容量就 5MB 左右，一个大项目直接写不进去（`saveStore` 只能默默吞掉
+ *     异常，用户毫无察觉，改动全丢）；
+ *   · 换了浏览器 / 换了机器 / 清一次缓存，项目就没了；
+ *   · 每次自动保存都要把整个项目序列化一遍塞进去，大项目会卡顿；
+ *   · 浏览器里存着项目的明文 JSON，出于任何理由都不合适。
+ *
+ * 现在浏览器只保留**极小的界面状态**（提示词收藏之类），项目一律走服务端。
+ * 老存档（meow.canvas.v1）只在**首次迁移**时读一次，迁到服务端后就删掉。
  */
 import type { GenNode, Viewport } from '../types'
 
@@ -27,8 +38,6 @@ export type ProjectMeta = {
   count: number
 }
 
-const KEY = 'meow.projects.v2'
-const LEGACY_KEY = 'meow.canvas.v1'
 const DEFAULT_VIEWPORT: Viewport = { x: 120, y: 90, z: 1 }
 
 let seq = 0
@@ -43,56 +52,30 @@ export function makeProject(
   return { id: newId(), name, created: now, updated: now, nodes, viewport }
 }
 
-function normalize(p: Partial<Project>): Project {
-  const now = new Date().toISOString()
-  return {
-    id: p.id || newId(),
-    name: p.name || '未命名项目',
-    created: p.created || now,
-    updated: p.updated || now,
-    nodes: Array.isArray(p.nodes) ? p.nodes : [],
-    viewport: p.viewport && typeof p.viewport.z === 'number' ? p.viewport : DEFAULT_VIEWPORT,
-  }
-}
-
-/** 读取全部项目；没有就新建一个默认项目（并顺手迁移老存档）。 */
-export function loadStore(): { current: string; projects: Project[] } {
-  try {
-    const raw = localStorage.getItem(KEY)
-    if (raw) {
-      const s = JSON.parse(raw)
-      if (s && Array.isArray(s.projects) && s.projects.length > 0) {
-        const projects = (s.projects as Partial<Project>[]).map(normalize)
-        const current = projects.some((p) => p.id === s.current) ? s.current : projects[0].id
-        return { current, projects }
-      }
-    }
-  } catch {
-    /* 存档损坏就当没有 */
-  }
-
-  // 老存档迁移：只有一份 nodes + viewport 的时代
-  let nodes: GenNode[] = []
-  let viewport: Viewport = DEFAULT_VIEWPORT
+/**
+ * 老存档迁移：读一次 `meow.canvas.v1`（只有一份 nodes+viewport 的时代）。
+ *
+ * **只在迁移时读**：内容交给服务端保存后，浏览器里那份就该删掉——
+ * 留着就等于「项目内容还存了一份在浏览器」。
+ *
+ * @returns 迁移用的项目；没有老存档则返回 null。
+ */
+export function takeLegacyProject(): Project | null {
+  const LEGACY_KEY = 'meow.canvas.v1'
   try {
     const raw = localStorage.getItem(LEGACY_KEY)
-    if (raw) {
-      const s = JSON.parse(raw)
-      if (Array.isArray(s.nodes)) nodes = s.nodes
-      if (s.viewport && typeof s.viewport.z === 'number') viewport = s.viewport
-    }
+    if (!raw) return null
+    const s = JSON.parse(raw)
+    const nodes: GenNode[] = Array.isArray(s.nodes) ? s.nodes : []
+    const viewport: Viewport = (s.viewport && typeof s.viewport.z === 'number')
+      ? s.viewport : DEFAULT_VIEWPORT
+    // 读完就删：内容已经在服务端了，浏览器不留副本
+    localStorage.removeItem(LEGACY_KEY)
+    if (!nodes.length) return null
+    return makeProject('我的项目', nodes, viewport)
   } catch {
-    /* ignore */
-  }
-  const p = makeProject('我的项目', nodes, viewport)
-  return { current: p.id, projects: [p] }
-}
-
-export function saveStore(current: string, projects: Project[]): void {
-  try {
-    localStorage.setItem(KEY, JSON.stringify({ current, projects }))
-  } catch {
-    /* 存储满了就放弃：不能因为存不下就把用户的画布搞坏 */
+    try { localStorage.removeItem(LEGACY_KEY) } catch { /* ignore */ }
+    return null
   }
 }
 
@@ -133,11 +116,13 @@ export function archiveOf(p: Project): {
 /**
  * 从导入/模板实例化出来的内容，还原成一个**新项目**。
  *
- * **为什么要换 id**：导入的项目必须是新项目，不能覆盖已有的——
- * 素材落在 `assets/projects/<id>/`，用同一个 id 会跟原项目的产物混在一起。
+ * **id 必须由调用方指定**：素材已经落在 `assets/projects/<id>/imported/`
+ * 了（后端按这个 id 解包的），项目定义也写在这个 id 下。前端若另起一个 id，
+ * 素材和项目定义就分家了——产物写到 A 目录，引用图在 B 目录。
  */
 export function projectFromImported(
   imp: { meta: Record<string, unknown>; payload: Record<string, unknown> },
+  id: string,
   fallbackName: string,
 ): Project {
   const now = new Date().toISOString()
@@ -146,7 +131,7 @@ export function projectFromImported(
   const nodes = Array.isArray(payload.nodes) ? (payload.nodes as GenNode[]) : []
   const viewport = (payload.viewport as Viewport) || DEFAULT_VIEWPORT
   return {
-    id: newId(),
+    id,
     name: String(meta.name || fallbackName || '导入的项目'),
     created: String(meta.created || now),
     updated: now,

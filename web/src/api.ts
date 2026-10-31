@@ -115,16 +115,39 @@ function common(params: GenParams, opts: SubmitOpts) {
   }
 }
 
+/**
+ * 提交生成的超时（毫秒）。
+ *
+ * **必须有超时**：`fetch` 没有默认超时，服务端不响应时请求会挂到天荒地老。
+ * 前端在提交前把节点标成「排队中」，请求挂住 = 节点永远排队中、按钮禁用。
+ * 30 秒足够服务端把任务塞进队列（真出图是后面的事，不占这个连接）。
+ */
+const SUBMIT_TIMEOUT_MS = 30_000
+
 async function post(
   workflow: 'w1' | 'w2' | 'w3' | 'w4' | 'w5' | 'wbg' | 'wpx' | 'wpc' | 'wss'
     | 'topixel' | 'wap' | 'wout' | 'woutfit' | 'wface' | 'wvnccs',
   params: Record<string, unknown>,
 ) {
-  const r = await fetch(`${base}/generate`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ workflow, params }),
-  })
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), SUBMIT_TIMEOUT_MS)
+  let r: Response
+  try {
+    r = await fetch(`${base}/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workflow, params }),
+      signal: ctrl.signal,
+    })
+  } catch (e) {
+    // 区分「超时」与「连不上」——用户看的提示不一样
+    if (e instanceof Error && e.name === 'AbortError') {
+      throw new Error('提交超时：服务端 30 秒没响应，请检查后端是否在运行')
+    }
+    throw new Error(`提交失败：${e instanceof Error ? e.message : '网络错误'}`)
+  } finally {
+    clearTimeout(timer)
+  }
   if (!r.ok) throw new Error(`提交失败：HTTP ${r.status}`)
   return r.json() as Promise<SubmitResult>
 }
@@ -815,8 +838,9 @@ export async function health(): Promise<{ ok: boolean; device?: string }> {
 
 // ---------------- 项目导入 / 导出 / 模板 ----------------
 //
-// 项目（画布 + 节点）存在浏览器 localStorage，素材在服务端 assets/ 下。
-// 导入导出把两边拼成一个 `.mproj` 单文件：拷走它就等于拷走了整个项目。
+// 项目（画布 + 节点）存在**服务端磁盘**（assets/projects/<id>/project.json），
+// 素材也在服务端 assets/ 下。导入导出把两边拼成一个 `.mproj` 单文件：
+// 拷走它就等于拷走了整个项目。
 
 /** 打包时的项目内容。meta 是元信息，payload 是节点等主体数据。 */
 export type ProjectArchive = {
@@ -925,4 +949,112 @@ export async function instantiateTemplate(
 export async function deleteTemplate(tid: string): Promise<void> {
   const r = await fetch(`${base}/templates/${encodeURIComponent(tid)}`, { method: 'DELETE' })
   if (!r.ok) throw new Error(`删除模板失败：HTTP ${r.status}`)
+}
+
+// ---------------- 项目落盘存储 ----------------
+//
+// 项目定义存在**服务端磁盘**：`assets/projects/<id>/project.json`。
+// 换机器、换浏览器、清缓存都不丢。**浏览器里不留任何项目内容。**
+
+/** 服务端返回的项目摘要（不带节点）。 */
+export type ServerProjectMeta = {
+  id: string
+  name: string
+  created: string
+  updated: string
+  count: number
+}
+
+/** 服务端返回的项目定义。 */
+export type ServerProject = {
+  id: string
+  name: string
+  created: string
+  updated: string
+  nodes: unknown[]
+  viewport: Record<string, unknown>
+}
+
+/**
+ * 拉磁盘上的项目列表。
+ *
+ * **失败返回空数组而不是抛错**：后端没连上时，前端要能用缓存继续工作
+ * （离线兜底），不能因为拉列表失败就整个应用打不开。
+ */
+export async function fetchServerProjects(): Promise<{
+  items: ServerProjectMeta[]
+  current: string
+  /** 后端是否可达。false = 拉不到（服务没起 / 网络断） */
+  reachable: boolean
+}> {
+  try {
+    const r = await fetch(`${base}/projects`)
+    if (!r.ok) return { items: [], current: '', reachable: false }
+    const j = await r.json()
+    return {
+      items: Array.isArray(j.items) ? (j.items as ServerProjectMeta[]) : [],
+      current: typeof j.current === 'string' ? j.current : '',
+      reachable: true,
+    }
+  } catch {
+    return { items: [], current: '', reachable: false }
+  }
+}
+
+/** 拉一个项目的完整定义。失败返回 null（本地缓存里可能还有）。 */
+export async function fetchServerProject(id: string): Promise<ServerProject | null> {
+  try {
+    const r = await fetch(`${base}/projects/${encodeURIComponent(id)}`)
+    if (!r.ok) return null
+    return (await r.json()) as ServerProject
+  } catch {
+    return null
+  }
+}
+
+/** 把项目定义保存到服务端磁盘。 */
+export async function saveServerProject(p: {
+  id: string
+  name: string
+  created: string
+  updated: string
+  nodes: unknown[]
+  viewport: Record<string, unknown>
+}): Promise<boolean> {
+  try {
+    const r = await fetch(`${base}/projects/${encodeURIComponent(p.id)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(p),
+    })
+    return r.ok
+  } catch {
+    return false
+  }
+}
+
+/** 删服务端的项目。`files=true` 连产物目录一起删。 */
+export async function deleteServerProject(id: string, files: boolean): Promise<boolean> {
+  try {
+    const r = await fetch(
+      `${base}/projects/${encodeURIComponent(id)}?files=${files ? 1 : 0}`,
+      { method: 'DELETE' },
+    )
+    return r.ok
+  } catch {
+    return false
+  }
+}
+
+/** 记「当前打开的是哪个项目」——重开浏览器回到同一个画布。 */
+export async function saveWorkspace(current: string): Promise<void> {
+  try {
+    await fetch(`${base}/workspace`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ current }),
+    })
+  } catch {
+    /* 记不住无所谓：下次仍会按项目列表的顺序选 */
+  }
 }
