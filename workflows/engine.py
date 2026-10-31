@@ -427,10 +427,9 @@ class Engine:
         """
         from diffusers import QwenImage21Pipeline
 
-        # **加载前先清场**：qwen 峰值 16.4GB，SDXL 的 ControlNet 管线约 13GB，
-        # 两条并存必然挤爆。不清的话 _fit 会降级到 cpu offload（每步在 CPU/GPU
-        # 间搬权重），用户看到的是「一直转、显存满」而不是报错。
-        # 反方向也一样——generate.py 里 pose 系加载前会按需驱逐 qwen。
+        # **加载前先清场**：Qwen 峰值 16.4GB，别的管线留着就是挤爆。
+        # 不清的话 Qwen 只能退到 cpu offload（每步在 CPU/GPU 间搬权重），
+        # 用户看到的是「一直转、显存满」而不是报错。
         self.ensure_headroom(need_gb=17.0)
         tor = self._load_qwen_transformer(root)
         te = self._load_qwen_text(root)
@@ -709,9 +708,10 @@ class Engine:
                        total_gb: float = 0.0) -> int:
         """W4 在 `size` 边长下最多能批量几个候选（按**本机总显存**算）。
 
-        与 `vramopt.plan_candidates` 的区别：那个看**当前空闲**显存（运行时决策），
-        这个看**总显存**（给前端设输入框上限、提前拦住明显跑不动的配置）。
-        两者都要有：前者防止跑着跑着劣化，后者防止用户一开始就设成跑不动的值。
+        这是**界面侧的上限**：用户在输入框里根本设不出跑不动的值。
+        运行时 OOM 由 `generate._infer` 兜底（清缓存 + 缩 3/4 边长重试），
+        不再有"按当前空闲显存临时降候选数"那一层——SD 时代的
+        `vramopt.plan_candidates` 从未接线，已随管线删除。
         """
         from . import vramopt
 

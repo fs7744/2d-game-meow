@@ -1272,8 +1272,10 @@ VAE 切片、候选择优压到 1）把 37s 压到 24s，但**量级差距仍在
 关掉 offload（`MEOW_QWEN_OFFLOAD=0`）可以让 transformer 常驻，实测每张省 1~2s；
 两块 fp8 常驻合计 15.5GB，1024² 会压线，只在 768² 且不并跑别的管线时用。
 
-`vramopt._W4_SHAPE["qwen21"] = (11.0, 5.0, 5.5)`：按实测峰值标定，
-规划器在 24G 卡上对 Qwen 给出的候选数就是 1——这是事实，不是保守。
+`vramopt._W4_SHAPE["qwen21"] = (11.0, 6.0, 6.5)`：按实测峰值标定（权重 / 768² 激活 /
+每多一个候选的增量，单位 GB），规划器在 24G 卡上对 Qwen 给出的候选数就是 1
+——这是事实，不是保守。**别按旧值 (11.0, 5.0, 5.5) 改回去**：估低了会放行 768²
+批量 2（实测 23.5GB），挤到 cpu offload 上耗时翻倍且不报错。
 
 ---
 
@@ -1319,6 +1321,24 @@ VAE 切片、候选择优压到 1）把 37s 压到 24s，但**量级差距仍在
    比静默消失诚实。
 2. `/models` 的 `refiner` 字段仍在，恒 `False`：老前端的 `if (refiner)` 不会
    拿到 `undefined` 而崩。
+
+### 第二轮清理（2026-10-31）
+
+第一轮删的是**管线与路由**，`vramopt.py` 整套 AnimateDiff 显存优化当时漏了：
+`VRAM_PROFILES` / `apply_vae_slicing` / `release_ipa_encoder` / `_attach_encode_hook` /
+`optimize_pipe` / `plan_generation` / `_estimate_gb` / `plan_candidates`。
+它们改的是 `AnimateDiffControlNetPipeline` 的部件（motion module、IP-Adapter
+image_encoder），Qwen 的管线里没有这些对象，**一个调用点也没有**：
+`plan_generation` 只在测试里被调用，`plan_candidates` 从未接线
+（README 曾宣称「W4 出候选前按显存余量封顶」，实际代码里没有这一步）。
+
+现在 `vramopt.py` 只剩 `estimate_pose_gb`（`engine.max_candidates` 用它算前端
+输入框上限）。`_W4_SHAPE` 里的 sd15 / sdxl 两档也删了：未知架构按 qwen21
+保守估，不再退回 SD 档位（用 SD 的权重/激活估 Qwen 的峰值会低估一半）。
+
+同期删掉：`engine._scheduler`（引用未导入的 `DPMSolverMultistepScheduler`）、
+`engine.detect_variant`（SD 的 fp16 UNet 探测）、`projectio.read_template`
+（无调用），以及前端 `shortModel()` 里的 sd15 / sdxl 短名映射。
 
 ### 回退方式
 

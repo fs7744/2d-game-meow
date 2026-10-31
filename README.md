@@ -1658,30 +1658,30 @@ test_stability 的 free 与泄漏、test_matte 的缓存素材）需要 GPU。
 
 | 文件 | 覆盖 | 用例数 |
 |---|---|---|
-| `tests/test_qwen_workflows.py` | **十个工作流的能力表与「近似」标记**、**局部重绘选区外逐点不变**、**output_resolution 真的对齐**、**逐帧尺度归一**、**透明底 alpha 不被白底吃掉**、**Qwen 路径不许碰已删的 SD 管线**、**非人形主体不补提**、**两阶段每帧调两次模型** | 25 |
-| `tests/test_gate.py` | 公共闸门组件（候选怎么跑、同分取第一个、非人形不补提） | 6 |
+| `tests/test_qwen_workflows.py` | **十个工作流的能力表与「近似」标记**、**局部重绘选区外逐点不变**、**output_resolution 真的对齐**、**逐帧尺度归一**、**透明底 alpha 不被白底吃掉**、**Qwen 路径不许碰已删的 SD 管线**、**非人形主体不补提**、**两阶段每帧调两次模型** | 34 || `tests/test_gate.py` | 公共闸门组件（候选怎么跑、同分取第一个、非人形不补提） | 6 |
 | `tests/test_e2e_qwen.py` | **十个工作流各真跑一次模型**（`-m slow`，约 80s） | 10 |
-| `tests/test_matte.py` | 背景估计、连通域不误抠内部同色区、去白边、alpha 二值、**u2net 抠空自动回退**、**已有 alpha 复用（IoU 1.000）**、**雾状 alpha 仍重抠**、**补内部洞但不动通到边界的缺口** | 17 |
-| `tests/test_api.py` | 各工作流队列往返、**未知 workflow 报错**、蒙版端点、上传端点、真删（连带 sidecar/raw、路径穿越）、资产按项目过滤、**参数按签名过滤并记 params_ignored** | 28 |
-| `tests/test_projects.py` | **项目归档往返**（.mproj 打包/解包）、**目录与通配引用还原成同构目录**、**路径与 URL 一起重算**、缺失素材清空而非报错、**Windows 反斜杠相对路径**、模板存/列/实例化/删 | 14 |
+| `tests/test_matte.py` | 背景估计、连通域不误抠内部同色区、去白边、alpha 二值、**u2net 抠空自动回退**、**已有 alpha 复用（IoU 1.000）**、**雾状 alpha 仍重抠**、**补内部洞但不动通到边界的缺口** | 18 || `tests/test_api.py` | 各工作流队列往返、**未知 workflow 报错**、蒙版端点、上传端点、真删（连带 sidecar/raw、路径穿越）、资产按项目过滤、**参数按签名过滤并记 params_ignored** | 33 || `tests/test_projects.py` | **项目归档往返**（.mproj 打包/解包）、**目录与通配引用还原成同构目录**、**路径与 URL 一起重算**、缺失素材清空而非报错、**Windows 反斜杠相对路径**、模板存/列/实例化/删 | 14 |
 | `tests/test_project_store.py` | **项目落盘存取往返**、**原子写（不留半截 JSON / 临时文件）**、**路径穿越被清洗**、坏文件不让列表 500、删项目（保留/连产物）、**HTTP 增删改查**、**任务 404 带明确文案**、**id 分配唯一**、**新建撞 id 报 409 不覆盖**、**乐观锁检出并发修改**、**导入到已存在 id 被拒** | 27 |
 | `tests/test_models.py` | **只剩一个底模时接口自洽**：available / arch / recommend / caps.approx / refiner=false、未知底模报错 | 5 |
 | `tests/test_postprocess.py` | 锚点、逐帧对齐、打包几何、色板上限、alpha 二值、像素块单色性、前景块计数 | 11 |
 | `tests/test_pixelfy.py` | 网格检测、每格一色、共享色板、噪点清理、网格吸附 | 20 |
 | `tests/test_sheet.py` | 精灵图网格自动检测、切分、前景掩膜 | 16 |
-| `tests/test_pose.py` | 检测器切换、18 点完整性、骨架渲染、双后端一致性、单例 | 7 |
-| `tests/test_refcond.py` | 轮廓条件、auto 降级、强制骨架报错、换皮 | 13 |
-| `tests/test_refprep.py` | 参考图预处理、帧级评分 | 19 |
+| `tests/test_pose.py` | 检测器切换、18 点完整性、骨架渲染、双后端一致性、单例 | 12 || `tests/test_refcond.py` | 轮廓条件、auto 降级、强制骨架报错、换皮 | 18 || `tests/test_refprep.py` | 参考图预处理、帧级评分 | 19 |
 | `tests/test_quality.py` | 前景占比/质心/漂移/贴边、无模型时「无法判定」 | 11 |
 | `tests/test_io_paths.py` | 视频抽帧、GIF、切片 CLI、非 8 倍数尺寸、环境自检 | 10 |
 | `tests/test_presets.py` | 契约拼接与优先级、token 预算、长提示词不丢后缀 | 9 |
 | `tests/test_repaint.py` | 选区外逐点不变、色彩校正、色板吸附、RGBA 进 VAE 会炸 | 16 |
 | `tests/test_stability.py` | 连续出图显存不涨、**free() 清空缓存**、跨进程同 seed（`MEOW_SLOW=1` 手动跑） | 5 |
-| `tests/test_vramopt.py` | 显存规划（帧数不砍 / 降分辨率 / 档位）、估算公式 | 9 |
+| `tests/test_vramopt.py` | W4 候选峰值估算（768² 单帧/加一个候选、24G 卡只够 1 个、未知架构按 Qwen 算） | 4 |
 | `tests/test_denoise.py` | `strip_fringe` 剥白边、`clean_isolated`、斜向轮廓不被吃 | 9 |
 | `tests/test_anim.py` | GIF/APNG 帧数、Godot tres/tscn 导出 | 9 |
 | `tests/test_video.py` | numpy/PIL 帧兼容、mp4 落地、Wan 真实生成（`RUN_WAN=1`） | 6 |
-| `tests/test_review_p2.py` | 抠图后端选择、网格对齐、资产索引增量 | 9 |
+| `tests/test_review_p2.py` | 抠图后端选择、网格对齐、资产索引增量、**删条目不能误伤同名近似文件** | 10 |
+| `tests/test_review_round2.py` | **LoRA 双槽位（临时挂载不顶掉用户的）**、**路径穿越（`assets2/` 不算 `assets/`）**、**meta 真实性（记的步数是实际执行的）**、重复字典键 | 12 |
+
+合计 **344 条**（`pytest --collect-only` 实测；`-m slow` 的 `test_e2e_qwen`
+10 条也在内，跑起来才真加载模型）。改测试后顺手核一遍这张表——
+数字对不上说明有文件被整段删掉或重复定义覆盖了。
 
 **SD 时代的 8 个测试模块已一起删除**（`test_clip` / `test_controlnet` /
 `test_generate` / `test_lora` / `test_train` / `test_review_fixes` /
@@ -2178,13 +2178,17 @@ python tools/ab_base.py --rebuild --out assets/_ab_base
   **前端已消费**：切换底模时自动套到「用户没改过」的生成节点上（判据是当前值
   仍等于旧底模的推荐值），手改过的节点保持原样；新建节点也按当前底模初始化。
   Sidebar 会显示「推荐 768×768 / 24 步」，切换时给一次 toast 说明。
-- `vramopt.plan_candidates()` 在 W4 出候选前按显存余量封顶：装不下就降候选数，
-  单帧都装不下才报错。被降级的情况会写进 meta 的 `candidates_note`，
-  不会静默改变行为。实测拦的就是 sdxl 1024² 批量 2（23.98GB / 耗时 17.5s）。
 - `Engine.max_candidates(model, size)` 把上限一路送到界面：`/models` 的 recommend
-  带 `max_candidates`（SDXL@768 是 3、@1024 只有 1），前端拿它当候选输入框的
-  `max`；切换底模时已设的值会跟着夹到新上限。**超上限不会报错，只会静默变慢**，
-  所以不能靠用户自己记。
+  带 `max_candidates`（Qwen@768 是 1，因为 768² 批量 2 要 23.5GB、会挤到 cpu offload
+  上，耗时翻倍且不报错），前端拿它当候选输入框的 `max`；切换底模时已设的值会跟着
+  夹到新上限。**超上限不会报错，只会静默变慢**，所以不能靠用户自己记。
+  估算公式在 `vramopt.estimate_pose_gb`（本模块只剩这一个函数）。
+- meta 里的 `candidates_note` 目前**恒为 None**：候选数在界面层就被 `max_candidates`
+  夹住了，运行时不会再降级。字段留着是因为前端有 `candidatesNote` 的渲染分支
+  （`⚠ 候选已降级`），将来若要接"运行时按空闲显存降档"可以直接写这里。
+  SD 时代那条 `vramopt.plan_candidates()`（按空闲显存封顶候选数）**从未接线**，
+  2026-10-31 已随 SD 管线一起删除——它的职责由上面这个上限 + `_infer` 的 OOM 重试
+  分担，不要再按旧文档去找它。
 - 序列帧结果区显示 `候选 N/帧 · 补提 X 次 · 闸门 M/K`，候选被降级时给出原因。
   图片视图（看完图最常见的状态）也显示，只是缩成一行 `⚠ 候选已降级`——
   只在展开视图里说，用户就不会展开。

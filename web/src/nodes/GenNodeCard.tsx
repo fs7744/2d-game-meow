@@ -20,7 +20,8 @@ const PARAM_HINTS: Record<string, { what: string; effect: string; rec: string }>
   宽: {
     what: '输出画面的宽度（px）',
     effect: '决定细节量与构图余量。太小画不出全身，太大反而更容易顶边',
-    rec: '768。SD1.5 在 512 上必糊；SDXL 用 1024 反而更差（角色占比大、可交付率 92%→75%）',
+    rec: '768。Qwen 的 1024² token 数是 768² 的 1.78 倍（单帧 45s vs 25s），'
+      + '而精灵成品最后要缩到 32~128px，那点细节看不见；画立绘再手动调大',
   },
   高: { what: '输出画面的高度（px）', effect: '同宽，精灵帧要留出头顶与脚底的空隙', rec: '768（与宽一致，方形最好对齐）' },
   图片宽: {
@@ -31,7 +32,8 @@ const PARAM_HINTS: Record<string, { what: string; effect: string; rec: string }>
   步数: {
     what: '去噪步数（采样迭代次数）',
     effect: '太少会糊、结构不成形；太多只是变慢，画质提升很小',
-    rec: 'SD1.5 用 30、SDXL 用 24。用了蒸馏（lcm）可降到 4~8',
+    rec: '16（默认）。8~12 步浅色主体会发白；白猫/白甲建议 20~24；'
+      + '开快速模式走 8 步蒸馏（Lightning LoRA）',
   },
   CFG: {
     what: '真 CFG 强度（classifier-free guidance）',
@@ -51,23 +53,10 @@ const PARAM_HINTS: Record<string, { what: string; effect: string; rec: string }>
   },
   反向提示词: {
     what: '不希望出现的东西',
-    effect: 'SD1.5 上作用很大；写具体名词比堆形容词有效（如 character sheet 压多主体）',
-    rec: '留空用内置默认即可。多主体压不住时加 character sheet, multiple characters',
-  },
-  LoRA: {
-    what: '附加的风格/角色权重（LoRA）',
-    effect: '会大幅改变画风；必须与底模架构匹配（SD1.5 的 LoRA 不能用于 SDXL）',
-    rec: '像素风挂 px_illustrious(0.75)；武侠挂 wuxia_v2。不挂就是纯底模',
-  },
-  'LoRA 强度': {
-    what: 'LoRA 的作用强度',
-    effect: '过高会过拟合：构图僵、出伪影、多主体；过低则看不出风格',
-    rec: '0.6~0.85。像素 LoRA 实测 0.75 最稳，0.5 就掉风格了',
-  },
-  重绘: {
-    what: '重绘幅度（denoise strength）',
-    effect: '越低越接近原图；越高越自由、越可能丢原有结构',
-    rec: '保持原样微调 0.3；改内容 0.55~0.7；几乎重画 0.85+',
+    effect: '**默认 cfg=1.0 时不会发给模型**（省掉一半前向），写了也不起作用；'
+      + '把 CFG 调到 >1 才会真的生效，代价是时间翻倍。生效时写具体名词比堆形容词有效'
+      + '（如 character sheet 压多主体）',
+    rec: '留空用内置默认即可。多数情况下把「主体 + 构图」写清楚比加负向词更有效',
   },
   列: {
     what: '精灵图一行放几帧',
@@ -79,16 +68,6 @@ const PARAM_HINTS: Record<string, { what: string; effect: string; rec: string }>
     effect: '同上，只影响打包排版',
     rec: '0=自动。帧数不是列数整数倍时才需要手填',
   },
-  动作: {
-    what: 'ControlNet 条件强度（贴不贴参考动作）',
-    effect: '高=姿态准但僵硬、易崩；低=自由但动作走形',
-    rec: '0.8~1.2。参考图本身不规范时降到 0.7',
-  },
-  身份: {
-    what: 'IP-Adapter 强度（像不像角色图）',
-    effect: '高=更像角色，但会压制姿态、画面变糊；低=姿态准但换了个角色',
-    rec: '0.7~0.9。动作复杂时降到 0.65',
-  },
   占高: {
     what: '人物占画面高度的比例',
     effect: '太大会顶到画布边缘（脚被切），太小则像素化后没细节',
@@ -99,15 +78,11 @@ const PARAM_HINTS: Record<string, { what: string; effect: string; rec: string }>
     effect: '骨架=只取关节（真人照片适用）；轮廓=取外形（游戏素材适用）；自动=先试骨架，认不出人再退轮廓',
     rec: '游戏精灵图用「轮廓」；真人动作照用「骨架」；不确定用「自动」',
   },
-  姿态: {
-    what: 'ControlNet 姿态强度（同「动作」）',
-    effect: '高=严格贴合参考骨架；低=允许自由发挥',
-    rec: '1.0；参考图比例不对时降到 0.8',
-  },
   候选: {
     what: '每帧生成几张再挑一张',
     effect: '同 seed 也会漂，多张按「关节数+前景占比+贴边+漂移」挑最好的。越多越稳、越慢',
-    rec: '2~3 张。上限由显存算出（SDXL@768 是 3、@1024 只有 1）',
+    rec: '1~2。上限由显存算出：Qwen 在 768² 上多一个候选就是多 6GB 峰值与一倍时间，'
+      + '24G 卡只够 1 个',
   },
   补提: {
     what: '候选都不合格时再补生成几次',
@@ -125,44 +100,15 @@ const PARAM_HINTS: Record<string, { what: string; effect: string; rec: string }>
     rec: '要改体型用 AI 重绘；只是换颜色（省时且零漂移）用换皮',
   },
   引擎: {
-    what: '生成引擎',
-    effect: 'AnimateDiff 一次出整段、靠时序注意力锁一致性；逐帧多候选更省显存、更容易挑到好帧',
-    rec: '帧数多且要连贯用 AnimateDiff；显存紧或帧数少用逐帧',
-  },
-  显存: {
-    what: '显存档位（不够时降分辨率，帧数不砍）',
-    effect: '帧数是你的动画内容不能动，所以只能牺牲分辨率',
-    rec: 'auto。OOM 频繁时手动选 low（384²）',
+    what: '生成路线（序列帧替换 / 姿态序列都走这个下拉）',
+    effect: 'VNCCS = 骨架 + 角色双图指令，专用 LoRA 锁住画风与服装（帧间不漂，推荐）；'
+      + '旧版 = 每帧单独跑一次角色迁移再过质量闸门（慢，但每帧能挑最好的）',
+    rec: '先用 VNCCS。腿部姿态被参考图的站姿覆盖时，再改用旧版逐帧',
   },
   边长: {
     what: '目标像素画的边长（原生像素数）',
     effect: '决定最终像素密度；0=自动检测输入图的网格',
     rec: '0（自动）。已知原图是 128px 像素画时直接填 128',
-  },
-  精修: {
-    what: 'SDXL Refiner：底模出图后再走一遍精修（接在最后一段去噪上）',
-    effect: '它是个**照片化**精修器：喂插画会把画面往写实拉（实测把动漫剑客'
-      + '变成"墙上挂的一幅画"），喂写实图才会提升发丝/布料/金属的细节',
-    rec: '**写实图**才值得开；像素/动漫素材别开——后处理本来就会抹平细节，'
-      + 'refiner 只会把风格带偏',
-  },
-  精修步数: {
-    what: 'refiner 自己的去噪步数',
-    effect: '越多越干净也越慢；refiner 只处理最后一段，步数需求比底模低',
-    rec: '20~30',
-  },
-  精修强度: {
-    what: 'refiner 的 CFG（提示词服从度）',
-    effect: '高=更贴合提示词但可能过饱和；低=更自然',
-    rec: '5~7，与底模 CFG 接近',
-  },
-  精修起点: {
-    what: 'refiner 接手收尾的那一段，起点越高改得越少',
-    effect: '0.8 = 只修最后 20% 的幅度（不毁构图）；'
-      + '0.6 会明显改画风，但也更容易把脸和手改坏。'
-      + '注意实际执行步数 = 精修步数 ×(1−起点)，20 步 × 0.8 只剩 4 步',
-    rec: '0.8。refiner 只微调质感，**不是画质增强**——'
-      + '实测清晰度不升反略降（VAE 编解码有损），别指望它救糊图',
   },
   像素化: {
     what: '要不要把出图变成像素画（把画面按色块栅格化）',
@@ -392,15 +338,16 @@ const WORKFLOW_OF: Record<string, string> = {
   faceswap: 'face_swap',
 }
 
-/** 底模下拉里的短名：目录名（qwen-image-2.1）太长，撑爆 260px 的卡片 */
+/**
+ * 底模下拉里的短名：目录名（qwen-image-2.1）太长，撑爆 260px 的卡片。
+ *
+ * **别再把 sd15 / sdxl 加回这张表**：SD 权重早就归档了（见 README「底模」），
+ * 下拉选项本身来自后端 `/models`，这张表只做「目录名 → 人看的名字」。
+ * 留着旧映射的坏处不是显示错——是让人以为"列表里可能会冒出一个 SD"，
+ * 排查模型相关问题时白查一遍。
+ */
 function shortModel(m: string): string {
-  const map: Record<string, string> = {
-    sd15: 'SD1.5',
-    sdxl: 'SDXL',
-    'sdxl-anime': 'SDXL 动漫',
-    'sd15-inpaint': 'SD1.5 重绘',
-    'qwen-image-2.1': 'Qwen-Image 2.1',
-  }
+  const map: Record<string, string> = { 'qwen-image-2.1': 'Qwen-Image 2.1' }
   return map[m] || m
 }
 
