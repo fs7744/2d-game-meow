@@ -21,6 +21,26 @@ import sys
 import time
 
 sys.path.insert(0, ".")
+from pathlib import Path
+
+# ---- 产物目录：验证脚本的输出**不进 assets/**（那里是项目资产） ----
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from workflows import paths                                  # noqa: E402
+
+
+def _out_path(name: str) -> Path:
+    """验证产物的落盘位置（tests/_out/ 下）。"""
+    return paths.tool_out(name)
+
+
+def _find_asset(name: str) -> Path:
+    """找输入素材：先看测试输出目录，再看仓库 assets/（历史素材兼容）。"""
+    for base in (paths.TEST_OUT / "legacy_assets", paths.ASSETS, paths.ROOT / "assets"):
+        p = base / name
+        if p.is_file():
+            return p
+    return paths.TEST_OUT / "legacy_assets" / name
+
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 import torch
@@ -46,8 +66,8 @@ DEFAULT_PROMPT = (
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ref", default="assets/_cn_none.png")
-    ap.add_argument("--pose", default="assets/_pose_walk_07.png")
+    ap.add_argument("--ref", default=str(_find_asset("_cn_none.png")))
+    ap.add_argument("--pose", default=str(_find_asset("_pose_walk_07.png")))
     ap.add_argument("--height", type=int, default=1024)
     ap.add_argument("--width", type=int, default=768)
     ap.add_argument("--steps", type=int, default=24)
@@ -97,7 +117,7 @@ def main() -> int:
                        generator=torch.Generator("cuda").manual_seed(43),
                        output_resolution=max(Wd, H), **kw).images[0]
             dt = time.time() - t
-            p = f"assets/_cnr_{label}.png"
+            p = str(_out_path(f"_cnr_{label}.png"))
             flatten(out).save(p)
             print(f"  {label:14s} {dt:5.1f}s → {p}", flush=True)
             if inj is not None and inj._image_pad_mask is not None:
@@ -120,8 +140,8 @@ def main() -> int:
     side = Image.new("RGB", (Wd * len(tiles), H), "white")
     for i, t in enumerate(tiles):
         side.paste(t, (i * Wd, 0))
-    side.save("assets/_cnr_compare.png")
-    print("\n  → assets/_cnr_compare.png（左→右：只参考 / 角色图 / 只骨架 / 参考+骨架）",
+    side.save(str(_out_path("_cnr_compare.png")))
+    print("\n  → " + str(_out_path("_cnr_compare.png")) + "（左→右：只参考 / 角色图 / 只骨架 / 参考+骨架）",
           flush=True)
     return 0
 

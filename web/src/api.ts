@@ -812,3 +812,117 @@ export async function health(): Promise<{ ok: boolean; device?: string }> {
   const j = await r.json()
   return { ok: !!j.ok, device: j?.engine?.device }
 }
+
+// ---------------- 项目导入 / 导出 / 模板 ----------------
+//
+// 项目（画布 + 节点）存在浏览器 localStorage，素材在服务端 assets/ 下。
+// 导入导出把两边拼成一个 `.mproj` 单文件：拷走它就等于拷走了整个项目。
+
+/** 打包时的项目内容。meta 是元信息，payload 是节点等主体数据。 */
+export type ProjectArchive = {
+  meta: Record<string, unknown>
+  payload: Record<string, unknown>
+}
+
+/** 导入/实例化后返回的项目内容。 */
+export type ImportedProject = {
+  meta: Record<string, unknown>
+  payload: Record<string, unknown>
+  imported_files: number
+}
+
+/**
+ * 导出项目 → `.mproj` 归档字节。
+ *
+ * 后端会把节点里引用到的素材（图片、目录、通配）一起打包进去，
+ * 所以这个文件是**自包含**的——换台机器导入也能用。
+ */
+export async function exportProject(archive: ProjectArchive): Promise<Blob> {
+  const r = await fetch(`${base}/projects/export`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(archive),
+  })
+  if (!r.ok) throw new Error(`导出失败：HTTP ${r.status}`)
+  return r.blob()
+}
+
+/** 导入一个 `.mproj` → 新项目的内容。 */
+export async function importProject(
+  file: Blob,
+  scope: string,
+  name?: string,
+): Promise<ImportedProject> {
+  const buf = await file.arrayBuffer()
+  // base64：JSON 请求体传二进制（与 /upload 的裸字节不同，这里要 JSON 化）
+  let bin = ''
+  const bytes = new Uint8Array(buf)
+  const CHUNK = 0x8000                       // 分块，避免 apply 参数过多爆栈
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    bin += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + CHUNK)))
+  }
+  const r = await fetch(`${base}/projects/import`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ scope, name: name || '', data: btoa(bin) }),
+  })
+  if (!r.ok) {
+    let msg = `导入失败：HTTP ${r.status}`
+    try {
+      const j = await r.json()
+      if (j && j.detail) msg = String(j.detail)
+    } catch {
+      /* 后端没给 JSON 就用默认文案 */
+    }
+    throw new Error(msg)
+  }
+  return r.json() as Promise<ImportedProject>
+}
+
+export type TemplateInfo = {
+  id: string
+  name: string
+  created: number | string
+  bytes: number
+  nodes: number
+}
+
+/** 可用模板列表。 */
+export async function fetchTemplates(): Promise<TemplateInfo[]> {
+  const r = await fetch(`${base}/templates`)
+  if (!r.ok) return []
+  const j = await r.json()
+  return Array.isArray(j.items) ? (j.items as TemplateInfo[]) : []
+}
+
+/** 把当前项目存成模板。 */
+export async function saveTemplate(archive: ProjectArchive): Promise<{ id: string; name: string }> {
+  const r = await fetch(`${base}/templates`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(archive),
+  })
+  if (!r.ok) throw new Error(`保存模板失败：HTTP ${r.status}`)
+  return r.json()
+}
+
+/** 从模板实例化一个新项目（素材复制到新项目目录）。 */
+export async function instantiateTemplate(
+  tid: string,
+  scope: string,
+  name?: string,
+): Promise<ImportedProject> {
+  const r = await fetch(`${base}/templates/${encodeURIComponent(tid)}/instantiate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ scope, name: name || '', data: '' }),
+  })
+  if (!r.ok) throw new Error(`从模板新建失败：HTTP ${r.status}`)
+  return r.json() as Promise<ImportedProject>
+}
+
+/** 删模板。 */
+export async function deleteTemplate(tid: string): Promise<void> {
+  const r = await fetch(`${base}/templates/${encodeURIComponent(tid)}`, { method: 'DELETE' })
+  if (!r.ok) throw new Error(`删除模板失败：HTTP ${r.status}`)
+}

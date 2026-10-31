@@ -168,6 +168,47 @@ function makeFetch() {
     if (String(url).startsWith('/files/')) {
       return { ok: true, json: async () => ({}) }
     }
+    // ---- 项目导入 / 导出 / 模板 ----
+    if (String(url).endsWith('/templates') && (init.method || 'GET') === 'GET') {
+      return {
+        ok: true,
+        json: async () => ({
+          count: 1,
+          items: [{ id: 'pixel_line', name: '像素精灵产线', created: 1, bytes: 2048, nodes: 3 }],
+        }),
+      }
+    }
+    if (String(url).endsWith('/templates') && (init.method || 'GET') === 'POST') {
+      return { ok: true, json: async () => ({ id: 'pixel_line', name: '像素精灵产线' }) }
+    }
+    if (String(url).includes('/templates/') && String(url).includes('/instantiate')) {
+      return {
+        ok: true,
+        json: async () => ({
+          meta: { name: '像素精灵产线' },
+          payload: { nodes: [{ id: 'tn1', kind: 'gen', x: 0, y: 0, view: 'expanded',
+            params: { prompt: '模板节点' } }], viewport: { x: 0, y: 0, z: 1 } },
+          imported_files: 2,
+        }),
+      }
+    }
+    if (String(url).includes('/templates/') && (init.method || 'GET') === 'DELETE') {
+      return { ok: true, json: async () => ({ deleted: 'x' }) }
+    }
+    if (String(url).endsWith('/projects/export')) {
+      return { ok: true, blob: async () => new Blob([new Uint8Array([80, 75, 3, 4])]) }
+    }
+    if (String(url).endsWith('/projects/import')) {
+      return {
+        ok: true,
+        json: async () => ({
+          meta: { name: '导入的项目' },
+          payload: { nodes: [{ id: 'in1', kind: 'gen', x: 0, y: 0, view: 'expanded',
+            params: { prompt: '导入节点' } }], viewport: { x: 0, y: 0, z: 1 } },
+          imported_files: 3,
+        }),
+      }
+    }
     return { ok: false, status: 404, json: async () => ({}) }
   }
 }
@@ -530,9 +571,10 @@ function check(name, cond, extra = '') {
   check('侧栏存在', !!doc.querySelector('.rail'))
   const titles = [...doc.querySelectorAll('.rail-sec-title')].map((x) => x.textContent)
   // 底模选择已移到每个节点自己的卡头上，侧栏不再有「底模」分组；
-  // 「LoRA」是新增的（Qwen 现在支持 LoRA，见 engine.available_loras）
-  check('五个菜单分组：项目/节点/收藏/LoRA/设置',
-    JSON.stringify(titles) === JSON.stringify(['项目', '节点', '提示词收藏', 'LoRA', '设置']),
+  // 「LoRA」是新增的（Qwen 现在支持 LoRA，见 engine.available_loras）；
+  // 「模板」是项目预设模板区（存模板 / 从模板新建）。
+  check('六个菜单分组：项目/模板/节点/收藏/LoRA/设置',
+    JSON.stringify(titles) === JSON.stringify(['项目', '模板', '节点', '提示词收藏', 'LoRA', '设置']),
     JSON.stringify(titles))
 
   // 分组可折叠
@@ -576,7 +618,88 @@ function check(name, cond, extra = '') {
   dom.window.close()
 }
 
-// 11) 图生图节点：派生、源图解析、提交 w2
+// 11a) 项目：导入 / 导出 / 预设模板
+{
+  const { dom, errors } = await boot('?demo=1')
+  const doc = dom.window.document
+  const win = dom.window
+  await new Promise((r) => setTimeout(r, 500))
+
+  // ---- 模板列表（后端 GET /templates）----
+  const tplSec = [...doc.querySelectorAll('.rail-sec')]
+    .find((s) => s.querySelector('.rail-sec-title')?.textContent === '模板')
+  check('侧栏有「模板」分组', !!tplSec)
+  check('模板列表显示模板名', (tplSec?.textContent || '').includes('像素精灵产线'),
+    (tplSec?.textContent || '').slice(0, 60))
+  check('模板列表显示节点数', (tplSec?.textContent || '').includes('3 个节点'),
+    (tplSec?.textContent || '').slice(0, 80))
+
+  // ---- 从模板新建项目 ----
+  const before = doc.querySelectorAll('.project-item').length
+  const tplBtn = [...(tplSec?.querySelectorAll('.rail-item-main') || [])][0]
+  tplBtn?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 400))
+  const instCall = calls.find((c) => c.url.includes('/instantiate'))
+  check('从模板新建调用了 /instantiate', !!instCall,
+    JSON.stringify(calls.slice(-3).map((c) => c.url)))
+  check('实例化请求带了新项目 id',
+    !!instCall && JSON.parse(instCall.body || '{}').scope?.length > 0,
+    instCall?.body || '')
+  check('导入后多了一个项目', doc.querySelectorAll('.project-item').length === before + 1,
+    `${before} -> ${doc.querySelectorAll('.project-item').length}`)
+
+  // ---- 导出项目 ----
+  const dlBtn = doc.querySelector('.project-item .rail-act[title*="导出"]')
+  check('项目行有「导出」按钮', !!dlBtn)
+  dlBtn?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 300))
+  const expCall = calls.find((c) => c.url.includes('/projects/export'))
+  check('导出调用了 /projects/export', !!expCall,
+    JSON.stringify(calls.slice(-3).map((c) => `${c.method} ${c.url}`)))
+  const expBody = expCall ? JSON.parse(expCall.body || '{}') : {}
+  check('导出请求带了 meta（项目名）', typeof expBody.meta?.name === 'string',
+    JSON.stringify(expBody.meta || {}))
+  check('导出请求带了 payload（节点）', Array.isArray(expBody.payload?.nodes),
+    JSON.stringify(Object.keys(expBody.payload || {})))
+
+  // ---- 存模板 ----
+  const starBtn = doc.querySelector('.project-item .rail-act[title*="模板"]')
+  check('项目行有「存为模板」按钮', !!starBtn)
+  starBtn?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 300))
+  check('存模板调用了 POST /templates',
+    calls.some((c) => c.url.endsWith('/templates') && c.method === 'POST'),
+    JSON.stringify(calls.slice(-3).map((c) => `${c.method} ${c.url}`)))
+
+  // ---- 导入项目（文件选择）----
+  const importBtn = [...doc.querySelectorAll('.rail-new')]
+    .find((b) => (b.textContent || '').includes('导入项目'))
+  check('侧栏有「导入项目」按钮', !!importBtn)
+  const fileInput = doc.querySelector('input[type="file"][accept=".mproj"]')
+  check('有 .mproj 文件选择框', !!fileInput)
+  if (fileInput) {
+    // **jsdom 没有 DataTransfer 构造器**：造一个只带 files 的假对象，
+    // 用 defineProperty 塞进 input.files（这个属性在 jsdom 里是只读的）。
+    const fakeFile = new win.File([new Uint8Array([80, 75, 3, 4])], '别人的项目.mproj',
+      { type: 'application/octet-stream' })
+    const fakeList = { 0: fakeFile, length: 1, item: (i) => fakeFile }
+    Object.defineProperty(fileInput, 'files', {
+      configurable: true,
+      get: () => fakeList,
+    })
+    fileInput.dispatchEvent(new win.Event('change', { bubbles: true }))
+    await new Promise((r) => setTimeout(r, 400))
+  }
+  check('导入调用了 /projects/import',
+    calls.some((c) => c.url.includes('/projects/import')),
+    JSON.stringify(calls.slice(-3).map((c) => `${c.method} ${c.url}`)))
+
+  check('项目导入导出场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+
+// 12) 图生图节点：派生、源图解析、提交 w2
 {
   calls.length = 0
   const { dom, errors } = await boot('?demo=gen')

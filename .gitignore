@@ -19,6 +19,14 @@ assets/
 *.log
 *.jsonl
 
+# ---- 测试与验证脚本的产物 ----
+# 单独一个目录，不混进 assets/：assets/ 里放的是**项目要交付的东西**，
+# 这里放的是开发过程的对比图、基准数据、pytest 的中间产物。
+tests/_out/
+
+# ---- 项目模板（用户自己的模板，不入库）----
+templates/
+
 # ---- 前端 ----
 web/node_modules/
 web/dist/

@@ -19,6 +19,26 @@ import sys
 import time
 
 sys.path.insert(0, ".")
+from pathlib import Path
+
+# ---- 产物目录：验证脚本的输出**不进 assets/**（那里是项目资产） ----
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from workflows import paths                                  # noqa: E402
+
+
+def _out_path(name: str) -> Path:
+    """验证产物的落盘位置（tests/_out/ 下）。"""
+    return paths.tool_out(name)
+
+
+def _find_asset(name: str) -> Path:
+    """找输入素材：先看测试输出目录，再看仓库 assets/（历史素材兼容）。"""
+    for base in (paths.TEST_OUT / "legacy_assets", paths.ASSETS, paths.ROOT / "assets"):
+        p = base / name
+        if p.is_file():
+            return p
+    return paths.TEST_OUT / "legacy_assets" / name
+
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 import numpy as np
@@ -73,8 +93,8 @@ def sharp(im: Image.Image) -> float:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ref", default="assets/_cn_none.png")
-    ap.add_argument("--pose", default="assets/_pose_walk_07.png")
+    ap.add_argument("--ref", default=str(_find_asset("_cn_none.png")))
+    ap.add_argument("--pose", default=str(_find_asset("_pose_walk_07.png")))
     ap.add_argument("--steps", type=int, default=25)
     ap.add_argument("--seeds", default="43,7")
     ap.add_argument("--loras", default="vnccs_pose,vnccs_pose_v2")
@@ -104,7 +124,7 @@ def main() -> int:
                        true_cfg_scale=1.0, negative_prompt="",
                        generator=torch.Generator("cuda").manual_seed(sd),
                        output_resolution=max(W, H)).images[0].convert("RGB")
-            p = f"assets/_vnccs_cmp_{name}_{sd}.png"
+            p = str(_out_path(f"_vnccs_cmp_{name}_{sd}.png"))
             out.save(p)
             hs, sh = hist_sim(ref, out), sharp(out)
             print(f"  seed={sd:<4} {time.time()-t:5.1f}s  配色相似={hs:.4f}  "
@@ -118,9 +138,9 @@ def main() -> int:
     for r, name in enumerate(loras):
         grid.paste(pad(ref, W, H), (0, r * H))          # 每行第一格都是参考图
         for c, sd in enumerate(seeds):
-            im = Image.open(f"assets/_vnccs_cmp_{name}_{sd}.png")
+            im = Image.open(str(_out_path(f"_vnccs_cmp_{name}_{sd}.png")))
             grid.paste(im, ((c + 1) * W, r * H))
-    grid.save("assets/_vnccs_versions_grid.png")
+    grid.save(str(_out_path("_vnccs_versions_grid.png")))
     print(f"\n  → assets/_vnccs_versions_grid.png"
           f"（行={','.join(loras)} 列=参考图 + seed {seeds}）", flush=True)
     return 0

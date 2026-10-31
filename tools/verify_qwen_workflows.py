@@ -8,7 +8,7 @@
   G) w4 姿态序列：3 帧骨架 → DWPose 关节数 / 贴边 / 前景占比 / 可交付率
   H) wss 序列帧替换：3 帧小精灵图 → 帧间质心漂移 / 共享色板色数 / 逐帧耗时
 
-素材全部现场生成或复用 `assets/_qwen_verify/`（避免提交二进制）。
+素材全部现场生成或复用 `tests/_out/_qwen_verify/`（避免提交二进制）。
 用法：
     .venv\\Scripts\\python.exe tools\\verify_qwen_workflows.py
     .venv\\Scripts\\python.exe tools\\verify_qwen_workflows.py --steps 8   # 冒烟
@@ -31,7 +31,8 @@ from workflows import generate as gen  # noqa: E402
 from workflows import quality as q  # noqa: E402
 from workflows.engine import Engine  # noqa: E402
 
-OUT = Path("assets/_qwen_verify")
+from workflows import paths                                  # noqa: E402
+OUT = paths.tool_out("_qwen_verify")
 OUT.mkdir(parents=True, exist_ok=True)
 MODEL = "qwen-image-2.1"
 

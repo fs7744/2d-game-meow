@@ -25,6 +25,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from workflows import paths
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 import numpy as np  # noqa: E402
@@ -33,7 +34,7 @@ from PIL import Image  # noqa: E402
 
 from workflows.engine import Engine  # noqa: E402
 
-OUT = Path("assets/_qwen_bench")
+OUT = paths.tool_out("_qwen_bench")
 OUT.mkdir(parents=True, exist_ok=True)
 
 MODEL = "qwen-image-2.1"

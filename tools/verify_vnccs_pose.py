@@ -36,6 +36,26 @@ import sys
 import time
 
 sys.path.insert(0, ".")
+from pathlib import Path
+
+# ---- 产物目录：验证脚本的输出**不进 assets/**（那里是项目资产） ----
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from workflows import paths                                  # noqa: E402
+
+
+def _out_path(name: str) -> Path:
+    """验证产物的落盘位置（tests/_out/ 下）。"""
+    return paths.tool_out(name)
+
+
+def _find_asset(name: str) -> Path:
+    """找输入素材：先看测试输出目录，再看仓库 assets/（历史素材兼容）。"""
+    for base in (paths.TEST_OUT / "legacy_assets", paths.ASSETS, paths.ROOT / "assets"):
+        p = base / name
+        if p.is_file():
+            return p
+    return paths.TEST_OUT / "legacy_assets" / name
+
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 import torch
@@ -60,14 +80,14 @@ IDENTITY = (
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ref", default="assets/_cn_none.png")
-    ap.add_argument("--pose", default="assets/_pose_walk_07.png")
+    ap.add_argument("--ref", default=str(_find_asset("_cn_none.png")))
+    ap.add_argument("--pose", default=str(_find_asset("_pose_walk_07.png")))
     ap.add_argument("--steps", type=int, default=25)
     ap.add_argument("--lora", type=float, default=1.0)
     ap.add_argument("--lora-name", default="vnccs_pose",
                     help="models/lora/ 下的文件名（不带 .safetensors）")
     ap.add_argument("--extra", default=IDENTITY, help="附加的身份/场景描述")
-    ap.add_argument("--out", default="assets/_vnccs_pose.png")
+    ap.add_argument("--out", default=str(_out_path("_vnccs_pose.png")))
     ap.add_argument("--canvas", default="pose",
                     choices=["pose", "ref"],
                     help="画布尺寸取骨架（默认，让骨架填满不被缩小）还是角色图（官方做法）")
@@ -126,8 +146,8 @@ def main() -> int:
     side.paste(pad_to(ref, w, h), (0, 0))
     side.paste(pad_to(pose, w, h), (w, 0))
     side.paste(out.convert("RGB"), (w * 2, 0))
-    side.save("assets/_vnccs_compare.png")
-    print("  → assets/_vnccs_compare.png（左=角色 中=骨架 右=结果）", flush=True)
+    side.save(str(_out_path("_vnccs_compare.png")))
+    print("  → " + str(_out_path("_vnccs_compare.png")) + "（左=角色 中=骨架 右=结果）", flush=True)
     return 0
 
 

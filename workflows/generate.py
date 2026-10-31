@@ -32,10 +32,13 @@ from . import qwen_mask
 from . import outpaint as op_mod
 from . import swap as swap_mod
 from . import sheet as sheet_mod
+from . import paths
 from .engine import DEFAULT_MODEL, Engine
 
-ASSETS = Path(__file__).resolve().parent.parent / "assets"
-PROJECTS_DIR = ASSETS / "projects"
+# 资产根目录**只在 paths 里定义一次**。以前这里和 app.py 各写一份
+# `ROOT/"assets"`，导致「把测试产物写到别处」得改两个地方，漏一个就污染真目录。
+ASSETS = paths.ASSETS
+PROJECTS_DIR = paths.PROJECTS_DIR
 
 
 

@@ -85,14 +85,20 @@ def test_trim_crops_to_content():
 def test_matte_on_generated_frame(root):
     """真实生成图也要能抠干净（背景是模型自己画的，不是纯白）。
 
-    素材用 `assets/_qwen_verify/char.png`（tools/verify_qwen_workflows.py 生成的
+    素材用 `_qwen_verify/char.png`（tools/verify_qwen_workflows.py 生成的
     白猫骑士立绘）。**不现场生成**：Qwen 一张 24 步要 25s，而这条测的是抠图，
     与生成无关；素材不在就跳过，别让单测变成几分钟。
+
+    素材可能在测试输出目录（tests/_out/）也可能在仓库 assets/ 里——两处都找。
     """
-    src = root / "assets" / "_qwen_verify" / "char.png"
+    from workflows import paths
+
+    src = paths.ASSETS / "_qwen_verify" / "char.png"
+    if not src.is_file():
+        src = root / "assets" / "_qwen_verify" / "char.png"
     if not src.is_file():
         import pytest
-        pytest.skip("缺素材 assets/_qwen_verify/char.png（先跑 tools/verify_qwen_workflows.py）")
+        pytest.skip("缺素材 _qwen_verify/char.png（先跑 tools/verify_qwen_workflows.py）")
     raw = Image.open(src).convert("RGBA")
     out = M.matte(raw)
     a = _alpha(out)

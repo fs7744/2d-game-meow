@@ -25,11 +25,12 @@ import torch  # noqa: E402
 from PIL import Image  # noqa: E402
 
 from tools.make_pose import render, walk_pose  # noqa: E402
+from workflows import paths
 from workflows import generate as g  # noqa: E402
 from workflows import refprep  # noqa: E402
 from workflows.engine import Engine  # noqa: E402
 
-OUT = Path("assets/_steps_pose")
+OUT = paths.tool_out("_steps_pose")
 OUT.mkdir(parents=True, exist_ok=True)
 
 STEPS = (12, 16, 20, 24)

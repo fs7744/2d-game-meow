@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import base64
 import io
 import inspect
 import json
@@ -32,7 +33,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -40,13 +41,15 @@ from PIL import Image
 
 from workflows import generate as gen
 from workflows import assetdb
+from workflows import paths
+from workflows import projectio
 from workflows.assetdb import AssetIndex
 from workflows.engine import Engine
 
 ROOT = Path(__file__).resolve().parent
-ASSETS = ROOT / "assets"
-UPLOAD_DIR = ASSETS / "uploads"
-PROJECTS_DIR = ASSETS / "projects"
+ASSETS = paths.ASSETS
+UPLOAD_DIR = paths.UPLOAD_DIR
+PROJECTS_DIR = paths.PROJECTS_DIR
 MAX_UPLOAD = 20 * 1024 * 1024
 UPLOAD_FORMATS = {"PNG": ".png", "JPEG": ".jpg", "WEBP": ".webp",
                   "BMP": ".bmp", "GIF": ".gif"}
@@ -641,6 +644,132 @@ def files(path: str, download: int = 0) -> FileResponse:
         # FileResponse(filename=…) 会设成 attachment；产物名已经带后缀
         return FileResponse(target, filename=target.name)
     return FileResponse(target)
+
+
+# ---------------- 项目导入 / 导出 / 模板 ----------------
+#
+# 项目（画布 + 节点 + 参数）由**前端**持有（localStorage），素材在服务端 assets/ 下。
+# 这两个端点把两边拼成一个单文件归档 `.mproj`，让项目能拷走、能换机、能当模板复用。
+
+
+class ProjectArchiveReq(BaseModel):
+    """导出/存模板的请求体。
+
+    `meta`  —— 项目元信息（name / created / viewport 等）
+    `payload` —— 主体数据（nodes 等）
+    """
+
+    meta: Dict[str, Any] = Field(default_factory=dict)
+    payload: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ProjectImportReq(BaseModel):
+    """导入请求：归档的原始字节 + 新项目 id。"""
+
+    scope: str = Field(..., description="新项目的 id（前端生成，assets/projects/<id>/）")
+    name: str = Field("", description="导入后的项目名；空则用归档里的名字")
+    data: str = Field("", description=".mproj 文件内容（base64）")
+
+
+@app.post("/projects/export")
+def export_project(req: ProjectArchiveReq) -> Response:
+    """把项目打包成 `.mproj` 下载。
+
+    归档里含 `project.json`（节点，路径已替换成占位符）+ 它引用到的所有素材。
+    路径占位符在**导入**时才换成新位置，所以导出不会改动磁盘上的任何东西。
+    """
+    try:
+        data = projectio.pack(req.meta, req.payload)
+    except Exception as exc:                       # noqa: BLE001
+        raise HTTPException(400, f"导出失败：{exc}") from exc
+    name = str(req.meta.get("name") or "project").strip() or "project"
+    # **文件名必须是 latin-1**：HTTP 头只允许 latin-1，中文名会让
+    # starlette 编码头时抛 UnicodeEncodeError（整个导出 500）。
+    # 中文项目名保留在归档内部，这里只给一个安全的下载名。
+    safe = "".join(ch for ch in name if ch.isascii() and (ch.isalnum() or ch in "-_"))[:48]
+    if not safe:
+        safe = "project"
+    return Response(
+        content=data,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{safe}.mproj"'},
+    )
+
+
+@app.post("/projects/import")
+def import_project(req: ProjectImportReq) -> Dict[str, Any]:
+    """导入一个 `.mproj` → 一个**新项目**（素材落在新项目目录，路径重写）。
+
+    绝不覆盖已有项目：新项目的 id 由前端传进来（前端才是项目的持有者），
+    素材落到 `assets/projects/<scope>/imported/`。
+    """
+    import base64
+
+    try:
+        raw = base64.b64decode(req.data, validate=True)
+    except Exception as exc:                       # noqa: BLE001
+        raise HTTPException(400, f"归档内容不是合法的 base64：{exc}") from exc
+    if not raw:
+        raise HTTPException(400, "归档内容为空")
+    try:
+        result = projectio.unpack(raw, req.scope)
+    except projectio.ArchiveError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    meta = dict(result["meta"])
+    payload = dict(result["payload"])
+    if req.name.strip():
+        meta["name"] = req.name.strip()
+    return {"meta": meta, "payload": payload,
+            "imported_files": result["imported_files"]}
+
+
+@app.get("/templates")
+def list_templates() -> Dict[str, Any]:
+    """可用模板列表。"""
+    items = projectio.list_templates()
+    return {"count": len(items), "items": items}
+
+
+@app.post("/templates")
+def save_template(req: ProjectArchiveReq) -> Dict[str, Any]:
+    """把当前项目存成模板（`.mproj` 落在 `templates/`）。"""
+    meta = dict(req.meta)
+    name = str(meta.get("name") or "模板").strip() or "模板"
+    tid = "".join(ch for ch in name if ch.isascii() and (ch.isalnum() or ch in "-_"))[:48]
+    if not tid:
+        tid = "template"
+    # 同名模板不覆盖：加时间后缀
+    if projectio._template_file(tid).exists():
+        tid = f"{tid}_{int(time.time()) % 100000}"
+    try:
+        info = projectio.save_template(tid, meta, req.payload)
+    except Exception as exc:                       # noqa: BLE001
+        raise HTTPException(400, f"保存模板失败：{exc}") from exc
+    return {"id": info["id"], "name": name, "bytes": info["bytes"]}
+
+
+@app.post("/templates/{tid}/instantiate")
+def instantiate_template(tid: str, req: ProjectImportReq) -> Dict[str, Any]:
+    """从模板新建一个项目（素材复制到新项目目录，路径重写）。"""
+    try:
+        result = projectio.instantiate_template(tid, req.scope)
+    except projectio.ArchiveError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    meta = dict(result["meta"])
+    payload = dict(result["payload"])
+    if req.name.strip():
+        meta["name"] = req.name.strip()
+    return {"meta": meta, "payload": payload,
+            "imported_files": result["imported_files"]}
+
+
+@app.delete("/templates/{tid}")
+def delete_template(tid: str) -> Dict[str, Any]:
+    """删模板。"""
+    ok = projectio.delete_template(tid)
+    if not ok:
+        raise HTTPException(404, "模板不存在")
+    return {"deleted": tid}
 
 
 # 前端构建产物（web/dist）。存在就挂在根路径，API 路由在上面已注册，不会被抢。

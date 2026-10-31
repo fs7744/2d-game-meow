@@ -925,12 +925,14 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
 .rail-item-main em { display: block; font-style: normal; font-size: 10px; color: var(--muted-2); }
 .rail-item-main:hover:not(:disabled) { color: var(--green); }
 .rail-item-main:disabled { color: var(--muted-2); cursor: not-allowed; }
-.rail-add, .rail-del {
+.rail-add, .rail-del, .rail-act {
   width: 24px; align-self: stretch; background: transparent;
   border: 0; border-left: 1px solid var(--line); color: var(--muted-2); font-size: 13px;
 }
 .rail-add:hover { color: var(--green); }
 .rail-del:hover { color: var(--pink); }
+/* 项目行的次级动作（导出 / 存模板）：比删除轻一点，悬停用蓝绿色 */
+.rail-act:hover { color: var(--green); background: rgba(0, 255, 136, 0.08); }
 .rail-tip { margin: 0; font-size: 10px; line-height: 1.7; color: var(--muted-2); }
 
 /* 项目（独立画布） */

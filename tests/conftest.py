@@ -14,7 +14,23 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-ASSETS = ROOT / "assets"
+#: **测试产物根目录**。测试期间的一切生成物（产物 PNG、索引、上传、蒙版）
+#: 都落在这里，不进 `assets/`。
+#:
+#: 为什么要隔离：`assets/` 是**项目要用的运行时目录**——索引、上传、用户项目的
+#: 产物都在那儿。以前 pytest 直接往 `assets/` 里写，跑一轮就多出几十个
+#: `apiwbg_*.png` / `w1_*.png`，把真正的交付物淹没，删项目时还会误删。
+#:
+#: 必须在**导入 workflows 之前**设好：`workflows.paths.ASSETS` 是模块级常量，
+#: import 时求值。conftest 在 collection 阶段加载，早于所有测试模块的 import，
+#: 所以这里的时序是对的。
+TEST_OUT = ROOT / "tests" / "_out"
+os.environ["MEOW_ASSETS_DIR"] = str(TEST_OUT / "assets")
+
+from workflows import paths                                    # noqa: E402
+
+#: 资产根（测试期间指向 tests/_out/assets）
+ASSETS = paths.ASSETS
 
 
 @pytest.fixture(scope="session")
@@ -24,7 +40,8 @@ def root() -> Path:
 
 @pytest.fixture(scope="session")
 def assets() -> Path:
-    ASSETS.mkdir(exist_ok=True)
+    """测试期间的资产根。**不是**仓库里的 `assets/`。"""
+    ASSETS.mkdir(parents=True, exist_ok=True)
     return ASSETS
 
 

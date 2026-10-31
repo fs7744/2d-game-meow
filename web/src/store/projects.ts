@@ -105,3 +105,52 @@ export function metaOf(p: Project): ProjectMeta {
     count: p.nodes.length,
   }
 }
+
+/**
+ * 把项目打成「可导出」的归档内容。
+ *
+ * **为什么 meta 和 payload 分开**：meta 是项目自己的元信息（名字、创建时间），
+ * payload 是主体数据（节点、视口）。后端要靠 payload 里引用的素材路径决定
+ * 打包哪些图，分开才能只扫 payload。
+ */
+export function archiveOf(p: Project): {
+  meta: Record<string, unknown>
+  payload: Record<string, unknown>
+} {
+  return {
+    meta: {
+      name: p.name,
+      created: p.created,
+      updated: p.updated,
+    },
+    payload: {
+      nodes: p.nodes,
+      viewport: p.viewport,
+    },
+  }
+}
+
+/**
+ * 从导入/模板实例化出来的内容，还原成一个**新项目**。
+ *
+ * **为什么要换 id**：导入的项目必须是新项目，不能覆盖已有的——
+ * 素材落在 `assets/projects/<id>/`，用同一个 id 会跟原项目的产物混在一起。
+ */
+export function projectFromImported(
+  imp: { meta: Record<string, unknown>; payload: Record<string, unknown> },
+  fallbackName: string,
+): Project {
+  const now = new Date().toISOString()
+  const meta = imp.meta || {}
+  const payload = imp.payload || {}
+  const nodes = Array.isArray(payload.nodes) ? (payload.nodes as GenNode[]) : []
+  const viewport = (payload.viewport as Viewport) || DEFAULT_VIEWPORT
+  return {
+    id: newId(),
+    name: String(meta.name || fallbackName || '导入的项目'),
+    created: String(meta.created || now),
+    updated: now,
+    nodes,
+    viewport,
+  }
+}

@@ -26,6 +26,26 @@ import sys
 import time
 
 sys.path.insert(0, ".")
+from pathlib import Path
+
+# ---- 产物目录：验证脚本的输出**不进 assets/**（那里是项目资产） ----
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from workflows import paths                                  # noqa: E402
+
+
+def _out_path(name: str) -> Path:
+    """验证产物的落盘位置（tests/_out/ 下）。"""
+    return paths.tool_out(name)
+
+
+def _find_asset(name: str) -> Path:
+    """找输入素材：先看测试输出目录，再看仓库 assets/（历史素材兼容）。"""
+    for base in (paths.TEST_OUT / "legacy_assets", paths.ASSETS, paths.ROOT / "assets"):
+        p = base / name
+        if p.is_file():
+            return p
+    return paths.TEST_OUT / "legacy_assets" / name
+
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 import torch
@@ -52,7 +72,7 @@ PROMPT = (
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--pose", default="assets/_pose_walk_02.png")
+    ap.add_argument("--pose", default=str(_find_asset("_pose_walk_02.png")))
     ap.add_argument("--height", type=int, default=1024)
     ap.add_argument("--width", type=int, default=768)
     ap.add_argument("--steps", type=int, default=40)
@@ -103,7 +123,7 @@ def main() -> int:
                        generator=torch.Generator("cuda").manual_seed(43),
                        output_resolution=max(Wd, H), **kw).images[0]
             dt = time.time() - t
-            p = f"assets/_cnp_{label}.png"
+            p = str(_out_path(f"_cnp_{label}.png"))
             img = out if args.transparent else out.convert("RGB")
             img.save(p)
             print(f"  {label}: {dt:.1f}s  → {p}", flush=True)
@@ -124,8 +144,8 @@ def main() -> int:
     side.paste(flatten(base), (0, 0))
     side.paste(cond.resize((Wd, H)), (Wd, 0))
     side.paste(flatten(ctl), (Wd * 2, 0))
-    side.save("assets/_cnp_compare.png")
-    print("  → assets/_cnp_compare.png（左=无控制 中=条件图 右=带控制）", flush=True)
+    side.save(str(_out_path("_cnp_compare.png")))
+    print("  → " + str(_out_path("_cnp_compare.png")) + "（左=无控制 中=条件图 右=带控制）", flush=True)
     return 0
 
 

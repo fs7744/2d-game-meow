@@ -25,6 +25,26 @@ import sys
 import time
 
 sys.path.insert(0, ".")
+from pathlib import Path
+
+# ---- 产物目录：验证脚本的输出**不进 assets/**（那里是项目资产） ----
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from workflows import paths                                  # noqa: E402
+
+
+def _out_path(name: str) -> Path:
+    """验证产物的落盘位置（tests/_out/ 下）。"""
+    return paths.tool_out(name)
+
+
+def _find_asset(name: str) -> Path:
+    """找输入素材：先看测试输出目录，再看仓库 assets/（历史素材兼容）。"""
+    for base in (paths.TEST_OUT / "legacy_assets", paths.ASSETS, paths.ROOT / "assets"):
+        p = base / name
+        if p.is_file():
+            return p
+    return paths.TEST_OUT / "legacy_assets" / name
+
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 import numpy as np
@@ -106,13 +126,13 @@ def run_all(only: set[str] | None) -> int:
         return r
 
     # ---- 素材 ----
-    ref = "assets/_cn_none.png"
+    ref = str(_find_asset("_cn_none.png"))
     if not os.path.isfile(ref):
         print(f"缺少素材 {ref}", file=sys.stderr)
         return 1
     src = Image.open(ref).convert("RGBA")
     # 造一张局部重绘用的蒙版
-    mask_path = "assets/_qa_mask.png"
+    mask_path = str(_out_path("_qa_mask.png"))
     m = Image.new("L", src.size, 0)
     ImageDraw.Draw(m).ellipse([src.width * 0.25, src.height * 0.25,
                                src.width * 0.75, src.height * 0.55], fill=255)

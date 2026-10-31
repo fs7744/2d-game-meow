@@ -3,7 +3,8 @@ import Canvas, { type LinkField } from './canvas/Canvas'
 import Sidebar from './components/Sidebar'
 import { hasPrompt, loadPrompts, removePrompt, savePrompts, togglePrompt } from './store/prompts'
 import {
-  loadStore, makeProject, metaOf, saveStore, type Project, type ProjectMeta,
+  loadStore, makeProject, metaOf, saveStore, archiveOf, projectFromImported,
+  type Project, type ProjectMeta,
 } from './store/projects'
 import {
   deleteAssets, fetchJob, fetchModels, health, submitAiRepaint, submitImg2Img,
@@ -13,6 +14,8 @@ import {
   submitSpriteSwap, submitTxt2Img, uploadImage, extractPose,
   fetchLoras, applyLoras, setFastMode, type QwenLora, type ActiveLora,
   submitOutpaint, submitOutfitSwap, submitFaceSwap, submitVnccsPose,
+  exportProject, importProject, fetchTemplates, saveTemplate, instantiateTemplate,
+  deleteTemplate, type TemplateInfo,
 } from './api'
 import ConfirmDialog from './components/ConfirmDialog'
 import Lightbox from './components/Lightbox'
@@ -451,6 +454,117 @@ export default function App() {
       setSelectedId(null)
     }
   }, [flushCurrent])
+
+  // ---------------- 项目导入 / 导出 / 模板 ----------------
+
+  const [templates, setTemplates] = useState<TemplateInfo[]>([])
+
+  /** 模板列表：启动时拉一次，存/删模板后刷新。 */
+  const reloadTemplates = useCallback(() => {
+    fetchTemplates().then(setTemplates).catch(() => setTemplates([]))
+  }, [])
+  useEffect(() => { reloadTemplates() }, [reloadTemplates])
+
+  /** 把某个项目导出成 `.mproj` 单文件并触发下载。 */
+  const exportOneProject = useCallback(async (id: string) => {
+    const projects = flushCurrent()
+    const target = projects.find((p) => p.id === id)
+    if (!target) return
+    try {
+      const blob = await exportProject(archiveOf(target))
+      // **下载文件名用 ASCII**：中文名在部分浏览器/代理下会让下载变成乱码，
+      // 所以用项目 id 兜底，名字放不进去。
+      const safe = target.name.replace(/[^\w\-一-龥]+/g, '_').slice(0, 40) || id
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${safe}.mproj`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+      setNotice(`已导出「${target.name}」（含引用的素材）`)
+      window.setTimeout(() => setNotice(''), 4000)
+    } catch (e) {
+      setUploadMsg(`导出失败：${e instanceof Error ? e.message : '未知错误'}`)
+      window.setTimeout(() => setUploadMsg(''), 6000)
+    }
+  }, [flushCurrent])
+
+  /** 把项目存成预设模板。 */
+  const makeTemplate = useCallback(async (id: string) => {
+    const projects = flushCurrent()
+    const target = projects.find((p) => p.id === id)
+    if (!target) return
+    try {
+      const r = await saveTemplate(archiveOf(target))
+      reloadTemplates()
+      setNotice(`已存为模板「${r.name}」`)
+      window.setTimeout(() => setNotice(''), 4000)
+    } catch (e) {
+      setUploadMsg(`存模板失败：${e instanceof Error ? e.message : '未知错误'}`)
+      window.setTimeout(() => setUploadMsg(''), 6000)
+    }
+  }, [flushCurrent, reloadTemplates])
+
+  /** 导入一个 `.mproj` → 新项目。 */
+  const importOneProject = useCallback(async (file: File) => {
+    try {
+      // **先建好项目再导入**：导入的素材要落到 `assets/projects/<新id>/`，
+      // 所以 id 必须先定下来。
+      const projects = flushCurrent()
+      const p = makeProject(file.name.replace(/\.mproj$/i, '') || '导入的项目')
+      const imp = await importProject(file, p.id)
+      const merged = projectFromImported(imp, p.name)
+      const next = [...projects, merged]
+      storeRef.current = { current: merged.id, projects: next }
+      saveStore(merged.id, next)
+      setProjectMeta(next.map(metaOf))
+      setCurrentId(merged.id)
+      setNodes(merged.nodes.map(migrate))
+      setViewport(merged.viewport)
+      setSelectedId(null)
+      setNotice(`已导入「${merged.name}」（${imp.imported_files} 份素材）`)
+      window.setTimeout(() => setNotice(''), 4000)
+    } catch (e) {
+      setUploadMsg(`导入失败：${e instanceof Error ? e.message : '未知错误'}`)
+      window.setTimeout(() => setUploadMsg(''), 6000)
+    }
+  }, [flushCurrent])
+
+  /** 从模板新建一个项目。 */
+  const useTemplate = useCallback(async (tid: string) => {
+    try {
+      const projects = flushCurrent()
+      const p = makeProject('新项目')
+      const imp = await instantiateTemplate(tid, p.id)
+      const merged = projectFromImported(imp, p.name)
+      const next = [...projects, merged]
+      storeRef.current = { current: merged.id, projects: next }
+      saveStore(merged.id, next)
+      setProjectMeta(next.map(metaOf))
+      setCurrentId(merged.id)
+      setNodes(merged.nodes.map(migrate))
+      setViewport(merged.viewport)
+      setSelectedId(null)
+      setNotice(`已从模板新建「${merged.name}」`)
+      window.setTimeout(() => setNotice(''), 4000)
+    } catch (e) {
+      setUploadMsg(`从模板新建失败：${e instanceof Error ? e.message : '未知错误'}`)
+      window.setTimeout(() => setUploadMsg(''), 6000)
+    }
+  }, [flushCurrent])
+
+  /** 删模板。 */
+  const removeTemplate = useCallback(async (tid: string) => {
+    try {
+      await deleteTemplate(tid)
+      reloadTemplates()
+    } catch (e) {
+      setUploadMsg(`删模板失败：${e instanceof Error ? e.message : '未知错误'}`)
+      window.setTimeout(() => setUploadMsg(''), 5000)
+    }
+  }, [reloadTemplates])
 
   const patchNode = useCallback((id: string, patch: NodePatch) => {
     setNodes((list) => list.map((n) => (n.id === id ? { ...n, ...patch } : n)))
@@ -1100,6 +1214,12 @@ export default function App() {
           onCreateProject={() => createProject()}
           onRenameProject={renameProject}
           onDeleteProject={(id) => setPendingProjectDelete(id)}
+          onExportProject={(id) => void exportOneProject(id)}
+          onSaveTemplate={(id) => void makeTemplate(id)}
+          onImportProject={(f) => void importOneProject(f)}
+          templates={templates}
+          onUseTemplate={(tid) => void useTemplate(tid)}
+          onDeleteTemplate={(tid) => void removeTemplate(tid)}
           onAddNode={(kind) => addNode(kind ?? 'gen')}
           canApply={!!selectedId}
           onApplyFav={applyFavorite}

@@ -26,11 +26,12 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 from PIL import Image  # noqa: E402
 
+from workflows import paths
 from workflows import quality  # noqa: E402
 from workflows.engine import Engine  # noqa: E402
 
 MODEL = "qwen-image-2.1"
-OUT = Path("assets/_steps_wide")
+OUT = paths.tool_out("_steps_wide")
 OUT.mkdir(parents=True, exist_ok=True)
 
 STEPS = (8, 12, 16, 20, 24)

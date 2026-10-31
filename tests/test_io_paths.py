@@ -94,7 +94,17 @@ def test_cli_missing_file_exits_2(tmp_path):
 # ---------------- 非 8 倍数尺寸 ----------------
 
 def test_inpaint_non_multiple_of_8(eng, assets):
-    """250×250 不是 8 的倍数：内部要按 248 推理再还原，选区外必须逐点不变。"""
+    """250×250 不是 8 的倍数：内部要按 248 推理再还原，尺寸必须回到 250。
+
+    **两条策略的承诺不同，选区外的断言也不同**：
+
+    · ``strategy="whole"``（蒙版贴回）：选区外**逐点不变**（差恒为 0）。
+    · ``strategy="mask"``（默认，模型自己看蒙版）：走 VAE 解码，蒙版外有
+      约 19 级像素偏差（docstring 里写明了，视觉上完全一致）。
+      这是这条用例以前失败的原因——断言按 whole 写，跑的却是 mask。
+
+    所以两条都跑，各自断言各自的契约。
+    """
     src = assets / "_t_odd_src.png"
     mask = assets / "_t_odd_mask.png"
     im = Image.new("RGB", (250, 250), (40, 80, 120))
@@ -106,14 +116,27 @@ def test_inpaint_non_multiple_of_8(eng, assets):
 
     from workflows import generate as g
 
-    r = g.inpaint(eng, image=src, mask=mask, prompt="green block", steps=8, seed=3, tag="odd")
+    before = np.asarray(Image.open(src).convert("RGB")).astype(int)
+    msk = np.asarray(Image.open(mask).convert("L"))
+
+    # ---- 贴回策略：选区外逐点不变 ----
+    r = g.inpaint(eng, image=src, mask=mask, prompt="green block", steps=8, seed=3,
+                  tag="odd", strategy="whole")
     out = Image.open(r["file"])
     assert out.size == (250, 250), f"尺寸被改了: {out.size}"
-
-    before = np.asarray(Image.open(src).convert("RGB")).astype(int)
     after = np.asarray(out.convert("RGB")).astype(int)
-    msk = np.asarray(Image.open(mask).convert("L"))
     assert np.abs(after - before).max(axis=2)[msk == 0].max() == 0
+
+    # ---- 蒙版策略：尺寸同样要还原，偏差在可接受范围内 ----
+    r2 = g.inpaint(eng, image=src, mask=mask, prompt="green block", steps=8, seed=3,
+                   tag="odd", strategy="mask")
+    out2 = Image.open(r2["file"])
+    assert out2.size == (250, 250), f"尺寸被改了: {out2.size}"
+    after2 = np.asarray(out2.convert("RGB")).astype(int)
+    diff = int(np.abs(after2 - before).max(axis=2)[msk == 0].max())
+    # VAE 解码的固有误差；实测 19。留出余量但不放水（>32 说明溢出到选区外了）
+    assert diff <= 32, f"蒙版外偏差过大：{diff}"
+    assert r2["meta"]["outside_max_diff"] == diff
 
 
 def test_pack_sheet_with_more_cols_than_frames(tmp_path):

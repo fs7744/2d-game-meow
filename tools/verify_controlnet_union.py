@@ -17,6 +17,26 @@ import sys
 import time
 
 sys.path.insert(0, ".")
+from pathlib import Path
+
+# ---- 产物目录：验证脚本的输出**不进 assets/**（那里是项目资产） ----
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from workflows import paths                                  # noqa: E402
+
+
+def _out_path(name: str) -> Path:
+    """验证产物的落盘位置（tests/_out/ 下）。"""
+    return paths.tool_out(name)
+
+
+def _find_asset(name: str) -> Path:
+    """找输入素材：先看测试输出目录，再看仓库 assets/（历史素材兼容）。"""
+    for base in (paths.TEST_OUT / "legacy_assets", paths.ASSETS, paths.ROOT / "assets"):
+        p = base / name
+        if p.is_file():
+            return p
+    return paths.TEST_OUT / "legacy_assets" / name
+
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 import torch
@@ -36,7 +56,7 @@ def mem(tag: str) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--pose", default="assets/_pose_walk_02.png")
+    ap.add_argument("--pose", default=str(_find_asset("_pose_walk_02.png")))
     ap.add_argument("--size", type=int, default=768)
     ap.add_argument("--steps", type=int, default=24,
                     help=">8 = 不挂 Lightning 跑这么多步（官方示例用 40）；<=8 = 挂 Lightning")
@@ -202,7 +222,7 @@ def main() -> int:
             dt = time.time() - t
             print(f"  {label}: {dt:.1f}s", flush=True)
             mem(label)
-            p = f"assets/_cn_{label}.png"
+            p = str(_out_path(f"_cn_{label}.png"))
             img = out if args.transparent else out.convert("RGB")
             img.save(p)
             if args.transparent and img.mode == "RGBA":
@@ -257,8 +277,8 @@ def main() -> int:
         side = Image.new("RGB", (sz * len(tiles), sz), "white")
         for i, t in enumerate(tiles):
             side.paste(t, (i * sz, 0))
-        side.save("assets/_cn_compare.png")
-        print(f"\n  → assets/_cn_compare.png （从左到右：无控制 / 条件图 / "
+        side.save(str(_out_path("_cn_compare.png")))
+        print(f"\n  → " + str(_out_path("_cn_compare.png")) + " （从左到右：无控制 / 条件图 / "
               f"scale={','.join(f'{s:g}' for s in args.scales)}）", flush=True)
 
     mem("结束")

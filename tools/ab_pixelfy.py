@@ -13,10 +13,11 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from workflows import paths
 from workflows import pixelfy as pxf          # noqa: E402
 from workflows import perfect_pixel as pp      # noqa: E402
 
-OUT = ROOT / "assets" / "_ab"
+OUT = paths.tool_out("_ab")
 OUT.mkdir(parents=True, exist_ok=True)
 
 
@@ -33,9 +34,14 @@ def one_color_per_cell(arr: np.ndarray, cell: int) -> float:
 
 
 def main() -> None:
-    real = sorted((ROOT / "assets").glob("_chain_a_*.png"))
+    # 输入素材：测试输出目录优先，再看仓库 assets/（历史素材兼容）
+    real = []
+    for base in (paths.TEST_OUT / "legacy_assets", paths.ASSETS, ROOT / "assets"):
+        real = sorted(base.glob("_chain_a_*.png"))
+        if real:
+            break
     if not real:
-        raise SystemExit("缺少真实素材 assets/_chain_a_*.png")
+        raise SystemExit("缺少真实素材 _chain_a_*.png")
     src = real[0]
     im = Image.open(src).convert("RGBA")
     print(f"源图: {src.name} {im.size}")

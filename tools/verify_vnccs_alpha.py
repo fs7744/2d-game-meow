@@ -31,6 +31,26 @@ import sys
 import time
 
 sys.path.insert(0, ".")
+from pathlib import Path
+
+# ---- 产物目录：验证脚本的输出**不进 assets/**（那里是项目资产） ----
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from workflows import paths                                  # noqa: E402
+
+
+def _out_path(name: str) -> Path:
+    """验证产物的落盘位置（tests/_out/ 下）。"""
+    return paths.tool_out(name)
+
+
+def _find_asset(name: str) -> Path:
+    """找输入素材：先看测试输出目录，再看仓库 assets/（历史素材兼容）。"""
+    for base in (paths.TEST_OUT / "legacy_assets", paths.ASSETS, paths.ROOT / "assets"):
+        p = base / name
+        if p.is_file():
+            return p
+    return paths.TEST_OUT / "legacy_assets" / name
+
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 import numpy as np
@@ -77,13 +97,13 @@ def checker(im: Image.Image) -> Image.Image:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ref", default="assets/_cn_none.png")
-    ap.add_argument("--pose", default="assets/_pose_from_pixel.png")
+    ap.add_argument("--ref", default=str(_find_asset("_cn_none.png")))
+    ap.add_argument("--pose", default=str(_find_asset("_pose_from_pixel.png")))
     ap.add_argument("--extra", default=DEFAULT_EXTRA)
     ap.add_argument("--steps", type=int, default=25)
     ap.add_argument("--seed", type=int, default=43)
     ap.add_argument("--lora", type=float, default=1.0)
-    ap.add_argument("--out", default="assets/_vnccs_alpha.png")
+    ap.add_argument("--out", default=str(_out_path("_vnccs_alpha.png")))
     args = ap.parse_args()
 
     eng = Engine("models")

@@ -180,7 +180,8 @@ def test_assets_filtered_by_project(client):
                      headers={"Content-Type": "image/png"}).json()
     with open(up["path"], "rb") as fh:
         data = fh.read()
-    idx = Path(__file__).resolve().parents[1] / "assets" / "index.jsonl"
+    from workflows import paths
+    idx = paths.ASSETS / "index.jsonl"
     with idx.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps({"file": up["path"], "scope": "projY", "tag": "t"}) + "\n")
     try:
@@ -238,7 +239,8 @@ def test_upload_rejects_empty_body(client):
 
 def test_delete_assets_removes_file_sidecar_and_raw(client):
     """真删：删一个 PNG 要连带删掉 sidecar 与 raw，并把索引里的条目摘掉。"""
-    assets = Path(__file__).resolve().parents[1] / "assets"
+    from workflows import paths
+    assets = paths.ASSETS
     png = assets / "_del_api_test.png"
     png.write_bytes(b"x")
     (assets / "_del_api_test.png.json").write_text("{}", encoding="utf-8")
@@ -277,7 +279,8 @@ def test_delete_assets_blocks_path_traversal(client):
 
 def test_delete_assets_protects_index(client):
     """索引文件不能被删（删了资产清单就废了）。"""
-    idx = Path(__file__).resolve().parents[1] / "assets" / "index.jsonl"
+    from workflows import paths
+    idx = paths.ASSETS / "index.jsonl"
     r = client.request("DELETE", "/assets", json={"paths": ["index.jsonl", str(idx)]})
     assert r.status_code == 200
     assert r.json()["count"] == 0
@@ -442,7 +445,8 @@ def test_files_serves_asset(client):
     """产物现在在 projects/<id>/ 子目录里，取文件必须带相对路径（只取 basename 会 404）。"""
     import shutil
 
-    assets = Path(__file__).resolve().parents[1] / "assets"
+    from workflows import paths
+    assets = paths.ASSETS
     d = assets / "projects" / "_serve_test_proj"
     d.mkdir(parents=True, exist_ok=True)
     png = d / "x.png"
@@ -462,7 +466,8 @@ def test_files_download_sets_attachment(client):
     """?download=1 要带 Content-Disposition，浏览器才会直接存盘而不是内联显示。"""
     import shutil
 
-    assets = Path(__file__).resolve().parents[1] / "assets"
+    from workflows import paths
+    assets = paths.ASSETS
     d = assets / "projects" / "_dl_test_proj"
     d.mkdir(parents=True, exist_ok=True)
     png = d / "hero.png"

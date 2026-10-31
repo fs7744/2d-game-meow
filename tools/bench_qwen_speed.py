@@ -34,10 +34,11 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 from PIL import Image  # noqa: E402
 
+from workflows import paths  # noqa: E402
 from workflows.engine import Engine  # noqa: E402
 
 MODEL = "qwen-image-2.1"
-OUT = Path("assets/_speed_exp")
+OUT = paths.tool_out("_speed_exp")
 OUT.mkdir(parents=True, exist_ok=True)
 
 POS = ("a pixel art white cat knight with red cape and golden armor, standing, "

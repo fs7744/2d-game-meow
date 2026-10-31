@@ -31,12 +31,13 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 from PIL import Image  # noqa: E402
 
 from tools.make_pose import render, walk_pose  # noqa: E402
+from workflows import paths
 from workflows import framescore, quality  # noqa: E402
 from workflows import generate as g  # noqa: E402
 from workflows import refprep  # noqa: E402
 from workflows.engine import Engine  # noqa: E402
 
-OUT = Path("assets/_anchor_exp")
+OUT = paths.tool_out("_anchor_exp")
 OUT.mkdir(parents=True, exist_ok=True)
 MODEL = "qwen-image-2.1"
 

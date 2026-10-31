@@ -925,6 +925,82 @@ assets/
 > 历史文件（项目功能之前生成的，还在 `assets/` 根目录）仍可访问，也能当图生图的源，
 > 它们属于「公共区」；但它们不会被任何项目的新产物覆盖或混进去。
 
+### 项目导出 / 导入（.mproj 单文件）
+
+项目本来只活在浏览器的 localStorage 里——换台机器、换个浏览器就没了。
+现在项目能导出成一个 `.mproj` 文件（zip），**连它引用的素材一起打包**：
+
+- **导出**：项目行右边的 `↧` 按钮 → 下载 `<项目名>.mproj`。
+- **导入**：左栏「↑ 导入项目」→ 选一个 `.mproj` → 得到一个**新项目**。
+
+**这个文件是自包含的**：节点里引用的图片、蒙版、骨架帧目录都会被收进去。
+换台机器导入，素材照样在——不用再手动把图一张张搬过去。
+
+导入的落点是 `assets/projects/<新项目id>/imported/`，**绝不覆盖已有项目**：
+
+| 引用形态 | 例子 | 导入后 |
+|---|---|---|
+| 单个文件 | `params.maskPath` | 同名文件 |
+| 目录 | `psDir` 指向骨架帧目录 | **同构的目录**（内部结构保留） |
+| 通配 | `assets/_pose_*.png` | 折成目录（后端接受目录，更稳） |
+
+路径与 `/files/...` 链接在导入时**全部重算**；引用的文件当时不在盘上时，
+该路径会被清空（留着一个指向不存在文件的绝对路径，只会让用户点了生成才报错）。
+
+**怎么找到素材**：不去猜「节点里哪些字段是路径」，而是在整棵节点 JSON 上递归找
+**看起来像路径且真实存在**的字符串。所以以后加新节点类型，这块不用改。
+
+### 预设模板：一套产线，反复开新项目
+
+同一个项目结构往往要开好几次（同一套「像素精灵产线」跑不同角色）。
+左栏「模板」分组就是干这个的：
+
+- **存模板**：项目行右边的 `★` 按钮 → 当前项目存成一个模板。
+- **从模板新建**：点模板 → 开一个**新项目**，节点、参数、素材全都在。
+- **删模板**：模板右边的 ✕。
+
+模板存在 `templates/<id>.mproj`（**不在 `assets/` 下**——它是跨项目共享的
+用户资源，不属于任何一个项目的产物）。同名的模板不覆盖，自动加时间后缀。
+
+### assets/ 里放什么，tests/_out/ 里放什么
+
+这个项目有两类完全不同的文件，以前混在一个目录里：
+
+```
+assets/                       项目资产（要交付的东西）
+├── index.jsonl               全局索引
+├── index.db                  索引的 SQLite 读缓存
+├── projects/<项目id>/        每个项目的产物 / 上传 / 蒙版
+├── uploads/                  历史遗留的上传
+└── pose_walk/ pose_pixel/    可直接当 W4 输入的骨架帧目录
+
+tests/_out/                   测试与验证产物（开发过程，不入库）
+├── assets/                   pytest 期间的资产根（见下）
+├── legacy_assets/            历史上散在 assets/ 根下的调试图
+├── legacy_projects/          历史上各项目目录里的测试产物
+└── _*/                       各个验证脚本 / 实验脚本的输出
+```
+
+**为什么要分开**：`assets/` 里的东西是用户要拿走的。混进几百张
+`_xxx_compare.png` 之后，资产清单被淹没、真正交付的图翻不到，删项目时还会
+连带删掉。新人打开 `assets/` 也不知道哪些是能用的。
+
+**pytest 期间的资产根是 `tests/_out/assets`**，不是仓库的 `assets/`：
+`tests/conftest.py` 在 collection 阶段就设好 `MEOW_ASSETS_DIR`，
+`workflows/paths.py` 据此解析路径。这样跑一轮测试，仓库的 `assets/` 一点不脏。
+
+路径解析只有一处定义（`workflows/paths.py`），可用环境变量覆盖：
+
+| 环境变量 | 作用 | 默认 |
+|---|---|---|
+| `MEOW_ASSETS_DIR` | 运行时资产根 | `assets/` |
+| `MEOW_TEMPLATES_DIR` | 模板根 | `templates/` |
+
+`tools/` 下的验证脚本（`verify_*.py` / `exp_*.py` / `bench_*.py`）输出统一走
+`paths.tool_out()`，一律落在 `tests/_out/`。`tools/pose_from_image.py` 是
+**给用户用的工具**（抽骨架帧给 W4 当输入），它的输出仍然由 `-o` 指定，
+默认 `assets/pose/`——那是用户要用的素材，不算测试产物。
+
 ### 抠图节点：去背景 / 换背景
 
 左栏「节点」组多了一个**抠图**（紫色标题）。它**不用模型**——纯图像处理，
@@ -1513,8 +1589,14 @@ MEOW_SLOW=1 pytest tests -m slow                  # 真跑 Qwen 的端到端组�
 | `workflows/matte.py` / `refprep.py` | test_matte test_refprep | 20s |
 | `workflows/postprocess.py` / `pixelfy.py` | test_postprocess test_pixelfy test_sheet | 15s |
 | `app.py` / `workflows/assetdb.py` | test_api test_review_p2 | 15s |
+| `workflows/projectio.py` / `paths.py` | test_projects | 5s |
 | `tools/*` `docs/*` `README` | 不跑（工具靠自身输出验证） | — |
 | 合并 / 发版前 | 全量 | 150s |
+
+**测试产物不进 `assets/`**：`tests/conftest.py` 在 collection 阶段设
+`MEOW_ASSETS_DIR=tests/_out/assets`，pytest 期间的一切生成物（产物 PNG、索引、
+上传、蒙版）都落在 `tests/_out/` 下。仓库的 `assets/` 只放项目资产，
+跑一轮测试它一点不脏。详见「assets/ 里放什么，tests/_out/ 里放什么」。
 
 纯 CPU 的子集（presets / postprocess / matte / repaint / assetdb / qwen_workflows）
 都在 1 分钟内。**只有真正加载 Qwen 权重的三条**（test_models 的 /models、
@@ -1527,6 +1609,7 @@ test_stability 的 free 与泄漏、test_matte 的缓存素材）需要 GPU。
 | `tests/test_e2e_qwen.py` | **十个工作流各真跑一次模型**（`-m slow`，约 80s） | 10 |
 | `tests/test_matte.py` | 背景估计、连通域不误抠内部同色区、去白边、alpha 二值、**u2net 抠空自动回退**、**已有 alpha 复用（IoU 1.000）**、**雾状 alpha 仍重抠**、**补内部洞但不动通到边界的缺口** | 17 |
 | `tests/test_api.py` | 各工作流队列往返、**未知 workflow 报错**、蒙版端点、上传端点、真删（连带 sidecar/raw、路径穿越）、资产按项目过滤、**参数按签名过滤并记 params_ignored** | 28 |
+| `tests/test_projects.py` | **项目归档往返**（.mproj 打包/解包）、**目录与通配引用还原成同构目录**、**路径与 URL 一起重算**、缺失素材清空而非报错、**Windows 反斜杠相对路径**、模板存/列/实例化/删 | 14 |
 | `tests/test_models.py` | **只剩一个底模时接口自洽**：available / arch / recommend / caps.approx / refiner=false、未知底模报错 | 5 |
 | `tests/test_postprocess.py` | 锚点、逐帧对齐、打包几何、色板上限、alpha 二值、像素块单色性、前景块计数 | 11 |
 | `tests/test_pixelfy.py` | 网格检测、每格一色、共享色板、噪点清理、网格吸附 | 20 |
@@ -1564,6 +1647,8 @@ W4 侧对应的兜底是上面那套**质量闸门**（生成后再检一遍，�
 2d-game-meow/
 ├── app.py                  FastAPI 服务入口
 ├── workflows/
+│   ├── paths.py            统一路径解析（资产根 / 模板根，可用环境变量覆盖）
+│   ├── projectio.py        项目归档 .mproj：打包 / 解包 / 模板
 │   ├── engine.py           pipeline 懒加载、显存守卫、LoRA 热切换
 │   ├── generate.py         w1/w2/w3/w4 四个工作流
 │   ├── quality.py          帧质量评分（关节数 / 占比 / 贴边 / 漂移）——挑帧与闸门
@@ -1588,7 +1673,9 @@ W4 侧对应的兜底是上面那套**质量闸门**（生成后再检一遍，�
 │   ├── bench_sprite.py     精灵管线单位成本（预热+中位数；每"可用帧"耗时与显存峰值）
 │   └── check_env.py        环境自检
 ├── models/                 权重（checkpoints / controlnet / ipadapter / loras / ...）
-└── assets/                 产物 + sidecar(.json) + index.jsonl
+├── templates/              项目模板（*.mproj，跨项目共享的用户资源）
+├── assets/                 项目资产：产物 + sidecar(.json) + index.jsonl
+└── tests/_out/             测试与验证产物（不入库，仓库的 assets/ 保持干净）
 ```
 
 ## 环境（本机实测）

@@ -33,11 +33,12 @@ import numpy as np
 from PIL import Image
 
 from tools.make_pose import render, walk_pose
+from workflows import paths
 from workflows import generate as g
 from workflows import refprep
 from workflows.engine import Engine
 
-OUT = ROOT / "assets" / "_two_stage"
+OUT = paths.tool_out("_two_stage")
 
 
 # ---------------------------------------------------------------- 度量
@@ -171,7 +172,10 @@ def main() -> int:
 
     OUT.mkdir(parents=True, exist_ok=True)
     eng = Engine("models")
-    char_path = ROOT / "assets" / "_qwen_verify" / "char.png"
+    # 角色素材：验证脚本的输出目录（tests/_out/_qwen_verify/）优先
+    char_path = paths.tool_out("_qwen_verify") / "char.png"
+    if not char_path.is_file():
+        char_path = ROOT / "assets" / "_qwen_verify" / "char.png"
     if not char_path.is_file():
         print(f"缺少角色素材 {char_path}（先跑 tools/verify_qwen_workflows.py）")
         return 1

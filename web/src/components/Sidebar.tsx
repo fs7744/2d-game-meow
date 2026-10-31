@@ -1,6 +1,7 @@
-import { useState, type ReactNode } from 'react'
+import { useRef, useState, type ReactNode } from 'react'
 import type { FavoritePrompt } from '../types'
 import type { QwenLora, ActiveLora } from '../api'
+import type { TemplateInfo } from '../api'
 import type { ProjectMeta } from '../store/projects'
 
 type Props = {
@@ -11,6 +12,17 @@ type Props = {
   onCreateProject: () => void
   onRenameProject: (id: string, name: string) => void
   onDeleteProject: (id: string) => void
+  /** 导出当前项目为 .mproj 单文件 */
+  onExportProject: (id: string) => void
+  /** 把当前项目存成预设模板 */
+  onSaveTemplate: (id: string) => void
+  /** 打开 .mproj 文件导入成一个新项目 */
+  onImportProject: (file: File) => void
+  /** 可用模板 */
+  templates: TemplateInfo[]
+  /** 从模板新建一个项目 */
+  onUseTemplate: (tid: string) => void
+  onDeleteTemplate: (tid: string) => void
   onAddNode: (
     kind?: 'gen' | 'img2img' | 'image' | 'bg' | 'inpaint' | 'airepaint' | 'pixelify'
     | 'poseclone' | 'spriteswap' | 'topixel' | 'poseswap' | 'poseedit'
@@ -57,15 +69,17 @@ function Section(
   )
 }
 
-/** 项目行：名字可双击改成输入框。 */
+/** 项目行：名字可双击改成输入框；右侧有「导出」「存模板」「删除」三个动作。 */
 function ProjectRow({
-  p, current, onSwitch, onRename, onDelete,
+  p, current, onSwitch, onRename, onDelete, onExport, onTemplate,
 }: {
   p: ProjectMeta
   current: boolean
   onSwitch: () => void
   onRename: (name: string) => void
   onDelete: () => void
+  onExport: () => void
+  onTemplate: () => void
 }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(p.name)
@@ -95,7 +109,15 @@ function ProjectRow({
         </button>
       )}
       {!editing && (
-        <button className="rail-del" title="删除项目" onClick={onDelete}>✕</button>
+        <>
+          <button className="rail-act" title="导出为 .mproj 单文件（含引用的素材）" onClick={onExport}>
+            ↧
+          </button>
+          <button className="rail-act" title="存为预设模板（可反复新建项目）" onClick={onTemplate}>
+            ★
+          </button>
+          <button className="rail-del" title="删除项目" onClick={onDelete}>✕</button>
+        </>
       )}
     </div>
   )
@@ -112,8 +134,11 @@ export default function Sidebar({
   matteBackend, onMatteBackend,
   loras, activeLoras, onLorasChange, fastMode, onFastMode,
   projects, currentProject, onSwitchProject, onCreateProject, onRenameProject, onDeleteProject,
+  onExportProject, onSaveTemplate, onImportProject,
+  templates, onUseTemplate, onDeleteTemplate,
 }: Props) {
   const [collapsed, setCollapsed] = useState(false)
+  const importRef = useRef<HTMLInputElement | null>(null)
 
   if (collapsed) {
     return (
@@ -157,12 +182,59 @@ export default function Sidebar({
               onSwitch={() => onSwitchProject(p.id)}
               onRename={(name) => onRenameProject(p.id, name)}
               onDelete={() => onDeleteProject(p.id)}
+              onExport={() => onExportProject(p.id)}
+              onTemplate={() => onSaveTemplate(p.id)}
             />
           ))}
           <button className="rail-new" onClick={onCreateProject} title="新建一个空画布">
             + 新建项目
           </button>
+          <button
+            className="rail-new"
+            onClick={() => importRef.current?.click()}
+            title="导入 .mproj 归档（别人发来的项目 / 换台机器继续做）"
+          >
+            ↑ 导入项目
+          </button>
+          <input
+            ref={importRef}
+            type="file"
+            accept=".mproj"
+            style={{ display: 'none' }}
+            onChange={(e) => {
+              const f = e.target.files?.[0]
+              // **清空 value**：同一个文件连续选两次不会触发 change，
+              // 用户会以为「导入没反应」。
+              e.target.value = ''
+              if (f) onImportProject(f)
+            }}
+          />
           <p className="rail-tip">每个项目是一套独立的画布，互不干涉。</p>
+        </Section>
+
+        <Section icon="★" title="模板" count={templates.length}>
+          {templates.length === 0 ? (
+            <p className="rail-tip">
+              在项目上点 <b>★</b> 存成模板。之后点模板就能一键开一个
+              同样的新项目——同一套产线要开好几个项目时用得上。
+            </p>
+          ) : (
+            templates.map((t) => (
+              <div className="rail-item" key={t.id}>
+                <button
+                  className="rail-item-main"
+                  onClick={() => onUseTemplate(t.id)}
+                  title={`从「${t.name}」新建一个项目`}
+                >
+                  <b>{t.name}</b>
+                  <em>{t.nodes} 个节点</em>
+                </button>
+                <button className="rail-del" title="删除模板" onClick={() => onDeleteTemplate(t.id)}>
+                  ✕
+                </button>
+              </div>
+            ))
+          )}
         </Section>
 
         <Section icon="▣" title="节点">

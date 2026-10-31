@@ -54,8 +54,13 @@ def walk_pose(phase: float) -> dict[int, tuple[float, float]]:
 
 
 def main() -> None:
-    out = Path(__file__).resolve().parent.parent / "assets"
-    out.mkdir(exist_ok=True)
+    # 输出到统一路径模块解析出来的资产根。测试期间 conftest 会把
+    # MEOW_ASSETS_DIR 指到 tests/_out/assets，所以这里自动跟着走，
+    # 不会往仓库的 assets/ 里丢测试素材。
+    from workflows import paths
+
+    out = paths.ASSETS
+    out.mkdir(parents=True, exist_ok=True)
     frames = []
     for i in range(8):
         img = render(walk_pose(i / 8))
