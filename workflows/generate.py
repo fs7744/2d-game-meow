@@ -411,20 +411,25 @@ QWEN_EDIT_RULES = (
 )
 
 
-def _qwen_work_size(size: tuple[int, int], *, cap: int = 1024,
-                    lo: int = 512) -> tuple[int, int]:
-    """把源图尺寸夹到 Qwen 的划算区间（16 的倍数，长边 ≤ cap）。
+def _qwen_work_size(size: tuple[int, int], *, cap: int = 1024) -> tuple[int, int]:
+    """把源图尺寸夹到 Qwen 的划算区间（**32 的倍数**，长边 ≤ cap）。
 
     为什么要有上限：Qwen 的开销随面积涨，1024² 的图 token 是 768² 的 1.78 倍，
     而像素素材原生只有 32~128px——放大到 1024 并不会多出细节，只会把
     「按 1024 画的笔触」再缩回去，白烧一倍显存与时间。
+
+    **为什么是 32 而不是 16**：管线的 `multiple_of = vae_scale_factor * 2 = 32`
+    （diffusers `pipeline_qwenimage21.py`）。给 16 的倍数时管线会**静默 resize**
+    到 32 的倍数，于是 meta 里记的尺寸与实际出的图对不上。
     """
     w, h = size
     f = min(1.0, cap / max(1, max(w, h)))
+
     def snap(v: float) -> int:
-        # **向下取整到 16 的倍数**：向上取整会让「不缩放」的图反而被放大 1~15px，
-        # 白白多算 token。宁可少 15px 也不放大（像素素材放大不会多出信息）。
-        return max(16, int(v * f) // 16 * 16)
+        # **向下取整到 32 的倍数**：向上取整会让「不缩放」的图反而被放大几 px，
+        # 白白多算 token。宁可少一点也不放大（像素素材放大不会多出信息）。
+        return max(32, int(v * f) // 32 * 32)
+
     return snap(w), snap(h)
 
 
@@ -2346,6 +2351,15 @@ def _qwen_poseswap(eng: Engine, *, pose_images: Sequence[Path], prompt: str,
     # VNCCS 本身就是「骨架 + 角色」双图路线，两阶段（先草图再换皮）是多余的，
     # 而且两阶段的第二段用 [角色图, 草图]，与 VNCCS 的图序相反。
     use_two_stage = bool(two_stage) and char is not None and not use_vnccs
+    # 两阶段模式下**不用少步蒸馏**：Lightning 是按无控制训练的，
+    # 8 步配双图条件（草图 + 换皮）质量会掉；宁可多花一倍时间。
+    # 做法是把临时槽清空（Lightning 由 _qwen_call 按需挂），并让两次调用
+    # 都 fast_lora=False。
+    if use_two_stage:
+        try:
+            eng.unload_loras(eng.txt2img_pipe(model), scope="temp")
+        except Exception:                 # noqa: BLE001
+            pass
 
     if seed < 0:
         seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
@@ -2362,6 +2376,8 @@ def _qwen_poseswap(eng: Engine, *, pose_images: Sequence[Path], prompt: str,
     frame_scores: List[Dict[str, Any]] = []
     attempts_used = 0
     prev_gate: Optional[Image.Image] = None
+    # 本次是否真的走少步分支：VNCCS 要独占 LoRA 槽位、两阶段不用蒸馏
+    fast_ok = (not use_vnccs) and (not use_two_stage)
     # **非人形主体**（史莱姆、机甲、道具）：DWPose 一个关节都检不出来，
     # 闸门永远过不了 —— 这时补提就是纯烧钱（每帧 25~30s 白花）。
     # 一旦某帧「画面里有前景、但关节数为 0」，就判定这个角色不是人形：
@@ -2406,13 +2422,16 @@ def _qwen_poseswap(eng: Engine, *, pose_images: Sequence[Path], prompt: str,
                     draft = _qwen_call(
                         eng, prompt=solo_instr, negative=neg, ref_image=cond,
                         width=width, height=height, steps=steps, cfg=cfg,
-                        seed=sd, model=model, label="w4-draft")
+                        seed=sd, model=model, label="w4-draft",
+                        # 两次调用共用同一组 adapter：不要每步都挂/卸一次 Lightning
+                        fast_lora=False)
                     # 阶段 2：角色图在前、草图在后 → 换回身份，姿态保住
                     raw = _qwen_call(
                         eng, prompt=reskin_instr, negative=neg,
                         ref_image=[char, draft],
                         width=width, height=height, steps=steps, cfg=cfg,
-                        seed=sd, model=model, label="w4-reskin")
+                        seed=sd, model=model, label="w4-reskin",
+                        fast_lora=False)
                 else:
                     raw = _qwen_call(
                         eng, prompt=instr, negative=neg, ref_image=refs,
@@ -2490,10 +2509,10 @@ def _qwen_poseswap(eng: Engine, *, pose_images: Sequence[Path], prompt: str,
         "clip_skip": None,
         # 两阶段模式每个候选跑**两次**（草图 + 换皮），总步数要 ×2，
         # 否则产线算「每可用帧成本」会少算一半。
-        "steps": _eff_steps(eng, steps, fast=not use_vnccs) * (2 if use_two_stage else 1),
-        "steps_per_pass": _eff_steps(eng, steps, fast=not use_vnccs),
+        "steps": _eff_steps(eng, steps, fast=fast_ok) * (2 if use_two_stage else 1),
+        "steps_per_pass": _eff_steps(eng, steps, fast=fast_ok),
         "passes": 2 if use_two_stage else 1,
-        **_fast_meta(eng, applied=not use_vnccs),
+        **_fast_meta(eng, applied=fast_ok),
         "cfg": cfg, "seed": seed, "frames": len(frames),
         "width": width, "height": height,
         # 落盘的是精灵图：列数×格宽。w4 的格子就是生成画布尺寸，
