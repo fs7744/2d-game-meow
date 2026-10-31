@@ -1335,6 +1335,35 @@ export default function App() {
     return () => clearInterval(timer)
   }, [])
 
+  /**
+   * 图片显示方式：像素画**放大**时要硬边（pixelated），**缩小**时要平滑（auto）。
+   *
+   * CSS 的 `image-rendering` 分不出这两者——节点里的图是 768/1024，卡片只有
+   * 260~620 宽，**永远是缩小**，而 `pixelated` 缩小是最近邻采样：边缘那些
+   * "半透明 + 背景色"的像素被整颗保留，看起来就是一圈白点和锯齿毛刺。
+   * （用户的反馈就是「人物边缘明显有问题」。）
+   *
+   * 反过来，128px 的像素化成品在卡片里会被放大，那时必须 pixelated，
+   * 否则像素格被双线性抹成一坨糊。
+   *
+   * 所以按「源图宽度 vs 显示宽度」逐张判，判完写 inline style 覆盖 CSS 默认值。
+   * 用**捕获阶段**的 `load` 统一处理：img 的 load 不冒泡，但捕获能收到，
+   * 这样不必在十几处 `<img>` 上各挂一个 onLoad。
+   */
+  useEffect(() => {
+    const fit = (el: HTMLImageElement) => {
+      if (!el.naturalWidth || !el.clientWidth) return
+      el.style.imageRendering =
+        el.naturalWidth <= el.clientWidth + 1 ? 'pixelated' : 'auto'
+    }
+    const onLoad = (e: Event) => {
+      const t = e.target
+      if (t instanceof HTMLImageElement) fit(t)
+    }
+    document.addEventListener('load', onLoad, true)
+    return () => document.removeEventListener('load', onLoad, true)
+  }, [])
+
   // 快捷键：Delete 删除、Ctrl/Cmd+D 复制（输入框内不拦截）
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
