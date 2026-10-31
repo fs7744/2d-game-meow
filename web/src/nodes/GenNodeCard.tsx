@@ -495,6 +495,8 @@ export default function GenNodeCard({
   const upAzimuth = sourceNode?.kind === 'poseedit'
     ? (sourceNode.skeleton?.azimuth ?? 0)
     : undefined
+  // 角色迁移的引擎：只有 VNCCS 的提交带 `transparent`（旧版 wpc 没有这个字段）
+  const isVnccs = (node.params.pcEngine ?? 'wvnccs') === 'wvnccs'
   // 可全屏预览的图（图片节点的本地图 / 生成节点的产物）
   const previewUrl = isImg ? node.image?.url : job?.url
   const previewName = previewUrl
@@ -1676,15 +1678,35 @@ export default function GenNodeCard({
             <label className="bg-mode" title={'生成时的底色。\n'
               + '角色本身偏白（白毛、白甲）时白底会让抠图分不清主体与背景，'
               + '把脸/腿一起判成背景 —— 这种情况选「深色底」，靠对比度抠干净。\n'
-              + '深色系角色（黑袍、黑甲）反过来仍用白底。'}>
+              + '深色系角色（黑袍、黑甲）反过来仍用白底。\n'
+              + '勾了「透明背景」之后这个选项就没意义了（模型直接出 alpha）。'}>
               底色
               <select
                 value={p.bgTone}
+                disabled={!!p.transparent && isVnccs}
                 onChange={(e) => setParam('bgTone', e.target.value as typeof p.bgTone)}
               >
                 <option value="white">白底（默认）</option>
                 <option value="dark">深色底（白毛角色）</option>
               </select>
+            </label>
+            {/* 透明底：Qwen 原生 RGBA。VNCCS 下实测可用（主体 16.6%、
+                半透明 2.1%、背景全透），不像 ControlNet 那条路会被控制信号压成半透膜。
+                旧版引擎（wpc）的提交里没有这个字段，所以只在 VNCCS 下可勾。 */}
+            <label
+              className="check"
+              title={'模型直接输出 alpha 通道，不用再抠图（抠图会把白鞋、发丝一起吃掉）。\n'
+                + 'VNCCS 引擎实测：主体 16.6% / 半透明 2.1% / 背景全透。\n'
+                + '旧版引擎不支持原生 alpha，需要透明底时请用 VNCCS。'}
+            >
+              <input
+                type="checkbox"
+                checked={!!p.transparent && isVnccs}
+                disabled={!isVnccs}
+                onChange={(e) => setParam('transparent', e.target.checked)}
+              />
+              透明背景（原生 RGBA）
+              {!isVnccs && <span className="dim"> 仅 VNCCS 引擎</span>}
             </label>
           </details>
           {hasImage && (

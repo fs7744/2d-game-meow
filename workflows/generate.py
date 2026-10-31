@@ -1826,13 +1826,19 @@ def _qwen_vnccs(eng: Engine, *, pose_image: str | Path,
 
     raw = out.copy() if (matte or pixel > 1 or palette) else None
     matte_info: Dict[str, Any] = {}
+    # **transparent 必须传下去**：模型出了 RGBA 之后，alpha 还要过一遍
+    # 「可信就复用、起雾就硬切/重抠」的判断。漏传的后果是带雾的 alpha 直接进量化，
+    # 背景被实化成白块（w1/w2 上踩过，这条路由一开始就漏了）。
     out, edge, subjects = _postprocess(
         out, eng, matte=matte, matte_backend=matte_backend, denoise=denoise,
-        pixel=pixel, palette=palette, clean_iso=clean_iso, info=matte_info)
+        pixel=pixel, palette=palette, clean_iso=clean_iso, info=matte_info,
+        transparent=transparent)
     # `_postprocess` 的 info 里有 `pre_pixel`（PIL Image），整个展开进 meta
     # 会在写 sidecar 时 `json.dumps` 报 "Object of type Image is not
     # serializable"。只挑可序列化的几个键（其它工作流也这么做）。
-    safe_info = {k: matte_info[k] for k in ("backend", "fallback")
+    safe_info = {k: matte_info[k] for k in
+                 ("backend", "fallback", "alpha_reused", "alpha_hardened",
+                  "alpha_recut", "a0", "mid", "fg")
                  if k in matte_info}
     return _save(out, _stamp(tag), "vnccs_pose", {
         "workflow": "wvnccs", "scope": scope or "default",
@@ -1844,6 +1850,8 @@ def _qwen_vnccs(eng: Engine, *, pose_image: str | Path,
         "canvas": [w, h], "steps": _eff_steps(eng, steps, fast=False),
         "cfg": cfg, "seed": seed,
         "transparent": bool(transparent),
+        # 记**实际**有没有跑抠图：透明底 + alpha 可信时是 False（一个像素都不动）
+        "matte": bool(matte and not transparent) or bool(matte_info.get("alpha_recut")),
         **_fast_meta(eng, applied=False),
         "seconds": round(seconds, 2),
         "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),

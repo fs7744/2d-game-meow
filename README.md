@@ -203,7 +203,7 @@ RTX 4090 上 768×768 / 16 步约 **10 秒**。第一次要加载模型（1~2 �
 ├── web/                     前端（React + Vite，零 UI 库）
 │   ├── src/                 源码
 │   ├── public/icon.png      应用图标
-│   └── smoke.mjs            无浏览器冒烟测试（366 项）
+│   └── smoke.mjs            无浏览器冒烟测试（372 项）
 ├── models/                  模型权重（不提交到 git）
 ├── assets/                  你的项目和产物
 ├── templates/               项目模板（.mproj）
@@ -221,7 +221,7 @@ RTX 4090 上 768×768 / 16 步约 **10 秒**。第一次要加载模型（1~2 �
   ```bash
   pytest tests/test_api.py tests/test_projects.py -q      # 接口与项目
   pytest tests/test_matte.py tests/test_pixelfy.py -q     # 抠图与像素化
-  cd web && npm run smoke                                 # 前端（366 项，不用显卡）
+  cd web && npm run smoke                                 # 前端（372 项，不用显卡）
   ```
   全量测试会加载两次模型，约 3 分钟；按改动挑子集跑更快（对照表在 changelog 的「测试」章节）。
   **测试不会碰你的项目和模板**：产物、上传、模板全落在 `tests/_out/` 下，

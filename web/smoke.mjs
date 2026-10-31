@@ -2587,6 +2587,29 @@ function check(name, cond, extra = '') {
     String(body.params.prompt || '').includes('viewing direction: side view, facing right'),
     body.params.prompt)
 
+  // 8. 透明底：VNCCS 支持原生 alpha，但节点上以前没有这个开关
+  //    （用户看到的是「底色」只有白/深两档，问「怎么没有透明」）
+  const alphaBox = [...pcNode.querySelectorAll('details.adv label.check')]
+    .find((l) => (l.textContent || '').includes('透明背景'))
+  const alphaInput = alphaBox?.querySelector('input[type=checkbox]')
+  check('节点上有「透明背景」勾选框', !!alphaInput,
+    alphaBox?.textContent || '（没有）')
+  check('VNCCS 引擎下透明底可勾（不是禁用）', alphaInput?.disabled === false)
+  check('默认不勾', alphaInput?.checked === false)
+
+  const bgSel = [...pcNode.querySelectorAll('details.adv label.bg-mode')]
+    .find((l) => (l.textContent || '').trim().startsWith('底色'))?.querySelector('select')
+  check('没勾透明底时「底色」可选', bgSel?.disabled === false)
+
+  alphaInput?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 150))
+  check('勾上之后「底色」被禁用（模型直接出 alpha，底色没意义）',
+    bgSel?.disabled === true, `disabled=${bgSel?.disabled}`)
+
+  body = await submitAndRead()
+  check('勾透明底后提交带上 transparent=true',
+    body.params.transparent === true, String(body.params.transparent))
+
   check('骨骼→迁移场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
