@@ -20,6 +20,8 @@ import inspect
 import json
 import os
 import shutil
+import subprocess
+import sys
 
 import numpy as np
 import queue
@@ -815,6 +817,47 @@ def delete_project(scope: str, files: int = 1) -> Dict[str, Any]:
     if not ok:
         raise HTTPException(404, "项目不存在")
     return {"deleted": projectstore.safe_scope(scope), "files": bool(files)}
+
+
+def _reveal_in_file_manager(path: Path) -> None:
+    """在系统文件管理器里打开一个目录。
+
+    **只适用于本地单机**：服务默认只监听 127.0.0.1（见 `__main__`），
+    这个入口是给「打开项目文件夹」用的便捷操作，不是远程文件管理。
+
+    三个细节：
+    - **列表传参、不经过 shell**：路径本身来自 `safe_scope`（只留 ASCII
+      字母数字与 `-_`），没有注入面，但仍然不该拼字符串给 shell。
+    - **Windows 用 explorer 且不检查返回码**：explorer.exe 即使成功打开也
+      返回 1，检查返回值会把成功当失败。
+    - 用 Popen 不等待：文件管理器是常驻进程，等它退出会把请求挂住。
+    """
+    target = str(path)
+    if sys.platform.startswith("win"):
+        subprocess.Popen(["explorer", target])
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", target])
+    else:
+        # 无桌面环境（纯命令行服务器）时 xdg-open 不存在，会抛 FileNotFoundError
+        subprocess.Popen(["xdg-open", target])
+
+
+@app.post("/projects/{scope}/reveal")
+def reveal_project(scope: str) -> Dict[str, Any]:
+    """在文件管理器里打开这个项目的目录（产物、上传、蒙版都在里面）。
+
+    **为什么需要**：用户想知道图存哪了、想直接把整个项目拷走、想拿 raw 图去
+    别的工具里二次处理——都得先能找到那个目录。项目 id 是服务端分配的
+    （`p` + 日期 + 随机串），让人自己去 `assets/projects/` 下翻不现实。
+    """
+    d = projectstore.project_dir(scope)
+    if not d.is_dir():
+        raise HTTPException(404, "项目目录不存在（这个项目还没生成过产物）")
+    try:
+        _reveal_in_file_manager(d)
+    except OSError as exc:
+        raise HTTPException(500, f"打不开文件管理器：{exc}") from exc
+    return {"opened": str(d)}
 
 
 @app.put("/workspace")

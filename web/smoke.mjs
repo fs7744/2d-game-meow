@@ -205,6 +205,14 @@ function makeFetch() {
         }),
       }
     }
+    // ---- 打开项目文件夹 ----
+    // 必须排在「按 id 读项目」前面：`/projects/<id>/reveal` 也含 `/projects/`
+    if (/\/projects\/[^/]+\/reveal$/.test(String(url))) {
+      return {
+        ok: true,
+        json: async () => ({ opened: 'D:/repo/assets/projects/pdemo' }),
+      }
+    }
     // ---- 项目落盘存储（服务端磁盘）----
     // **分配 id**：服务端保证唯一（随机后缀 + 存在性检查）。
     // 必须排在 `/projects` 列表分支前面吗？——`/projects/allocate` 不以
@@ -774,6 +782,22 @@ function check(name, cond, extra = '') {
     instCall?.body || '')
   check('导入后多了一个项目', doc.querySelectorAll('.project-item').length === before + 1,
     `${before} -> ${doc.querySelectorAll('.project-item').length}`)
+
+  // ---- 打开项目文件夹 ----
+  // 按钮是 ⌂，点了要 POST /projects/<id>/reveal（后端用 explorer/open/xdg-open 唤起）
+  const revealBtn = doc.querySelector('.project-item .rail-act[title*="文件夹"]')
+  check('项目行有「打开文件夹」按钮', !!revealBtn)
+  const revealBefore = calls.length
+  revealBtn?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 200))
+  const revealCall = calls.slice(revealBefore).find((c) => /\/reveal$/.test(c.url))
+  check('打开文件夹调用了 POST /projects/<id>/reveal',
+    !!revealCall && revealCall.method === 'POST',
+    revealCall ? `${revealCall.method} ${revealCall.url}`
+      : JSON.stringify(calls.slice(-3).map((c) => `${c.method} ${c.url}`)))
+  check('打开文件夹后给了提示',
+    (doc.querySelector('.toast')?.textContent || '').includes('已打开'),
+    doc.querySelector('.toast')?.textContent || '（无 toast）')
 
   // ---- 导出项目 ----
   const dlBtn = doc.querySelector('.project-item .rail-act[title*="导出"]')

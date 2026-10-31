@@ -14,6 +14,8 @@ type Props = {
   onDeleteProject: (id: string) => void
   /** 导出当前项目为 .mproj 单文件 */
   onExportProject: (id: string) => void
+  /** 在文件管理器里打开项目目录 */
+  onRevealProject: (id: string) => void
   /** 把当前项目存成预设模板 */
   onSaveTemplate: (id: string) => void
   /** 打开 .mproj 文件导入成一个新项目 */
@@ -69,9 +71,9 @@ function Section(
   )
 }
 
-/** 项目行：名字可双击改成输入框；右侧有「导出」「存模板」「删除」三个动作。 */
+/** 项目行：名字可双击改成输入框；右侧有「打开文件夹」「导出」「存模板」「删除」四个动作。 */
 function ProjectRow({
-  p, current, onSwitch, onRename, onDelete, onExport, onTemplate,
+  p, current, onSwitch, onRename, onDelete, onExport, onTemplate, onReveal,
 }: {
   p: ProjectMeta
   current: boolean
@@ -80,6 +82,8 @@ function ProjectRow({
   onDelete: () => void
   onExport: () => void
   onTemplate: () => void
+  /** 在系统文件管理器里打开 `assets/projects/<id>/` */
+  onReveal: () => void
 }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(p.name)
@@ -110,6 +114,13 @@ function ProjectRow({
       )}
       {!editing && (
         <>
+          <button
+            className="rail-act"
+            title="在文件管理器里打开项目文件夹（产物、上传、蒙版都在里面）"
+            onClick={onReveal}
+          >
+            ⌂
+          </button>
           <button className="rail-act" title="导出为 .mproj 单文件（含引用的素材）" onClick={onExport}>
             ↧
           </button>
@@ -134,7 +145,7 @@ export default function Sidebar({
   matteBackend, onMatteBackend,
   loras, activeLoras, onLorasChange, fastMode, onFastMode,
   projects, currentProject, onSwitchProject, onCreateProject, onRenameProject, onDeleteProject,
-  onExportProject, onSaveTemplate, onImportProject,
+  onExportProject, onRevealProject, onSaveTemplate, onImportProject,
   templates, onUseTemplate, onDeleteTemplate,
 }: Props) {
   const [collapsed, setCollapsed] = useState(false)
@@ -184,6 +195,7 @@ export default function Sidebar({
               onDelete={() => onDeleteProject(p.id)}
               onExport={() => onExportProject(p.id)}
               onTemplate={() => onSaveTemplate(p.id)}
+              onReveal={() => onRevealProject(p.id)}
             />
           ))}
           <button className="rail-new" onClick={onCreateProject} title="新建一个空画布">

@@ -17,6 +17,7 @@ import {
   exportProject, importProject, fetchTemplates, saveTemplate, instantiateTemplate,
   deleteTemplate, type TemplateInfo,
   fetchServerProjects, fetchServerProject, saveServerProject, deleteServerProject,
+  revealProject,
   saveWorkspace, allocateProjectId,
 } from './api'
 import ConfirmDialog from './components/ConfirmDialog'
@@ -617,6 +618,25 @@ export default function App() {
     fetchTemplates().then(setTemplates).catch(() => setTemplates([]))
   }, [])
   useEffect(() => { reloadTemplates() }, [reloadTemplates])
+
+  /**
+   * 在文件管理器里打开项目文件夹（`assets/projects/<id>/`）。
+   *
+   * 后端用 `explorer` / `open` / `xdg-open` 唤起系统窗口，所以**只在服务跑在
+   * 本机时有意义**——服务默认就只听 127.0.0.1，这里不再额外判断。
+   * 失败原因要说清楚（没桌面环境、目录还不存在），别只报"失败"。
+   */
+  const revealProjectFolder = useCallback(async (id: string) => {
+    try {
+      const path = await revealProject(id)
+      setNotice(path ? `已打开：${path}` : '已打开项目文件夹')
+      window.setTimeout(() => setNotice(''), 4000)
+    } catch (e) {
+      // 目录不存在是常见情况（新建项目还没生成过图），用 uploadMsg 显示错误更醒目
+      setUploadMsg(`打开文件夹失败：${e instanceof Error ? e.message : '未知错误'}`)
+      window.setTimeout(() => setUploadMsg(''), 6000)
+    }
+  }, [])
 
   /** 把某个项目导出成 `.mproj` 单文件并触发下载。 */
   const exportOneProject = useCallback(async (id: string) => {
@@ -1482,6 +1502,7 @@ export default function App() {
           onRenameProject={renameProject}
           onDeleteProject={(id) => setPendingProjectDelete(id)}
           onExportProject={(id) => void exportOneProject(id)}
+          onRevealProject={(id) => void revealProjectFolder(id)}
           onSaveTemplate={(id) => void makeTemplate(id)}
           onImportProject={(f) => void importOneProject(f)}
           templates={templates}

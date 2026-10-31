@@ -390,3 +390,59 @@ def test_import_to_existing_scope_refused():
             projectio.unpack(blob, sid)
     finally:
         projectstore.delete_project(sid)
+
+
+# ---------------- 打开项目文件夹 ----------------
+
+
+def test_api_reveal_opens_project_dir(client, monkeypatch):
+    """「打开文件夹」要把**项目目录**交给文件管理器，而不是 assets 根。"""
+    import app as app_module
+    from workflows import projectstore
+
+    sid = "p_reveal_ok"
+    client.put(f"/projects/{sid}", json={
+        "id": sid, "name": "打开我", "created": "2026-10-31T00:00:00",
+        "updated": "2026-10-31T00:00:00", "nodes": [],
+    })
+    opened: list[str] = []
+    # **必须打桩**：真调 explorer 会在测试机上弹出一堆窗口
+    monkeypatch.setattr(app_module, "_reveal_in_file_manager",
+                        lambda p: opened.append(str(p)))
+
+    r = client.post(f"/projects/{sid}/reveal")
+    assert r.status_code == 200, r.text
+    assert len(opened) == 1
+    # 传进去的必须是 assets/projects/<id>，不能是 assets 或项目根
+    assert opened[0] == str(projectstore.project_dir(sid))
+    assert opened[0].endswith(sid)
+
+
+def test_api_reveal_missing_404(client, monkeypatch):
+    import app as app_module
+
+    called: list[str] = []
+    monkeypatch.setattr(app_module, "_reveal_in_file_manager",
+                        lambda p: called.append(str(p)))
+    r = client.post("/projects/p_never_existed_reveal/reveal")
+    assert r.status_code == 404
+    assert not called, "目录不存在时不该去唤起文件管理器"
+
+
+def test_api_reveal_reports_os_error(client, monkeypatch):
+    """没有文件管理器（纯命令行服务器）时要给出可读的错误，而不是 500 裸崩。"""
+    import app as app_module
+
+    sid = "p_reveal_err"
+    client.put(f"/projects/{sid}", json={
+        "id": sid, "name": "无桌面", "created": "2026-10-31T00:00:00",
+        "updated": "2026-10-31T00:00:00", "nodes": [],
+    })
+
+    def boom(_p):
+        raise FileNotFoundError("xdg-open 不存在")
+
+    monkeypatch.setattr(app_module, "_reveal_in_file_manager", boom)
+    r = client.post(f"/projects/{sid}/reveal")
+    assert r.status_code == 500
+    assert "文件管理器" in r.json()["detail"]

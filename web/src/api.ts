@@ -1099,6 +1099,33 @@ export async function deleteServerProject(id: string, files: boolean): Promise<b
   }
 }
 
+/**
+ * 在文件管理器里打开项目文件夹（`assets/projects/<id>/`）。
+ *
+ * 产物、上传的原图、蒙版、`project.json` 都在那个目录里。用户想拷走项目、
+ * 找某张 raw 图、或者看看到底占了多少磁盘，都得先能定位到它。
+ * 失败时抛出带原因的错误（比如无桌面环境），由调用方提示。
+ */
+export async function revealProject(id: string): Promise<string> {
+  const r = await fetch(`${base}/projects/${encodeURIComponent(id)}/reveal`, {
+    method: 'POST',
+  })
+  if (!r.ok) {
+    const t = await r.text().catch(() => '')
+    // FastAPI 的错误体是 {"detail": "..."}，取出来给人看
+    let msg = `HTTP ${r.status}`
+    try {
+      const j = JSON.parse(t)
+      if (j && typeof j.detail === 'string') msg = j.detail
+    } catch {
+      /* 不是 JSON 就用状态码 */
+    }
+    throw new Error(msg)
+  }
+  const j = await r.json().catch(() => ({}))
+  return typeof j.opened === 'string' ? j.opened : ''
+}
+
 /** 记「当前打开的是哪个项目」——重开浏览器回到同一个画布。 */
 export async function saveWorkspace(current: string): Promise<void> {
   try {
