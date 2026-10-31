@@ -18,6 +18,7 @@ from __future__ import annotations
 import io
 import inspect
 import json
+import mimetypes
 import os
 import shutil
 import subprocess
@@ -973,6 +974,13 @@ def delete_template(tid: str) -> Dict[str, Any]:
         raise HTTPException(404, "模板不存在")
     return {"deleted": tid}
 
+
+# **.mjs 必须是 text/javascript**：浏览器对 module script 强制 MIME 校验，
+# 认错类型就直接拒绝加载（本机 Python 的 mimetypes 不认识 .mjs，给的是
+# text/plain → 页面里的模块一个都不跑，只能空等到超时）。
+# 官方 VNCCS PoseStudio 里有一批 .mjs，这里一次性登记好。
+mimetypes.add_type("text/javascript", ".mjs")
+mimetypes.add_type("text/javascript", ".js")
 
 # 前端构建产物（web/dist）。存在就挂在根路径，API 路由在上面已注册，不会被抢。
 WEB_DIST = ROOT / "web" / "dist"

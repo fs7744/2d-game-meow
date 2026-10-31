@@ -2625,36 +2625,31 @@ function check(name, cond, extra = '') {
   //
   // 放在朝向测试**之后**：上面的方向词语义是「只有线框骨架时」的行为；
   // 人偶图的朝向已经烘焙在图里，再补方向词是重复指令，还会压过姿势。
-  // 9. 导出 3D 人偶图（官方 PoseStudio 渲染）
+  // 9. 打开官方 3D 人偶编辑器（编辑会话），导出后下游改用人偶图
   //
-  // jsdom 不加载 iframe 内容，官方渲染器不会回话。把 contentWindow 打桩，
-  // 手动回一发 ready + result，模拟「网格加载完 → 渲染 → 回 PNG」。
-  // 这条链路的意义：**VNCCS 的 LoRA 是在人偶图上训的**，线框骨架不在分布里。
+  // 交互与官方 UniCanvas 的 pose layer 一致：进编辑会话 → 摆姿势 → 导出。
+  // jsdom 不加载 iframe 内容，所以把 contentWindow 换成空壳（吞掉父页的 init），
+  // 再手动模拟官方那侧的两条消息：ready（加载完）→ result（用户点了导出）。
   const manBtn = [...(skelNode?.querySelectorAll('button') || [])]
-    .find((b) => (b.textContent || '').includes('导出人偶图'))
-  check('骨骼节点有「导出人偶图（3D）」按钮', !!manBtn)
-  const mhFrame = doc.querySelector('iframe[title*="PoseStudio"]')
-  check('页面里挂着官方 PoseStudio 宿主 iframe', !!mhFrame)
-  if (mhFrame) {
-    const fakeWin = {
-      postMessage: (msg) => {
-        setTimeout(() => {
-          win.dispatchEvent(new win.MessageEvent('message', {
-            data: {
-              type: 'result', id: msg.id,
-              dataURL: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==',
-            },
-          }))
-        }, 30)
-      },
-    }
-    Object.defineProperty(mhFrame, 'contentWindow', { value: fakeWin, configurable: true })
-  }
-  // 官方那边网格加载完会 postMessage({type:'ready'})，这里手动补一发
-  win.dispatchEvent(new win.MessageEvent('message', { data: { type: 'ready' } }))
-  await new Promise((r) => setTimeout(r, 120))
+    .find((b) => (b.textContent || '').includes('编辑 3D 人偶'))
+  check('骨骼节点有「编辑 3D 人偶」按钮', !!manBtn)
   manBtn?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 700))
+  await new Promise((r) => setTimeout(r, 300))
+  const modal = doc.querySelector('.mannequin-modal')
+  check('点开后会弹出 3D 人偶编辑器（官方 PoseStudio）', !!modal)
+  const mhFrame = doc.querySelector('.mannequin-frame iframe')
+  check('弹窗里挂着官方 PoseStudio iframe', !!mhFrame)
+  if (mhFrame) {
+    Object.defineProperty(mhFrame, 'contentWindow', {
+      value: { postMessage: () => {} }, configurable: true,
+    })
+  }
+  win.dispatchEvent(new win.MessageEvent('message', { data: { type: 'ready' } }))
+  await new Promise((r) => setTimeout(r, 150))
+  win.dispatchEvent(new win.MessageEvent('message', {
+    data: { type: 'result', dataURL: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==' },
+  }))
+  await new Promise((r) => setTimeout(r, 800))
   const prevs = [...(skelNode?.querySelectorAll('.skel-preview') || [])]
   check('导出人偶图后节点上有两份产物（骨架图 + 人偶图）',
     prevs.length === 2, `previews=${prevs.length}`)

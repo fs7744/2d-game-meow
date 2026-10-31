@@ -2,22 +2,59 @@
 <html lang="zh">
 <head>
   <meta charset="UTF-8" />
-  <title>VNCCS PoseStudio</title>
+  <title>VNCCS PoseStudio · 3D 人偶编辑器</title>
   <style>
-    body { background: #111; color: #eee; font: 14px/1.6 sans-serif; margin: 16px; }
-    #status { color: #ffd54a; white-space: pre-wrap; margin-bottom: 12px; }
+    html, body { margin: 0; background: #0d0f16; color: #e8eaf2;
+      font: 13px/1.5 "PingFang SC", "Microsoft YaHei", system-ui, sans-serif; }
+    #wrap { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 10px; }
+    #status { color: #ffd54a; min-height: 18px; }
+    #stage { display: block; background: #fff; border-radius: 4px; touch-action: none; }
+    #bar { display: flex; gap: 8px; align-items: center; }
+    #bar select, #bar button {
+      background: #1b2030; color: #e8eaf2; border: 1px solid #2e3648;
+      border-radius: 4px; padding: 5px 10px; font: inherit; cursor: pointer;
+    }
+    #bar button:hover { background: #252c40; }
+    #bar button#btn-export { background: #2f6b3a; border-color: #3f8a4d; }
+    #hint { color: #8a90a6; font-size: 12px; }
     #out { display: flex; gap: 12px; flex-wrap: wrap; }
-    #out img { image-rendering: auto; background: #fff; }
-    /* 集成模式（被父页当 iframe 用）：只留画布，界面全部藏掉 */
-    body.integrated { margin: 0; background: #fff; }
-    body.integrated #status, body.integrated #out { display: none; }
-    body.integrated #stage { position: fixed; left: -10000px; top: 0; }
+    #out img { background: #fff; }
   </style>
 </head>
 <body>
-  <div id="status">加载中…</div>
-  <canvas id="stage" width="768" height="768" style="display:none"></canvas>
-  <div id="out"></div>
-  <script type="module" src="./entry.mjs"></script>
+  <div id="wrap">
+    <div id="status">正在加载…</div>
+    <canvas id="stage" width="768" height="768"></canvas>
+    <div id="bar">
+      <label>朝向 <select id="yaw"></select></label>
+      <button id="btn-reset" type="button">重置视角</button>
+      <button id="btn-export" type="button">导出人偶图</button>
+    </div>
+    <div id="hint">拖橙色关节点摆姿势 · 右键拖动转视角 · 中键平移 · 滚轮缩放</div>
+    <div id="out"></div>
+  </div>
+  <script>
+    // **早期错误捕获**：模块脚本加载失败（MIME 不对 / 404）时，模块内部的
+    // try/catch 根本不会执行（模块压根没跑）。只能在这里截，截到就立刻通知
+    // 父页——否则父页只能空等到超时，用户只看到「导出超时」。
+    window.addEventListener('error', function (e) {
+      var t = e.target
+      if (t && t.tagName === 'SCRIPT') {
+        try {
+          window.parent.postMessage(
+            { type: 'error', message: '脚本加载失败：' + (t.src || t.getAttribute('src') || '(未知)') },
+            '*')
+        } catch (e2) { /* 跨域等，忽略 */ }
+      }
+    }, true)
+    window.addEventListener('unhandledrejection', function (e) {
+      try {
+        window.parent.postMessage(
+          { type: 'error', message: '加载失败：' + ((e.reason && e.reason.message) || e.reason) },
+          '*')
+      } catch (e2) { /* 忽略 */ }
+    })
+  </script>
+  <script type="module" src="./entry.js"></script>
 </body>
 </html>

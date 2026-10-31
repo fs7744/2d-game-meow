@@ -22,7 +22,7 @@ import {
 } from './api'
 import ConfirmDialog from './components/ConfirmDialog'
 import Lightbox from './components/Lightbox'
-import { MannequinHost, type MannequinHandle } from './components/MannequinHost'
+import { MannequinHost } from './components/MannequinHost'
 import type { PoseDir } from './api'
 import type { ModelCaps } from './api'
 import type {
@@ -484,8 +484,12 @@ export default function App() {
   const currentIdRef = useRef(currentId)
   currentIdRef.current = currentId
 
-  // 官方 PoseStudio 宿主（隐藏 iframe）：骨骼编辑器「导出人偶图」用它渲染
-  const mannequinRef = useRef<MannequinHandle | null>(null)
+  // 官方 PoseStudio 编辑会话（弹窗）：骨骼编辑器「编辑 3D 人偶」打开它
+  const [mannequinEditor, setMannequinEditor] = useState<{
+    nodeId: string
+    joints?: { x: number; y: number }[]
+    azimuth?: number
+  } | null>(null)
 
   // 自动保存（防抖 400ms）：只写回**当前项目**，别的项目原封不动。
   //
@@ -882,36 +886,42 @@ export default function App() {
   }, [patchNode, currentId])
 
   /**
-   * 骨骼编辑器「导出人偶图」：调官方 PoseStudio 渲染 3D 人偶 → 上传 → 挂到
-   * node.mannequin。
+   * 骨骼编辑器「编辑 3D 人偶」：**打开官方 PoseStudio 的编辑会话**。
+   *
+   * 官方 UniCanvas 的 pose layer 就是这个交互：插一个人偶图层 → 进编辑会话 →
+   * 在 3D 视口里摆姿势 → Save pose。我们照搬：编辑器是官方的
+   * （MakeHuman 网格 + 53 根骨 + IK + 可拖的关节标记），我们只提供弹窗与通信。
    *
    * 为什么要单独存一个字段而不是覆盖 node.image：线框骨架（OpenPose-18）和 3D 人偶
    * 是两种格式，各有用途（ControlNet 系要骨架、VNCCS 要人偶），下游按优先级取。
-   *
-   * 渲染走的是官方那套（iframe 里跑 MakeHuman 网格 + 官方 OpenPose→骨旋转），
-   * 第一次要等 37.8MB 网格加载，几秒。
    */
-  const exportMannequin = useCallback(async (
-    id: string,
-    joints: { x: number; y: number }[],
-    azimuth: number,
-  ) => {
+  const openMannequinEditor = useCallback((id: string) => {
+    const node = nodesRef.current.find((n) => n.id === id)
+    setMannequinEditor({
+      nodeId: id,
+      joints: node?.skeleton?.points.map((p) => ({ x: p.x, y: p.y })),
+      azimuth: node?.skeleton?.azimuth ?? 0,
+    })
+  }, [])
+
+  /** 编辑器里导出后：上传 → 挂到 node.mannequin → 关弹窗 */
+  const onMannequinResult = useCallback(async (blob: Blob) => {
+    const ed = mannequinEditor
+    if (!ed) return
     try {
-      const host = mannequinRef.current
-      if (!host) throw new Error('人偶渲染器未挂载')
-      const blob = await host.render(joints, azimuth, { width: 768, height: 768 })
       const f = new File([blob], 'mannequin.png', { type: 'image/png' })
       const up = await uploadImage(f, currentId)
-      patchNode(id, {
+      patchNode(ed.nodeId, {
         mannequin: { path: up.path, url: up.url, w: 768, h: 768 },
       })
+      setMannequinEditor(null)
       setNotice('3D 人偶图已导出：角色迁移会优先用它当动作参考（VNCCS 官方格式）')
       window.setTimeout(() => setNotice(''), 6000)
     } catch (e) {
       setNotice(`导出人偶图失败：${e instanceof Error ? e.message : '未知错误'}`)
       window.setTimeout(() => setNotice(''), 6000)
     }
-  }, [patchNode, currentId])
+  }, [mannequinEditor, patchNode, currentId])
 
   /**
    * 骨骼编辑器「从图片提取」：上传原图 → 后端 DWPose 提 18 关节 → 2D 点补深度
@@ -1612,7 +1622,7 @@ export default function App() {
           onDropType={(t, world) => addNode(t, world)}
           onSpawnImg2Img={spawnImg2Img}
           onExportSkeleton={(id, blob) => void exportSkeleton(id, blob)}
-          onExportMannequin={(id, joints, azimuth) => exportMannequin(id, joints, azimuth)}
+          onExportMannequin={(id) => openMannequinEditor(id)}
           onImportPose={(id, file) => importPoseFromImage(id, file)}
           onDropFiles={(files, world, targetId) => void handleFiles(files, world, targetId)}
           onConnect={onConnect}
@@ -1642,9 +1652,14 @@ export default function App() {
 
       {preview && <Lightbox url={preview.url} name={preview.name} onClose={() => setPreview(null)} />}
 
-      {/* 官方 VNCCS PoseStudio 宿主：隐藏 iframe，挂载即预热网格。
-          骨骼编辑器「导出人偶图」通过 postMessage 让它渲染。 */}
-      <MannequinHost ref={mannequinRef} />
+      {/* 官方 VNCCS PoseStudio 编辑会话：3D 人偶编辑器（摆姿势 → 导出）*/}
+      <MannequinHost
+        open={!!mannequinEditor}
+        onClose={() => setMannequinEditor(null)}
+        onResult={(blob) => void onMannequinResult(blob)}
+        joints={mannequinEditor?.joints}
+        azimuth={mannequinEditor?.azimuth}
+      />
 
       {pendingProjectDelete && (() => {
         const proj = projectMeta.find((p) => p.id === pendingProjectDelete)

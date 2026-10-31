@@ -140,9 +140,18 @@ loadMorphPack → solveMorph → buildStaticModelData → PoseViewerCore.loadDat
    人偶图的朝向**烘焙在图里**，所以下游不该再补方向词——补了是重复指令，
    还会压过姿势（实测 front view 会让分腿张臂退回站立）。
 
-界面接入：骨骼编辑节点新增「导出人偶图（3D）」，产物存 `node.mannequin`
-（与线框骨架 `node.image` 并存）。角色迁移的「动作参考」**优先用人偶图**，
-没有才退回线框骨架（`poseSourceOf`）。
+界面接入：骨骼编辑节点新增「**编辑 3D 人偶**」，打开官方的**编辑会话**（弹窗）。
+交互与官方 UniCanvas 的 pose layer 一致：
+
+- 3D 视口里**直接拖橙色关节点**摆姿势（官方 raycast + IK + 极点约束，
+  肘/膝的弯向由官方保证）；
+- 右键拖 = 轨道旋转视角、中键平移、滚轮缩放（官方 OrbitControls）；
+  视角只是「检查视图」，**不影响输出**——导出用的是「朝向」下拉定的机位
+  （官方同理：capture framing 与导航相机分离）；
+- 点「导出人偶图」→ 官方 `capture()` 输出白底灰人偶 PNG。
+
+产物存 `node.mannequin`（与线框骨架 `node.image` 并存）。角色迁移的
+「动作参考」**优先用人偶图**，没有才退回线框骨架（`poseSourceOf`）。
 
 后端**零改动**：`_vnccs_skeleton` 只把「低饱和 + 暗」的像素换成白底，
 人偶图本就是白底灰人偶，判据 `mx < 70` 不会命中它。

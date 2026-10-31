@@ -55,13 +55,10 @@ type Props = {
    *
    * 官方 PoseStudio 用 MakeHuman 网格渲染「白底灰色人偶」当 image1，LoRA 是在
    * 这种图上训的；线框骨架不在它的分布里，姿态跟随会弱很多（见 docs/VNCCS-REAL.md）。
-   * 这里的关节是编辑器的 0~1 坐标（x 右 / y 下），方位角决定朝向。
-   * 由节点侧调官方渲染器（iframe）完成，可能要等几秒。
+   * 编辑器里能直接拖关节摆姿势（官方 IK + 极点约束），比在 2D 骨架上摆精确得多。
+   * 打开的是官方的编辑会话（弹窗），导出由用户在那边点。
    */
-  onExportMannequin?: (
-    joints: { x: number; y: number }[],
-    azimuth: number,
-  ) => Promise<void>
+  onExportMannequin?: () => void
   mannequinExporting?: boolean
 }
 
@@ -442,16 +439,6 @@ export default function SkeletonEditor({
     onExport(blob)
   }, [state, onExport])
 
-  /**
-   * 导出 3D 人偶图。官方 PoseStudio 只吃 2D 关键点（OpenPose 的 COCO-18），
-   * 所以这里把编辑器的 x/y 原样传过去；编辑器的 z（前后深度）在官方那套
-   * 2D→骨旋转里用不到（朝向由方位角单独给）。
-   */
-  const doExportMannequin = useCallback(async () => {
-    if (!onExportMannequin) return
-    await onExportMannequin(state.points.map((p) => ({ x: p.x, y: p.y })), state.azimuth)
-  }, [state.points, state.azimuth, onExportMannequin])
-
   return (
     <div className="skel-editor" onPointerDown={(e) => e.stopPropagation()}>
       <div className="skel-row">
@@ -558,13 +545,13 @@ export default function SkeletonEditor({
         </button>
         <button
           className="mini wide"
-          onClick={() => void doExportMannequin()}
+          onClick={() => onExportMannequin?.()}
           disabled={mannequinExporting || !onExportMannequin}
-          title={'导出 3D 人偶图（白底灰人偶）。VNCCS 的姿态 LoRA 是在这种图上训的，\n'
-            + '比线框骨架贴合得好；朝向 = 当前的方位角（0° 正面 / 90° 侧面 / 180° 背面）。\n'
-            + '会调起官方 PoseStudio 渲染，第一次要等网格加载。'}
+          title={'打开官方 3D 人偶编辑器：直接拖关节摆姿势，导出白底灰人偶。\n'
+            + 'VNCCS 的姿态 LoRA 就是在这种图上训的，比线框骨架贴合得好。\n'
+            + '第一次要等 37MB 人偶模型加载（十几秒）。'}
         >
-          {mannequinExporting ? '渲染人偶…' : '导出人偶图（3D）'}
+          {mannequinExporting ? '打开中…' : '编辑 3D 人偶'}
         </button>
       </div>
       <input

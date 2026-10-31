@@ -3,7 +3,7 @@ import {
     buildStaticModelData,
     loadMorphPack,
     solveMorph,
-} from "./morph_runtime.mjs";
+} from "./morph_runtime.js";
 
 let morphDataPromise = null;
 let morphData = null;

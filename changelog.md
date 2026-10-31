@@ -233,9 +233,18 @@ LoRA 是 `MIUProject/VNCCS_PoseStudio_QI2.1`（152MB，ComfyUI 格式，
   - 官方源码整套入库 `web/public/vnccs-pose/`（core.js 8938 行 + morph_runtime +
     openpose.js + vendor/three），MakeHuman 网格（CC0）与皮肤贴图一并入库；
     `entry.mjs` 只是接线（约 100 行），**没有一行自己的 IK 或渲染**
-  - 骨骼编辑节点新增「导出人偶图（3D）」，产物存 `node.mannequin`
-    （与线框骨架 `node.image` 并存）；角色迁移的「动作参考」**优先用人偶图**，
-    没有才退回线框骨架
+  - 骨骼编辑节点新增「**编辑 3D 人偶**」——打开官方的**编辑会话**（弹窗），
+    交互与官方 UniCanvas 的 pose layer 一致：在 3D 视口里**直接拖橙色关节点**
+    摆姿势（官方 raycast + IK + 极点约束），选朝向，点「导出人偶图」。
+    产物存 `node.mannequin`（与线框骨架 `node.image` 并存）；
+    角色迁移的「动作参考」**优先用人偶图**，没有才退回线框骨架
+  - **修「导出超时」**：本机 Python 的 `mimetypes` 不认识 `.mjs`（给 text/plain），
+    浏览器对 module script 强制 MIME 校验 → 官方渲染器的模块**一个都没加载**，
+    页面永远停在「加载中…」，父页只能空等到超时。两处都修了：
+    入口与 morph_runtime 改名 `.js`（.js 的 MIME 本来就对，不依赖重启后端）；
+    app.py 里再注册一次 `mimetypes.add_type('text/javascript', '.mjs')`
+  - 宿主页面加**早期错误捕获**（inline script）：模块没加载时立刻上报，
+    不再让父页空等；等待上限从 60 秒放宽到 180 秒（37MB 网格首次要十几秒）
   - **后端零改动**：`_vnccs_skeleton` 只把「低饱和+暗」的像素换成白底，
     人偶图本就是白底灰人偶，判据 `mx<70` 不会命中
   - 验证：真实浏览器（headless Edge + swiftshader）里 postMessage 往返拿到
@@ -878,7 +887,7 @@ start.bat                   # Windows 双击或命令行
 cd web && npm ci && npm run build     # 构建
 cd .. && python app.py                # FastAPI 同时托管 dist 与 API → http://127.0.0.1:8000
 cd web && npm run dev                 # 或开发模式（:5173，代理到 8000）
-npm run smoke                         # 无浏览器渲染冒烟（jsdom，383 项断言）
+npm run smoke                         # 无浏览器渲染冒烟（jsdom，384 项断言）
 ```
 
 > `start.bat` 刻意保持**纯 ASCII**：cmd.exe 按 OEM 代码页解析 .bat，中文注释会切断命令行

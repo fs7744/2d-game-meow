@@ -276,13 +276,10 @@ type Props = {
   /** 骨骼编辑器导出的 PNG（Blob）→ 上传并挂到节点 image 上 */
   onExportSkeleton?: (blob: Blob) => void
   /**
-   * 骨骼编辑器「导出人偶图」：渲染 + 上传 + 挂到节点 mannequin 上。
-   * 由 App 层用官方 PoseStudio（iframe）渲染，可能要等网格加载。
+   * 骨骼编辑器「编辑 3D 人偶」：打开官方 PoseStudio 的编辑会话（弹窗）。
+   * 用户在里面摆好姿势并导出后，App 层上传并挂到节点 mannequin 上。
    */
-  onExportMannequin?: (
-    joints: { x: number; y: number }[],
-    azimuth: number,
-  ) => void | Promise<void>
+  onExportMannequin?: (id: string) => void
   /** 骨骼编辑器「从图片提取」，返回 Promise 以便节点显示"提取中" */
   onImportPose?: (file: File) => void | Promise<void>
   /** 图生图的上游节点（从 source.nodeId 解析而来） */
@@ -1001,9 +998,11 @@ export default function GenNodeCard({
               setSkelImporting(true)
               try { await onImportPose?.(f) } finally { setSkelImporting(false) }
             }}
-            onExportMannequin={async (joints, azimuth) => {
+            onExportMannequin={() => {
               setMannequinExporting(true)
-              try { await onExportMannequin?.(joints, azimuth) } finally { setMannequinExporting(false) }
+              try { onExportMannequin?.(node.id) } finally {
+                window.setTimeout(() => setMannequinExporting(false), 400)
+              }
             }}
             mannequinExporting={mannequinExporting}
           />
