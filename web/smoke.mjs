@@ -356,7 +356,7 @@ function check(name, cond, extra = '') {
 {
   const { dom, errors } = await boot('')
   const doc = dom.window.document
-  check('渲染出顶栏品牌', doc.querySelector('.brand .title')?.textContent?.includes('喵叫'))
+  check('渲染出顶栏品牌', doc.querySelector('.brand .title')?.textContent?.includes('喵助手'))
   check('空状态引导可见', !!doc.querySelector('.canvas-empty .empty-card'))
   // 不写死数量：加节点类型时忘改这里会误报。只断言「有骨骼编辑」这项新入口
   check('侧栏存在（节点分组含骨骼编辑）',

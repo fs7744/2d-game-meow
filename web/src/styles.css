@@ -1,5 +1,5 @@
 /* ==========================================================================
-   喵叫工作台 · 画布
+   可爱的喵助手 · 画布
    视觉沿用 pixelforge 的像素风：近黑底、1px 硬边框、硬投影、四色点缀。
    与 pixelforge 的差异：节点只有一种（图生成），参数内嵌在卡片里并可折叠。
    ========================================================================== */
@@ -83,10 +83,14 @@ input:disabled, select:disabled, textarea:disabled { opacity: 0.45; cursor: not-
   background: var(--bg-1);
   position: relative; z-index: 30;
 }
-.brand { display: flex; align-items: baseline; gap: 10px; }
+/* 顶栏 logo 用的是应用图标本体（web/public/icon.png）：标签页、桌面快捷方式、
+   顶栏三处同一张图，用户才认得出"这是同一个东西"。
+   **不要加 `image-rendering: pixelated`**：这里是 512px 源图缩到 26px 显示，
+   属于下采样，最近邻会把像素格抽掉一半、看起来碎成噪点。浏览器默认的
+   双线性缩小反而更清楚（放大时才该用 pixelated）。 */
+.brand { display: flex; align-items: center; gap: 10px; }
 .logo {
-  font-family: var(--pixel); font-size: 15px; color: var(--bg);
-  background: var(--green); padding: 4px 7px; line-height: 1;
+  width: 26px; height: 26px; display: block; flex: none;
   box-shadow: 3px 3px 0 var(--pink);
 }
 .title { font-weight: 800; letter-spacing: 0.2px; }

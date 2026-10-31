@@ -1419,8 +1419,8 @@ export default function App() {
     <div className="app">
       <header className="topbar">
         <div className="brand">
-          <span className="logo">喵</span>
-          <span className="title">喵叫工作台</span>
+          <img className="logo" src="/icon.png" alt="可爱的喵助手" />
+          <span className="title">可爱的喵助手</span>
           <span className="sub">
             {projectMeta.find((p) => p.id === currentId)?.name ?? '画布'} · 文生图 / 图生图
           </span>

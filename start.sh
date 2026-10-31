@@ -68,12 +68,14 @@ else
 fi
 
 # ---------- 2. 模型权重 ----------
-if compgen -G "models/checkpoints/sd15/unet/*.safetensors" > /dev/null; then
-  n=$(find models -name "*.safetensors" -o -name "*.pth" -o -name "*.onnx" 2>/dev/null | wc -l | tr -d ' ')
-  ok "权重就绪（$n 个文件）"
+# 现在只用 Qwen-Image-2.1；SD 的权重在 models/_archive/sd/（不再参与运行）
+if [[ -f "models/checkpoints/qwen-image-2.1/model_index.json" ]]; then
+  n=$(find models/checkpoints/qwen-image-2.1 -name "*.safetensors" 2>/dev/null | wc -l | tr -d ' ')
+  ok "Qwen-Image-2.1 权重就绪（$n 个 safetensors）"
 else
-  warn "SD1.5 底座缺失，生成会失败"
-  warn "  → $PY tools/fetch_modelscope.py"
+  warn "Qwen-Image-2.1 权重缺失，生成会失败"
+  warn "  → 放到 models/checkpoints/qwen-image-2.1/（需要 model_index.json）"
+  warn "  → 目录结构见 README「安装」"
 fi
 
 # ---------- 3. 前端 ----------

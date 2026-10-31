@@ -1,6 +1,6 @@
 @echo off
 REM ============================================================
-REM  Meow Workbench - startup script for Windows (double-click me)
+REM  Cute Meow Assistant - startup script for Windows (double-click me)
 REM
 REM    start.bat              build if needed, then launch + open browser
 REM    start.bat --port 8010  use another port
@@ -35,7 +35,7 @@ echo Usage: start.bat [--port N] [--rebuild] [--no-build] [--check]
 exit /b 2
 
 :after_parse
-echo Meow Workbench - startup check
+echo Cute Meow Assistant - startup check
 echo.
 
 REM ---------- 1. Python ----------
@@ -66,13 +66,13 @@ if errorlevel 1 (
 )
 
 REM ---------- 2. Weights ----------
-set "HAS_WEIGHTS=0"
-for %%f in (models\checkpoints\sd15\unet\*.safetensors) do set "HAS_WEIGHTS=1"
-if "%HAS_WEIGHTS%"=="1" (
-  echo   [OK] SD1.5 base weights found
+REM  Only Qwen-Image-2.1 is used now; SD weights live in models\_archive\sd\.
+if exist "models\checkpoints\qwen-image-2.1\model_index.json" (
+  echo   [OK] Qwen-Image-2.1 weights found
 ) else (
-  echo   [!] SD1.5 base weights missing, generation will fail
-  echo       run:  %PY% tools\fetch_modelscope.py
+  echo   [X] Qwen-Image-2.1 weights missing, generation will fail
+  echo       expected: models\checkpoints\qwen-image-2.1\model_index.json
+  echo       see README "Install" for the download layout
 )
 
 REM ---------- 3. Frontend ----------
