@@ -143,6 +143,27 @@ def _timer():
     return lambda: round(time.perf_counter() - t0, 2)
 
 
+def _harden_alpha(img: Image.Image, thr: int = 240) -> Image.Image:
+    """把「实心主体 + 雾状背景」的原生 alpha 硬切到 0/255，**保留模型自己的边界**。
+
+    Qwen 的 alpha 起雾时，通常不是"整张图都糊"，而是：**主体仍是 255，背景是
+    200~240 的半透明阴影层**（实测一张 1024² 的图：≥250 占 14.4%、230~240 占
+    2.1%、128~230 占 68%）。这种情况下边界信息是模型逐像素给出的，比任何分割
+    模型都准——拿 u2net 去重猜，反而会啃掉白鞋、在轮廓外留一圈 mask 的肥边。
+
+    所以只在这里硬切一刀（>=thr 保留，其余连同 RGB 清零），**不重抠**。
+    真正的"重抠"只留给「整张图连一块实心都没有」的情况（模型根本没打算画透明）。
+    """
+    if img.mode != "RGBA":
+        return img
+    arr = np.asarray(img).copy()
+    a = arr[:, :, 3]
+    solid = a >= thr
+    arr[~solid, 0:3] = 0
+    arr[:, :, 3] = np.where(solid, 255, 0).astype(np.uint8)
+    return Image.fromarray(arr, "RGBA")
+
+
 def _postprocess(img: Image.Image, eng: Engine, *, matte: bool, matte_backend: str,
                  denoise: int, pixel: int, palette: int, clean_iso: int,
                  info: Dict[str, Any] | None = None, transparent: bool = False):
@@ -152,14 +173,16 @@ def _postprocess(img: Image.Image, eng: Engine, *, matte: bool, matte_backend: s
     反过来会把背景噪点量化成格纹，抠图也会因为色阶被压而失效。
     三张卡（文生图 / 图生图 / 姿态帧）共用这一份，避免各写一遍走样。
 
-    `transparent=True`（模型直接出了 RGBA）时**不能无条件相信它的 alpha**：
-    Qwen 在提示词和透明声明打架时会输出一层**雾**——实测一张 1024² 的图里
-    68% 的像素 alpha 停在 128~240（既不全透也不全实）。这层雾一旦进
-    `quantize_palette`，就会被 `>127 → 255` 的硬边规则**实化**：背景变成
-    两大块实心白，用户看到的正是「透明底怎么这么多白的」。
+    `transparent=True`（模型直接出了 RGBA）时，处理顺序是**先信模型、再兜底**：
 
-    所以这里先过 `alpha_trust`：干净就沿用（省一次抠图），是雾就重抠一遍。
-    代价只有雾的那几张图，收益是「勾了透明底就真的透明」。
+    1. alpha 干净（`alpha_trust` 通过）→ 直接复用，什么都不做；
+    2. alpha 是雾，但**有实心主体**（≥240 的像素占 2% 以上）→ `_harden_alpha`
+       硬切一刀。边界仍是模型给的，逐像素精确；
+    3. 整张图连一块实心都没有（模型压根没画透明）→ 才走分割模型重抠。
+
+    第 2 步是这里的关键：以前只有 1 和 3，雾状 alpha 会直接进量化，
+    被 `>127 → 255` 实化成两大块白；而改成"雾就重抠"又丢掉了模型更准的边界
+    （u2net 的 mask 天生胖 1~2px，白鞋还会被啃）。所以补上"硬切"这一档。
     """
     info = info if info is not None else {}
     edge: list[str] = []
@@ -172,14 +195,19 @@ def _postprocess(img: Image.Image, eng: Engine, *, matte: bool, matte_backend: s
                                    eng.matte_dir, info=info)
         cut = True
     elif transparent:
-        ok, obs = matte_mod.alpha_trust(img.convert("RGBA"))
+        rgba = img.convert("RGBA")
+        ok, obs = matte_mod.alpha_trust(rgba)
         if ok:
-            # 模型这次画干净了：直接用它的 alpha（再抠一次反而会咬掉白毛）
+            # 模型这次画干净了：直接用（再抠一次反而会咬掉白毛）
             info.update(alpha_reused=True, **obs)
+        elif (np.asarray(rgba.getchannel("A")) >= 240).mean() >= 0.02:
+            # 雾状背景，但主体是实心的 → 用**模型的边界**硬切，不重抠
+            img = _harden_alpha(rgba, 240)
+            cut = True
+            info.update(alpha_hardened=True, **obs)
         else:
-            # 雾状 / 几乎没有透明区 → 重抠。**这就是「白块」的来源**，
-            # 重抠之后 alpha 变成 0/255 两档，量化不会再把它实化。
-            img = matte_mod.matte_auto(img.convert("RGBA"), matte_backend,
+            # 整张都是雾 → 模型没打算画透明，只能靠分割模型兜底
+            img = matte_mod.matte_auto(rgba, matte_backend,
                                        eng.matte_dir, info=info)
             cut = True
             info.update(alpha_recut=True, **obs)
@@ -602,6 +630,7 @@ def _qwen_txt2img(eng: Engine, *, prompt: str, negative: Optional[str],
         "matte_used": info.get("backend"), "matte_fallback": info.get("fallback"),
         "alpha_reused": info.get("alpha_reused"),
         "alpha_recut": info.get("alpha_recut"),
+        "alpha_hardened": info.get("alpha_hardened"),
         "alpha_mid": info.get("mid"),
         "prompt_bg_stripped": stripped or None,
         "edge_touch": edge, "model": model, "clip_skip": None,
@@ -700,6 +729,7 @@ def _qwen_img2img(eng: Engine, *, init_image: str | Path, prompt: str,
         "matte_fallback": info.get("fallback"),
         "alpha_reused": info.get("alpha_reused"),
         "alpha_recut": info.get("alpha_recut"),
+        "alpha_hardened": info.get("alpha_hardened"),
         "edge_touch": edge, "subjects": subjects, "model": model,
         "clip_skip": None, "transparent": transparent,
         "seconds": seconds,

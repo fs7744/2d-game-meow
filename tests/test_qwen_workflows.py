@@ -637,36 +637,54 @@ def test_poseswap_meta_has_no_duplicate_lora_keys():
 # 透明底：模型的 alpha 不可信时要重抠（「透明底怎么这么多白的」的看守）
 # --------------------------------------------------------------------------- #
 
-def _foggy(alpha_bg: int) -> Image.Image:
+def _foggy(alpha_bg: int, alpha_fg: int = 255) -> Image.Image:
     """一张 256² 图：白背景 + 中间一个深色方块。
 
-    `alpha_bg=180` 模拟 Qwen 画坏的雾状 alpha（既不全透也不全实）；
-    `alpha_bg=0` 是模型正常输出的干净透明底。
+    `alpha_bg=180` 模拟 Qwen 画坏的雾状背景（既不全透也不全实）；
+    `alpha_bg=0` 是模型正常输出的干净透明底；
+    `alpha_fg=200` 连主体都是半实心 → 没有 >=240 的核心，用于测"只能重抠"那档。
     """
     im = Image.new("RGBA", (256, 256), (250, 250, 250, alpha_bg))
-    ImageDraw.Draw(im).rectangle([88, 88, 168, 200], fill=(30, 30, 40, 255))
+    ImageDraw.Draw(im).rectangle([88, 88, 168, 200],
+                                 fill=(30, 30, 40, alpha_fg))
     return im
 
 
-def test_foggy_alpha_is_recut_not_quantized_into_white(eng):
-    """**雾状 alpha 必须在量化之前被识破并重抠。**
+def test_foggy_alpha_is_hardened_not_quantized_into_white(eng):
+    """**雾状背景必须在量化之前硬切掉，否则会被实化成白块。**
 
     用户报的原话是「为何透明背景这么多白色的」。链路是这样坏的：
     模型输出的背景 alpha 是 128~240 的雾 → `quantize_palette` 的
     `>127 → 255` 把它实化 → 背景变成两大块实心白。
     一条 1024² 的实测图里，雾占 68%，实化后不透明率从 14% 跳到 82%。
 
-    判据用「不透明占比」：重抠之后只剩中间那个方块（约 10%），
-    如果没有重抠，整张图（≈100%）都会被判成不透明。
+    **修法不是"重抠"**：模型给的主体 alpha 仍是 255，边界比分割模型准。
+    所以只要还有实心主体（>=240 占 2% 以上），就用 `_harden_alpha` 沿模型的
+    边界切一刀；重抠只留给「整张都是雾」的情况（见下一条测试）。
     """
     info: dict = {}
     out, _edge, _subj = g._postprocess(
         _foggy(180), eng, matte=False, matte_backend="color", denoise=0,
         pixel=0, palette=16, clean_iso=0, info=info, transparent=True)
     a = np.asarray(out)[:, :, 3]
-    assert info.get("alpha_recut") is True, "雾状 alpha 没被识破"
+    assert info.get("alpha_hardened") is True, f"没走硬切：{info}"
+    assert info.get("alpha_recut") is None, "有实心主体时不该动分割模型"
     assert (a > 240).mean() < 0.35, f"背景被实化了：{(a > 240).mean():.0%} 不透明"
     assert ((a >= 16) & (a <= 240)).mean() == 0, "量化后不应留下半透明像素"
+
+
+def test_alpha_without_solid_core_falls_back_to_recut(eng):
+    """**整张图连一块实心都没有**（模型压根没画透明）→ 才重抠。
+
+    这种情况硬切会切出空图，只能靠分割模型兜底。
+    """
+    info: dict = {}
+    out, _edge, _subj = g._postprocess(
+        _foggy(150, alpha_fg=200), eng, matte=False, matte_backend="color",
+        denoise=0, pixel=0, palette=16, clean_iso=0, info=info, transparent=True)
+    assert info.get("alpha_recut") is True, f"该重抠却没重抠：{info}"
+    a = np.asarray(out)[:, :, 3]
+    assert (a > 240).mean() > 0.02, "重抠后应该留下主体"
 
 
 def test_clean_alpha_is_reused_not_recut(eng):
@@ -685,36 +703,54 @@ def test_clean_alpha_is_reused_not_recut(eng):
 # 透明底：模型的 alpha 不可信时要重抠（「透明底怎么这么多白的」的看守）
 # --------------------------------------------------------------------------- #
 
-def _foggy(alpha_bg: int) -> Image.Image:
+def _foggy(alpha_bg: int, alpha_fg: int = 255) -> Image.Image:
     """一张 256² 图：白背景 + 中间一个深色方块。
 
-    `alpha_bg=180` 模拟 Qwen 画坏的雾状 alpha（既不全透也不全实）；
-    `alpha_bg=0` 是模型正常输出的干净透明底。
+    `alpha_bg=180` 模拟 Qwen 画坏的雾状背景（既不全透也不全实）；
+    `alpha_bg=0` 是模型正常输出的干净透明底；
+    `alpha_fg=200` 连主体都是半实心 → 没有 >=240 的核心，用于测"只能重抠"那档。
     """
     im = Image.new("RGBA", (256, 256), (250, 250, 250, alpha_bg))
-    ImageDraw.Draw(im).rectangle([88, 88, 168, 200], fill=(30, 30, 40, 255))
+    ImageDraw.Draw(im).rectangle([88, 88, 168, 200],
+                                 fill=(30, 30, 40, alpha_fg))
     return im
 
 
-def test_foggy_alpha_is_recut_not_quantized_into_white(eng):
-    """**雾状 alpha 必须在量化之前被识破并重抠。**
+def test_foggy_alpha_is_hardened_not_quantized_into_white(eng):
+    """**雾状背景必须在量化之前硬切掉，否则会被实化成白块。**
 
     用户报的原话是「为何透明背景这么多白色的」。链路是这样坏的：
     模型输出的背景 alpha 是 128~240 的雾 → `quantize_palette` 的
     `>127 → 255` 把它实化 → 背景变成两大块实心白。
     一条 1024² 的实测图里，雾占 68%，实化后不透明率从 14% 跳到 82%。
 
-    判据用「不透明占比」：重抠之后只剩中间那个方块（约 10%），
-    如果没有重抠，整张图（≈100%）都会被判成不透明。
+    **修法不是"重抠"**：模型给的主体 alpha 仍是 255，边界比分割模型准。
+    所以只要还有实心主体（>=240 占 2% 以上），就用 `_harden_alpha` 沿模型的
+    边界切一刀；重抠只留给「整张都是雾」的情况（见下一条测试）。
     """
     info: dict = {}
     out, _edge, _subj = g._postprocess(
         _foggy(180), eng, matte=False, matte_backend="color", denoise=0,
         pixel=0, palette=16, clean_iso=0, info=info, transparent=True)
     a = np.asarray(out)[:, :, 3]
-    assert info.get("alpha_recut") is True, "雾状 alpha 没被识破"
+    assert info.get("alpha_hardened") is True, f"没走硬切：{info}"
+    assert info.get("alpha_recut") is None, "有实心主体时不该动分割模型"
     assert (a > 240).mean() < 0.35, f"背景被实化了：{(a > 240).mean():.0%} 不透明"
     assert ((a >= 16) & (a <= 240)).mean() == 0, "量化后不应留下半透明像素"
+
+
+def test_alpha_without_solid_core_falls_back_to_recut(eng):
+    """**整张图连一块实心都没有**（模型压根没画透明）→ 才重抠。
+
+    这种情况硬切会切出空图，只能靠分割模型兜底。
+    """
+    info: dict = {}
+    out, _edge, _subj = g._postprocess(
+        _foggy(150, alpha_fg=200), eng, matte=False, matte_backend="color",
+        denoise=0, pixel=0, palette=16, clean_iso=0, info=info, transparent=True)
+    assert info.get("alpha_recut") is True, f"该重抠却没重抠：{info}"
+    a = np.asarray(out)[:, :, 3]
+    assert (a > 240).mean() > 0.02, "重抠后应该留下主体"
 
 
 def test_clean_alpha_is_reused_not_recut(eng):

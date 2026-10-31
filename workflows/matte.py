@@ -32,6 +32,9 @@ import cv2
 import numpy as np
 from PIL import Image
 
+#: 3×3 十字/方形核。多处复用（剥边、收缩、开运算），别各写一份。
+_K3 = np.ones((3, 3), np.uint8)
+
 
 def estimate_bg_color(img: Image.Image, border: int = 2) -> tuple[int, int, int]:
     """背景色估计：**四角 patch 的众数**优先，退化时才用四条边的众数。
@@ -335,6 +338,17 @@ def matte_ai(img: Image.Image, model_dir: str | Path, name: str = "isnet-general
 
     if fringe:
         arr[..., 3] = strip_fringe(arr[..., 3], rgb, estimate_bg_color(flat))
+        # **再补一次几何收缩**：颜色判据在「白底 + 白主体」上无解——白鞋、白毛
+        # 与背景同色，靠色差剥边等于把主体一起剥掉（实测白鞋会缺一块）。
+        # 而分割模型的 mask 天生比真实轮廓胖 1~2px，这一圈无论什么颜色都不属于
+        # 主体。所以对**分割后端**无条件收 1px：
+        #   · 代价：轮廓整体瘦 1px，1024² 上看不出来；32px 精灵早就重采样过了
+        #   · 收益：不会有「描边外挂一圈浅灰」这种一眼就脏的边
+        # 色键后端不走这里（它按颜色切，边界本来就准）。
+        # **只清 0、不重建 255**：`alpha_mode="soft"`（高清插画的发丝/纱）要靠
+        # 这个保留半透明值，直接把 mask 乘 255 会把 soft 模式废掉（有测试盯着）。
+        solid = cv2.erode((arr[..., 3] > 0).astype(np.uint8), _K3).astype(bool)
+        arr[..., 3] = np.where(solid, arr[..., 3], 0)
     out = Image.fromarray(arr, "RGBA")
     if holes:
         out = fill_holes(out)
