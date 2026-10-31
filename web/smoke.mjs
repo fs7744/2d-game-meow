@@ -73,6 +73,32 @@ function makeFetch() {
         }),
       }
     }
+    // 角色出图：拼 prompt（不跑模型）/ 提交生成
+    if (String(url).includes('/characters/') && String(url).endsWith('/prompt')) {
+      const b = JSON.parse(init.body || '{}')
+      return {
+        ok: true,
+        json: async () => ({
+          name: 'Alice', style: b.style || 'ghibli_miyazaki',
+          // 官方结构：每个字段一行
+          prompt: 'Draw an image of a character in the following style: Test.\n'
+            + 'The image contains one character.\nGender: female\nAge: 18 years old',
+          negative: 'bad quality',
+          resolution: [792, 1408],
+          defaults: { steps: 25, cfg: 3, sampler: 'euler', scheduler: 'simple' },
+        }),
+      }
+    }
+    if (String(url).includes('/characters/') && String(url).endsWith('/generate')) {
+      jobSeq += 1
+      return {
+        ok: true,
+        json: async () => ({
+          job_id: `job-${jobSeq}`, status: 'queued',
+          prompt: JSON.parse(init.body || '{}').prompt || '', resolution: [792, 1408],
+        }),
+      }
+    }
     if (String(url).includes('/characters/') && (init.method || 'GET') === 'GET') {
       const name = decodeURIComponent(String(url).split('/characters/')[1].split('?')[0])
       return {
@@ -3052,8 +3078,8 @@ function check(name, cond, extra = '') {
   check('选中角色后拉详情',
     calls.some((c) => c.url.includes('/characters/Alice')))
   const subTabs = [...doc.querySelectorAll('.chars-tab')]
-  check('详情有 属性/服装/表情库/素材 四个 tab',
-    subTabs.length === 4, subTabs.map((t) => t.textContent).join('/'))
+  check('详情有 属性/出图/服装/表情库/素材 五个 tab',
+    subTabs.length === 5, subTabs.map((t) => t.textContent).join('/'))
   check('属性页有画风区（官方 358 条风格库）',
     (doc.querySelector('.chars-style')?.textContent || '').includes('画风'),
     (doc.querySelector('.chars-style')?.textContent || '').slice(0, 30))
@@ -3064,6 +3090,73 @@ function check(name, cond, extra = '') {
   await new Promise((r) => setTimeout(r, 300))
   check('切回画布后角色中心收起', !doc.querySelector('.chars'))
   check('角色中心场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 47) 角色出图：官方结构化 prompt + 提交后自动收进角色目录
+//
+// 官方造角色不是一句自然语言，是**每个字段一行**的结构化 prompt
+// （character_creator_v2.py:1124）——风格 LoRA 就是照这个格式调的。
+// 这条用例钉住两件事：prompt 是后端按官方结构拼的；出完图后端直接收进
+// Sprites/<服装>/<表情>/，不用前端再搬一次。
+{
+  const { dom, errors } = await boot('')
+  const doc = dom.window.document
+  const win = dom.window
+  await new Promise((r) => setTimeout(r, 400))
+
+  // 进角色中心并建一个角色
+  ;[...doc.querySelectorAll('.view-tab')][1]
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 250))
+  const setInput = (el, v) => {
+    Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value').set.call(el, v)
+    el.dispatchEvent(new win.Event('input', { bubbles: true }))
+  }
+  setInput(doc.querySelector('.chars-new input'), 'Alice')
+  await new Promise((r) => setTimeout(r, 80))
+  ;[...doc.querySelectorAll('.chars-new button')][0]
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 300))
+
+  // 切到「出图」页
+  const genTab = [...doc.querySelectorAll('.chars-tab')]
+    .find((t) => (t.textContent || '').includes('出图'))
+  check('详情有「出图」页', !!genTab)
+  genTab?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 400))
+  check('向后端要了拼好的 prompt',
+    calls.some((c) => c.url.includes('/characters/Alice/prompt')))
+  const ta = doc.querySelector('textarea.chars-prompt')
+  check('prompt 显示出来了（官方结构化格式）',
+    (ta?.value || '').includes('The image contains one character.')
+    && (ta?.value || '').includes('Gender: female'),
+  (ta?.value || '').slice(0, 60))
+  check('显示官方默认参数（25 步 / cfg 3）',
+    (doc.querySelector('.chars-body')?.textContent || '').includes('25 步'),
+    (doc.querySelector('.chars-body')?.textContent || '').slice(0, 60))
+  check('显示官方公式算出的分辨率 792×1408',
+    (doc.querySelector('.chars-body')?.textContent || '').includes('792×1408'))
+
+  const genBtn = [...doc.querySelectorAll('.chars-body button')]
+    .find((b) => (b.textContent || '').includes('生成底图'))
+  check('有「生成底图」按钮', !!genBtn)
+  genBtn?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 600))
+  const gen = calls.find((c) => c.url.includes('/characters/Alice/generate'))
+  check('出图提交到 /characters/Alice/generate', !!gen, gen?.url)
+  if (gen) {
+    const b = JSON.parse(gen.body)
+    check('提交的是 w1 文生图', b.workflow === 'w1', b.workflow)
+    check('带了拼好的 prompt 与负向词',
+      String(b.prompt || '').includes('Gender:') && b.negative === 'bad quality',
+      String(b.prompt || '').slice(0, 40))
+  }
+  check('轮询了任务状态', calls.some((c) => c.url.includes('/jobs/')))
+  check('出完图自动切到素材页',
+    [...doc.querySelectorAll('.chars-tab')].some(
+      (t) => t.classList.contains('on') && (t.textContent || '').includes('素材')))
+  check('出图场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 

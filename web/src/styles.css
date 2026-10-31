@@ -1355,3 +1355,12 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
   background: #fff; border: 1px solid var(--line);
 }
 
+
+/* 出图页：官方结构化 prompt 的编辑框 */
+.chars-prompt {
+  width: 100%; min-height: 260px; resize: vertical;
+  background: var(--bg-3); color: var(--white);
+  border: 1px solid var(--line-strong); border-radius: 2px;
+  padding: 6px; font-family: var(--mono); font-size: 10.5px; line-height: 1.6;
+}
+.chars-prompt.short { min-height: 60px; }

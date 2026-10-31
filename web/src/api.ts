@@ -615,6 +615,38 @@ export function deleteCostume(name: string,
     { method: 'DELETE' })
 }
 
+/** 把 character_info + 风格拼成官方结构的 prompt（**不跑模型**，用来预览） */
+export function fetchCharacterPrompt(
+  name: string, style = '', info?: Record<string, unknown>,
+): Promise<CharacterPrompt> {
+  return req(`/characters/${encodeURIComponent(name)}/prompt`,
+    { method: 'POST', body: JSON.stringify({ style, info: info || {} }) })
+}
+
+/** 给角色出图；出完后端自动按官方命名收进角色目录 */
+export function generateForCharacter(
+  name: string, body: {
+    workflow?: 'w1' | 'w2'
+    costume?: string
+    emotion?: string
+    prompt?: string
+    negative?: string
+    params?: Record<string, unknown>
+  },
+): Promise<{ job_id: string; status: string; prompt: string; resolution: number[] }> {
+  return req(`/characters/${encodeURIComponent(name)}/generate`,
+    { method: 'POST', body: JSON.stringify(body) })
+}
+
+export type CharacterPrompt = {
+  name: string
+  style: string
+  prompt: string
+  negative: string
+  resolution: [number, number]
+  defaults: { steps: number; cfg: number; sampler: string; scheduler: string }
+}
+
 /** 官方风格库（静态 json，随项目发行）。358 条，13 个分组。 */
 export async function fetchStyleCatalog(): Promise<StyleCatalog> {
   const r = await fetch('/vnccs/character_template/character_styles.json')

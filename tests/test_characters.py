@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 
 from workflows import characters as ch
@@ -168,3 +169,146 @@ def test_config_is_valid_json_with_indent():
     data = json.loads(raw)
     assert data["character_info"]["name"] == "Alice"
     assert "\n    " in raw, "缩进过的 JSON 才能手改"
+
+
+# ------------------------------------------------------------------ 出图
+
+
+def test_prompt_is_official_structured():
+    """官方造角色的 prompt 是**每个字段一行**，不是一句自然语言。
+
+    风格 LoRA 是按这个格式调的（`character_creator_v2.py:1124`），
+    格式一变风格就吃不准——这条用例钉住格式。
+    """
+    from workflows import charactergen as cg
+    info = {"name": "Alice", "sex": "female", "age": 22, "race": "elf",
+            "hair": "blonde hair", "eyes": "blue eyes", "background_color": "green",
+            "framing": "full_body", "aesthetics": "masterpiece"}
+    p = cg.character_prompt(info, "ghibli_miyazaki")
+    for key in ("Draw an image of a character in the following style:",
+                "Style reference:", "Style description:",
+                "The image contains one character.", "Framing:", "Background:",
+                "Gender:", "Age:", "Race:", "Facial features:", "Hair:", "Eyes:",
+                "Skin color:", "Build:", "Clothes:", "Additional details:"):
+        assert key in p, f"缺官方字段行：{key}"
+    assert "22 years old" in p
+    assert "solid green background" in p
+    assert "head to toe" in p, "full_body 要有全身构图词"
+    # 性别为女才出现胸围那一行（官方同样只在 female 时加）
+    assert "Breast size:" in p
+    male = cg.character_prompt({**info, "sex": "male"})
+    assert "Breast size:" not in male
+
+
+def test_prompt_transparent_background():
+    from workflows import charactergen as cg
+    p = cg.character_prompt({"background_color": "transparent"})
+    assert cg.QI2_ALPHA_BACKGROUND_PROMPT in p
+
+
+def test_resolution_uses_official_formula():
+    """官方 `get_generation_resolution`：latent 9:16 × 步长 8，按总像素等比。"""
+    from workflows import charactergen as cg
+    # 1024 → sqrt(1024*1024 / (72*128)) ≈ 10.67 → 11 → 792×1408
+    assert cg.generation_resolution(1024) == (792, 1408)
+    w, h = cg.generation_resolution(768)
+    assert w % 8 == 0 and h % 8 == 0
+    assert abs((w / h) - (9 / 16)) < 0.01, "比例要锁在 9:16（官方 latent 宽高）"
+
+
+def test_style_and_race_lookups_from_official_data():
+    """风格与种族特征都从随项目发行的官方 json 里读，不能自己编。"""
+    from workflows import charactergen as cg
+    sp = cg.style_prompt_of("shonen_anime")
+    assert sp.startswith("Style: Shonen Anime.")
+    assert "Visual description:" in sp
+    assert cg.style_prompt_of("不存在的风格") == ""
+    feats = cg.race_features("elf")
+    assert "Elf:" in feats and "pointed ears" in feats
+    assert cg.race_features("") == ""
+
+
+def test_publish_uses_official_naming_and_versions():
+    """`sprite_pose_0001.png`（neutral）/ `sprite_<表情>_0001.png`，重生成旧图进 V1。"""
+    import shutil
+    from pathlib import Path
+    if ch.character_exists("Pub"):
+        ch.delete_character("Pub")
+    ch.create_character("Pub")
+    src = Path(paths.CHARACTERS_DIR, "_tmp_src.png")
+    src.parent.mkdir(parents=True, exist_ok=True)
+    src.write_bytes(b"v1")
+    try:
+        r1 = ch.publish_image("Pub", str(src), "Naked", "neutral")
+        assert Path(r1["path"]).name == "sprite_pose_0001.png", r1["file"]
+        assert r1["index"] == 1
+        # 封面：角色库卡片靠它认人
+        assert Path(r1["cover"]).is_file()
+
+        src.write_bytes(b"v2")
+        r2 = ch.publish_image("Pub", str(src), "Naked", "neutral")
+        assert Path(r2["path"]).name == "sprite_pose_0002.png"
+        # 第二张不覆盖第一张
+        assert Path(r1["path"]).read_bytes() == b"v1"
+
+        r3 = ch.publish_image("Pub", str(src), "Naked", "angry")
+        assert Path(r3["path"]).name == "sprite_angry_0001.png"
+        assert Path(r3["path"]).parent.name == "angry"
+    finally:
+        src.unlink(missing_ok=True)
+        ch.delete_character("Pub")
+
+
+def test_publish_rejects_missing_source():
+    if ch.character_exists("NoSrc"):
+        ch.delete_character("NoSrc")
+    ch.create_character("NoSrc")
+    try:
+        ch.publish_image("NoSrc", "/绝对不存在的图.png")
+    except FileNotFoundError:
+        pass
+    else:
+        raise AssertionError("源图不存在应该报错，不能建出一个空文件")
+    ch.delete_character("NoSrc")
+
+
+def test_publish_appends_without_archiving():
+    """逐张发布是**追加**：官方目录里本来就是 sprite_pose_0001..N 一张张攒的。
+
+    （`staged_image_batch` 的"整批替换 + 旧版进 V1"是给一次出一整批姿势帧用的，
+    逐张发布用它就会把前面所有图都推进 V1。）
+    """
+    from pathlib import Path
+    if ch.character_exists("Ver"):
+        ch.delete_character("Ver")
+    ch.create_character("Ver")
+    src = Path(paths.CHARACTERS_DIR, "_tmp_src.png")
+    src.parent.mkdir(parents=True, exist_ok=True)
+    src.write_bytes(b"one")
+    try:
+        a = ch.publish_image("Ver", str(src), "Naked", "neutral")
+        src.write_bytes(b"two")
+        b = ch.publish_image("Ver", str(src), "Naked", "neutral")
+    finally:
+        src.unlink(missing_ok=True)
+    assert Path(a["path"]).read_bytes() == b"one", "先发的那张不能被后来的挤掉"
+    assert Path(b["path"]).read_bytes() == b"two"
+    assert Path(a["path"]).name == "sprite_pose_0001.png"
+    assert Path(b["path"]).name == "sprite_pose_0002.png"
+    assert not Path(ch.sprites_dir("Ver"), "V1").exists(), "逐张发布不该产生版本目录"
+    ch.delete_character("Ver")
+
+
+def test_staged_batch_versions_when_publishing_a_set():
+    """一次出一整批时才走 staged：旧的整批进 V1（官方 `utils.py:252`）。"""
+    from pathlib import Path
+    d = Path(paths.CHARACTERS_DIR, "_batch_probe")
+    if d.exists():
+        shutil.rmtree(d)
+    d.mkdir(parents=True)
+    Path(d, "sprite_pose_0001.png").write_bytes(b"old")
+    with ch.staged_image_batch(str(d)) as stage:
+        Path(stage, "sprite_pose_0001.png").write_bytes(b"new")
+    assert Path(d, "sprite_pose_0001.png").read_bytes() == b"new"
+    assert Path(d, "V1", "sprite_pose_0001.png").read_bytes() == b"old"
+    shutil.rmtree(d)

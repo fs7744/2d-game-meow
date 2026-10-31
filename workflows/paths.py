@@ -44,6 +44,11 @@ PROJECTS_DIR = ASSETS / "projects"
 #   Sprites/<服装>/<表情>/sprite_<表情>_0001.png
 CHARACTERS_DIR = ASSETS / "characters"
 
+#: 随项目发行的 **VNCCS 官方素材**（风格库 / 标签库 / 提示词模板），
+#: 落在 `web/public/vnccs/character_template/`——前端要直接 fetch 同一份，
+#: 后端拼 prompt 也从这里读，**不复制第二份**（复制就会有天对不上）。
+VNCCS_TEMPLATE_DIR = ROOT / "web" / "public" / "vnccs" / "character_template"
+
 #: 没有项目归属的上传（旧路径，保留兼容）
 UPLOAD_DIR = ASSETS / "uploads"
 

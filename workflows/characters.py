@@ -462,6 +462,67 @@ def cover_image(name: str) -> Optional[str]:
     return None
 
 
+def next_sprite_index(name: str, costume: str, emotion: str) -> int:
+    """下一个序号（官方 `%04d`，从 1 开始）。旧版本目录 V* 不算数。"""
+    d = sprites_dir(name, costume, emotion)
+    if not os.path.isdir(d):
+        return 1
+    n = 0
+    for f in os.listdir(d):
+        if os.path.isfile(os.path.join(d, f)) and \
+                os.path.splitext(f)[1].lower() in IMAGE_EXTS:
+            n += 1
+    return n + 1
+
+
+def sprite_filename(emotion: str, index: int) -> str:
+    """官方命名规则（`character_generator.py:2754-2758` / `4053-4059`）：
+    neutral 用 `sprite_pose_0001.png`，表情用 `sprite_<表情>_0001.png`。"""
+    e = ensure_safe_name(emotion, "表情名")
+    stem = "pose" if e.casefold() == "neutral" else e
+    return f"sprite_{stem}_{max(1, int(index)):04d}.png"
+
+
+def publish_image(
+    name: str, src: str, costume: str = "Naked",
+    emotion: str = "neutral", set_cover: bool = True,
+) -> Dict[str, Any]:
+    """把一张生成出来的图**追加**进角色目录（不覆盖已有素材）。
+
+    **为什么是追加而不是替换**：官方的 `staged_image_batch`（`utils.py:252`）是
+    给"一次出一整批（一组姿势帧）"用的——整批替换、旧的进 V1。我们这里是**逐张**
+    发布（官方目录里本来也是 `sprite_pose_0001..N` 一张张攒起来的），
+    一张新图把前面全推进 V1 显然是错的。等做批量姿势生成时再用 staged 那条路。
+    """
+    n = ensure_safe_name(name, "角色名")
+    c = ensure_safe_name(costume, "服装名")
+    e = ensure_safe_name(emotion, "表情名")
+    if not os.path.isfile(src):
+        raise FileNotFoundError(f"要收编的图不存在：{src}")
+    target = sprites_dir(n, c, e)
+    os.makedirs(target, exist_ok=True)
+    index = next_sprite_index(n, c, e)
+    fname = sprite_filename(e, index)
+    ext = os.path.splitext(src)[1] or ".png"
+    if ext.lower() != ".png":
+        fname = os.path.splitext(fname)[0] + ext
+    out = os.path.join(target, fname)
+    shutil.copy2(src, out)
+    cover = ""
+    if set_cover:
+        cd = cache_dir(n)
+        os.makedirs(cd, exist_ok=True)
+        cover = os.path.join(cd, "preview.png")
+        try:
+            shutil.copy2(out, cover)
+        except OSError:
+            cover = ""
+    return {
+        "character": n, "costume": c, "emotion": e,
+        "path": out, "file": fname, "index": index, "cover": cover,
+    }
+
+
 def character_summary(name: str) -> Dict[str, Any]:
     """列表用的一条：名字 + 封面 + 服装 + 表情 + 各类图的数量。"""
     cfg = load_config(name) or {}

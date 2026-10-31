@@ -21,6 +21,8 @@ import {
   createCharacter, deleteCharacter, deleteCostume, fetchCharacter,
   fetchCharacters, renameCharacter, saveCostume, updateCharacterInfo,
   fetchStyleCatalog, fetchEmotionCatalog, stylePreviewUrl, emotionIconUrl,
+  fetchCharacterPrompt, generateForCharacter, fetchJob,
+  type CharacterPrompt,
 } from '../api'
 
 /** 角色属性字段（官方 character_creator_v2.py:2138-2146 的字段清单） */
@@ -56,10 +58,14 @@ export default function CharactersPage({ onNotice }: Props) {
   const [detail, setDetail] = useState<CharacterDetail | null>(null)
   const [styles, setStyles] = useState<StyleCatalog | null>(null)
   const [emotions, setEmotions] = useState<EmotionCatalog | null>(null)
-  const [tab, setTab] = useState<'info' | 'clothes' | 'emotions' | 'assets'>('info')
+  const [tab, setTab] = useState<'info' | 'gen' | 'clothes' | 'emotions' | 'assets'>('info')
   const [newName, setNewName] = useState('')
   const [costume, setCostume] = useState('Naked')
   const [draft, setDraft] = useState<Record<string, unknown>>({})
+  /** 后端按官方结构拼好的 prompt（不跑模型，改属性就能立刻看到） */
+  const [cPrompt, setCPrompt] = useState<CharacterPrompt | null>(null)
+  const [genBusy, setGenBusy] = useState(false)
+  const [genMsg, setGenMsg] = useState('')
 
   const reload = useCallback(async () => {
     try {
@@ -86,6 +92,8 @@ export default function CharactersPage({ onNotice }: Props) {
     void fetchCharacter(sel)
       .then((d) => { if (alive) { setDetail(d); setDraft(d.config.character_info ?? {}) } })
       .catch((e) => { if (alive) setErr(String(e instanceof Error ? e.message : e)) })
+    void fetchCharacterPrompt(sel).then((p) => { if (alive) setCPrompt(p) })
+      .catch(() => { if (alive) setCPrompt(null) })
     return () => { alive = false }
   }, [sel])
 
@@ -153,11 +161,55 @@ export default function CharactersPage({ onNotice }: Props) {
       await updateCharacterInfo(sel, patch)
       const d = await fetchCharacter(sel)
       setDetail(d)
+      // prompt 是属性拼出来的，属性变了它就得跟着变
+      const p = await fetchCharacterPrompt(sel).catch(() => null)
+      if (p) setCPrompt(p)
       onNotice('已保存')
     } catch (e) {
       setErr(`保存失败：${e instanceof Error ? e.message : e}`)
     }
   }, [sel, onNotice])
+
+  /** 出图：提交 → 轮询 → 完成后后端已经把图收进角色目录了，刷新即可 */
+  const doGenerate = useCallback(async (workflow: 'w1' | 'w2') => {
+    if (!sel || genBusy) return
+    setGenBusy(true)
+    setGenMsg('已提交，排队中…')
+    try {
+      const r = await generateForCharacter(sel, {
+        workflow,
+        costume,
+        emotion: 'neutral',
+        prompt: cPrompt?.prompt || '',
+        negative: cPrompt?.negative || '',
+      })
+      for (let i = 0; i < 400; i++) {
+        const j = await fetchJob(r.job_id)
+        if (j.status === 'done') {
+          const d = await fetchCharacter(sel)
+          setDetail(d)
+          setTab('assets')
+          setGenMsg(d.assets[costume]?.neutral?.length
+            ? '已收进角色目录（素材页可看）'
+            : '出图完成了，但没收到角色目录里：'
+              + '看任务结果里的 publish_error')
+          onNotice('出图完成')
+          return
+        }
+        if (j.status === 'failed') {
+          setGenMsg(`生成失败：${j.error || '未知错误'}`)
+          return
+        }
+        setGenMsg('生成中…')
+        await new Promise((res) => setTimeout(res, 1000))
+      }
+      setGenMsg('等太久了：任务还在跑，去画布那边看任务状态')
+    } catch (e) {
+      setGenMsg(`出图失败：${e instanceof Error ? e.message : e}`)
+    } finally {
+      setGenBusy(false)
+    }
+  }, [sel, genBusy, costume, cPrompt, onNotice])
 
   const costumeFields = useMemo(
     () => detail?.config.costumes?.[costume] ?? {}, [detail, costume])
@@ -264,8 +316,8 @@ export default function CharactersPage({ onNotice }: Props) {
               <button type="button" className="mini" onClick={() => void doRename()}>改名</button>
             </div>
             <div className="chars-tabs">
-              {([['info', '属性'], ['clothes', '服装'], ['emotions', '表情库'],
-                ['assets', '素材']] as const).map(([k, label]) => (
+              {([['info', '属性'], ['gen', '出图'], ['clothes', '服装'],
+                ['emotions', '表情库'], ['assets', '素材']] as const).map(([k, label]) => (
                 <button
                   type="button" key={k}
                   className={`chars-tab${tab === k ? ' on' : ''}`}
@@ -362,6 +414,58 @@ export default function CharactersPage({ onNotice }: Props) {
                     </p>
                   )}
                 </div>
+              </div>
+            )}
+
+            {tab === 'gen' && (
+              <div className="chars-body">
+                <p className="chars-sub">
+                  这是<b>官方 QI2 的结构化 prompt</b>：每个字段一行，不是一句自然语言。
+                  风格 LoRA 就是照这个格式调的，自己另写一句会明显偏。
+                  <b>Prompt Enhancement（字段扩写）还没接</b>，等 Qwen3.5-4B gguf 到位。
+                </p>
+                <label className="chars-field">
+                  正向 prompt（可改，改了就用你这份出图）
+                  <textarea
+                    className="chars-prompt"
+                    value={cPrompt?.prompt ?? ''}
+                    onChange={(e) => setCPrompt((p) => (p ? { ...p, prompt: e.target.value } : p))}
+                  />
+                </label>
+                <label className="chars-field">
+                  负向词
+                  <textarea
+                    className="chars-prompt short"
+                    value={cPrompt?.negative ?? ''}
+                    onChange={(e) => setCPrompt((p) => (p ? { ...p, negative: e.target.value } : p))}
+                  />
+                </label>
+                <div className="chars-row">
+                  <span className="chars-sub">
+                    分辨率 {cPrompt ? `${cPrompt.resolution[0]}×${cPrompt.resolution[1]}` : '—'}
+                    （官方公式：按总像素等比，对齐到 latent 步长 8）
+                  </span>
+                  <span className="chars-sub">
+                    {cPrompt ? `${cPrompt.defaults.steps} 步 / cfg ${cPrompt.defaults.cfg}` : ''}
+                  </span>
+                </div>
+                <div className="chars-row">
+                  <button type="button" className="mini wide" onClick={() => void doGenerate('w1')}
+                    disabled={genBusy || !cPrompt}>
+                    {genBusy ? '生成中…' : '生成底图（文生图）'}
+                  </button>
+                  <button type="button" className="mini" onClick={() => void doGenerate('w2')}
+                    disabled={genBusy || !cPrompt}
+                    title="以当前这套服装的最新一张为底图，按服装描述改">
+                    换装（图生图）
+                  </button>
+                  <button type="button" className="mini"
+                    onClick={() => sel && fetchCharacterPrompt(sel)
+                      .then(setCPrompt).catch(() => {})}>
+                    重拼 prompt
+                  </button>
+                </div>
+                {genMsg && <p className="chars-sub">{genMsg}</p>}
               </div>
             )}
 

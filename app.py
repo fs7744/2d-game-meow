@@ -55,6 +55,7 @@ from PIL import Image
 from workflows import generate as gen
 from workflows import assetdb
 from workflows import characters
+from workflows import charactergen
 from workflows import library
 from workflows import paths
 from workflows import poselib
@@ -146,6 +147,23 @@ def _run(job_id: str, workflow: str, params: Dict[str, Any]) -> None:
             job["result"] = fn(engine, **accepted)
         if ignored and isinstance(job.get("result"), dict):
             job["result"].setdefault("meta", {})["params_ignored"] = ignored
+        # **发布到角色库**：任务参数里带 `publish` 时，出图后顺手按官方命名
+        # 规则收进 `assets/characters/<角色>/Sprites/<服装>/<表情>/`。
+        # 放在这里（而不是让前端再发一个请求）是因为：出了图却没进角色库，
+        # 用户看到的就是"明明跑了但素材页空着"。
+        pub = params.get("publish")
+        if isinstance(pub, dict) and isinstance(job.get("result"), dict):
+            src = job["result"].get("raw") or job["result"].get("file") or ""
+            try:
+                job["result"]["published"] = characters.publish_image(
+                    name=str(pub.get("character") or ""), src=str(src),
+                    costume=str(pub.get("costume") or "Naked"),
+                    emotion=str(pub.get("emotion") or "neutral"),
+                )
+            except Exception as pexc:                     # noqa: BLE001
+                # 落盘失败**不能**把整个任务判失败：图已经生成出来了，
+                # 让用户能拿到它，另外把原因写进 result。
+                job["result"]["publish_error"] = str(pexc)
         job["status"] = "done"
     except Exception as exc:  # noqa: BLE001
         job.update(status="failed", error=f"{type(exc).__name__}: {exc}")
@@ -926,6 +944,112 @@ def save_costume_api(name: str, costume: str, req: CostumeReq) -> Dict[str, Any]
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     return {"name": name, "costumes": cfg.get("costumes", {})}
+
+
+class CharacterPromptReq(BaseModel):
+    """拼装 prompt 的请求。style 省略就用角色自己存的那个。"""
+    style: str = ""
+    info: Dict[str, Any] = Field(default_factory=dict)
+
+
+class CharacterGenerateReq(BaseModel):
+    """出图请求。
+
+    `workflow`：w1（文生图，造角色底图）/ w2（图生图，换装）。
+    `publish`：{costume, emotion} —— 出图后按官方命名收进角色目录。
+    `params`：直接透传给生成函数（steps / cfg / width / height / seed …）。
+    """
+    workflow: str = "w1"
+    costume: str = "Naked"
+    emotion: str = "neutral"
+    prompt: str = ""
+    negative: str = ""
+    params: Dict[str, Any] = Field(default_factory=dict)
+    init_image: str = ""
+
+
+@app.post("/characters/{name}/prompt")
+def character_prompt_api(name: str, req: CharacterPromptReq) -> Dict[str, Any]:
+    """把 character_info + 风格拼成官方结构的 prompt。
+
+    前端拿它预览（也能改完再发回去出图）——**这一步不跑模型**，所以改属性时
+    能立刻看到会喂给模型什么。
+    """
+    try:
+        safe = characters.ensure_safe_name(name, "角色名")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    cfg = characters.load_config(safe) or {}
+    info = dict(cfg.get("character_info") or {})
+    info.update(req.info or {})
+    style = req.style or str(info.get("style") or "")
+    return {
+        "name": safe,
+        "style": style,
+        "prompt": charactergen.character_prompt(info, style),
+        "negative": str(info.get("negative_prompt") or ""),
+        "resolution": charactergen.generation_resolution(
+            int((req.params or {}).get("target_size") or 0)
+            or charactergen.QI2_DEFAULTS["target_size"]),
+        "defaults": dict(charactergen.QI2_DEFAULTS),
+    }
+
+
+@app.post("/characters/{name}/generate")
+def character_generate_api(name: str, req: CharacterGenerateReq) -> Dict[str, Any]:
+    """给角色出一张图，出完**自动收进角色目录**。
+
+    复用画布那条 `/generate` 队列（单卡串行、可轮询），只是多带一个
+    `publish` 参数让 worker 收编产物。
+    """
+    try:
+        safe = characters.ensure_safe_name(name, "角色名")
+        costume = characters.ensure_safe_name(req.costume or "Naked", "服装名")
+        emotion = characters.ensure_safe_name(req.emotion or "neutral", "表情名")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not characters.character_exists(safe):
+        raise HTTPException(404, f"没有这个角色：{safe}")
+    allowed = ("w1", "w2")
+    if req.workflow not in allowed:
+        raise HTTPException(400, f"角色出图只支持 {'/'.join(allowed)}")
+
+    cfg = characters.load_config(safe) or {}
+    info = cfg.get("character_info") or {}
+    prompt = req.prompt.strip() or charactergen.character_prompt(
+        info, str(info.get("style") or ""))
+    negative = req.negative.strip() or str(info.get("negative_prompt") or "")
+    w, h = charactergen.generation_resolution(
+        int((req.params or {}).get("target_size") or 0)
+        or charactergen.QI2_DEFAULTS["target_size"])
+
+    params: Dict[str, Any] = {
+        "prompt": prompt,
+        "negative": negative,
+        "width": w, "height": h,
+        "steps": charactergen.QI2_DEFAULTS["steps"],
+        "cfg": charactergen.QI2_DEFAULTS["cfg"],
+        "transparent": str(info.get("background_color") or "").lower()
+        == "transparent",
+        "publish": {"character": safe, "costume": costume, "emotion": emotion},
+    }
+    if req.workflow == "w2":
+        # 换装：底图取当前这套服装里已有的最新一张（没有就退回 Naked）
+        refs = characters.list_sprite_images(safe, costume, "neutral") \
+            or characters.list_sprite_images(safe, "Naked", "neutral")
+        if not refs:
+            raise HTTPException(400, "换装需要一张底图：先在「属性」页生成一张")
+        params["image_path"] = req.init_image.strip() or refs[-1]
+    params.update({k: v for k, v in (req.params or {}).items()
+                   if k not in ("prompt", "negative", "publish")})
+
+    job_id = uuid.uuid4().hex[:12]
+    _jobs[job_id] = {"job_id": job_id, "workflow": req.workflow, "params": params,
+                     "status": "queued", "created": time.time()}
+    _q.put((job_id, req.workflow, params))
+    _prune(_jobs, JOB_KEEP)
+    return {"job_id": job_id, "status": "queued", "position": _q.qsize(),
+            "prompt": prompt, "resolution": [w, h]}
 
 
 @app.delete("/characters/{name}/costumes/{costume}")
