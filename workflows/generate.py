@@ -528,13 +528,11 @@ def _qwen_txt2img(eng: Engine, *, prompt: str, negative: Optional[str],
     """
     if preset and preset != "none":
         if transparent:
-            prompt, negative = presets.build(prompt, negative, "none",
-                                             max_tokens=presets.CHUNK_BUDGET)
+            prompt, negative = presets.build(prompt, negative, "none")
             prompt = f"{prompt}, single character, full body, centered" if prompt \
                 else "single character, full body, centered"
         else:
-            prompt, negative = presets.build(prompt, negative, preset,
-                                             max_tokens=presets.CHUNK_BUDGET)
+            prompt, negative = presets.build(prompt, negative, preset)
     stripped = False
     if transparent:
         # 透明底时把「白底/纯色底」这类措辞清掉：它们是和透明声明直接打架的
@@ -622,8 +620,7 @@ def _qwen_img2img(eng: Engine, *, init_image: str | Path, prompt: str,
     改图场景下"我要跟原图一样大"是压倒性预期。
     """
     if preset and preset != "none":
-        prompt, negative = presets.build(prompt, negative, preset,
-                                         max_tokens=presets.CHUNK_BUDGET)
+        prompt, negative = presets.build(prompt, negative, preset)
     if transparent:
         # 同文生图：透明底时清掉「白底」这类与透明声明打架的措辞
         prompt, _stripped = _strip_bg_words(prompt)
@@ -951,12 +948,13 @@ def _parse_color(c: str | Sequence[int]) -> tuple[int, int, int]:
 # **为什么这句是英文**：为了和 `presets` 的英文契约后缀（SPRITE_SUFFIX 等）
 # 拼在一起时语言统一，**不是模型只认英文**。Qwen 的文本编码器是 Qwen3-VL，
 # 中文可以直接写——SD 时代那条「CLIP 只认英文、77 token 会把后半段砍掉」的
-# 结论已随 SD 管线作废（现在预算是 `presets.CHUNK_BUDGET` = 154）。
+# 结论已作废（现在 `presets.build()` 一个字都不截，模型侧也没有 truncation）。
 #
-# **为什么这么短**：23 token 是 SD 时代省出来的（当时三方共享 77），现在预算
-# 宽松了，但**不要加长**——约束越长越容易把"不要接缝"读成"画接缝"。实测
-# 有效的就三件事：只改选区、风格延续、不要接缝。砍掉的是那些模型本来也不会
-# 做的（加物体、改构图：img2img 里选区外本来就不动，那条约束是给文生图的）。
+# **为什么这么短**：23 token 是 SD 时代省出来的（当时三方共享 77），现在没有
+# 预算上限了，但**不要加长**——约束越长越容易把"不要接缝"读成"画接缝"，而且
+# 它是**系统写进去的**那句，越简短越不容易盖过用户自己写的内容。实测有效的
+# 就三件事：只改选区、风格延续、不要接缝。砍掉的是那些模型本来也不会做的
+# （加物体、改构图：img2img 里选区外本来就不动，那条约束是给文生图的）。
 AI_REPAINT_CONSTRAINT = (
     "local inpaint, repaint only the masked area, keep the rest identical, "
     "match style and lighting, no seams"
@@ -995,8 +993,7 @@ def _qwen_ai_repaint(eng: Engine, *, image: str | Path, mask: str | Path,
     if not body:
         raise ValueError("提示词是空的：先写一句要重绘成什么")
     if preset and preset != "none":
-        body, negative = presets.build(body, negative, preset,
-                                       max_tokens=presets.CHUNK_BUDGET)
+        body, negative = presets.build(body, negative, preset)
     if seed < 0:
         seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
 

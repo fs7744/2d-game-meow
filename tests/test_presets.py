@@ -1,16 +1,12 @@
-"""提示词契约与下载器过滤规则（纯逻辑，不碰模型/网络）。"""
+"""提示词契约（`workflows/presets.py`）。
+
+核心契约：**拼接，不截断**。用户在框里写多少，就原样交给模型多少——
+模型侧（Qwen3-VL + diffusers 的 encode_prompt）本来就没有 truncation，
+SD 时代那套「按 token 预算砍」已经删了（见 `presets.build` 的 docstring）。
+"""
 from __future__ import annotations
 
 from workflows import presets
-
-
-def _tokens(text: str) -> int:
-    """预算断言要用**真实** token 数。
-
-    老的断言用的是 `rough_tokens`，而它比真实 BPE 计数高估约 3 倍——
-    拿它当判据等于容忍"只用了 1/3 预算"，正是提示词被提前截断的根源。
-    """
-    return presets.count(text)
 
 
 def test_preset_appends_suffix_and_negative():
@@ -23,7 +19,7 @@ def test_preset_appends_suffix_and_negative():
 def test_preset_keeps_user_negative():
     _, neg = presets.build("x", "my own negative", "sprite")
     assert "my own negative" in neg
-    # 预设里最脏的词仍排在最前（77 token 截断时优先保留）
+    # 预设的词仍排在用户词前面：顺序即优先级，用户看到的顺序要稳定
     assert neg.index("pattern") < neg.index("my own negative")
 
 
@@ -41,42 +37,41 @@ def test_unknown_preset_raises():
         raise AssertionError("未知 preset 必须报错")
 
 
-def test_sprite_suffix_fits_clip_budget():
-    """正向后缀必须给主体描述留余量：SD1.5 只有 77 token。"""
-    pos, _ = presets.build("blue slime monster", None, "sprite")
-    assert presets.rough_tokens(pos) < 50, presets.rough_tokens(pos)
-    assert presets.rough_tokens(presets.SPRITE_SUFFIX) < 40
+def test_empty_prompt_yields_suffix_only():
+    """没写提示词时不能拼出一个前导逗号。"""
+    pos, _ = presets.build("", None, "sprite")
+    assert pos == presets.SPRITE_SUFFIX
+    assert not pos.startswith(",")
 
 
-def test_rough_tokens_handles_cjk():
-    assert presets.rough_tokens("蓝色史莱姆") > 0
-    assert presets.rough_tokens("") == 0
+# ---------------- 不截断（这条是产品契约，退化过两次） ----------------
 
+def test_long_prompt_is_delivered_whole():
+    """**一个字都不能砍**：用户写 1000 字就给 1000 字。
 
-# ---------------- 下载器过滤 ----------------
-
-def test_long_prompt_keeps_suffix():
-    """用户主体描述写超了要截主体，绝不能把契约后缀丢掉。
-
-    老实现是 prompt + suffix 直接交给 CLIP，超出 77 token 时被静默丢弃的恰好是
-    后缀（扁平背景 / 硬描边），画出来背景就脏了 —— 这正是「提示词越长越难看」
-    的真实原因。
+    历史上这里有过两版截断：先是按 77 token 硬砍（CLIP 时代），后来改成
+    154（`CHUNK_BUDGET`）。两次都错在同一个地方——**我们替用户做减法**。
+    Qwen 的 tokenizer 上限 262144、管线只 padding 不 truncation，
+    模型能吃多长就吃多长；写长是有理由的（官方示例就是几百字中文详述）。
     """
-    long_prompt = ", ".join(["a very detailed knight with flame patterns"] * 8)
-    pos, _ = presets.build(long_prompt, None, "sprite")
-    assert pos.endswith(presets.SPRITE_SUFFIX)
-    assert _tokens(pos) <= 77, _tokens(pos)
+    body = "，".join([f"第{i}个细节是红披风配银色肩甲" for i in range(60)])
+    pos, _ = presets.build(body, None, "sprite")
+    assert body in pos, "用户描述被改写了"
+    assert pos.endswith(presets.SPRITE_SUFFIX), "契约后缀要留在末尾"
+    assert len(pos) > len(body)
 
 
-def test_fit_never_returns_empty_for_comma_free_text():
-    """整段没有逗号且超预算时，按词截断，不能返回空串（等于没有负向词）。"""
-    text = " ".join(["ugly"] * 200)
-    out = presets.fit(text, budget=20)
-    assert out and out.startswith("ugly")
-    assert _tokens(out) <= 20, _tokens(out)
+def test_long_negative_is_delivered_whole():
+    """负向词同理：不截。它只在 cfg>1 时才会发出去，用户写长也不该被砍。"""
+    negs = ", ".join(f"bad thing {i}" for i in range(50))
+    _, neg = presets.build("x", negs, "sprite")
+    assert negs in neg
 
 
-def test_fit_drops_tail_sections():
-    text = ", ".join(f"word{i}" for i in range(40))
-    out = presets.fit(text, budget=20)
-    assert "word0" in out and "word39" not in out
+def test_suffix_is_kept_short():
+    """后缀是**系统写的**那句，要保持短：堆长了会盖过用户自己写的内容。"""
+    for name in ("sprite", "pixel", "portrait", "wuxia", "anime"):
+        suffix, _ = presets.PRESETS[name]
+        # 当前最长的是 sprite（28 词，含 FRAMING 的留白约束）。32 是上限，
+        # 不是目标值——加词前先问自己"这句是不是产线硬要求"。
+        assert len(suffix.split()) <= 32, (name, len(suffix.split()), suffix)

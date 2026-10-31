@@ -48,7 +48,8 @@ const PARAM_HINTS: Record<string, { what: string; effect: string; rec: string }>
   },
   风格: {
     what: '提示词契约（predefined 的构图/背景约定）',
-    effect: '自动补「扁平背景、硬描边、全身」这类产线约束，并截断到 token 预算内',
+    effect: '自动在你的描述后面追加「扁平背景、硬描边、全身」这类产线约束；'
+      + '**不截断你的描述**（Qwen 没有 token 上限），写多长都原样送进去',
     rec: '精灵用 sprite、立绘用 portrait、武侠 LoRA 配 wuxia、像素用 pixel',
   },
   反向提示词: {

@@ -701,6 +701,14 @@ CLIP。用户主体描述一写长，被丢掉的恰好是后缀（`flat plain b
 `fit` 按逗号分段累加，第一段就超预算时 `break` 得只剩空列表，返回 `""`——
 用户粘贴一整串空格分隔的负向词，等于什么都没写。现在退化成按词截断。
 
+> **2026-10-31 更新：①② 那套 77 token 预算机制已整体删除。**
+> 底模换成 Qwen-Image 后，tokenizer 的 `model_max_length` 是 262144、
+> diffusers 的 `encode_prompt()` 只做 padding **不做 truncation**——模型侧没有
+> 长度上限。所以 `presets.build()` 现在只做拼接，**一个字都不截**
+> （`fit` / `count` / `rough_tokens` / `CHUNK_BUDGET` 一并删了）。
+> 上面两段留作历史：它们说明"替用户做减法"能造成多大伤害——一次是砍掉了后缀，
+> 一次是靠高估的估算器把 35 token 当成 113 来砍。
+
 **③ 像素化降采样：LANCZOS → BOX**
 LANCZOS 有负瓣，色块交界处会振铃出「过冲色」（黑线旁边冒一圈更亮的边），这些假色
 再被量化，就成了多出来的脏色阶。实测同一张图：LANCZOS 用满 32 色且边缘发毛，
@@ -1175,7 +1183,7 @@ hard / soft 两组对照）。
   用户正文写中文完全没问题。英文的作用是和 `presets` 的英文后缀拼在一起时
   语言统一，模型更容易分清"哪句是产线契约、哪句是用户描述"。
   SD 时代"整句约束 100+ token 必然在 77 处被截断"的结论也作废了：
-  现在预算是 154（`presets.CHUNK_BUDGET`）。
+  现在 `presets.build()` **不截断**（模型侧也没有 truncation）。
 
 后端对应 `POST /generate` 的 `workflow: "w5"`：
 
@@ -1671,7 +1679,7 @@ test_stability 的 free 与泄漏、test_matte 的缓存素材）需要 GPU。
 | `tests/test_pose.py` | 检测器切换、18 点完整性、骨架渲染、双后端一致性、单例 | 12 || `tests/test_refcond.py` | 轮廓条件、auto 降级、强制骨架报错、换皮 | 18 || `tests/test_refprep.py` | 参考图预处理、帧级评分 | 19 |
 | `tests/test_quality.py` | 前景占比/质心/漂移/贴边、无模型时「无法判定」 | 11 |
 | `tests/test_io_paths.py` | 视频抽帧、GIF、切片 CLI、非 8 倍数尺寸、环境自检 | 10 |
-| `tests/test_presets.py` | 契约拼接与优先级、token 预算、长提示词不丢后缀 | 9 |
+| `tests/test_presets.py` | 契约拼接与优先级、**长提示词原样送达（一个字都不截）**、后缀保持短 | 8 |
 | `tests/test_repaint.py` | 选区外逐点不变、色彩校正、色板吸附、RGBA 进 VAE 会炸 | 16 |
 | `tests/test_stability.py` | 连续出图显存不涨、**free() 清空缓存**、跨进程同 seed（`MEOW_SLOW=1` 手动跑） | 5 |
 | `tests/test_vramopt.py` | W4 候选峰值估算（768² 单帧/加一个候选、24G 卡只够 1 个、未知架构按 Qwen 算） | 4 |

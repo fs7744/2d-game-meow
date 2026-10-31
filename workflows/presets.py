@@ -3,11 +3,14 @@
 背景：裸提示词会自作主张加背景纹理、渐变、多余角色；只写 "pixel art" 得到的
 是「看起来像像素」的糊图。这里把「产线要求」固化成后缀与负向词，用户只描述主体。
 
-**长度约束放宽了，但没有取消**：SD 时代 CLIP 只有 77 token，超出部分被**静默
-丢弃**，所以后缀必须极短、重要的词放最前（背景干净 > 画风 > 构图）。现在底模是
-Qwen-Image（编码器 Qwen3-VL），生产调用一律传 `max_tokens=CHUNK_BUDGET`（154），
-按下面 `count()` 的启发式（中文 1.6 token/字）也够放 90 来个汉字。
-但**后缀仍然保持短**：契约是"约束"不是"描述"，堆长了会把用户的主体描述挤掉。
+**长度：不截断，用户写多少给多少。**
+SD 时代 CLIP 只有 77 token、超出部分**静默丢弃**，所以那时必须把后缀压到极短、
+还得按预算砍用户描述。现在底模是 Qwen-Image（编码器 Qwen3-VL，tokenizer 的
+`model_max_length` 是 262144，diffusers 的 `encode_prompt()` 只 padding、
+不 truncation），**模型侧没这个限制**，`build()` 也就一行都不砍。
+
+剩下的只是成本问题：prompt 越长，DiT 的 joint attention 序列越长、越慢越吃显存。
+这个取舍交给用户（见 `build()` 的 docstring）。
 
 **语言**：后缀是英文常量；用户正文**中英文都行**（Qwen 的编码器支持中文）。
 两者拼一起时模型能分清哪句是契约——这也是后缀保持英文的一个理由。
@@ -54,11 +57,11 @@ WUXIA_SUFFIX = (
     "full body head to toe, centered, plain white background, "
     "chinese ink painting, clean lineart"
 )
-# 顺序即优先级：越靠前被保留的概率越高。
-# **注意**：这里曾经写着"实测这串写到 113 token 尾部全被丢弃"——那是 `rough_tokens`
-# 的估算值。用真实 CLIPTokenizer 数出来是 **35 token**，根本没超 77。真正被搞坏的
-# 不是"超长被丢"，而是"按高估值提前截断"：估算器把 35 当成 113，于是 `fit()` 在
-# 77 的预算里只留下了前面几条。现在 `fit()` 用真实 BPE 计数（见 presets.count）。
+# 顺序即优先级：越脏的词越靠前（万一以后又要按预算取舍，先保这些）。
+#
+# 这里记着一段教训：曾经的 `rough_tokens` 估算器把这条 **35 token** 的串估成
+# 113，于是按预算截断时只留下前几条——**估算偏差比"超长"本身更伤**。
+# 现在全程不截断（见 build 的 docstring），这段留作"别再加回估算式截断"的提醒。
 WUXIA_NEG = (
     # 1 裁切（最致命：头脚出画面就不能当立绘）
     "cropped, cut off head, cut off feet, "
@@ -128,102 +131,31 @@ PRESETS = {
 }
 
 
-def rough_tokens(text: str) -> int:
-    """粗估 token 数：英文按 1.35 token/词，中文按 1 字 1.6 token。
+def build(prompt: str, negative: str | None,
+          preset: str = "sprite") -> tuple[str, str]:
+    """用户描述 + 契约后缀。**一个字都不截**。
 
-    **只作为兜底**。它对逗号分隔的英文串高估约 3 倍（实测 WUXIA_NEG 估算 113、
-    真实 35），据此截断会把本来塞得下的词白白砍掉。有 tokenizer 时一律走
-    `count`（真实 BPE 计数），估算法只在没下权重/没装 transformers 时用。
-    """
-    words = len(text.split())
-    cjk = sum(1 for ch in text if ord(ch) > 0x2E80)
-    return int(words * 1.35 + cjk * 1.6)
+    **为什么不截**：截断是我们的判断，不是模型的限制。Qwen-Image 的编码器是
+    Qwen3-VL，tokenizer 的 `model_max_length` 是 262144，diffusers 的
+    `pipeline_qwenimage21.encode_prompt()` 只做 `padding=True`、**没有
+    truncation**——模型能吃多长就吃多长。SD 时代那套「77 token 必须砍」的约束
+    （CLIP 超长静默丢弃）随管线一起作废了。
 
+    代价是**越长的提示词越慢**：prompt token 会进 DiT 的 joint attention 序列，
+    和图像 token 一起算注意力。但这个代价该由用户自己权衡——他写 300 字是有
+    理由的（Qwen 官方示例本身就是几百字的中文详述），不该被我们悄悄砍掉一半。
+    界面上只提示"越长越慢"，不替他做减法。
 
-def count(text: str) -> int:
-    """token 数；拿不到 tokenizer 时退回启发式（宁可粗也不能崩）。
-
-    SD 时代这里走 `workflows.clip` 的真实 BPE 计数。**那个模块已经删了**：
-    Qwen 的文本编码器是 Qwen3-VL，CLIP 的 77 token 预算对它没有意义，
-    契约后缀的作用也从「别被截断」变成「给模型一句构图约束」。
-    所以现在恒走启发式——保留这个函数是因为 `build(fit=...)` 还要用它。
-    """
-    return rough_tokens(text)
-
-
-def _cut_words(text: str, budget: int) -> str:
-    """整段都塞不下时按词截断。没有逗号的超长提示词不能直接丢成空串。"""
-    keep: list[str] = []
-    used = 0
-    for w in text.split():
-        cost = count(w) + 1
-        if used + cost > budget:
-            break
-        keep.append(w)
-        used += cost
-    return " ".join(keep)
-
-
-def fit(text: str, budget: int = 77) -> str:
-    """按逗号段截断到 token 预算内。
-
-    **默认 77 是历史值，只留给测试用**：生产路径（`generate.py` 的四处
-    `presets.build(..., max_tokens=CHUNK_BUDGET)`）都显式传 154。
-    真正需要砍的理由不再是"模型会静默丢弃"，而是**太长会把契约/主体挤掉**。
-
-    截断策略本身仍然要对：先保前面的段（最重要的词在前），并把被砍的部分
-    暴露出来——这比静默截断诚实。
-
-    两个边界情况必须处理，否则「截断」会比不截断更糟：
-    - 只有一段却没有逗号（用户直接粘了一长串）→ 按词截，不能返回空串；
-    - 第一段就超预算 → 同上，至少要留下开头那几个词。
-    """
-    if count(text) <= budget:
-        return text
-    out: list[str] = []
-    total = 0
-    for part in (x.strip() for x in text.split(",")):
-        if not part:
-            continue
-        cost = count(part) + 1                              # 逗号
-        if total + cost > budget:
-            if not out:                                    # 一句都没进去：退化成按词截
-                tail = _cut_words(part, budget)
-                if tail:
-                    out.append(tail)
-            break
-        out.append(part)
-        total += cost
-    return ", ".join(out)
-
-
-# 分段编码能塞下的总预算（77 × 2）。见 workflows/clip.py 的 encode_long：
-# 超过 77 token 的部分不再被丢弃，而是切成第二段参与交叉注意力。
-CHUNK_BUDGET = 154
-
-
-def build(prompt: str, negative: str | None, preset: str = "sprite",
-          budget: int = 77, max_tokens: int = 0) -> tuple[str, str]:
-    """用户描述 + 契约后缀，两侧都在 token 预算内。
-
-    **预算先留给后缀**：后缀（扁平背景 / 硬描边 / 全身）才是产线契约，用户主体
-    描述写超了应该截主体，而不是把契约末尾丢掉——老实现是直接 `prompt + suffix`
-    交给 CLIP，超长时被静默丢弃的恰好是后缀，画出来背景就脏了。
-
-    `max_tokens`：调大预算，配合 `clip.embeds` 的分段编码使用（见 CHUNK_BUDGET）。
-    默认 0 表示维持 77 的硬上限，老行为逐字不变。
+    顺序上后缀仍放最后：用户写的描述在前、系统补的契约在后，读起来清楚
+    "哪些是自己写的"；模型对末尾约束通常也更敏感。
     """
     if preset not in PRESETS:
         raise ValueError(f"未知 preset: {preset}（可选 {', '.join(PRESETS)}）")
-    if max_tokens and max_tokens > budget:
-        budget = int(max_tokens)
     suffix, neg = PRESETS[preset]
     user = (prompt or "").strip().strip(",")
-    if suffix:
-        room = max(8, budget - count(suffix) - 1)
-        user = fit(user, room)
-        pos = f"{user}, {suffix}" if user else suffix
+    if user and suffix:
+        pos = f"{user}, {suffix}"
     else:
-        pos = fit(user, budget)
+        pos = user or suffix
     negs = ", ".join(x for x in (neg, (negative or "").strip()) if x)
-    return pos, fit(negs, budget)
+    return pos, negs
