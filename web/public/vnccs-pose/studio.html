@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8" />
+  <title>VNCCS PoseStudio 渲染验证</title>
+  <style>
+    body { background: #111; color: #eee; font: 14px/1.6 sans-serif; margin: 16px; }
+    #status { color: #ffd54a; white-space: pre-wrap; margin-bottom: 12px; }
+    #out { display: flex; gap: 12px; flex-wrap: wrap; }
+    #out img { image-rendering: auto; background: #fff; }
+  </style>
+</head>
+<body>
+  <div id="status">加载中…</div>
+  <canvas id="stage" width="768" height="768" style="display:none"></canvas>
+  <div id="out"></div>
+  <script type="module" src="./entry.mjs"></script>
+</body>
+</html>
