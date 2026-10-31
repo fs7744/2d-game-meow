@@ -92,6 +92,25 @@ LoraLoaderModelOnly (VNCCS LoRA, strength=1, model-only) -> patched_model
 - 说明 ②：**我们自己画的任何"人偶"都传不过朝向** —— 因为我们没有他们的 MakeHuman
   网格 + Phong 阴影 + 相机取景，画出来不在 LoRA 的分布内。
 
+### 决定性验证（2026-10-31 晚，`tools/render_mannequin.py`）
+
+用 **真 MakeHuman v2 网格**做 Phong 软光栅（白底、正交投影、单方向光），喂给 VNCCS
+（无任何方向词、同 seed、同角色）：
+
+| 人偶渲染机位 | 结果 |
+|---|---|
+| 0° 正面 | **正面** ✓ |
+| 90° 侧面 | **侧面、脸朝左** ✓ |
+| 180° 背面 | **背面** ✓ |
+
+**一次就全对。** 这证明：线框骨架 / 手绘人偶失败，是因为它们不在 LoRA 的训练分布里；
+只要把条件图换成"真 3D 人体网格的灰色阴影渲染"，朝向和姿态就都由相机决定，
+prompt 里一个字都不用写——和 VNCCS 官方完全一致。
+
+`tools/render_mannequin.py` 已固化（解析 `.bin.gz` + 软光栅）。**还差两块**：
+① 18 关节 → 53 根 MakeHuman 骨的 IK；② 蒙皮（skin_indices/skin_weights 驱动顶点），
+现在只渲染静息 A-pose。
+
 ## 6. 我们的取舍（现状）
 
 在没有"真 3D 人偶渲染器"之前：
