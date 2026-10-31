@@ -145,23 +145,49 @@ def _timer():
 
 def _postprocess(img: Image.Image, eng: Engine, *, matte: bool, matte_backend: str,
                  denoise: int, pixel: int, palette: int, clean_iso: int,
-                 info: Dict[str, Any] | None = None):
+                 info: Dict[str, Any] | None = None, transparent: bool = False):
     """抠图 → 像素化 → 量化 → 去孤立点。返回 (图, 贴边边, 主体数)。
 
     顺序固定，不能改：先抠图（按原始颜色判连通域更准），再像素化与量化。
     反过来会把背景噪点量化成格纹，抠图也会因为色阶被压而失效。
     三张卡（文生图 / 图生图 / 姿态帧）共用这一份，避免各写一遍走样。
+
+    `transparent=True`（模型直接出了 RGBA）时**不能无条件相信它的 alpha**：
+    Qwen 在提示词和透明声明打架时会输出一层**雾**——实测一张 1024² 的图里
+    68% 的像素 alpha 停在 128~240（既不全透也不全实）。这层雾一旦进
+    `quantize_palette`，就会被 `>127 → 255` 的硬边规则**实化**：背景变成
+    两大块实心白，用户看到的正是「透明底怎么这么多白的」。
+
+    所以这里先过 `alpha_trust`：干净就沿用（省一次抠图），是雾就重抠一遍。
+    代价只有雾的那几张图，收益是「勾了透明底就真的透明」。
     """
+    info = info if info is not None else {}
     edge: list[str] = []
     subjects = None
-    if matte:
+    cut = False
+
+    if matte and not transparent:
         # 保留 alpha：转回 RGB 会把透明区域压成黑色，等于白抠
-        img = matte_mod.despeckle(
-            matte_mod.matte_auto(img.convert("RGBA"), matte_backend, eng.matte_dir,
-                                 info=info if info is not None else {}),
-            denoise_iters=denoise)
+        img = matte_mod.matte_auto(img.convert("RGBA"), matte_backend,
+                                   eng.matte_dir, info=info)
+        cut = True
+    elif transparent:
+        ok, obs = matte_mod.alpha_trust(img.convert("RGBA"))
+        if ok:
+            # 模型这次画干净了：直接用它的 alpha（再抠一次反而会咬掉白毛）
+            info.update(alpha_reused=True, **obs)
+        else:
+            # 雾状 / 几乎没有透明区 → 重抠。**这就是「白块」的来源**，
+            # 重抠之后 alpha 变成 0/255 两档，量化不会再把它实化。
+            img = matte_mod.matte_auto(img.convert("RGBA"), matte_backend,
+                                       eng.matte_dir, info=info)
+            cut = True
+            info.update(alpha_recut=True, **obs)
+
+    if cut:
+        img = matte_mod.despeckle(img, denoise_iters=denoise)
         edge = matte_mod.edge_touch(img)
-        # 多主体是 SD1.5 画小怪物的通病（史莱姆尤甚），负向词压不住，只能量出来
+        # 多主体是画小怪物的通病，负向词压不住，只能量出来
         subjects = pp.foreground_blobs(img)
     if info is not None:
         # 像素化**之前**的图（已抠图）。质量闸门要用它数关节：
@@ -552,8 +578,9 @@ def _qwen_txt2img(eng: Engine, *, prompt: str, negative: Optional[str],
     raw = img.copy() if (pixel > 1 or palette) else None
     info: Dict[str, Any] = {}
     img2, edge, subjects = _postprocess(
-        img, eng, matte=(matte and not transparent), matte_backend=matte_backend,
-        denoise=denoise, pixel=pixel, palette=palette, clean_iso=clean_iso, info=info)
+        img, eng, matte=matte, matte_backend=matte_backend,
+        denoise=denoise, pixel=pixel, palette=palette, clean_iso=clean_iso,
+        info=info, transparent=transparent)
     # 真 CFG（cfg>1）时管线才会收到负向词；cfg=1 时它一次都没传过，
     # meta 里再写一份负向词会让人以为它生效了。
     neg_used = (negative or QWEN_NEG) if float(cfg) > 1.0 else None
@@ -568,11 +595,14 @@ def _qwen_txt2img(eng: Engine, *, prompt: str, negative: Optional[str],
         "seed": seed,
         "lora": None, "lora_scale": None,
         "pixel_block": pixel, "palette": palette,
-        # 透明底时抠图会被跳过（原始 alpha 直接复用），meta 要记**实际**值
-        "matte": bool(matte and not transparent),
+        # 透明底时**默认**不抠（模型自带 alpha）；但 alpha 是雾时会重抠一遍，
+        # 所以这里记的是「实际跑没跑抠图」，不是用户勾没勾
+        "matte": bool(matte and not transparent) or bool(info.get("alpha_recut")),
         "matte_backend": matte_backend, "denoise": denoise, "clean_iso": clean_iso,
         "matte_used": info.get("backend"), "matte_fallback": info.get("fallback"),
         "alpha_reused": info.get("alpha_reused"),
+        "alpha_recut": info.get("alpha_recut"),
+        "alpha_mid": info.get("mid"),
         "prompt_bg_stripped": stripped or None,
         "edge_touch": edge, "model": model, "clip_skip": None,
         "subjects": subjects, "transparent": transparent,
@@ -649,8 +679,9 @@ def _qwen_img2img(eng: Engine, *, init_image: str | Path, prompt: str,
     raw = img.copy()
     info: Dict[str, Any] = {}
     img, edge, subjects = _postprocess(
-        img, eng, matte=(matte and not transparent), matte_backend=matte_backend,
-        denoise=denoise, pixel=pixel, palette=palette, clean_iso=clean_iso, info=info)
+        img, eng, matte=matte, matte_backend=matte_backend,
+        denoise=denoise, pixel=pixel, palette=palette, clean_iso=clean_iso,
+        info=info, transparent=transparent)
     neg_used = (negative or QWEN_NEG) if float(cfg) > 1.0 else None
     return _save(img, _stamp(tag), "img2img", {
         "workflow": "w2", "prompt": _qwen_prompt(prompt, transparent),
@@ -664,9 +695,11 @@ def _qwen_img2img(eng: Engine, *, init_image: str | Path, prompt: str,
         # 实际输出尺寸（w2 之前根本没记，产线无从得知）
         "width": img.width, "height": img.height,
         "pixel_block": pixel, "palette": palette,
-        "matte": bool(matte and not transparent),
+        "matte": bool(matte and not transparent) or bool(info.get("alpha_recut")),
         "matte_backend": matte_backend, "matte_used": info.get("backend"),
         "matte_fallback": info.get("fallback"),
+        "alpha_reused": info.get("alpha_reused"),
+        "alpha_recut": info.get("alpha_recut"),
         "edge_touch": edge, "subjects": subjects, "model": model,
         "clip_skip": None, "transparent": transparent,
         "seconds": seconds,

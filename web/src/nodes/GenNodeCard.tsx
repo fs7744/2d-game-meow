@@ -39,7 +39,9 @@ const PARAM_HINTS: Record<string, { what: string; effect: string; rec: string }>
     what: '真 CFG 强度（classifier-free guidance）',
     effect: '大于 1 时管线每个步跑两遍 transformer（有条件 + 无条件），'
       + '时间翻倍，负向词这时才生效；等于 1 只跑一遍，快 40%',
-    rec: '1.0（默认，快）。要更强的负向约束再往上调，注意时间按倍数涨',
+    rec: '1.0（默认，快）。**别照 SD 的习惯填 7**——Qwen 的 CFG 语义不同，'
+      + '这里 >1 就已经是"真 CFG"（每步跑两遍 transformer，时间翻倍），'
+      + '7 属于强引导、容易过饱和与背景起雾。要更强的负向约束，从 2~4 试起',
   },
   种子: {
     what: '随机种子。-1 表示每次随机',

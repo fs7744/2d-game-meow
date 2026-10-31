@@ -631,3 +631,99 @@ def test_poseswap_meta_has_no_duplicate_lora_keys():
                 if isinstance(k, ast.Constant) and isinstance(k.value, str)]
         dup = {k for k in keys if keys.count(k) > 1}
         assert not dup, f"meta 里有重复键：{dup}"
+
+
+# --------------------------------------------------------------------------- #
+# 透明底：模型的 alpha 不可信时要重抠（「透明底怎么这么多白的」的看守）
+# --------------------------------------------------------------------------- #
+
+def _foggy(alpha_bg: int) -> Image.Image:
+    """一张 256² 图：白背景 + 中间一个深色方块。
+
+    `alpha_bg=180` 模拟 Qwen 画坏的雾状 alpha（既不全透也不全实）；
+    `alpha_bg=0` 是模型正常输出的干净透明底。
+    """
+    im = Image.new("RGBA", (256, 256), (250, 250, 250, alpha_bg))
+    ImageDraw.Draw(im).rectangle([88, 88, 168, 200], fill=(30, 30, 40, 255))
+    return im
+
+
+def test_foggy_alpha_is_recut_not_quantized_into_white(eng):
+    """**雾状 alpha 必须在量化之前被识破并重抠。**
+
+    用户报的原话是「为何透明背景这么多白色的」。链路是这样坏的：
+    模型输出的背景 alpha 是 128~240 的雾 → `quantize_palette` 的
+    `>127 → 255` 把它实化 → 背景变成两大块实心白。
+    一条 1024² 的实测图里，雾占 68%，实化后不透明率从 14% 跳到 82%。
+
+    判据用「不透明占比」：重抠之后只剩中间那个方块（约 10%），
+    如果没有重抠，整张图（≈100%）都会被判成不透明。
+    """
+    info: dict = {}
+    out, _edge, _subj = g._postprocess(
+        _foggy(180), eng, matte=False, matte_backend="color", denoise=0,
+        pixel=0, palette=16, clean_iso=0, info=info, transparent=True)
+    a = np.asarray(out)[:, :, 3]
+    assert info.get("alpha_recut") is True, "雾状 alpha 没被识破"
+    assert (a > 240).mean() < 0.35, f"背景被实化了：{(a > 240).mean():.0%} 不透明"
+    assert ((a >= 16) & (a <= 240)).mean() == 0, "量化后不应留下半透明像素"
+
+
+def test_clean_alpha_is_reused_not_recut(eng):
+    """模型画干净时要**直接用**它的 alpha——重抠会把白毛/白鞋咬掉。"""
+    info: dict = {}
+    out, _edge, _subj = g._postprocess(
+        _foggy(0), eng, matte=False, matte_backend="color", denoise=0,
+        pixel=0, palette=16, clean_iso=0, info=info, transparent=True)
+    assert info.get("alpha_reused") is True
+    assert info.get("alpha_recut") is None
+    a = np.asarray(out)[:, :, 3]
+    assert 0.05 < (a > 240).mean() < 0.35, (a > 240).mean()
+
+
+# --------------------------------------------------------------------------- #
+# 透明底：模型的 alpha 不可信时要重抠（「透明底怎么这么多白的」的看守）
+# --------------------------------------------------------------------------- #
+
+def _foggy(alpha_bg: int) -> Image.Image:
+    """一张 256² 图：白背景 + 中间一个深色方块。
+
+    `alpha_bg=180` 模拟 Qwen 画坏的雾状 alpha（既不全透也不全实）；
+    `alpha_bg=0` 是模型正常输出的干净透明底。
+    """
+    im = Image.new("RGBA", (256, 256), (250, 250, 250, alpha_bg))
+    ImageDraw.Draw(im).rectangle([88, 88, 168, 200], fill=(30, 30, 40, 255))
+    return im
+
+
+def test_foggy_alpha_is_recut_not_quantized_into_white(eng):
+    """**雾状 alpha 必须在量化之前被识破并重抠。**
+
+    用户报的原话是「为何透明背景这么多白色的」。链路是这样坏的：
+    模型输出的背景 alpha 是 128~240 的雾 → `quantize_palette` 的
+    `>127 → 255` 把它实化 → 背景变成两大块实心白。
+    一条 1024² 的实测图里，雾占 68%，实化后不透明率从 14% 跳到 82%。
+
+    判据用「不透明占比」：重抠之后只剩中间那个方块（约 10%），
+    如果没有重抠，整张图（≈100%）都会被判成不透明。
+    """
+    info: dict = {}
+    out, _edge, _subj = g._postprocess(
+        _foggy(180), eng, matte=False, matte_backend="color", denoise=0,
+        pixel=0, palette=16, clean_iso=0, info=info, transparent=True)
+    a = np.asarray(out)[:, :, 3]
+    assert info.get("alpha_recut") is True, "雾状 alpha 没被识破"
+    assert (a > 240).mean() < 0.35, f"背景被实化了：{(a > 240).mean():.0%} 不透明"
+    assert ((a >= 16) & (a <= 240)).mean() == 0, "量化后不应留下半透明像素"
+
+
+def test_clean_alpha_is_reused_not_recut(eng):
+    """模型画干净时要**直接用**它的 alpha——重抠会把白毛/白鞋咬掉。"""
+    info: dict = {}
+    out, _edge, _subj = g._postprocess(
+        _foggy(0), eng, matte=False, matte_backend="color", denoise=0,
+        pixel=0, palette=16, clean_iso=0, info=info, transparent=True)
+    assert info.get("alpha_reused") is True
+    assert info.get("alpha_recut") is None
+    a = np.asarray(out)[:, :, 3]
+    assert 0.05 < (a > 240).mean() < 0.35, (a > 240).mean()

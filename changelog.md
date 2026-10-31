@@ -1676,15 +1676,20 @@ test_stability 的 free 与泄漏、test_matte 的缓存素材）需要 GPU。
 
 | 文件 | 覆盖 | 用例数 |
 |---|---|---|
-| `tests/test_qwen_workflows.py` | **十个工作流的能力表与「近似」标记**、**局部重绘选区外逐点不变**、**output_resolution 真的对齐**、**逐帧尺度归一**、**透明底 alpha 不被白底吃掉**、**Qwen 路径不许碰已删的 SD 管线**、**非人形主体不补提**、**两阶段每帧调两次模型** | 34 || `tests/test_gate.py` | 公共闸门组件（候选怎么跑、同分取第一个、非人形不补提） | 6 |
+| `tests/test_qwen_workflows.py` | **十个工作流的能力表与「近似」标记**、**局部重绘选区外逐点不变**、**output_resolution 真的对齐**、**逐帧尺度归一**、**透明底 alpha 不被白底吃掉**、**Qwen 路径不许碰已删的 SD 管线**、**非人形主体不补提**、**两阶段每帧调两次模型** | 36 |
+| `tests/test_gate.py` | 公共闸门组件（候选怎么跑、同分取第一个、非人形不补提） | 6 |
 | `tests/test_e2e_qwen.py` | **十个工作流各真跑一次模型**（`-m slow`，约 80s） | 10 |
-| `tests/test_matte.py` | 背景估计、连通域不误抠内部同色区、去白边、alpha 二值、**u2net 抠空自动回退**、**已有 alpha 复用（IoU 1.000）**、**雾状 alpha 仍重抠**、**补内部洞但不动通到边界的缺口** | 18 || `tests/test_api.py` | 各工作流队列往返、**未知 workflow 报错**、蒙版端点、上传端点、真删（连带 sidecar/raw、路径穿越）、资产按项目过滤、**参数按签名过滤并记 params_ignored** | 33 || `tests/test_projects.py` | **项目归档往返**（.mproj 打包/解包）、**目录与通配引用还原成同构目录**、**路径与 URL 一起重算**、缺失素材清空而非报错、**Windows 反斜杠相对路径**、模板存/列/实例化/删 | 14 |
+| `tests/test_matte.py` | 背景估计、连通域不误抠内部同色区、去白边、alpha 二值、**u2net 抠空自动回退**、**已有 alpha 复用（IoU 1.000）**、**雾状 alpha 仍重抠**、**补内部洞但不动通到边界的缺口** | 18 |
+| `tests/test_api.py` | 各工作流队列往返、**未知 workflow 报错**、蒙版端点、上传端点、真删（连带 sidecar/raw、路径穿越）、资产按项目过滤、**参数按签名过滤并记 params_ignored** | 33 |
+| `tests/test_projects.py` | **项目归档往返**（.mproj 打包/解包）、**目录与通配引用还原成同构目录**、**路径与 URL 一起重算**、缺失素材清空而非报错、**Windows 反斜杠相对路径**、模板存/列/实例化/删 | 14 |
 | `tests/test_project_store.py` | **项目落盘存取往返**、**原子写（不留半截 JSON / 临时文件）**、**路径穿越被清洗**、坏文件不让列表 500、删项目（保留/连产物）、**HTTP 增删改查**、**任务 404 带明确文案**、**id 分配唯一**、**新建撞 id 报 409 不覆盖**、**乐观锁检出并发修改**、**导入到已存在 id 被拒** | 27 |
 | `tests/test_models.py` | **只剩一个底模时接口自洽**：available / arch / recommend / caps.approx / refiner=false、未知底模报错 | 5 |
 | `tests/test_postprocess.py` | 锚点、逐帧对齐、打包几何、色板上限、alpha 二值、像素块单色性、前景块计数 | 11 |
 | `tests/test_pixelfy.py` | 网格检测、每格一色、共享色板、噪点清理、网格吸附 | 20 |
 | `tests/test_sheet.py` | 精灵图网格自动检测、切分、前景掩膜 | 16 |
-| `tests/test_pose.py` | 检测器切换、18 点完整性、骨架渲染、双后端一致性、单例 | 12 || `tests/test_refcond.py` | 轮廓条件、auto 降级、强制骨架报错、换皮 | 18 || `tests/test_refprep.py` | 参考图预处理、帧级评分 | 19 |
+| `tests/test_pose.py` | 检测器切换、18 点完整性、骨架渲染、双后端一致性、单例 | 12 |
+| `tests/test_refcond.py` | 轮廓条件、auto 降级、强制骨架报错、换皮 | 18 |
+| `tests/test_refprep.py` | 参考图预处理、帧级评分 | 19 |
 | `tests/test_quality.py` | 前景占比/质心/漂移/贴边、无模型时「无法判定」 | 11 |
 | `tests/test_io_paths.py` | 视频抽帧、GIF、切片 CLI、非 8 倍数尺寸、环境自检 | 10 |
 | `tests/test_presets.py` | 契约拼接与优先级、**长提示词原样送达（一个字都不截）**、后缀保持短 | 8 |
@@ -1697,7 +1702,7 @@ test_stability 的 free 与泄漏、test_matte 的缓存素材）需要 GPU。
 | `tests/test_review_p2.py` | 抠图后端选择、网格对齐、资产索引增量、**删条目不能误伤同名近似文件** | 10 |
 | `tests/test_review_round2.py` | **LoRA 双槽位（临时挂载不顶掉用户的）**、**路径穿越（`assets2/` 不算 `assets/`）**、**meta 真实性（记的步数是实际执行的）**、重复字典键 | 12 |
 
-合计 **344 条**（`pytest --collect-only` 实测；`-m slow` 的 `test_e2e_qwen`
+合计 **345 条**（`pytest --collect-only` 实测；`-m slow` 的 `test_e2e_qwen`
 10 条也在内，跑起来才真加载模型）。改测试后顺手核一遍这张表——
 数字对不上说明有文件被整段删掉或重复定义覆盖了。
 
