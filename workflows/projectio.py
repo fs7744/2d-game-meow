@@ -27,13 +27,13 @@ from __future__ import annotations
 
 import io
 import json
-import os
 import re
 import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from workflows import paths
+from workflows import projectstore
 
 #: 归档格式标识。改动节点结构语义时递增，老归档仍按 v1 读。
 FORMAT = "meow-project"
@@ -59,10 +59,13 @@ class ArchiveError(Exception):
 
 
 def _scope_name(scope: str) -> str:
-    """项目 id → 安全的目录名。与 generate.scope_dir 的清洗规则保持一致。"""
-    safe = "".join(
-        ch for ch in (scope or "") if ch.isascii() and (ch.isalnum() or ch in "-_")
-    )[:64]
+    """项目 id → 安全的目录名。**非法 id 要报错，不能退回 default**。
+
+    清洗规则本身在 `projectstore.clean_scope`（全项目唯一一份）——导入时的
+    目录名必须和产物目录、`project.json` 三处算出来一致，否则素材落在 A、
+    定义落在 B，删项目时只删掉一半。
+    """
+    safe = projectstore.clean_scope(scope)
     if not safe:
         raise ArchiveError("项目 id 非法")
     return safe
@@ -273,7 +276,7 @@ def pack(meta: Dict[str, Any], payload: Dict[str, Any]) -> bytes:
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
         # 1) 先写素材。归档内的路径形如 files/<ref序号>/<相对名>
         for i, ref in enumerate(refs):
-            for f, rel in zip(ref.files, ref.rel_names):
+            for f, rel in zip(ref.files, ref.rel_names, strict=True):
                 try:
                     zf.writestr(f"{_FILES_DIR}/{i}/{rel}", f.read_bytes())
                 except OSError:
@@ -473,26 +476,24 @@ def _sort_key(t: Dict[str, Any]) -> float:
             return 0.0
     return 0.0
 
-def read_template(tid: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """读模板的 meta 与 payload（不解素材，只看内容）。"""
-    path = _template_file(tid)
-    if not path.exists():
-        raise ArchiveError(f"模板不存在：{tid}")
-    with zipfile.ZipFile(path) as zf:
-        doc = json.loads(zf.read("project.json").decode("utf-8"))
-    return doc.get("meta") or {}, doc.get("payload") or {}
-
-
 def instantiate_template(tid: str, scope: str) -> Dict[str, Any]:
     """从模板实例化一个新项目（素材复制到新项目目录，路径重写）。"""
-    path = _template_file(tid)
+    path = _template_file(tid)          # 非法 tid → ArchiveError（调用方转 404）
     if not path.exists():
         raise ArchiveError(f"模板不存在：{tid}")
     return unpack(path.read_bytes(), scope)
 
 
 def delete_template(tid: str) -> bool:
-    path = _template_file(tid)
+    """删模板。非法 tid 返回 False（=「没有这个模板」），不抛。
+
+    **别让它抛**：`DELETE /templates/<中文名>` 会走到这里，`_template_file`
+    对非法 id 抛 `ArchiveError`——不接住就是 500，而正确答案是 404。
+    """
+    try:
+        path = _template_file(tid)
+    except ArchiveError:
+        return False
     if not path.exists():
         return False
     path.unlink()

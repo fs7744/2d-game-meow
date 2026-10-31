@@ -102,19 +102,6 @@ def _qwen_vl_cls(cfg_dir: Path):
     mtype = cfg.get("model_type", "qwen3_vl")
     mod = importlib.import_module(f"transformers.models.{mtype}")
     return getattr(mod, arch)
-def _scheduler(config):
-    return DPMSolverMultistepScheduler.from_config(
-        config, use_karras_sigmas=True, algorithm_type="dpmsolver++"
-    )
-
-
-def detect_variant(root: Path) -> str | None:
-    """有 fp16 变体就用 fp16 文件，否则用默认 fp32（加载时按 torch_dtype 即时转型）。
-
-    ModelScope 上只有 fp32 权重，hf-mirror 上有 fp16 变体；两种目录都要能直接跑。
-    """
-    fp16 = root / "unet" / "diffusion_pytorch_model.fp16.safetensors"
-    return "fp16" if fp16.exists() else None
 
 
 # 进程级的权重池：**同一个 models_root 的所有 Engine 实例共享**。

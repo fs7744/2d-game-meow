@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from PIL import Image
@@ -335,7 +335,7 @@ class PoseExtractor:
         # （min_points 是**下限**不是上限——写反了会导致只取 10 个点，
         #   肩膀/脖子全丢，骨架只剩头+一只手+两条腿）
         if len(pts) < min_points:
-            for i, (x, y, sc) in keep:
+            for i, (x, y, _sc) in keep:
                 if i in pts:
                     continue
                 _add(i, x, y)

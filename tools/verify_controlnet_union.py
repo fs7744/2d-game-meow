@@ -278,7 +278,7 @@ def main() -> int:
         for i, t in enumerate(tiles):
             side.paste(t, (i * sz, 0))
         side.save(str(_out_path("_cn_compare.png")))
-        print(f"\n  → " + str(_out_path("_cn_compare.png")) + " （从左到右：无控制 / 条件图 / "
+        print("\n  → " + str(_out_path("_cn_compare.png")) + " （从左到右：无控制 / 条件图 / "
               f"scale={','.join(f'{s:g}' for s in args.scales)}）", flush=True)
 
     mem("结束")

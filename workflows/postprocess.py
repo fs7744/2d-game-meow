@@ -293,7 +293,7 @@ def normalize_sequence(frames: Sequence[Image.Image], *, fill: float | None = No
     target = min(hi, max(lo, target))
 
     out: List[Image.Image] = []
-    for f, r in zip(frames, ratios):
+    for f, r in zip(frames, ratios, strict=True):
         rgba = f.convert("RGBA")
         bb = rgba.getchannel("A").getbbox()
         if r <= 0 or bb is None:

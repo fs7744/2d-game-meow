@@ -179,7 +179,7 @@ def test_assets_filtered_by_project(client):
     up = client.post("/upload?name=p.png&project=projY", content=buf.getvalue(),
                      headers={"Content-Type": "image/png"}).json()
     with open(up["path"], "rb") as fh:
-        data = fh.read()
+        assert fh.read(), "上传的字节要真的落到磁盘上"
     from workflows import paths
     idx = paths.ASSETS / "index.jsonl"
     with idx.open("a", encoding="utf-8") as fh:

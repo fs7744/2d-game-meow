@@ -33,7 +33,6 @@ Qwen-Image-2.1 的多图条件是**同一个 vision context**：两张图一起�
 
 from __future__ import annotations
 
-from typing import Optional
 
 from PIL import Image
 

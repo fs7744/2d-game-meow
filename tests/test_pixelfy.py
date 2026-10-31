@@ -7,7 +7,6 @@
   4. **调色板量化后无色板外颜色**——验收指标必须为 0
 """
 import numpy as np
-import pytest
 from PIL import Image, ImageDraw
 
 from workflows import perfect_pixel as pp

@@ -112,7 +112,7 @@ def main() -> int:
     print(f"画布 {W}x{H}（骨架比例 ×1.5）", flush=True)
 
     prompt = f"{TEMPLATE}\n{IDENTITY}"
-    tiles, rows = [], []
+    tiles = []
     for name in loras:
         eng.apply_loras(pipe, [{"name": name, "scale": 1.0}])
         print(f"\n=== {name} ===", flush=True)

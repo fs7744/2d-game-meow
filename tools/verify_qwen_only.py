@@ -109,13 +109,15 @@ def verify_b(eng: Engine, char: Image.Image, extractor) -> dict:
         dt = time.time() - t
         im = im.convert("RGB")
         im.save(OUT / f"b_frame_{i}.png")
-        matted.save(OUT / f"b_frame_{i}_matted.png")
         # 先抠图再评估：Qwen 不开透明底时输出是 RGB，alpha 全 255 →
         # coverage 恒为 1.0，"前景 5~60%" 的判据必须对**抠完的**图算。
-        matted, minfo = gen_matte_bg(
+        matted, _minfo = gen_matte_bg(
             eng, init_image=OUT / f"b_frame_{i}.png", matte_backend="auto",
             scope="qwen_verify")
         sc = q.evaluate(matted, extractor)
+        # **保存放在抠图之后**：以前这句写在 `matted` 赋值之前（复制粘贴遗留），
+        # 一跑就 NameError，整个脚本连第一帧都到不了。
+        matted.save(OUT / f"b_frame_{i}_matted.png")
         rows.append((round(dt, 1), sc))
         log(f"[B] 帧{i}: {dt:.1f}s points={sc['points']} coverage={sc['coverage']} "
             f"edge={len(sc['edge'])} passed={sc['passed']}")

@@ -15,7 +15,6 @@
 """
 from __future__ import annotations
 
-import base64
 import io
 import inspect
 import json
@@ -33,7 +32,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -52,6 +51,12 @@ ASSETS = paths.ASSETS
 UPLOAD_DIR = paths.UPLOAD_DIR
 PROJECTS_DIR = paths.PROJECTS_DIR
 MAX_UPLOAD = 20 * 1024 * 1024
+
+#: 项目归档（.mproj）上限。**必须显式检查**：`/projects/import` 的 body 是
+#: base64 字符串，FastAPI 默认不限长度，一个几百 MB 的归档会先整个进内存再解码。
+#: 按 base64 的长度上限估算（4/3 膨胀），在**解码前**挡掉，别等解完才发现太大。
+MAX_ARCHIVE = 200 * 1024 * 1024
+MAX_ARCHIVE_B64 = MAX_ARCHIVE * 4 // 3 + 16
 UPLOAD_FORMATS = {"PNG": ".png", "JPEG": ".jpg", "WEBP": ".webp",
                   "BMP": ".bmp", "GIF": ".gif"}
 
@@ -122,7 +127,7 @@ def _run(job_id: str, workflow: str, params: Dict[str, Any]) -> None:
         ignored = sorted(set(params) - set(accepted))
         with _gpu_lock:                    # 单卡不并发
             job["result"] = fn(engine, **accepted)
-        if ignored:
+        if ignored and isinstance(job.get("result"), dict):
             job["result"].setdefault("meta", {})["params_ignored"] = ignored
         job["status"] = "done"
     except Exception as exc:  # noqa: BLE001
@@ -418,17 +423,24 @@ def submit(job: Job) -> Dict[str, Any]:
 
 
 @app.get("/jobs/{job_id}")
-def get_job(job_id: str) -> Dict[str, Any]:
+def get_job(job_id: str) -> Any:
     """查任务状态。
 
-    **查不到时返回 404，并带上 `status: "failed"`**：前端轮询拿到 404 就知道
-    这个任务已经没了（服务重启、任务被淘汰），可以把节点从「执行中」放出来。
-    以前直接 404 而不带状态，前端只能一直等——节点永远卡在「生成中…」，
-    按钮也是禁用的，用户只能刷新页面。
+    **查不到时返回 404，响应体里带 `status: "failed"`**：前端轮询同时看状态码
+    和状态字段，两种情况都能把节点从「执行中」放出来（以前只 404、body 里没有
+    status，前端得靠"连续失败 3 次"才敢判定，节点会白转 2 秒）。
+    服务重启、任务被淘汰（只留最近 200 条）都会走到这里。
     """
-    if job_id not in _jobs:
-        raise HTTPException(404, "任务不存在或已被淘汰")
-    return _jobs[job_id]
+    job = _jobs.get(job_id)
+    if job is None:
+        msg = "任务不存在或已被淘汰（服务重启 / 只保留最近 200 条）"
+        # `detail` 保留（= 原来 `HTTPException(404, ...)` 的 body 形状，
+        # 旧前端与测试都读它），另外补 `status` 让前端能直接判失败。
+        return JSONResponse(
+            status_code=404,
+            content={"detail": msg, "job_id": job_id, "status": "failed",
+                     "error": msg})
+    return job
 
 
 @app.get("/jobs")
@@ -594,12 +606,8 @@ async def save_mask(request: Request, name: str = "mask",
         raise HTTPException(400, f"不是有效的图片：{exc}") from exc
     if fmt != "PNG":
         raise HTTPException(400, f"蒙版必须是 PNG（收到 {fmt}）")
-    safe = "".join(
-        ch for ch in (name or "mask") if ch.isascii() and (ch.isalnum() or ch in "-_")
-    )[:64] or "mask"
-    scope = "".join(
-        ch for ch in (project or "") if ch.isascii() and (ch.isalnum() or ch in "-_")
-    )[:64] or "default"
+    safe = projectstore.clean_scope(name) or "mask"
+    scope = projectstore.safe_scope(project)
     d = PROJECTS_DIR / scope / "masks"
     d.mkdir(parents=True, exist_ok=True)
     out = d / f"{safe}.png"
@@ -639,16 +647,12 @@ async def upload_image(request: Request, name: str = "",
     ext = UPLOAD_FORMATS[fmt]
     # 磁盘名只用 ASCII：中文名会让 URL 必须百分号编码，jsdom / 某些代理会出问题。
     # 原名另外回传，前端可以显示。
-    stem = "".join(
-        ch for ch in Path(name).stem if ch.isascii() and (ch.isalnum() or ch in "-_")
-    )[:40] or "image"
-    # 项目隔离：上传的文件放进**本项目**的目录，别的项目拿不到
-    if project:
-        out_dir = PROJECTS_DIR / ("".join(
-            ch for ch in project if ch.isascii() and (ch.isalnum() or ch in "-_"))[:64]
-        ) / "uploads"
-    else:
-        out_dir = UPLOAD_DIR
+    stem = projectstore.clean_scope(Path(name).stem)[:40] or "image"
+    # 项目隔离：上传的文件放进**本项目**的目录，别的项目拿不到。
+    # **清洗后为空就别拼项目目录**：`PROJECTS_DIR / "" / "uploads"` 等于
+    # `assets/projects/uploads/`，会和「所有项目」这一层混在一起。
+    scope = projectstore.clean_scope(project)
+    out_dir = (PROJECTS_DIR / scope / "uploads") if scope else UPLOAD_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / f"{uuid.uuid4().hex[:10]}_{stem}{ext}"
     out.write_bytes(data)
@@ -854,6 +858,10 @@ def import_project(req: ProjectImportReq) -> Dict[str, Any]:
     """
     import base64
 
+    if len(req.data) > MAX_ARCHIVE_B64:
+        raise HTTPException(
+            413, f"归档太大（上限 {MAX_ARCHIVE // 2**20}MB，"
+                 f"收到约 {len(req.data) * 3 // 4 // 2**20}MB）")
     try:
         raw = base64.b64decode(req.data, validate=True)
     except Exception as exc:                       # noqa: BLE001

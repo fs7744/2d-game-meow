@@ -324,24 +324,6 @@ def test_strip_bg_words_removes_conflicts():
     assert not hit2 and same == "a cat, golden armor"
 
 
-# ---------------- 透明底：提示词不能和 alpha 声明打架 ----------------
-
-def test_strip_bg_words_removes_conflicts():
-    """透明底时「white background」这类措辞必须被清掉。
-
-    实测同一个 seed：带这句时 Qwen 的 alpha 是一层雾（81.5% 前景、77.5% 停在
-    16~240 的中间值），清掉后是干净的（31% 前景、67.8% 全透明、中间值 2.9%）。
-    """
-    p, hit = g._strip_bg_words("a pixel art cat, plain white background, full body")
-    assert hit and "white background" not in p.lower()
-    assert p == "a pixel art cat, full body"
-    # 删完不能留悬空介词
-    assert g._strip_bg_words("a cat on a white background")[0] == "a cat"
-    # 没有冲突词就不该动
-    same, hit2 = g._strip_bg_words("a cat, golden armor")
-    assert not hit2 and same == "a cat, golden armor"
-
-
 # ---------------- 边界：Qwen 路径不许碰 SD 管线 ----------------
 #
 # engine.py 里还留着 SD 时代的管线方法（inpaint_pipe / pose_pipe / controlnet /
@@ -474,88 +456,6 @@ def test_poseswap_two_stage_falls_back_without_ref(eng, sandbox, tmp_path):
                    scope="t")
     assert r["meta"]["two_stage"] is False
     assert len(sandbox["calls"]) == 1
-
-
-# ---------------- 两阶段：先出姿态草图，再换皮 ----------------
-
-def test_poseswap_two_stage_calls_model_twice(eng, sandbox, tmp_path):
-    """两阶段模式：每帧两次模型调用（草图 + 换皮），且角色图排在前面。"""
-    pose_dir = tmp_path / "poses"
-    pose_dir.mkdir()
-    Image.new("RGB", (256, 256), (255, 255, 255)).save(pose_dir / "p0.png")
-    char = tmp_path / "char.png"
-    Image.new("RGBA", (256, 256), (40, 170, 200, 255)).save(char)
-
-    r = g.poseswap(eng, pose_images=[pose_dir / "p0.png"], ref_image=char,
-                   prompt="a cat knight", steps=4, width=256, height=256,
-                   matte=False, candidates=1, gate=False, two_stage=True,
-                   scope="t")
-    assert r["meta"]["two_stage"] is True
-    assert len(sandbox["calls"]) == 2, "两阶段应该每帧两次模型调用"
-    # 第二次调用：角色图在前、草图在后（顺序是有讲究的，见 PLAN §2.8）
-    reskin = sandbox["calls"][1]
-    assert isinstance(reskin["ref"], list) and len(reskin["ref"]) == 2
-
-
-def test_poseswap_two_stage_falls_back_without_ref(eng, sandbox, tmp_path):
-    """没有角色参考图时，两阶段无从谈起（没有身份可换），自动退回单阶段。"""
-    pose_dir = tmp_path / "poses"
-    pose_dir.mkdir()
-    Image.new("RGB", (256, 256), (255, 255, 255)).save(pose_dir / "p0.png")
-
-    r = g.poseswap(eng, pose_images=[pose_dir / "p0.png"],
-                   prompt="a cat knight", steps=4, width=256, height=256,
-                   matte=False, candidates=1, gate=False, two_stage=True,
-                   scope="t")
-    assert r["meta"]["two_stage"] is False
-    assert len(sandbox["calls"]) == 1
-
-
-# ---------------- 真 CFG：时间翻倍的那一半 ----------------
-#
-# 实测（2026-10-30）：768²/24 步的总耗时里 DiT 前向占 86%，而
-# `true_cfg_scale > 1 且给了负向词` 时管线每个 step 跑**两遍** transformer
-# （有条件 + 无条件）→ 24 步 = 48 次前向。关掉后 21.1s → 13.6s（-36%），
-# 6 个提示词的画质对照没有下降（assets/_cfg_ab/cmp.png）。
-
-def test_negative_prompt_only_sent_with_true_cfg(eng, monkeypatch):
-    """真 CFG 关着时**不能**传负向词——传了就会触发双次前向。
-
-    这里直接调 `_qwen_call`（而不是走 monkeypatch 掉的假实现），
-    用一个假管线把 kwargs 截下来看。
-    """
-    seen = {}
-
-    class FakePipe:
-        def __call__(self, **kw):
-            seen.clear()
-            seen.update(kw)
-
-            class _Out:
-                images = [Image.new("RGBA", (16, 16))]
-            return _Out()
-
-    monkeypatch.setattr(eng, "txt2img_pipe",
-                        lambda model="qwen-image-2.1": FakePipe())
-
-    g._qwen_call(eng, prompt="x", negative="no blur", width=256, height=256,
-                 steps=8, seed=1, cfg=1.0)
-    assert "negative_prompt" not in seen
-    assert seen["true_cfg_scale"] == 1.0
-
-    g._qwen_call(eng, prompt="x", negative="no blur", width=256, height=256,
-                 steps=8, seed=1, cfg=4.0)
-    assert seen["negative_prompt"] == "no blur"
-    assert seen["true_cfg_scale"] == 4.0
-
-
-def test_cfg_reaches_the_model_call(eng, sandbox):
-    """cfg 必须真的传到推理层——以前 txt2img 的 cfg 参数根本没往下传
-    （内部实现 `_qwen_txt2img` 的签名里压根没有 cfg，meta 里写死 4.0）。"""
-    r = g.txt2img(eng, prompt="a cat", width=256, height=256, steps=8,
-                  seed=1, preset="none", pixel=0, palette=0, scope="t")
-    assert r["meta"]["cfg"] == 1.0
-    assert r["meta"]["true_cfg"] is False
 
 
 # ---------------- 真 CFG：时间翻倍的那一半 ----------------

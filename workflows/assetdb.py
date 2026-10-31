@@ -73,9 +73,11 @@ class AssetIndex:
         self.dir = Path(assets_dir)
         self.jsonl = self.dir / "index.jsonl"
         self.db_path = self.dir / "index.db"
-        self._lock = threading.Lock()
+        # **必须 RLock**：`recent()` 持锁后会调 `sync()`，而 sync 自己也要拿锁。
+        # 普通 Lock 重复获取是直接死锁（表现为清单接口一直不返回、也不报错），
+        # 和 projectstore._WRITE_LOCK 踩的是同一个坑。
+        self._lock = threading.RLock()
         self._conn: Optional[sqlite3.Connection] = None
-        self._ready = False
 
     # ---------- 连接 ----------
 
@@ -168,7 +170,13 @@ class AssetIndex:
     # ---------- 查询 / 删除 ----------
 
     def recent(self, limit: int = 50, project: str = "") -> List[Dict[str, Any]]:
-        """最近 N 条。**先查库再验存在**——只对返回的这一页做 stat。"""
+        """最近 N 条。**先查库再验存在**——只对返回的这一页做 stat。
+
+        **整段在锁内**：`sqlite3.Connection` 是共享的（`check_same_thread=False`），
+        两个请求线程同时用会撞上 "Recursive use of cursors not allowed"，
+        或者在 sync 的 commit 中途读到半批数据。FastAPI 的同步端点本来就是
+        线程池并发，这条锁不是装饰。
+        """
         conn = self._db()
         if conn is None:
             return []
@@ -180,10 +188,11 @@ class AssetIndex:
             args.append(project)
         sql += " ORDER BY id DESC LIMIT ?"
         args.append(max(1, int(limit)))
-        try:
-            rows = conn.execute(sql, args).fetchall()
-        except sqlite3.Error:
-            return []
+        with self._lock:
+            try:
+                rows = conn.execute(sql, args).fetchall()
+            except sqlite3.Error:
+                return []
         out: List[Dict[str, Any]] = []
         for (meta,) in rows:
             try:
@@ -198,10 +207,20 @@ class AssetIndex:
         return out
 
     def forget(self, paths: Sequence[str]) -> int:
-        """删除若干产物对应的索引行（连带按目录前缀匹配）。"""
+        """删除若干产物对应的索引行（连带按目录前缀匹配）。
+
+        **前缀匹配要转义 LIKE 的通配符**：产物名里全是 `_`（`w1_x_0000.png`），
+        而 `_` 在 LIKE 里是「任意一个字符」——不转义的话删 `a_b.png` 会连带
+        删掉 `axb.png` 的索引行，前端清单里就出现「文件还在、条目没了」。
+        """
         conn = self._db()
         if conn is None or not paths:
             return 0
+
+        def prefix(p: str) -> str:
+            esc = p.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            return esc + "%"
+
         n = 0
         with self._lock:
             for p in paths:
@@ -210,8 +229,8 @@ class AssetIndex:
                         "DELETE FROM assets WHERE file=? OR raw=? OR sheet=?", (p, p, p))
                     n += cur.rowcount or 0
                     cur = conn.execute(
-                        "DELETE FROM assets WHERE file LIKE ? OR sheet LIKE ?",
-                        (p + "%", p + "%"))
+                        "DELETE FROM assets WHERE file LIKE ? ESCAPE '\\' "
+                        "OR sheet LIKE ? ESCAPE '\\'", (prefix(p), prefix(p)))
                     n += cur.rowcount or 0
                 except sqlite3.Error:
                     continue

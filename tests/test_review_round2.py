@@ -15,7 +15,6 @@ from __future__ import annotations
 import ast
 import inspect
 import io
-import os
 from pathlib import Path
 
 import numpy as np
@@ -232,7 +231,6 @@ def test_outpaint_extension_is_opaque():
     游戏里会看到背景从新扩展的区域透出来。
     """
     from workflows import outpaint as op
-    src = Image.new("RGBA", (40, 40), (10, 20, 30, 255))
     out = Image.new("RGBA", (80, 40), (200, 100, 50, 128))   # 半透明
     fixed = op._opaque_outside(out, (40, 40), (0, 0))
     a = np.asarray(fixed.getchannel("A"))

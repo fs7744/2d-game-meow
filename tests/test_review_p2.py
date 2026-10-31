@@ -4,10 +4,8 @@ from __future__ import annotations
 import json
 
 import numpy as np
-import pytest
 from PIL import Image
 
-from workflows import generate as g
 from workflows import matte as M
 from workflows import postprocess as pp
 from workflows.assetdb import AssetIndex
@@ -157,36 +155,24 @@ def test_append_line_is_single_write(tmp_path):
     assert p.read_bytes().endswith(b"\n")
 
 
-def test_sync_survives_corrupt_line(tmp_path):
-    """索引里混进坏字节时，只跳过坏行，不能让整个清单接口挂掉。
+def test_forget_does_not_treat_underscore_as_wildcard(tmp_path):
+    """删 `a_b.png` 不能连带删掉 `axb.png` 的索引行。
 
-    实测线上索引里出现过一段 2990 字节的 NUL（并发追加交错），
-    `json.loads(bytes)` 会把它误判成 UTF-32 并抛 UnicodeDecodeError——
-    那不是 JSONDecodeError，没兜住就是 500。
+    产物名里 `_` 遍地都是（`w1_x_0000.png`），而 LIKE 的 `_` 是「任意一个字符」。
+    不转义时前缀匹配 `a_b.png%` 等价于 `a?b.png%`：删一张图会把同目录下名字
+    只差一个字符的条目一起摘掉——文件还在，清单里却翻不到。
     """
-    (tmp_path / "index.jsonl").write_bytes(b"")
+    (tmp_path / "index.jsonl").write_text("", encoding="utf-8")
     ix = AssetIndex(tmp_path)
-    for name in ("a.png", "b.png"):
-        (tmp_path / name).write_bytes(b"x")
+    keep = tmp_path / "axb.png"
+    gone = tmp_path / "a_b.png"
+    for p in (keep, gone):
+        p.write_bytes(b"x")
+    with (tmp_path / "index.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(_entry(gone)) + "\n")
+        fh.write(json.dumps(_entry(keep)) + "\n")
+    assert ix.sync() == 2
 
-    blob = b""
-    blob += json.dumps(_entry(tmp_path / "a.png")).encode() + b"\n"
-    blob += b"\x00" * 2990 + b"\n"                     # 损坏行
-    blob += json.dumps(_entry(tmp_path / "b.png")).encode() + b"\n"
-    (tmp_path / "index.jsonl").write_bytes(blob)
-
-    assert ix.sync() == 2, "两条正常记录都要入索引"
-    assert len(ix.recent(limit=10)) == 2
-
-
-def test_append_line_is_single_write(tmp_path):
-    """追加一条只产生一行，且不破坏已有内容。"""
-    from workflows.assetdb import append_line
-
-    p = tmp_path / "index.jsonl"
-    append_line(p, {"file": "x", "scope": "default"})
-    append_line(p, {"file": "y", "scope": "default"})
-    lines = p.read_bytes().decode("utf-8").splitlines()
-    assert len(lines) == 2
-    assert all(json.loads(x)["scope"] == "default" for x in lines)
-    assert p.read_bytes().endswith(b"\n")
+    ix.forget([str(gone)])
+    left = [i["file"] for i in ix.recent(limit=10)]
+    assert left == [str(keep)], left

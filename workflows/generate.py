@@ -33,6 +33,7 @@ from . import outpaint as op_mod
 from . import swap as swap_mod
 from . import sheet as sheet_mod
 from . import paths
+from . import projectstore
 from .engine import DEFAULT_MODEL, Engine
 
 # 资产根目录**只在 paths 里定义一次**。以前这里和 app.py 各写一份
@@ -93,11 +94,11 @@ def scope_dir(scope: str = "") -> Path:
     scope 是前端的项目 id（p…），只保留 ASCII 字母数字与 -_，空则用 default。
     每个项目的 PNG / sidecar / raw / 帧序列 / 精灵图都在自己的目录里，
     项目之间互不可见（后端还有一层校验，见 img2img 的源图检查）。
+
+    **清洗规则不在本文件实现**：调 `projectstore.safe_scope`（全项目唯一一份），
+    否则产物和 `project.json` 会因两套规则算出不同目录名而分家。
     """
-    safe = "".join(
-        ch for ch in (scope or "") if ch.isascii() and (ch.isalnum() or ch in "-_")
-    )[:64] or "default"
-    d = PROJECTS_DIR / safe
+    d = PROJECTS_DIR / projectstore.safe_scope(scope)
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -1917,7 +1918,7 @@ def _qwen_sprite_swap(eng: Engine, *, frames: Sequence[tuple],
             prev = generated[-1] if generated else None
             dt = _timer()
 
-            def _gen(k: int, _cond=cond) -> Tuple[Image.Image, Dict[str, Any]]:
+            def _gen(k: int, _cond=cond) -> tuple[Image.Image, Dict[str, Any]]:
                 raw = _qwen_call(
                     eng, prompt=instr, negative=neg,
                     # 图序按引擎反转：VNCCS 是 [骨架, 角色]，旧路线是 [角色, 骨架]
@@ -1936,9 +1937,11 @@ def _qwen_sprite_swap(eng: Engine, *, frames: Sequence[tuple],
                         matte_info[kk] = info[kk]
                 return cut, {}
 
-            def _score(cut: Image.Image, _info: Dict[str, Any]) -> Dict[str, Any]:
-                return framescore.evaluate(cut, frame, char_orig, prev=prev,
-                                           area_ref=ref_area)
+            def _score(cut: Image.Image, _info: Dict[str, Any], *,
+                       _frame=frame, _prev=prev,
+                       _area=ref_area) -> Dict[str, Any]:
+                return framescore.evaluate(cut, _frame, char_orig, prev=_prev,
+                                           area_ref=_area)
 
             best_img, best_ev, _finfo, used, _nh = gate_mod.run_candidates(
                 generate=_gen, score=_score,
@@ -1975,7 +1978,7 @@ def _qwen_sprite_swap(eng: Engine, *, frames: Sequence[tuple],
         [c.convert("RGB") for c in cut],
         grid_snap=False, target_size=(cell_w, cell_h), colors=palette)
     outs: List[Image.Image] = []
-    for item, src in zip(refined["items"], cut):
+    for item, src in zip(refined["items"], cut, strict=True):
         im = item["image"]
         if src.mode == "RGBA":
             im = im.convert("RGBA")
@@ -2415,15 +2418,22 @@ def _qwen_poseswap(eng: Engine, *, pose_images: Sequence[Path], prompt: str,
                 refs: Any = ([*chars, cond] if chars else cond)
             spent = 0.0
 
-            def _gen(i: int) -> Tuple[Image.Image, Dict[str, Any]]:
-                """跑一个候选：出图 → 后处理 → 交给打分函数。"""
+            def _gen(i: int, *, _cond=cond, _refs=refs
+                     ) -> tuple[Image.Image, Dict[str, Any]]:
+                """跑一个候选：出图 → 后处理 → 交给打分函数。
+
+                `cond` / `refs` 用**默认参数绑定当下这一帧的值**：它们是循环变量，
+                闭包直接引用会指向"最后一次循环"的值（B023）。现在
+                `run_candidates` 是同步调用，不会串帧，但这种写法只要以后把
+                生成改成并行/延迟，就会静默拿错帧的条件图——绑定一次消除隐患。
+                """
                 nonlocal spent
                 dt = _timer()
                 sd = seed + i * gate_seed_step
                 if use_two_stage:
                     # 阶段 1：只有骨架 + 文字（没人跟它抢姿态）
                     draft = _qwen_call(
-                        eng, prompt=solo_instr, negative=neg, ref_image=cond,
+                        eng, prompt=solo_instr, negative=neg, ref_image=_cond,
                         width=width, height=height, steps=steps, cfg=cfg,
                         seed=sd, model=model, label="w4-draft",
                         # 两次调用共用同一组 adapter：不要每步都挂/卸一次 Lightning
@@ -2437,7 +2447,7 @@ def _qwen_poseswap(eng: Engine, *, pose_images: Sequence[Path], prompt: str,
                         fast_lora=False)
                 else:
                     raw = _qwen_call(
-                        eng, prompt=instr, negative=neg, ref_image=refs,
+                        eng, prompt=instr, negative=neg, ref_image=_refs,
                         width=width, height=height, steps=steps, cfg=cfg,
                         seed=sd, model=model, label="w4",
                         output_resolution=max(width, height),
@@ -2455,9 +2465,10 @@ def _qwen_poseswap(eng: Engine, *, pose_images: Sequence[Path], prompt: str,
                 return img.convert("RGBA"), {"gate": gate_img.convert("RGBA"),
                                              "subjects": _subj}
 
-            def _score(img: Image.Image, info: Dict[str, Any]) -> Dict[str, Any]:
+            def _score(img: Image.Image, info: Dict[str, Any], *,
+                       _prev=prev_gate) -> Dict[str, Any]:
                 ev = quality.evaluate(info["gate"].convert("RGBA"), extractor,
-                                      prev=prev_gate,
+                                      prev=_prev,
                                       min_points=gate_min_points)
                 # **单主体判据**：Qwen 偶尔会把头画丢、把帽子画成浮空的一块。
                 # 这种帧 DWPose 照样能检出 16 个关节（躯干还在），闸门放它过去；

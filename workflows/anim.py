@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import zipfile
 from pathlib import Path
-from typing import Iterable, List, Sequence
+from typing import Sequence
 
 from PIL import Image
 
@@ -109,7 +109,7 @@ def export_godot(frames: Sequence[Image.Image], out_dir: str | Path, *, anim_nam
     sheet_path = out_dir / f"{safe}_sheet.png"
     sheet = pp.pack_sheet(frames, sheet_path, cols=cols)
 
-    rel_dir = f"anim"          # Godot 内建议放在 res://anim/ 下
+    rel_dir = "anim"          # Godot 内建议放在 res://anim/ 下
     sub_res = []
     for i in range(len(frames)):
         x = (i % sheet["cols"]) * sheet["cell_w"]

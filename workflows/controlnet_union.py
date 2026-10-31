@@ -104,6 +104,7 @@ base transformer fp8 走 cpu offload，control 分支 bf16 常驻 7.05GB。
 from __future__ import annotations
 
 import torch
+from PIL import Image
 from torch import nn
 
 #: 注入点：每 2 个 transformer block 注入一次（32 层 → 16 个）
@@ -275,9 +276,9 @@ def load_branch(path: str, *, dtype=torch.bfloat16,
     return branch.to(device=device, dtype=dtype).eval()
 
 
-def encoder_condition(*, control: "Image.Image | None" = None,
-                      mask: "Image.Image | None" = None,
-                      masked_image: "Image.Image | None" = None,
+def encoder_condition(*, control: Image.Image | None = None,
+                      mask: Image.Image | None = None,
+                      masked_image: Image.Image | None = None,
                       vae, size: tuple[int, int],
                       device, dtype=torch.bfloat16) -> torch.Tensor:
     """把条件图拼成 control 分支要的 129 通道 latent。
@@ -293,12 +294,11 @@ def encoder_condition(*, control: "Image.Image | None" = None,
 
     w, h = size
 
-    def _encode(img: "Image.Image | None") -> torch.Tensor:
+    def _encode(img: Image.Image | None) -> torch.Tensor:
         if img is None:
             # 官方语义是 zero-pad：填充**归一化空间**的 0（不是像素空间的 0）
             return torch.zeros((1, 64, h // 16, w // 16), device=device, dtype=dtype)
-        im = img.convert("RGBA").resize(
-            (w, h), __import__("PIL.Image", fromlist=["Image"]).LANCZOS)
+        im = img.convert("RGBA").resize((w, h), Image.LANCZOS)
         t = torch.from_numpy(np.array(im, copy=True)).float() / 127.5 - 1.0
         t = t.permute(2, 0, 1).unsqueeze(0).unsqueeze(2).to(device, dtype)
         with torch.no_grad():

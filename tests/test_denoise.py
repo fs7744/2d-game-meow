@@ -1,9 +1,7 @@
 """去白边（strip_fringe）与去孤立点（clean_isolated）。"""
 from __future__ import annotations
 
-import cv2
 import numpy as np
-import pytest
 from PIL import Image
 
 from workflows import matte as M

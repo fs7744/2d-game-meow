@@ -55,19 +55,30 @@ class ProjectConflict(Exception):
     """
 
 
-def safe_scope(scope: str) -> str:
-    """项目 id → 安全的目录名。
+def clean_scope(scope: str) -> str:
+    """项目 id → 安全的目录名片段（**可能返回空串**）。
 
-    与 `generate.scope_dir` 的清洗规则**必须一致**：两边算出不同的目录名，
-    产物和定义就散在两个地方了。
+    与 `safe_scope` 的区别只在「空输入怎么办」：
+      - 产物/上传目录：空就是"没指定项目"，退回 `default`；
+      - 导入/模板：id 必须明确，空就是非法，调用方要报错而不是静默落到
+        `default` 目录里（否则所有非法 id 会挤进同一个目录）。
 
     清洗掉一切非 ASCII 字母数字与 `-_` 的字符，顺带挡住路径穿越
-    （`../` 里的 `.` 和 `/` 会被去掉，`..` 变成空串 → 用 default）。
+    （`../` 里的 `.` 和 `/` 会被去掉）。
     """
-    s = "".join(
+    return "".join(
         ch for ch in (scope or "") if ch.isascii() and (ch.isalnum() or ch in "-_")
     )[:64]
-    return s or "default"
+
+
+def safe_scope(scope: str) -> str:
+    """项目 id → 安全的目录名（空输入退回 `default`）。
+
+    **全项目只有这一份实现**：`generate.scope_dir`、`projectio`、`app.py` 的
+    上传/蒙版端点都调这里。以前四处各抄一份，注释反复强调「必须一致」——
+    一处改了漏掉另一处，产物和项目定义就散在两个目录里。
+    """
+    return clean_scope(scope) or "default"
 
 
 def project_dir(scope: str) -> Path:

@@ -6,7 +6,6 @@ OpenPose 的 ControlNet 只认「彩色肢体 + 关节圆点」的画法，颜�
 from __future__ import annotations
 
 import math
-from pathlib import Path
 
 from PIL import Image, ImageDraw
 

@@ -19,7 +19,7 @@
 """
 from __future__ import annotations
 
-from typing import List, Optional, Sequence, Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 from PIL import Image, ImageFilter
