@@ -27,10 +27,36 @@ sys.path.insert(0, str(ROOT))
 TEST_OUT = ROOT / "tests" / "_out"
 os.environ["MEOW_ASSETS_DIR"] = str(TEST_OUT / "assets")
 
+#: **模板根也要隔离**。模板以前漏了这一步：`templates/*.mproj` 是跨项目共享的
+#: 用户资源，测试里的 `save_template` 直接往里写，于是跑一轮就在用户的模板列表里
+#: 多出 `API_34266.mproj` / `t_io_d4cdd081.mproj` 这类垃圾（名字带随机后缀，
+#: 用户根本分不清哪些是自己的）。实盘检查过一次：`templates/` 里 5 个文件全是
+#: 测试残留，没有一个是用户建的。
+os.environ["MEOW_TEMPLATES_DIR"] = str(TEST_OUT / "templates")
+
 from workflows import paths                                    # noqa: E402
 
 #: 资产根（测试期间指向 tests/_out/assets）
 ASSETS = paths.ASSETS
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _assert_isolated():
+    """**开场先确认真的隔离了**，否则一条测试都不许跑。
+
+    为什么要有这条：`paths.ASSETS` 是 import 时求值的常量，隔离完全依赖
+    「conftest 早于所有模块 import」这个时序。哪天有人在 `conftest` 之前
+    import 了 `workflows`（比如加个 `conftest` 上层的 `conftest.py`、
+    或把 `paths` 提到环境变量赋值前），隔离就静默失效——测试照样全绿，
+    但产物全落进用户的 `assets/`，而且没人会发现。
+    这里把它变成**硬失败**：跑不动比悄悄写脏好。
+    """
+    out = TEST_OUT.resolve()
+    for name, p in (("MEOW_ASSETS_DIR", paths.ASSETS),
+                    ("MEOW_TEMPLATES_DIR", paths.TEMPLATES_DIR)):
+        assert out in Path(p).resolve().parents, (
+            f"{name} 没有指向 tests/_out（实际 {p}）——测试会写脏用户的真实目录。"
+            f"检查 conftest 里两个环境变量是否在 import workflows 之前设置。")
 
 
 @pytest.fixture(scope="session")

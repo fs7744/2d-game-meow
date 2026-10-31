@@ -203,11 +203,11 @@ RTX 4090 上 768×768 / 16 步约 **10 秒**。第一次要加载模型（1~2 �
 ├── web/                     前端（React + Vite，零 UI 库）
 │   ├── src/                 源码
 │   ├── public/icon.png      应用图标
-│   └── smoke.mjs            无浏览器冒烟测试（345 项）
+│   └── smoke.mjs            无浏览器冒烟测试（351 项）
 ├── models/                  模型权重（不提交到 git）
 ├── assets/                  你的项目和产物
 ├── templates/               项目模板（.mproj）
-├── tests/                   Python 测试（345 条）
+├── tests/                   Python 测试（351 条）
 └── tools/                   实验与分析脚本（基准测试、验证）
 ```
 
@@ -221,9 +221,14 @@ RTX 4090 上 768×768 / 16 步约 **10 秒**。第一次要加载模型（1~2 �
   ```bash
   pytest tests/test_api.py tests/test_projects.py -q      # 接口与项目
   pytest tests/test_matte.py tests/test_pixelfy.py -q     # 抠图与像素化
-  cd web && npm run smoke                                 # 前端（345 项，不用显卡）
+  cd web && npm run smoke                                 # 前端（351 项，不用显卡）
   ```
   全量测试会加载两次模型，约 3 分钟；按改动挑子集跑更快（对照表在 changelog 的「测试」章节）。
+  **测试不会碰你的项目和模板**：产物、上传、模板全落在 `tests/_out/` 下，
+  `conftest.py` 里有一条看守夹具，万一哪天隔离失效会直接报错而不是悄悄写脏。
+- **改完界面想自己看一眼**：`python tools/serve_sandbox.py` 起一个沙盒实例
+  （端口 8123，资产根在 `tests/_out/ui/`）。别对着 `start.bat` 启动的实例做试验——
+  那边是你的真实项目，前端在「一个项目都没有」时会自动建一个占位项目。
 
 ---
 

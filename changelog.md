@@ -856,7 +856,7 @@ start.bat                   # Windows 双击或命令行
 cd web && npm ci && npm run build     # 构建
 cd .. && python app.py                # FastAPI 同时托管 dist 与 API → http://127.0.0.1:8000
 cd web && npm run dev                 # 或开发模式（:5173，代理到 8000）
-npm run smoke                         # 无浏览器渲染冒烟（jsdom，345 项断言）
+npm run smoke                         # 无浏览器渲染冒烟（jsdom，351 项断言）
 ```
 
 > `start.bat` 刻意保持**纯 ASCII**：cmd.exe 按 OEM 代码页解析 .bat，中文注释会切断命令行
@@ -1045,8 +1045,11 @@ assets/                       项目资产（要交付的东西）
 
 tests/_out/                   测试与验证产物（开发过程，不入库）
 ├── assets/                   pytest 期间的资产根（见下）
+├── templates/                pytest 期间的模板根（见下）
+├── ui/                       沙盒实例的资产根（tools/serve_sandbox.py）
 ├── legacy_assets/            历史上散在 assets/ 根下的调试图
 ├── legacy_projects/          历史上各项目目录里的测试产物
+├── quarantine_templates/     历史上写进真 templates/ 的测试模板
 └── _*/                       各个验证脚本 / 实验脚本的输出
 ```
 
@@ -1054,9 +1057,35 @@ tests/_out/                   测试与验证产物（开发过程，不入库�
 `_xxx_compare.png` 之后，资产清单被淹没、真正交付的图翻不到，删项目时还会
 连带删掉。新人打开 `assets/` 也不知道哪些是能用的。
 
-**pytest 期间的资产根是 `tests/_out/assets`**，不是仓库的 `assets/`：
-`tests/conftest.py` 在 collection 阶段就设好 `MEOW_ASSETS_DIR`，
-`workflows/paths.py` 据此解析路径。这样跑一轮测试，仓库的 `assets/` 一点不脏。
+**pytest 期间资产根和模板根都改到 `tests/_out/` 下**，不是仓库的 `assets/` /
+`templates/`：`tests/conftest.py` 在 collection 阶段就设好 `MEOW_ASSETS_DIR` 与
+`MEOW_TEMPLATES_DIR`，`workflows/paths.py` 据此解析路径。这样跑一轮测试，
+仓库的 `assets/` 与 `templates/` 一点不脏。
+
+**模板根漏过一次，代价是用户模板列表里多出 5 个垃圾文件**：早先 conftest 只隔离了
+资产根，`save_template()` 就直接往真 `templates/` 写。`API_34266.mproj` /
+`t_io_d4cdd081.mproj` 这种名字带随机后缀，用户根本分不清哪些是自己存的（实盘
+检查过：那几个文件全是 `test_projects.py` 的残留，没有一个是用户建的）。
+
+现在 `conftest.py` 有一条 **autouse 的看守夹具**：开场先断言两个目录都在
+`tests/_out` 下，否则**一条测试都不许跑**。理由是隔离完全依赖「conftest 早于所有
+模块 import」这个时序，一旦有人把它打破（新增上层 conftest、把 import 提到环境变量
+赋值前），隔离就静默失效——测试照样全绿，产物全落进用户目录，没人会发现。
+
+**界面验证必须用沙盒实例**：
+
+```bash
+python tools/serve_sandbox.py          # 资产根/模板根指向 tests/_out/ui/
+```
+
+**为什么不能直接 `uvicorn app:app` 做截图验证**：前端首屏逻辑是「一个项目都没有
+就新建一个」，于是无痕的 headless 浏览器每连一次，就在用户的项目列表里多一个空
+项目，还会把 `workspace.json` 的 `current` 指过去——用户下次打开发现画布被切走了。
+实测在 20:58 / 21:05 各撞过一次（其中一个空目录残留到现在才清）。
+
+**为什么必须走脚本而不是命令行前缀**：`paths.ASSETS` 是 **import 时求值**的常量，
+`uvicorn app:app` 会在导入 `app` 时连锁导入 `workflows`，环境变量必须在那之前设好。
+脚本能保证顺序；手写前缀容易漏设置其中一个（比如只设 ASSETS 没设 TEMPLATES）。
 
 路径解析只有一处定义（`workflows/paths.py`），可用环境变量覆盖：
 
@@ -1676,7 +1705,7 @@ test_stability 的 free 与泄漏、test_matte 的缓存素材）需要 GPU。
 
 | 文件 | 覆盖 | 用例数 |
 |---|---|---|
-| `tests/test_qwen_workflows.py` | **十个工作流的能力表与「近似」标记**、**局部重绘选区外逐点不变**、**output_resolution 真的对齐**、**逐帧尺度归一**、**透明底 alpha 不被白底吃掉**、**Qwen 路径不许碰已删的 SD 管线**、**非人形主体不补提**、**两阶段每帧调两次模型** | 36 |
+| `tests/test_qwen_workflows.py` | **十个工作流的能力表与「近似」标记**、**局部重绘选区外逐点不变**、**output_resolution 真的对齐**、**逐帧尺度归一**、**透明底 alpha 不被白底吃掉**、**Qwen 路径不许碰已删的 SD 管线**、**非人形主体不补提**、**两阶段每帧调两次模型** | 37 |
 | `tests/test_gate.py` | 公共闸门组件（候选怎么跑、同分取第一个、非人形不补提） | 6 |
 | `tests/test_e2e_qwen.py` | **十个工作流各真跑一次模型**（`-m slow`，约 80s） | 10 |
 | `tests/test_matte.py` | 背景估计、连通域不误抠内部同色区、去白边、alpha 二值、**u2net 抠空自动回退**、**已有 alpha 复用（IoU 1.000）**、**雾状 alpha 仍重抠**、**补内部洞但不动通到边界的缺口** | 18 |
@@ -1691,7 +1720,7 @@ test_stability 的 free 与泄漏、test_matte 的缓存素材）需要 GPU。
 | `tests/test_refcond.py` | 轮廓条件、auto 降级、强制骨架报错、换皮 | 18 |
 | `tests/test_refprep.py` | 参考图预处理、帧级评分 | 19 |
 | `tests/test_quality.py` | 前景占比/质心/漂移/贴边、无模型时「无法判定」 | 11 |
-| `tests/test_io_paths.py` | 视频抽帧、GIF、切片 CLI、非 8 倍数尺寸、环境自检 | 10 |
+| `tests/test_io_paths.py` | 视频抽帧、GIF、切片 CLI、非 8 倍数尺寸、环境自检、**测试目录不越界** | 12 |
 | `tests/test_presets.py` | 契约拼接与优先级、**长提示词原样送达（一个字都不截）**、后缀保持短 | 8 |
 | `tests/test_repaint.py` | 选区外逐点不变、色彩校正、色板吸附、RGBA 进 VAE 会炸 | 16 |
 | `tests/test_stability.py` | 连续出图显存不涨、**free() 清空缓存**、跨进程同 seed（`MEOW_SLOW=1` 手动跑） | 5 |
@@ -1702,7 +1731,7 @@ test_stability 的 free 与泄漏、test_matte 的缓存素材）需要 GPU。
 | `tests/test_review_p2.py` | 抠图后端选择、网格对齐、资产索引增量、**删条目不能误伤同名近似文件** | 10 |
 | `tests/test_review_round2.py` | **LoRA 双槽位（临时挂载不顶掉用户的）**、**路径穿越（`assets2/` 不算 `assets/`）**、**meta 真实性（记的步数是实际执行的）**、重复字典键 | 12 |
 
-合计 **345 条**（`pytest --collect-only` 实测；`-m slow` 的 `test_e2e_qwen`
+合计 **351 条**（`pytest --collect-only` 实测；`-m slow` 的 `test_e2e_qwen`
 10 条也在内，跑起来才真加载模型）。改测试后顺手核一遍这张表——
 数字对不上说明有文件被整段删掉或重复定义覆盖了。
 

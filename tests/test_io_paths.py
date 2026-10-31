@@ -179,3 +179,49 @@ def test_apply_lora_missing_file_raises(eng, tmp_path):
     pipe = eng.txt2img_pipe()
     with pytest.raises(Exception):
         eng.apply_lora(pipe, tmp_path / "nope.safetensors")
+
+
+# ---------------- 测试不能写脏用户的目录 ----------------
+#
+# 背景：这块踩过两次坑，都不是"报错"，而是**静默写进用户的真实目录**：
+#   1. `templates/` 漏了隔离 → 用户的模板列表里多出 5 个 `API_34266.mproj`
+#      这类随机后缀的垃圾（实盘检查过，全是 `test_projects.py` 的残留）；
+#   2. 拿真实 `assets/` 跑 headless 浏览器做界面验证 → 前端首屏"没有项目就新建
+#      一个"，于是每连一次就多一个空项目，还会改掉 `workspace.json` 的 current。
+# 所以这里把「测试/验证的写入范围」钉成不变量。
+
+def test_test_dirs_are_outside_user_dirs():
+    """pytest 期间的资产根与模板根都必须在 `tests/_out/` 下。
+
+    这条和 `conftest.py` 里的 autouse 看守夹具是双保险：夹具在 session 开场拦住
+    "全都跑完才发现写脏"，这条在静态上把契约写清楚（改坏了会看到具体断言）。
+    """
+    from workflows import paths
+
+    out = (ROOT / "tests" / "_out").resolve()
+    for name, p in (("ASSETS", paths.ASSETS), ("TEMPLATES_DIR", paths.TEMPLATES_DIR)):
+        p = Path(p).resolve()
+        assert out in p.parents, f"paths.{name} = {p}，不在 {out} 之下"
+    # 顺便钉住"没指向用户目录"这个更直白的表述
+    assert Path(paths.ASSETS).resolve() != (ROOT / "assets").resolve()
+    assert Path(paths.TEMPLATES_DIR).resolve() != (ROOT / "templates").resolve()
+
+
+def test_sandbox_server_points_at_tests_out():
+    """界面验证用的沙盒实例必须指向 `tests/_out/ui/`，不是真 assets。
+
+    只验证 `sandbox_dirs()` 算出来的两个路径——**不启动服务、也不改本进程环境变量**
+    （改了会影响后续用例：`paths` 已经在 import 时求值，但子进程会读到）。
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "serve_sandbox", ROOT / "tools" / "serve_sandbox.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    dirs = mod.sandbox_dirs()
+    assert set(dirs) == {"MEOW_ASSETS_DIR", "MEOW_TEMPLATES_DIR"}
+    ui = (ROOT / "tests" / "_out" / "ui").resolve()
+    for key, val in dirs.items():
+        assert ui in Path(val).resolve().parents, f"{key} = {val}，不在 {ui} 之下"
