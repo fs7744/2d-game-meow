@@ -41,9 +41,16 @@ def test_models_endpoint(client, eng):
 
     caps = body["caps"][DEFAULT_MODEL]
     assert caps["transparent"] is True and caps["instruction"] is True
-    assert caps["lora"] is False                      # Qwen 不吃 SD LoRA
-    assert len(caps["workflows"]) == 10
-    assert set(caps["approx"]) == {"inpaint", "ai_repaint", "poseswap", "sprite_swap"}
+    # **lora 现在是 True**：Qwen 吃**自己的** LoRA（fp8 量化后也能挂，实测只慢
+    # 1.1s）。以前这里是 False——那是"Qwen 不吃 SD LoRA"时代的断言，
+    # 2026-10-30 跑通 Qwen LoRA 后就该改了，一直没改。
+    assert caps["lora"] is True
+    # 14 个工作流（2026-10-30/31 加了 outpaint / outfit_swap / face_swap /
+    # vnccs_pose）
+    assert len(caps["workflows"]) == 14
+    # 近似集合只剩两个：inpaint / ai_repaint 已走**真蒙版路径**
+    # （模型看得见蒙版），不再是近似实现
+    assert set(caps["approx"]) == {"poseswap", "sprite_swap"}
     # 已经没有 refiner 了：前端不该再看到这个开关
     assert body["refiner"] is False
 

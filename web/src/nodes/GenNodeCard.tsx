@@ -385,6 +385,11 @@ const WORKFLOW_OF: Record<string, string> = {
   poseclone: 'pose_clone',
   spriteswap: 'sprite_swap',
   topixel: 'topixel',
+  // 这三个是 2026-10-30/31 加的，漏了会让它们的 `wf` 为空 →
+  // 底模下拉整块不渲染、isApprox 判断也失效
+  outpaint: 'outpaint',
+  outfit: 'outfit_swap',
+  faceswap: 'face_swap',
 }
 
 /** 底模下拉里的短名：目录名（qwen-image-2.1）太长，撑爆 260px 的卡片 */

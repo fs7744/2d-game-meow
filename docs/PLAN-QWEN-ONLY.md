@@ -941,6 +941,84 @@ node skeleton-preview.mjs 行走,跑步,张手 0,45,90,180     # → assets/_ske
   "file:///D:/code/2d-game-meow/assets/_skel_preview.svg"
 ```
 
+### 2.16e 全项目 review（2026-10-31 上午）
+
+对 9600 行后端 + 6400 行前端做了一轮全面审查（静态 + 实测 + 回归测试）。
+找到并修掉的问题按严重程度：
+
+#### 高危（会毁掉产物或越权）
+
+1. **扩图的 Outpaint LoRA 永久留在共享管线里**。`outpaint()` 挂完 LoRA
+   从不卸载，而 `pipe` 是被缓存复用的同一个对象 → 跑一次扩图之后，
+   **所有**后续生成都带着「灰色 padding = 待补全」的语义出图，而那些工作流的
+   meta 还写着 `lora: None`。已加 try/finally 卸载。
+2. **工作流临时挂的 LoRA 会顶掉用户挂的**。`apply_loras` 是「先全卸再挂」的
+   独占式，而 `/loras/apply` 设计成状态式（一直生效）。实测：用户挂 AnyAngle →
+   跑一次快速模式 → AnyAngle 被静默卸载。
+   **已改成双槽位**：`user`（用户挂的）+ `temp`（工作流临时用），合并加载。
+3. **路径穿越**：`str(target).startswith(str(ASSETS))` 是**字符串前缀**比较，
+   `assets2/x.png`、`assets_BACKUP/x.png` 都能通过 → `DELETE /assets` 能删到
+   assets 目录之外的文件，`GET /files/../assets2/x.png` 能读外部文件。
+   已换成 `Path.is_relative_to`（按路径段比较）。
+4. **meta 里的 `true_cfg` 是重复键**：w1 里写了两次（先 float 后 bool），
+   Python 静默取最后一个；w2 又只有 float → 同一字段两种类型。已统一成 bool。
+
+#### 中危（meta 说的和实际做的不一样，产线判据会算错）
+
+5. `steps` 记的是**请求值**，实际管线是 `max(8, min(steps, 60))`。请求 4 步
+   实际跑 8 步，meta 记 4。已加 `_clamp_steps`。
+6. **快速模式在三条路上根本不生效**（真蒙版 inpaint、VNCCS、扩图——它们要独占
+   LoRA 槽位或不走 `_qwen_call`），meta 却写 `fast_lora: lightning`。
+   已加 `fast_applied` 字段区分「全局开关开着」与「本次真的生效」。
+7. **负向词**：`_qwen_call` 只在 cfg>1 时才传负向词，meta 却无条件记一份。
+   已改为 cfg<=1 时记 None，并加 `negative_applied`。
+8. `matte` 记的是请求值，实际执行的是 `matte and not transparent`。
+9. w2/w3/w4/wss/wbg/wpx 的 meta **缺尺寸或记的是生成画布而非精灵图**。
+   已统一补 `width/height` 与 `sheet_size`。
+10. **wss 的候选数与补提次数被写死丢弃**（前端调了没用，但参数在签名里，
+    所以连 `params_ignored` 都不记）。已透传。
+11. **w4 的旧路线只读第一张角色图**，前端传的多图被静默丢掉。已支持多图。
+12. **扩图的扩展区域沿用模型给的软 alpha**（实测 30.6% 半透明像素）。
+    扩图补的是场景，那层 alpha 是噪声 → 游戏里背景会透出来。
+    已强制扩展区不透明（2.9%）。
+
+#### 低危
+
+13. `WORKFLOW_OF` 漏了 outpaint/outfit/faceswap → 这三个节点的底模下拉
+    整块不渲染。
+14. `submitToPixel` 的默认底模名是**已删除的** `sdxl-anime`。
+15. topixel 不透传画布尺寸 → 后端一直按 1024² 跑（45s 而非 25s）。
+16. 换装/换脸前端传死 width=768 → 非方形基底图的人物被压扁
+    （与函数语义「跟随基底图」相反）。已改为不传。
+17. `_parse_color` 对非法输入静默返回白色，而 meta 记的是原始字符串。
+18. `poseswap` 的默认 seed 是固定值（其它工作流都是随机）。
+19. 14 个工作流里有 5 个没调 `eng.require()`（能力表一旦加第二个架构就会绕过）。
+20. `app._run` 的签名过滤没排除第一个位置参数 `eng` → 客户端传 `eng=123`
+    会报「got multiple values」。
+21. `peak_vram_gb` 首轮多算约 10GB（模型加载在测量窗口内）→ 现在加载完就重置。
+
+#### 新增的回归测试
+
+`tests/test_review_round2.py`（12 条）钉住这轮的结构性修改：LoRA 双槽位、
+路径穿越、meta 真实性、重复键、颜色校验、require 覆盖、扩图 alpha。
+
+#### 新增的质量实测工具
+
+`tools/verify_review_quality.py`：跑 w1/w2/w3/wbg/wpx/wout 六条工作流，
+检查 meta 尺寸与落盘文件是否一致、主体占比是否在 5~60%、alpha 是否干净、
+有无纯色/全黑，并**检查跑完扩图后 LoRA 有没有泄漏**。
+
+实测结果（768²，RTX 4090）：
+
+| 工作流 | 尺寸 | 主体占比 | 半透明 | 判定 |
+|---|---|---|---|---|
+| w1 文生图（透明底） | 768×768 | 29.3% | 0.8% | OK |
+| w2 图生图 | 768×768 | 18.2% | 0.0% | OK |
+| w3 局部重绘 | 768×768 | 16.9% | 4.4% | OK |
+| wbg 抠图 | 768×768 | 16.9% | 4.4% | OK |
+| wpx 像素化 | 64×64 | 16.8% | 0.0% | OK |
+| wout 扩图 | 1152×768 | 44.6% | 2.9% | OK（修前 30.6%） |
+
 ### 2.16 生态侦察：HF 上 Qwen-Image-2.1 的可用资产
 
 之前记的「HF 下载被代理挡住」**不成立**：本机有可用代理

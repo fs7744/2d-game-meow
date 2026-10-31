@@ -48,21 +48,40 @@ FAST_LORA = "qwen21_lightning"
 FAST_STEPS = 8
 
 
-def _fast_meta(eng: Engine) -> Dict[str, Any]:
-    """快速模式的状态记进 meta（产线判据要看这个）。"""
+def _fast_meta(eng: Engine, applied: bool = True) -> Dict[str, Any]:
+    """快速模式的状态记进 meta（产线判据要看这个）。
+
+    `applied`：**本次调用是否真的走了少步分支**。有几条路不走——
+    真蒙版 inpaint（`qwen_mask.masked_inpaint` 自己跑管线，不挂 Lightning）、
+    VNCCS（LoRA 槽位归它自己）、扩图（挂的是 Outpaint LoRA）。
+    那些路即使全局开关开着也是满步数，meta 不写清楚就会把成本算错。
+    """
     on = bool(getattr(eng, "fast_mode", False))
-    return {"fast_mode": on, "fast_lora": FAST_LORA if on else None}
+    used = bool(on and applied)
+    return {"fast_mode": on, "fast_applied": used,
+            "fast_lora": FAST_LORA if used else None}
 
 
-def _eff_steps(eng: Engine, steps: int) -> int:
-    """快速模式下的**实际执行**步数（非请求值）。
+def _clamp_steps(steps: int) -> int:
+    """管线侧的步数钳制。
+
+    `_qwen_call` 与 `qwen_mask.masked_inpaint` 都是 `max(8, min(steps, 60))`：
+    低于 8 步 Qwen 出糊块，高于 60 步收益趋零。meta 必须记**钳制后**的值。
+    """
+    return max(8, min(int(steps), 60))
+
+
+def _eff_steps(eng: Engine, steps: int, fast: bool = True) -> int:
+    """**实际执行**步数（非请求值）。
 
     meta 里必须记这个而不是用户请求的步数——产线判据（每可用帧成本）看的是
-    真正跑了多少步。快速模式把步数压到 8，但 meta 记 24 会让人算错成本。
+    真正跑了多少步。两个地方会改它：管线的钳制（[8, 60]）与快速模式（压到 8）。
+    `fast=False` 用于**不走**少步分支的路（见 `_fast_meta`）。
     """
-    if getattr(eng, "fast_mode", False):
-        return min(int(steps), FAST_STEPS)
-    return int(steps)
+    n = _clamp_steps(steps)
+    if fast and getattr(eng, "fast_mode", False):
+        n = min(n, FAST_STEPS)
+    return n
 
 
 def scope_dir(scope: str = "") -> Path:
@@ -328,9 +347,16 @@ def _qwen_call(eng: Engine, *, prompt: str, negative: str, width: int, height: i
     # `fast_lora=False` 让调用方**独占 LoRA 槽位**：VNCCS 姿态迁移要挂自己的
     # LoRA，被这里再挂一个 Lightning 会把它顶掉（两个 adapter 同时生效也会
     # 让姿态遵循度崩掉）。
-    if fast_lora and (fast or getattr(eng, "fast_mode", False)):
-        eng.apply_loras(pipe, [{"name": FAST_LORA, "scale": 1.0}])
-        steps = min(int(steps), FAST_STEPS)
+    if fast_lora:
+        if fast or getattr(eng, "fast_mode", False):
+            # Lightning 走**临时槽**：用户挂的 LoRA 不会被顶掉
+            eng.apply_loras(pipe, [{"name": FAST_LORA, "scale": 1.0}],
+                            scope="temp")
+            steps = min(int(steps), FAST_STEPS)
+        else:
+            # 快速模式关了 → 顺手清掉临时槽里残留的 Lightning
+            # （清空后如果用户还挂着别的 LoRA，_sync_loras 会重新挂回它们）
+            eng.unload_loras(pipe, scope="temp")
     gen = torch.Generator("cuda").manual_seed(int(seed))
     kw: Dict[str, Any] = dict(
         prompt=full,
@@ -518,20 +544,27 @@ def _qwen_txt2img(eng: Engine, *, prompt: str, negative: Optional[str],
     img2, edge, subjects = _postprocess(
         img, eng, matte=(matte and not transparent), matte_backend=matte_backend,
         denoise=denoise, pixel=pixel, palette=palette, clean_iso=clean_iso, info=info)
+    # 真 CFG（cfg>1）时管线才会收到负向词；cfg=1 时它一次都没传过，
+    # meta 里再写一份负向词会让人以为它生效了。
+    neg_used = (negative or QWEN_NEG) if float(cfg) > 1.0 else None
     return _save(img2, _stamp(tag), "txt2img", {
         "workflow": "w1", "prompt": _qwen_prompt(prompt, transparent),
-        "negative": negative or QWEN_NEG,
+        "negative": neg_used,
+        "negative_applied": bool(float(cfg) > 1.0),
         "width": width, "height": height, "steps": _eff_steps(eng, steps), **_fast_meta(eng),
-        "cfg": float(cfg), "true_cfg": float(cfg), "seed": seed,
+        "cfg": float(cfg),
+        # 真 CFG 开着时每个 step 跑两遍 transformer（时间翻倍）
+        "true_cfg": bool(float(cfg) > 1.0),
+        "seed": seed,
         "lora": None, "lora_scale": None,
-        "pixel_block": pixel, "palette": palette, "matte": matte,
+        "pixel_block": pixel, "palette": palette,
+        # 透明底时抠图会被跳过（原始 alpha 直接复用），meta 要记**实际**值
+        "matte": bool(matte and not transparent),
         "matte_backend": matte_backend, "denoise": denoise, "clean_iso": clean_iso,
         "matte_used": info.get("backend"), "matte_fallback": info.get("fallback"),
         "alpha_reused": info.get("alpha_reused"),
         "prompt_bg_stripped": stripped or None,
         "edge_touch": edge, "model": model, "clip_skip": None,
-        # 真 CFG 开着时每个 step 跑两遍 transformer（时间翻倍）
-        "true_cfg": bool(float(cfg) > 1.0),
         "subjects": subjects, "transparent": transparent,
         "hires": None, "distill": None, "refiner": False,
         "seconds": seconds,
@@ -554,6 +587,7 @@ def txt2img(eng: Engine, *, prompt: str, negative: Optional[str] = None,
     时代的开关，Qwen 一个都不吃（不同主干、不同文本编码器、没有精修器）。
     前端如果还传这些键，`app._run` 会按签名过滤掉并记进 `meta.params_ignored`。
     """
+    eng.require(model, "txt2img")
     return _qwen_txt2img(
         eng, prompt=prompt, negative=negative, width=width, height=height,
         steps=steps, seed=seed, transparent=transparent, pixel=pixel,
@@ -608,13 +642,20 @@ def _qwen_img2img(eng: Engine, *, init_image: str | Path, prompt: str,
     img, edge, subjects = _postprocess(
         img, eng, matte=(matte and not transparent), matte_backend=matte_backend,
         denoise=denoise, pixel=pixel, palette=palette, clean_iso=clean_iso, info=info)
+    neg_used = (negative or QWEN_NEG) if float(cfg) > 1.0 else None
     return _save(img, _stamp(tag), "img2img", {
         "workflow": "w2", "prompt": _qwen_prompt(prompt, transparent),
-        "negative": negative or QWEN_NEG,
-        "init_image": str(init_image), "strength": None, "steps": _eff_steps(eng, steps), **_fast_meta(eng),
-        "cfg": float(cfg), "true_cfg": float(cfg), "seed": seed, "lora": None,
+        "negative": neg_used,
+        "negative_applied": bool(float(cfg) > 1.0),
+        "init_image": str(init_image), "strength": None,
+        "steps": _eff_steps(eng, steps), **_fast_meta(eng),
+        "cfg": float(cfg), "true_cfg": bool(float(cfg) > 1.0),
+        "seed": seed, "lora": None,
         "lora_scale": None,
-        "pixel_block": pixel, "palette": palette, "matte": matte,
+        # 实际输出尺寸（w2 之前根本没记，产线无从得知）
+        "width": img.width, "height": img.height,
+        "pixel_block": pixel, "palette": palette,
+        "matte": bool(matte and not transparent),
         "matte_backend": matte_backend, "matte_used": info.get("backend"),
         "matte_fallback": info.get("fallback"),
         "edge_touch": edge, "subjects": subjects, "model": model,
@@ -636,6 +677,7 @@ def img2img(eng: Engine, *, init_image: str | Path, prompt: str,
     Qwen 没有 `strength`（加噪幅度）这个概念——改多少完全由提示词决定，
     所以这里不接 strength。输出尺寸跟源图走（16 的倍数）。
     """
+    eng.require(model, "img2img")
     return _qwen_img2img(
         eng, init_image=init_image, prompt=prompt, negative=negative,
         steps=steps, seed=seed, transparent=transparent, preset=preset,
@@ -697,6 +739,8 @@ def _qwen_inpaint(eng: Engine, *, image: str | Path, mask: str | Path, prompt: s
             out = _restore_alpha(out, src)
         approx = False
         backend = "qwen-mask-inpaint"
+        # masked_inpaint 自己跑管线，**不挂 Lightning** → 快速模式对它无效
+        used_fast = False
     else:
         gen, work, full_prompt, region = _qwen_local_edit(
             eng, src=src, mask=msk, body=body, negative=negative, steps=steps,
@@ -707,6 +751,7 @@ def _qwen_inpaint(eng: Engine, *, image: str | Path, mask: str | Path, prompt: s
             out = _restore_alpha(out, src)
         approx = True
         backend = "qwen-edit"
+        used_fast = True          # 走 _qwen_call，会挂 Lightning
     seconds = dt()
     # 自检：承诺写进 meta，别让用户去猜「到底有没有溢出」
     diff = _outside_diff(src, out, msk)
@@ -714,7 +759,12 @@ def _qwen_inpaint(eng: Engine, *, image: str | Path, mask: str | Path, prompt: s
         "workflow": "w3", "prompt": full_prompt, "prompt_body": body,
         "negative": negative or QWEN_EDIT_NEG,
         "image": str(image), "mask": str(mask),
-        "strength": None, "steps": _eff_steps(eng, steps), **_fast_meta(eng), "cfg": cfg, "seed": seed,
+        # 实际输出尺寸（w3/w5 以前完全不记，产线无从得知）
+        "width": out.width, "height": out.height,
+        "strength": None,
+        "steps": _eff_steps(eng, steps, fast=used_fast),
+        **_fast_meta(eng, applied=used_fast),
+        "cfg": cfg, "seed": seed,
         "model": model, "backend": backend, "approx": approx,
         "strategy": strategy,
         "region": region, "work_size": list(work),
@@ -763,6 +813,7 @@ def matte_bg(eng: Engine, *, init_image: str | Path,
              bg_color: str | Sequence[int] | None = None,
              matte_backend: str = "auto", denoise: int = 1,
              alpha_mode: str = "binary", feather: int = 0,
+             model: str = DEFAULT_MODEL,
              scope: str = "", tag: str = "wbg") -> Dict[str, Any]:
     """抠图去背景 / 换背景。**不需要模型**，纯图像处理，所以不占显存、瞬间出。
 
@@ -777,6 +828,8 @@ def matte_bg(eng: Engine, *, init_image: str | Path,
     `alpha_mode`：像素素材用默认的 `binary`（硬边）；**高清插画资产改成 `soft`**，
     否则发丝/纱/光效会被压成一圈硬齿。`feather` 只对 soft 有意义。
     """
+    eng.require(model, "matte")
+    dt = _timer()
     src = Image.open(init_image).convert("RGBA")
     # 抠图：与其它工作流共用同一套（含 u2net 抠空自动回退的保护）。
     # info 要带出来：Qwen 出图自带 alpha 时这里会是 backend="alpha"（原样复用），
@@ -824,6 +877,7 @@ def matte_bg(eng: Engine, *, init_image: str | Path,
         "alpha_reused": minfo.get("alpha_reused"),
         "alpha_rejected": minfo.get("alpha_rejected"),
         "width": out.width, "height": out.height,
+        "seconds": round(dt(), 2),
     }
     res = _save(out, name, "matte_bg", meta, scope=scope)
     if mode != "alpha":
@@ -836,18 +890,44 @@ def matte_bg(eng: Engine, *, init_image: str | Path,
 
 
 def _parse_color(c: str | Sequence[int]) -> tuple[int, int, int]:
-    """把 "#rrggbb" / "rgb(r,g,b)" / (r,g,b) 统一成 RGB 三元组。"""
+    """把 #rrggbb / #rgb / rgb(r,g,b) / (r,g,b) 统一成 RGB 三元组。
+
+    **非法输入直接报错**，不静默回退成白色：以前解析失败就返回白底，
+    而 meta 里记的是原始字符串，看起来像是生效了——实际画出来是白的。
+    """
     if isinstance(c, (tuple, list)):
-        return (int(c[0]), int(c[1]), int(c[2]))
+        if len(c) < 3:
+            raise ValueError(f"颜色元组至少要 3 个分量：{c}")
+        vals = [int(c[0]), int(c[1]), int(c[2])]
+        for v in vals:
+            if not 0 <= v <= 255:
+                raise ValueError(f"颜色分量超出 0~255：{c}")
+        return (vals[0], vals[1], vals[2])
     s = str(c).strip()
+    if s.lower().startswith("rgb("):
+        body = s[4:-1] if s.endswith(")") else s[4:]
+        parts = [x.strip() for x in body.split(",")]
+        if len(parts) != 3:
+            raise ValueError(f"颜色格式应为 rgb(r,g,b)：{c}")
+        try:
+            vals = [int(x) for x in parts]
+        except ValueError as exc:
+            raise ValueError(f"颜色分量不是整数：{c}") from exc
+        for v in vals:
+            if not 0 <= v <= 255:
+                raise ValueError(f"颜色分量超出 0~255：{c}")
+        return (vals[0], vals[1], vals[2])
     if s.startswith("#"):
         s = s[1:]
     if len(s) == 3:
         s = "".join(ch * 2 for ch in s)
+    if len(s) != 6:
+        raise ValueError(
+            f"颜色格式应为 #rrggbb / #rgb / rgb(r,g,b)：{c}")
     try:
         return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16))
-    except ValueError:
-        return (255, 255, 255)
+    except ValueError as exc:
+        raise ValueError(f"颜色里有非十六进制字符：{c}") from exc
 
 
 # ---------------- W5 局部 AI 重绘 ----------------
@@ -928,6 +1008,7 @@ def _qwen_ai_repaint(eng: Engine, *, image: str | Path, mask: str | Path,
         box = list(msk.getbbox() or (0, 0, src.width, src.height))
         approx = False
         backend = "qwen-mask-inpaint"
+        used_fast = False      # masked_inpaint 自己跑管线，不挂 Lightning
     elif strategy == "crop":
         # 老方案：裁剪块 → 改图 → 贴回裁剪块 → 贴回原图
         crop, crop_mask, box = rp.crop_region(src, msk, expand=expand,
@@ -949,6 +1030,7 @@ def _qwen_ai_repaint(eng: Engine, *, image: str | Path, mask: str | Path,
         work = target
         approx = True
         backend = "qwen-edit"
+        used_fast = True       # 走 _qwen_call
     else:
         box = list(msk.getbbox() or (0, 0, src.width, src.height))
         gen, work, full_prompt, region = _qwen_local_edit(
@@ -960,6 +1042,7 @@ def _qwen_ai_repaint(eng: Engine, *, image: str | Path, mask: str | Path,
         out = _restore_alpha(out, src)
         approx = True
         backend = "qwen-edit"
+        used_fast = True       # 走 _qwen_local_edit → _qwen_call
 
     # 色板吸附（像素素材专用）：把重绘区里「接近源色」的杂色吸回源图色板，
     # 差得远的新颜色保留——否则「要把这块改成红色」会被吸成灰。
@@ -983,7 +1066,12 @@ def _qwen_ai_repaint(eng: Engine, *, image: str | Path, mask: str | Path,
         "prompt": full_prompt, "prompt_body": body, "constraint": QWEN_EDIT_RULES,
         "negative": negative or QWEN_EDIT_NEG,
         "image": str(image), "mask": str(mask),
-        "strength": None, "steps": _eff_steps(eng, steps), **_fast_meta(eng), "cfg": cfg, "seed": seed,
+        # 实际输出尺寸
+        "width": out.width, "height": out.height,
+        "strength": None,
+        "steps": _eff_steps(eng, steps, fast=used_fast),
+        **_fast_meta(eng, applied=used_fast),
+        "cfg": cfg, "seed": seed,
         "model": model, "lora": None, "lora_scale": None, "clip_skip": None,
         "backend": backend, "approx": approx, "strategy": strategy,
         "region": region, "work_size": list(work),
@@ -1165,25 +1253,32 @@ def outpaint(eng: Engine, *, image: str | Path, direction: str = "right",
     torch.cuda.reset_peak_memory_stats()
     dt = _timer()
     pipe = eng.txt2img_pipe(model)
-    # 扩图**必须**挂 Outpaint LoRA（标准权重不认识灰色 padding 的语义）
-    eng.apply_loras(pipe, [{"name": eng.OUTPAINT_LORA, "scale": float(lora_scale)}])
-
-    res = op_mod.outpaint(
-        pipe, src=src, direction=direction, expand=float(expand),
-        prompt=prompt, negative=negative, steps=steps, cfg=cfg, seed=seed,
-        blend=blend)
+    # 扩图**必须**挂 Outpaint LoRA（标准权重不认识灰色 padding 的语义）。
+    # 走**临时槽**并在 finally 卸载：以前它永久留在共享管线里，之后所有
+    # 生成都带着"灰色 padding = 待补全"的语义出图（而 meta 还写着 lora: None）。
+    eng.apply_loras(pipe, [{"name": eng.OUTPAINT_LORA, "scale": float(lora_scale)}],
+                    scope="temp")
+    try:
+        res = op_mod.outpaint(
+            pipe, src=src, direction=direction, expand=float(expand),
+            prompt=prompt, negative=negative, steps=steps, cfg=cfg, seed=seed,
+            blend=blend)
+    finally:
+        eng.unload_loras(pipe, scope="temp")
     out = res["image"].convert("RGBA")
     seconds = dt()
 
     meta = op_mod.outpaint_meta(
         res, workflow="wout", direction=direction, expand=float(expand),
         lora=eng.OUTPAINT_LORA, lora_scale=float(lora_scale),
-        prompt_body=prompt, image=str(image), steps=_eff_steps(eng, steps),
+        prompt_body=prompt, image=str(image),
+        # 扩图挂的是 Outpaint LoRA，**不走少步分支**
+        steps=_eff_steps(eng, steps, fast=False),
         cfg=cfg, seed=seed, model=model, backend="qwen-outpaint",
         blend=bool(blend), approx=False,
         seconds=seconds,
         peak_vram_gb=round(torch.cuda.max_memory_allocated() / 2**30, 2),
-        **_fast_meta(eng))
+        **_fast_meta(eng, applied=False))
     return _save(out, _stamp(tag), "outpaint", meta, scope=scope)
 
 
@@ -1196,6 +1291,7 @@ def pixelify(eng: Engine, *, init_image: str | Path,
              sample_method: str = "median",
              colors: int = 32, transparent_bg: bool = False,
              snap_to: Optional[int] = 16,
+             model: str = DEFAULT_MODEL,
              scope: str = "", tag: str = "wpx") -> Dict[str, Any]:
     """完美像素转换：任意图 → **像素完美**的像素画。**不跑模型**，纯确定性处理。
 
@@ -1217,6 +1313,9 @@ def pixelify(eng: Engine, *, init_image: str | Path,
     输出是**原生像素尺寸**（如 128×128），不预放大——放大交给渲染端
     （前端用 image-rendering: pixelated），这样以后想换 4 倍/16 倍不用重算。
     """
+    dt = _timer()
+    eng.require(model, "pixelify")
+    dt = _timer()
     src = Image.open(init_image).convert("RGBA")
     res = pxf.refine_batch([src], grid_snap=grid_snap,
                            grid_size=grid_size, target_size=target,
@@ -1236,6 +1335,9 @@ def pixelify(eng: Engine, *, init_image: str | Path,
         "colors_requested": int(colors),
         "transparent_bg": bool(transparent_bg),
         "snap_to": snap_to,
+        # 统一的尺寸字段（其它工作流都有这两个键）
+        "width": out.width, "height": out.height,
+        "seconds": round(dt(), 2),
     })
     return _save(out, _stamp(tag), "pixelify", meta, scope=scope)
 
@@ -1297,6 +1399,7 @@ def image_to_pixel(eng: Engine, *,
       snap_to  网格边长吸附到该数的整数倍（16 = 精灵常用）
       matte    先把源图的背景抠掉（像素精灵必须有透明底）
     """
+    eng.require(model, "topixel")
     t_all = _timer()
     meta: Dict[str, Any] = {"workflow": "topixel", "scope": scope or "default"}
     src_path: Optional[Path] = None
@@ -1467,7 +1570,8 @@ def _qwen_pose_clone(eng: Engine, *, pose_image: str | Path,
     return _save(out, _stamp(tag), "pose_clone", {
         "workflow": "wpc", "scope": scope or "default",
         "prompt": instr, "negative": negative or QWEN_NEG,
-        "pose_image": str(pose_image), "char_image": str(char_image),
+        "pose_image": str(pose_image), "char_image": str(char_paths[0]),
+        "char_images": char_paths, "n_refs": len(char_paths),
         "backend": "qwen-multiref", "bg": bg,
         "ref_mode": ref_mode, "ref_mode_used": used_mode,
         "ref_fallback_from": cond_info.get("fallback_from"),
@@ -1627,7 +1731,8 @@ def _qwen_vnccs(eng: Engine, *, pose_image: str | Path,
 
     torch.cuda.reset_peak_memory_stats()
     dt = _timer()
-    eng.apply_loras(pipe, [{"name": eng.VNCCS_LORA, "scale": float(lora_scale)}])
+    eng.apply_loras(pipe, [{"name": eng.VNCCS_LORA, "scale": float(lora_scale)}],
+                    scope="temp")
     try:
         out = _qwen_call(
             eng, prompt=instr, negative=negative or "",
@@ -1640,7 +1745,7 @@ def _qwen_vnccs(eng: Engine, *, pose_image: str | Path,
             fast_lora=False,          # LoRA 槽位归 VNCCS
         )
     finally:
-        eng.unload_loras(pipe)
+        eng.unload_loras(pipe, scope="temp")
     seconds = dt()
 
     raw = out.copy() if (matte or pixel > 1 or palette) else None
@@ -1656,11 +1761,14 @@ def _qwen_vnccs(eng: Engine, *, pose_image: str | Path,
     return _save(out, _stamp(tag), "vnccs_pose", {
         "workflow": "wvnccs", "scope": scope or "default",
         "prompt": instr, "negative": negative or "",
-        "pose_image": str(pose_image), "char_image": str(char_image),
+        "pose_image": str(pose_image), "char_image": str(char_paths[0]),
+        "char_images": char_paths, "n_refs": len(char_paths),
         "backend": "qwen-vnccs-lora", "lora": eng.VNCCS_LORA,
         "lora_scale": float(lora_scale),
-        "canvas": [w, h], "steps": steps, "cfg": cfg, "seed": seed,
+        "canvas": [w, h], "steps": _eff_steps(eng, steps, fast=False),
+        "cfg": cfg, "seed": seed,
         "transparent": bool(transparent),
+        **_fast_meta(eng, applied=False),
         "seconds": round(seconds, 2),
         "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
         "edge_px": edge, "subjects": subjects,
@@ -1712,7 +1820,9 @@ def _qwen_sprite_swap(eng: Engine, *, frames: Sequence[tuple],
                       denoise: int, palette: int, keep_alpha: bool,
                       candidates: int, bg: str, scope: str,
                       tag: str, engine: str = "wpc",
-                      lora_scale: float = 1.0) -> Dict[str, Any]:
+                      lora_scale: float = 1.0,
+                      gate_retries: int = 0,
+                      gate_seed_step: int = 1000) -> Dict[str, Any]:
     """Qwen 版序列帧替换（WSS）：逐帧「角色图 + 轮廓/骨架」双图条件。
 
     与 SD 那条路的差别只有一处但很关键：**没有 ControlNet 硬约束**。
@@ -1780,7 +1890,7 @@ def _qwen_sprite_swap(eng: Engine, *, frames: Sequence[tuple],
                 f"下载 MIUProject/VNCCS_PoseStudio_QI2.1 的 V1，用 "
                 f"tools/convert_lora.py 转成 diffusers 格式后放到 models/lora/")
         eng.apply_loras(vnccs_pipe, [{"name": eng.VNCCS_LORA,
-                                      "scale": float(lora_scale)}])
+                                      "scale": float(lora_scale)}], scope="temp")
     try:
         for _c, _r, frame in frames:
             cond, used_mode, _info = refcond.build_condition(
@@ -1825,7 +1935,8 @@ def _qwen_sprite_swap(eng: Engine, *, frames: Sequence[tuple],
             best_img, best_ev, _finfo, used, _nh = gate_mod.run_candidates(
                 generate=_gen, score=_score,
                 policy=gate_mod.GatePolicy(
-                    candidates=candidates, retries=0, seed_step=1000,
+                    candidates=candidates, retries=gate_retries,
+                    seed_step=gate_seed_step,
                     stop_on_first_pass=True))
             frame_scores.append({**best_ev, "attempts": used})
             attempts_used += used
@@ -1833,7 +1944,7 @@ def _qwen_sprite_swap(eng: Engine, *, frames: Sequence[tuple],
             generated.append(best_img)
     finally:
         if vnccs_pipe is not None:
-            eng.unload_loras(vnccs_pipe)
+            eng.unload_loras(vnccs_pipe, scope="temp")
 
     cut: List[Image.Image] = list(generated)
     if keep_alpha:
@@ -1877,7 +1988,9 @@ def _qwen_sprite_swap(eng: Engine, *, frames: Sequence[tuple],
         "cell": [cell_w, cell_h],
         "ref_mode": ref_mode, "ref_modes_used": sorted(set(used_modes)),
         "model": model, "width": width, "height": height,
-        "steps": _eff_steps(eng, steps), **_fast_meta(eng), "cfg": cfg, "seed": seed,
+        "steps": _eff_steps(eng, steps, fast=not use_vnccs),
+        **_fast_meta(eng, applied=not use_vnccs),
+        "cfg": cfg, "seed": seed,
         "engine": "vnccs" if use_vnccs else "wpc",
         "lora": (eng.VNCCS_LORA if use_vnccs else None),
         "lora_scale": (float(lora_scale) if use_vnccs else None),
@@ -1954,8 +2067,9 @@ def sprite_swap(eng: Engine, *, sheet_image: str | Path,
         width=width, height=height, steps=steps, cfg=cfg, seed=seed,
         ref_mode=ref_mode, model=model, matte=matte,
         matte_backend=matte_backend, denoise=denoise, palette=palette,
-        keep_alpha=keep_alpha, candidates=1, bg=bg, scope=scope, tag=tag,
-        engine=engine, lora_scale=lora_scale)
+        keep_alpha=keep_alpha, candidates=candidates, bg=bg, scope=scope, tag=tag,
+        engine=engine, lora_scale=lora_scale,
+        gate_retries=gate_retries, gate_seed_step=gate_seed_step)
 
 
 def _pack_sprite_frames(aligned: Sequence[Image.Image], frames: Sequence[tuple],
@@ -2022,6 +2136,8 @@ def _sprite_recolor(frames: Sequence[tuple], char_image: str | Path,
         "mode": "recolor", "prompt": prompt,
         "char_image": str(char_image),
         "grid": [cols, rows], "frames": len(aligned), "cell": [cell_w, cell_h],
+        # 落盘的是**精灵图**，尺寸 = 列数×格宽；生成画布是另一回事
+        "sheet_size": [cols * cell_w, rows * cell_h],
         "palette": palette, "palette_size": len(pal),
         "palette_colors": [list(c) for c in pal],
         "seconds_total": 0.0,
@@ -2192,8 +2308,21 @@ def _qwen_poseswap(eng: Engine, *, pose_images: Sequence[Path], prompt: str,
             # LoRA 是按完整采样训的，不是少步蒸馏：步数不够姿态和细节一起崩
             steps = 20
     elif ref_image is not None:
-        char = refprep.prepare_reference(Image.open(ref_image).convert("RGBA"),
-                                         size=max(width, height))
+        # 旧路线也支持多张角色图（同一角色的不同角度）——前端一直在传，
+        # 以前这一支只读第一张，多图被静默丢掉。
+        char_paths = _ref_image_list(ref_image, char_images)
+        chars = [refprep.prepare_reference(Image.open(p).convert("RGBA"),
+                                           size=max(width, height))
+                 for p in char_paths]
+        char = chars[0]
+        if len(chars) > 1:
+            # 多张角色图时必须说清这是同一个人的不同角度，
+            # 否则模型会把其中一张当成骨架。
+            head = head.replace(
+                "The images are: first the character reference, then ",
+                f"The first {len(chars)} images are character references of the "
+                f"SAME character from different angles: keep the same face, "
+                f"hairstyle, outfit and colors. The last image is ")
         head = head.replace(
             "The images are: first the character reference, then ",
             "The first image is the character reference: keep the same face, "
@@ -2251,7 +2380,7 @@ def _qwen_poseswap(eng: Engine, *, pose_images: Sequence[Path], prompt: str,
                 f"下载 MIUProject/VNCCS_PoseStudio_QI2.1 的 V1，用 "
                 f"tools/convert_lora.py 转成 diffusers 格式后放到 models/lora/")
         eng.apply_loras(vnccs_pipe, [{"name": eng.VNCCS_LORA,
-                                      "scale": float(lora_scale)}])
+                                      "scale": float(lora_scale)}], scope="temp")
     try:
         for pose_path in pose_images:
             if use_vnccs:
@@ -2264,7 +2393,7 @@ def _qwen_poseswap(eng: Engine, *, pose_images: Sequence[Path], prompt: str,
                 cond = _qwen_cond_image(
                     Image.open(pose_path).convert("RGB").resize((width, height),
                                                                 Image.LANCZOS))
-                refs: Any = [char, cond] if char is not None else cond
+                refs: Any = ([*chars, cond] if chars else cond)
             spent = 0.0
 
             def _gen(i: int) -> Tuple[Image.Image, Dict[str, Any]]:
@@ -2338,7 +2467,7 @@ def _qwen_poseswap(eng: Engine, *, pose_images: Sequence[Path], prompt: str,
             frames.append(frame)
     finally:
         if vnccs_pipe is not None:
-            eng.unload_loras(vnccs_pipe)
+            eng.unload_loras(vnccs_pipe, scope="temp")
 
     # 尺度归一：Qwen 没有 ControlNet，逐帧「人物占多大」是模型自己决定的
     # （实测同一段 3 帧能差 3 倍，最小的那帧前景只占 2%，直接被产线判废）。
@@ -2354,13 +2483,24 @@ def _qwen_poseswap(eng: Engine, *, pose_images: Sequence[Path], prompt: str,
         "engine": "vnccs" if use_vnccs else "wpc",
         "lora": (eng.VNCCS_LORA if use_vnccs else None),
         "lora_scale": (float(lora_scale) if use_vnccs else None),
-        "n_chars": len(chars) if use_vnccs else (1 if char is not None else 0),
+        "n_chars": len(chars),
         # 注意：这里原来还有一行 `"lora": None, "lora_scale": None`——
         # 重复键会让上面刚写的 engine/lora **被静默覆盖成 None**。
         "condition": kind, "bg": bg, "cn_scale": None, "ipa_scale": None,
         "clip_skip": None,
-        "steps": _eff_steps(eng, steps), **_fast_meta(eng), "cfg": cfg, "seed": seed, "frames": len(frames),
+        # 两阶段模式每个候选跑**两次**（草图 + 换皮），总步数要 ×2，
+        # 否则产线算「每可用帧成本」会少算一半。
+        "steps": _eff_steps(eng, steps, fast=not use_vnccs) * (2 if use_two_stage else 1),
+        "steps_per_pass": _eff_steps(eng, steps, fast=not use_vnccs),
+        "passes": 2 if use_two_stage else 1,
+        **_fast_meta(eng, applied=not use_vnccs),
+        "cfg": cfg, "seed": seed, "frames": len(frames),
         "width": width, "height": height,
+        # 落盘的是精灵图：列数×格宽。w4 的格子就是生成画布尺寸，
+        # 行数由帧数除以列数**向上取整**（w4 没有 rows 参数）。
+        "sheet_size": ([cols * aligned[0].width,
+                        (-(-len(aligned) // cols)) * aligned[0].height]
+                       if aligned else None),
         "matte": matte, "matte_used": matte_info.get("backend"),
         "matte_fallback": matte_info.get("fallback"),
         "model": model, "distill": None,
@@ -2404,7 +2544,7 @@ def poseswap(eng: Engine, *, pose_images: Sequence[str | Path], prompt: str,
              negative: Optional[str] = None, ref_image: Optional[str | Path] = None,
              char_images: Optional[Sequence[str]] = None,
              engine: str = "wpc", lora_scale: float = 1.0,
-             steps: int = 16, cfg: float = 1.0, seed: int = 20261027,
+             steps: int = 16, cfg: float = 1.0, seed: int = -1,
              width: int = 768, height: int = 768,
              cols: int = 8, pixel: int = 0, palette: int = 0,
              matte: bool = False, matte_backend: str = "auto", denoise: int = 1,

@@ -156,6 +156,12 @@ def outpaint(pipe, *, src: Image.Image, direction: str = "right",
         # 只贴原图那一块（含 8px 羽化），扩出来的区域完全保留模型结果。
         out = _blend_source(out, canvas, src, (ox, oy))
 
+    # 扩展区域的 alpha 强制为**不透明**。
+    # Qwen 原生输出 RGBA，没有透明指令时它给的 alpha 是一层软噪声
+    # （实测扩图产物里 30% 的像素半透明）——扩图补的是场景，那层 alpha
+    # 没有意义，留着会让游戏里背景透出来。原图区域的 alpha 保持源图的。
+    out = _opaque_outside(out, src.size, (ox, oy))
+
     return {"image": out, "canvas": canvas, "offset": (ox, oy), "work": work,
             "prompt": full}
 
@@ -178,6 +184,25 @@ def _blend_source(out: Image.Image, canvas: Image.Image, src: Image.Image,
     result = out.copy()
     result.paste(src.convert("RGBA"), (ox, oy), patch_mask)
     return result
+
+
+def _opaque_outside(out: Image.Image, src_size: Tuple[int, int],
+                    offset: Tuple[int, int]) -> Image.Image:
+    """把原图矩形**外面**的 alpha 强制设为不透明。
+
+    为什么要做：模型给的 alpha 在「扩图补场景」这个语义下是噪声。
+    实测（768² 扩右 50%）：不处理时产物有 30.6% 的半透明像素，
+    游戏里会看到背景从新扩展的区域透出来。
+    """
+    ox, oy = offset
+    w, h = src_size
+    a = out.getchannel("A")
+    keep = Image.new("L", out.size, 0)          # 只有原图那块保留原 alpha
+    keep.paste(255, (ox, oy, ox + w, oy + h))
+    opaque = Image.new("L", out.size, 255)
+    out = out.copy()
+    out.putalpha(Image.composite(a, opaque, keep))
+    return out
 
 
 def outpaint_meta(result: Dict[str, object], **extra) -> Dict[str, object]:

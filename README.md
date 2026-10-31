@@ -213,6 +213,24 @@ LoRA 是 `MIUProject/VNCCS_PoseStudio_QI2.1`（152MB，ComfyUI 格式，
   那是 ControlNet 路线的结论连坐过来的
 
 
+### 全项目 review（2026-10-31 上午）
+
+对整个项目做了一轮全面审查（静态 + 实测 + 回归测试），修掉 21 个问题。
+最严重的三个：
+
+1. **扩图的 Outpaint LoRA 永久留在共享管线里** → 跑一次扩图之后，
+   所有后续生成都带着它出图（而 meta 写着 `lora: None`）
+2. **工作流临时挂的 LoRA 会顶掉用户挂的** → 用户在界面挂的 LoRA 会被
+   快速模式静默卸载。现在改成 `user` / `temp` 双槽位合并加载
+3. **路径穿越** → `startswith` 是字符串前缀比较，`assets2/` 能通过，
+   `DELETE /assets` 能删到 assets 目录之外
+
+另外把 meta 里"说的和实际做的不一样"的地方都改准了（步数、快速模式是否生效、
+负向词、抠图、尺寸），产线判据不再算错。
+
+配套：`tests/test_review_round2.py`（12 条回归测试）、
+`tools/verify_review_quality.py`（六条工作流的质量实测 + LoRA 泄漏检查）。
+
 ### 骨骼编辑器：人形 / 线框 / 叠加三种视图
 
 拖关节摆姿势时，如果只有线条骨架，很难看出"这个姿势像不像人、朝向对不对"。

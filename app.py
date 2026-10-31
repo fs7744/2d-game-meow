@@ -108,7 +108,10 @@ def _run(job_id: str, workflow: str, params: Dict[str, Any]) -> None:
         # 已经没有对应的形参了。旧前端（或手写的 curl）还会传，直接 TypeError
         # 太粗暴；这里丢掉并记进 meta，用户翻产物时能看到「这条被忽略了」。
         sig = inspect.signature(fn)
-        accepted = {k: v for k, v in params.items() if k in sig.parameters}
+        # **排除第一个位置参数**（eng）：不然客户端传 {"eng": 123} 会被收下，
+        # 然后 fn(engine, eng=123) 抛 "got multiple values for argument"。
+        kw_names = set(list(sig.parameters)[1:])
+        accepted = {k: v for k, v in params.items() if k in kw_names}
         # 多余的键**全部记账**：以前把 lora / lora_scale 排除在外（那时还有
         # 专门的解析逻辑），现在 LoRA 整套已删，它们和 clip_skip / strength
         # 一样是纯粹的多余键，不报出来就等于静默丢弃。
@@ -255,6 +258,25 @@ class PoseExtractReq(BaseModel):
     path: str
 
 
+def _inside(root: Path, target: Path) -> bool:
+    """`target` 是否真的在 `root` 目录内。
+
+    **不能用 `str(target).startswith(str(root))`**：那是**字符串前缀**比较，
+    不是路径比较——`assets2/x.png`、`assets_BACKUP/x.png` 都会通过。
+    实测这会让 `DELETE /assets` 删到 assets 目录之外的文件、
+    `GET /files/../assets2/x.png` 读到外部文件。
+
+    用 `is_relative_to`（Python 3.9+），它按路径段比较，`assets2` 不算 `assets`。
+    """
+    try:
+        return target.is_relative_to(root)
+    except AttributeError:            # Python < 3.9 兜底
+        try:
+            return os.path.commonpath([str(root), str(target)]) == str(root)
+        except ValueError:
+            return False
+
+
 def _readable_asset_path(p: str) -> Optional[Path]:
     """只读用途的路径校验：必须在 assets 内、是文件、是图片。
 
@@ -268,7 +290,7 @@ def _readable_asset_path(p: str) -> Optional[Path]:
         t = t.resolve()
     except (OSError, ValueError):
         return None
-    if not str(t).startswith(str(ASSETS.resolve())):
+    if not _inside(ASSETS.resolve(), t):
         return None
     if not t.is_file() or t.suffix.lower() not in (
             ".png", ".jpg", ".jpeg", ".webp", ".bmp"):
@@ -441,7 +463,7 @@ def _safe_asset_path(p: str) -> Optional[Path]:
     except (OSError, ValueError):
         return None
     root = ASSETS.resolve()
-    if not str(t).startswith(str(root)):
+    if not _inside(root, t):
         return None
     if t.name in ("index.jsonl", "uploads"):     # 索引与旧上传目录不能删
         return None
@@ -613,7 +635,7 @@ async def upload_image(request: Request, name: str = "",
 def files(path: str, download: int = 0) -> FileResponse:
     """取产物。download=1 时带 Content-Disposition，浏览器直接存盘。"""
     target = (ASSETS / path).resolve()
-    if not str(target).startswith(str(ASSETS.resolve())) or not target.exists():
+    if not _inside(ASSETS.resolve(), target) or not target.exists():
         raise HTTPException(404, "not found")
     if download:
         # FileResponse(filename=…) 会设成 attachment；产物名已经带后缀

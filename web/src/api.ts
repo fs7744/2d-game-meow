@@ -241,10 +241,15 @@ export function submitToPixel(
     prompt: params.prompt,
     negative: params.negative || undefined,
     target: params.apTarget > 0 ? [params.apTarget, params.apTarget] : undefined,
+    // 透传画布：后端默认 1024²，节点上的 768 不传就会被忽略（实测 45s vs 25s，
+    // 而且 1024² 角色占比偏大、容易顶边）
+    source_width: params.width || undefined,
+    source_height: params.height || undefined,
     colors: params.apColors,
     pre_enhance: params.apPreEnhance,
     edge_rebuild: params.apEdgeRebuild,
-    model: opts.model || 'sdxl-anime',
+    // 底模只有 qwen-image-2.1（SDXL 那条路早删了）
+    model: opts.model || 'qwen-image-2.1',
     matte: params.apMatte,
     // 原生透明底：Qwen 直接出 alpha，比「生成后再抠」干净得多
     //（白猫白底这类场景，抠图会把身体一起切掉——实测过）
@@ -296,7 +301,8 @@ export function submitOutfitSwap(
     outfits: outfits && outfits.length > 1 ? outfits : undefined,
     prompt: params.prompt,
     negative: params.negative || undefined,
-    width: params.width, height: params.height,
+    // **不传 width/height**：后端默认跟随基底图尺寸。传死 768 会把
+    // 非方形的基底图人物压扁（与函数语义相反）。
     steps: params.steps, cfg: params.cfg, seed: params.seed,
     ...opts,
   })
@@ -316,7 +322,7 @@ export function submitFaceSwap(
     faces: faces && faces.length > 1 ? faces : undefined,
     prompt: params.prompt,
     negative: params.negative || undefined,
-    width: params.width, height: params.height,
+    // 同上：不传 width/height，输出跟随基底图
     steps: params.steps, cfg: params.cfg, seed: params.seed,
     ...opts,
   })
@@ -745,7 +751,8 @@ export type ModelList = {
 /** 全部工作流名（与后端 engine._ARCH_WORKFLOWS 同一套词）。老后端不给
  *  workflows 时按它兜底，前端至少不会把节点锁死。 */
 const ALL_WF = ['txt2img', 'img2img', 'inpaint', 'poseswap', 'matte',
-  'ai_repaint', 'pixelify', 'pose_clone', 'sprite_swap', 'topixel']
+  'ai_repaint', 'pixelify', 'pose_clone', 'sprite_swap', 'topixel',
+  'outpaint', 'outfit_swap', 'face_swap', 'vnccs_pose']
 
 /** Qwen 上属于「近似实现」的工作流（老后端不给 approx 时兜底） */
 // inpaint / ai_repaint 已走**真蒙版路径**（模型看得见蒙版），不再是近似

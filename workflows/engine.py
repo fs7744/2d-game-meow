@@ -146,6 +146,16 @@ class Engine:
         self._cache: "OrderedDict[str, Any]" = pool["cache"]
         # 语义分割抠图模型目录（isnet-general-use.onnx）。存在即启用 u2net 后端。
         self.matte_dir = self.root / "matte"
+        # ---- LoRA 双槽位 ----
+        # `user`：用户在界面上挂的（状态式，一直生效到下次 apply/unload）
+        # `temp`：工作流内部临时用的（VNCCS / Outpaint / Lightning），用完即卸
+        # 分成两槽是因为 diffusers 的 set_adapters 是**全局**的：以前工作流
+        # 临时挂一个 LoRA 就会把用户挂的顶掉（实测：挂 AnyAngle 后跑一次快速
+        # 模式，AnyAngle 被静默卸载），反过来扩图挂的 Outpaint LoRA 没卸干净，
+        # 之后所有生成都带着它出图。
+        self._user_specs: List[Dict[str, Any]] = []
+        self._temp_specs: List[Dict[str, Any]] = []
+        self._loaded_sig: Optional[tuple] = None
 
     # ---------- 底模 ----------
 
@@ -263,14 +273,24 @@ class Engine:
             })
         return out
 
-    def apply_loras(self, pipe, specs: Sequence[Dict[str, Any]]) -> List[str]:
+    def apply_loras(self, pipe, specs: Sequence[Dict[str, Any]],
+                    scope: str = "user") -> List[str]:
         """把 LoRA 挂到 Qwen 管线上，返回实际生效的 adapter 名列表。
 
         `specs`：`[{"name": ..., "scale": 0.8}, ...]`
 
-        **状态式设计**：挂上的 LoRA 会一直生效，直到下一次 `apply_loras`
-        （传空列表）或 `unload_loras`。这样 LoRA 不必穿过每个工作流的
-        参数链——设置一次，后续所有生成自动带上它。
+        `scope` 决定写到哪个槽位：
+
+        - `"user"`（默认）：**状态式**，用户在界面上挂的。一直生效到下次
+          apply / unload。
+        - `"temp"`：工作流内部临时用的（VNCCS / Outpaint / Lightning），
+          用完由调用方 `unload_loras(pipe, scope="temp")` 还原。
+
+        **为什么要分两槽**：diffusers 的 `set_adapters` 是**全局**的，一次只能
+        有一组 adapter 生效。以前工作流临时挂一个 LoRA 就会把用户挂的顶掉
+        （实测：挂 AnyAngle 后跑一次快速模式，AnyAngle 被静默卸载）；反过来
+        扩图挂的 Outpaint LoRA 没卸干净，之后**所有**生成都带着它出图。
+        现在两槽合并加载，用户的效果不会被工作流顶掉，工作流也不会泄漏。
 
         **实测可行**（2026-10-30）：fp8 量化后的 transformer **照样能挂 LoRA**——
         diffusers 的 LoRA 层是包在 `nn.Linear` 外面的，fp8 的 `w_fp8` 在
@@ -278,7 +298,42 @@ class Engine:
         实测 AnyAngle（rank 24，384 张量）挂上后 1440 个 LoRA 模块生效，
         出图只慢 1.1s（12.6s → 13.7s）。
         """
-        active: List[str] = []
+        items = [sp for sp in specs if str(sp.get("name") or "").strip()]
+        if scope == "temp":
+            self._temp_specs = list(items)
+        else:
+            self._user_specs = list(items)
+        self._sync_loras(pipe)
+        return [a["adapter"] for a in self._active_loras]
+
+    def unload_loras(self, pipe, scope: str = "all") -> None:
+        """卸掉 LoRA。
+
+        `scope`：`"all"`（默认，界面上的「卸载全部」）/ `"user"` / `"temp"`。
+        工作流收尾时用 `"temp"`，这样**不会**把用户挂的 LoRA 一起卸掉。
+        """
+        if scope in ("all", "user"):
+            self._user_specs = []
+        if scope in ("all", "temp"):
+            self._temp_specs = []
+        self._sync_loras(pipe)
+
+    def _sync_loras(self, pipe) -> None:
+        """把两个槽位合并挂到管线上（幂等：组合没变就不重挂）。"""
+        specs = list(self._user_specs) + list(self._temp_specs)
+        # 同名只保留最后一个（temp 覆盖 user），免得 adapter 名冲突
+        seen: Dict[str, Dict[str, Any]] = {}
+        for sp in specs:
+            name = str(sp.get("name") or "").strip()
+            if name:
+                seen[name] = sp
+        merged = list(seen.values())
+
+        sig = tuple((str(sp.get("name")).strip(),
+                     round(float(sp.get("scale", 1.0)), 4)) for sp in merged)
+        if sig == self._loaded_sig:
+            return                       # 已经挂好了，不重复加载
+
         # 先全卸，避免上一次调用残留
         for a in list(getattr(pipe, "_loaded_lora_adapters", []) or []):
             try:
@@ -290,7 +345,8 @@ class Engine:
         except Exception:                     # noqa: BLE001
             pass
 
-        for spec in specs:
+        active: List[Dict[str, Any]] = []
+        for spec in merged:
             name = str(spec.get("name") or "").strip()
             scale = float(spec.get("scale", 1.0))
             if not name:
@@ -302,34 +358,18 @@ class Engine:
                 raise FileNotFoundError(f"LoRA 文件不存在：{name}（见 models/lora/）")
             adapter = f"qwen_{name}"
             pipe.load_lora_weights(str(f), adapter_name=adapter)
-            active.append((adapter, scale))
+            active.append({"name": name, "scale": scale, "adapter": adapter})
         if active:
-            pipe.set_adapters([a for a, _ in active], [s for _, s in active])
+            pipe.set_adapters([a["adapter"] for a in active],
+                              [a["scale"] for a in active])
             try:
-                pipe._loaded_lora_adapters = [a for a, _ in active]
+                pipe._loaded_lora_adapters = [a["adapter"] for a in active]
             except Exception:                 # noqa: BLE001
                 pass
         # 记下当前状态：供 /loras 接口与前端显示。
         # 记**原始名**（不是 adapter 名）——前端拿这个名字去 /loras 列表里找。
-        self._active_loras = [
-            {"name": str(spec.get("name") or "").strip(), "scale": sc,
-             "adapter": a}
-            for (a, sc), spec in zip(active, [x for x in specs if x.get("name")])
-        ]
-        return [a for a, _ in active]
-
-    def unload_loras(self, pipe) -> None:
-        """卸掉所有 LoRA（回到基座模型）。"""
-        for a in list(getattr(pipe, "_loaded_lora_adapters", []) or []):
-            try:
-                pipe.delete_adapters(a)
-            except Exception:                 # noqa: BLE001
-                pass
-        try:
-            pipe._loaded_lora_adapters = []
-        except Exception:                     # noqa: BLE001
-            pass
-        self._active_loras = []
+        self._active_loras = active
+        self._loaded_sig = sig
 
     def active_loras(self) -> List[Dict[str, Any]]:
         """当前生效的 LoRA（供 /loras 与前端显示）。"""
@@ -364,12 +404,18 @@ class Engine:
         """
         self.fast_mode = bool(on)
         if not self.fast_mode:
-            try:
-                pipe = self.txt2img_pipe(self.DEFAULT_MODEL)
-                self.unload_loras(pipe)
-            except Exception:                 # noqa: BLE001
-                pass
-        return {"fast_mode": self.fast_mode, "lora": self.FAST_LORA if on else None,
+            # 只清**临时槽**（Lightning），不动用户挂的 LoRA。
+            # 而且**不为了卸载去加载模型**——那会白占 15GB 显存。
+            # 管线没加载过就跳过：下次 _qwen_call 会顺手清掉。
+            pipe = self._cache.get(self.DEFAULT_MODEL)
+            if pipe is not None:
+                try:
+                    self.unload_loras(pipe, scope="temp")
+                except Exception:             # noqa: BLE001
+                    pass
+        return {"fast_mode": self.fast_mode,
+                # Lightning 是**由 _qwen_call 按需挂**的，这里不能说"已挂"
+                "lora": self.FAST_LORA if on else None,
                 "max_steps": self.FAST_STEPS if on else None}
 
 
@@ -418,6 +464,13 @@ class Engine:
         except Exception:                     # noqa: BLE001
             pass
         pipe.set_progress_bar_config(disable=True)
+        # **加载完就把显存峰值重置**：否则首次调用会把权重加载的 ~15GB
+        # 算进本次峰值，同一工作流"第一次跑"与"之后跑"的 peak_vram_gb
+        # 差一个量级，没法横向比较。
+        try:
+            torch.cuda.reset_peak_memory_stats()
+        except Exception:                     # noqa: BLE001
+            pass
         return pipe
 
     def _load_qwen_text(self, root: Path):
