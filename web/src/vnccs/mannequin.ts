@@ -75,6 +75,8 @@ function avgVertices(vertices: Float32Array, indices: number[]): [number, number
 export type Mannequin = {
   /** 含人偶的 group，几何已归一化（中心在原点、高度约 2 单位） */
   group: THREE.Group
+  mesh: THREE.SkinnedMesh
+  skeleton: THREE.Skeleton
   bones: Record<string, THREE.Bone>
   boneList: THREE.Bone[]
   boneHeads: Record<string, THREE.Vector3>     // 网格坐标（未归一化）里的骨 head/tail
@@ -154,7 +156,7 @@ export function buildMannequin(pack: MorphPack): Mannequin {
   const group = new THREE.Group()
   group.add(mesh)
 
-  return { group, bones, boneList, boneHeads, boneTails, restDir }
+  return { group, mesh, skeleton, bones, boneList, boneHeads, boneTails, restDir }
 }
 
 // ---------------------------------------------------------------------------
