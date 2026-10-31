@@ -703,6 +703,12 @@ class ProjectDocReq(BaseModel):
     updated: str = Field("", description="更新时间（ISO）")
     nodes: list = Field(default_factory=list, description="节点列表")
     viewport: Dict[str, Any] = Field(default_factory=dict)
+    # **乐观锁**：客户端读到的那份项目的 updated 时间戳。
+    # 与磁盘上的不一致 → 409（被别人改过了），而不是覆盖。
+    expect_updated: Optional[str] = Field(
+        None, description="客户端读到的 updated；用于检出并发修改")
+    # **新建标记**：为 true 时若 id 已被占用 → 409，不覆盖。
+    create: bool = Field(False, description="true=新建（id 已存在则报错），false=更新")
 
 
 def _persist_imported(scope: str, meta: Dict[str, Any],
@@ -763,14 +769,35 @@ def put_project(scope: str, req: ProjectDocReq) -> Dict[str, Any]:
 
     前端在改动画布后防抖调用。**这是幂等的**——同一个项目反复保存不会
     产生垃圾文件（同一个 path 覆盖）。
+
+    **两种冲突在这里被挡住**（返回 409，不覆盖别人的数据）：
+      · `create=true` 但 id 已被占用 → 409（两个标签页撞了 id）；
+      · `expect_updated` 与磁盘上的不符 → 409（别人改过这个项目了）。
     """
     try:
-        info = projectstore.save_project(scope, req.model_dump())
+        info = projectstore.save_project(
+            scope, req.model_dump(),
+            expect_updated=req.expect_updated, create=req.create)
+    except projectstore.ProjectConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except OSError as exc:
         raise HTTPException(500, f"保存项目失败：{exc}") from exc
     return info
+
+
+@app.post("/projects/allocate")
+def allocate_project() -> Dict[str, Any]:
+    """向服务端要一个**保证没用过**的项目 id。
+
+    **为什么 id 要服务端分配**：原先由浏览器用「时间戳 + 序号」生成，
+    两个标签页在同一毫秒建项目会拿到**完全相同**的 id（实测 `pmdr5q6ns0`），
+    后保存的直接覆盖先保存的——用户的画布无声消失，还以为保存成功了。
+
+    这里用「随机后缀 + 存在性检查」分配，撞了就换，绝不返回已存在的 id。
+    """
+    return {"id": projectstore.allocate_project_id()}
 
 
 @app.delete("/projects/{scope}")

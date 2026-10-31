@@ -1012,7 +1012,21 @@ export async function fetchServerProject(id: string): Promise<ServerProject | nu
   }
 }
 
-/** 把项目定义保存到服务端磁盘。 */
+/** 保存项目定义的结果。 */
+export type SaveResult =
+  | { ok: true }
+  /** 409：id 被占用（新建撞车）或内容被别人改过 */
+  | { ok: false; conflict: true; message: string }
+  | { ok: false; conflict: false; message: string }
+
+/**
+ * 把项目定义保存到服务端磁盘。
+ *
+ * **409 冲突要区分开**：
+ *  · `create=true` 且 id 已被占用 → 两个标签页撞了 id；
+ *  · `expect_updated` 对不上 → 别人改过这个项目了。
+ * 两种都不能默默覆盖，得让用户知道。
+ */
 export async function saveServerProject(p: {
   id: string
   name: string
@@ -1020,16 +1034,55 @@ export async function saveServerProject(p: {
   updated: string
   nodes: unknown[]
   viewport: Record<string, unknown>
-}): Promise<boolean> {
+  /** 新建时为 true（id 已存在则 409） */
+  create?: boolean
+  /** 客户端读到的 updated；用于检出并发修改 */
+  expectUpdated?: string
+}): Promise<SaveResult> {
   try {
     const r = await fetch(`${base}/projects/${encodeURIComponent(p.id)}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(p),
+      body: JSON.stringify({
+        id: p.id, name: p.name, created: p.created, updated: p.updated,
+        nodes: p.nodes, viewport: p.viewport,
+        create: !!p.create,
+        expect_updated: p.expectUpdated ?? null,
+      }),
     })
-    return r.ok
+    if (r.ok) return { ok: true }
+    let msg = `保存失败：HTTP ${r.status}`
+    try {
+      const j = await r.json()
+      if (j && j.detail) msg = String(j.detail)
+    } catch {
+      /* 后端没给 JSON 就用默认文案 */
+    }
+    return { ok: false, conflict: r.status === 409, message: msg }
+  } catch (e) {
+    return {
+      ok: false, conflict: false,
+      message: `保存失败：${e instanceof Error ? e.message : '网络错误'}`,
+    }
+  }
+}
+
+/**
+ * 向服务端要一个**保证没用过**的项目 id。
+ *
+ * **为什么不能本地生成**：两个标签页在同一毫秒建项目会拿到完全相同的 id
+ * （时间戳 + 序号，两边都是从 0 开始），后保存的会把先保存的覆盖掉。
+ *
+ * 服务端用随机后缀 + 存在性检查分配，撞了就换。
+ */
+export async function allocateProjectId(): Promise<string | null> {
+  try {
+    const r = await fetch(`${base}/projects/allocate`, { method: 'POST' })
+    if (!r.ok) return null
+    const j = await r.json()
+    return typeof j.id === 'string' && j.id ? j.id : null
   } catch {
-    return false
+    return null
   }
 }
 

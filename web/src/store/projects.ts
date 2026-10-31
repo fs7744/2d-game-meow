@@ -43,13 +43,23 @@ const DEFAULT_VIEWPORT: Viewport = { x: 120, y: 90, z: 1 }
 let seq = 0
 const newId = () => `p${Date.now().toString(36)}${(seq++).toString(36)}`
 
+/**
+ * 造一个新项目。
+ *
+ * **id 建议由服务端分配**（`allocateProjectId()`）：本地用「时间戳 + 序号」
+ * 生成的话，两个标签页在同一毫秒建项目会拿到完全相同的 id（两边序号都从 0
+ * 开始），后保存的直接覆盖先保存的——用户的画布无声消失。
+ *
+ * 传了 `id` 就用它；没传才本地生成（只在离线兜底时用）。
+ */
 export function makeProject(
   name: string,
   nodes: GenNode[] = [],
   viewport: Viewport = DEFAULT_VIEWPORT,
+  id?: string,
 ): Project {
   const now = new Date().toISOString()
-  return { id: newId(), name, created: now, updated: now, nodes, viewport }
+  return { id: id || newId(), name, created: now, updated: now, nodes, viewport }
 }
 
 /**

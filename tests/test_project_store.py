@@ -231,3 +231,163 @@ def test_api_job_missing_returns_404(client):
     assert r.status_code == 404
     # 错误信息要说清是「任务不存在」，不是「not found」
     assert "任务" in r.json()["detail"]
+
+
+# ---------------- id 冲突 ----------------
+
+
+def test_allocate_id_is_unique():
+    """分配的 id 必须互不相同，且不能撞上已存在的项目。"""
+    from workflows import projectstore
+
+    ids = [projectstore.allocate_project_id() for _ in range(30)]
+    assert len(set(ids)) == len(ids), "分配出了重复的 id"
+    for i in ids:
+        assert not projectstore.project_file(i).exists()
+
+
+def test_allocate_id_avoids_existing():
+    """已存在的 id 不能被分配出去。"""
+    from workflows import projectstore
+
+    projectstore.save_project("p_alloc_taken", {"name": "占位", "nodes": []})
+    for _ in range(10):
+        got = projectstore.allocate_project_id()
+        assert got != "p_alloc_taken"
+    projectstore.delete_project("p_alloc_taken")
+
+
+def test_create_mode_refuses_existing_id():
+    """**新建时 id 已被占用 → 报错，不覆盖。**
+
+    以前是静默覆盖：两个标签页在同一毫秒建项目会拿到相同 id
+    （实测 `pmdr5q6ns0`），后保存的把先保存的覆盖掉——用户的画布无声消失。
+    """
+    from workflows import projectstore
+
+    projectstore.save_project("p_conflict", {
+        "name": "A 的项目",
+        "nodes": [{"id": "n1", "params": {"prompt": "A 的内容"}}]})
+
+    with pytest.raises(projectstore.ProjectConflict):
+        projectstore.save_project("p_conflict", {
+            "id": "p_conflict", "name": "B 的项目",
+            "nodes": [{"id": "n2", "params": {"prompt": "B 的内容"}}]},
+            create=True)
+
+    # A 的内容还在
+    got = projectstore.load_project("p_conflict")
+    assert got["nodes"][0]["params"]["prompt"] == "A 的内容"
+    assert got["name"] == "A 的项目"
+
+
+def test_update_mode_still_overwrites():
+    """**更新模式仍然覆盖**（同一个项目反复保存是正常操作）。"""
+    from workflows import projectstore
+
+    projectstore.save_project("p_update", {"name": "原名", "nodes": [{"id": "a"}]})
+    projectstore.save_project("p_update", {"name": "新名", "nodes": [{"id": "b"}]})
+    got = projectstore.load_project("p_update")
+    assert got["name"] == "新名"
+    assert got["nodes"][0]["id"] == "b"
+
+
+def test_optimistic_lock_detects_concurrent_edit():
+    """**乐观锁**：两个窗口编辑同一个项目，后保存的应被拒。"""
+    from workflows import projectstore
+
+    projectstore.save_project("p_lock", {
+        "name": "原始", "updated": "2026-10-31T00:00:00", "nodes": [{"id": "a"}]})
+
+    # 窗口 A 读到 updated=00:00:00，改完存进去
+    projectstore.save_project("p_lock", {
+        "name": "A 改的", "updated": "2026-10-31T01:00:00", "nodes": [{"id": "a2"}]},
+        expect_updated="2026-10-31T00:00:00")
+
+    # 窗口 B 还拿着旧的 00:00:00 → 冲突
+    with pytest.raises(projectstore.ProjectConflict):
+        projectstore.save_project("p_lock", {
+            "name": "B 改的", "updated": "2026-10-31T02:00:00", "nodes": [{"id": "b2"}]},
+            expect_updated="2026-10-31T00:00:00")
+
+    # A 的改动没被覆盖
+    got = projectstore.load_project("p_lock")
+    assert got["name"] == "A 改的"
+    assert got["nodes"][0]["id"] == "a2"
+
+
+def test_optimistic_lock_passes_when_version_matches():
+    """版本号对得上就放行（正常保存路径不能被误伤）。"""
+    from workflows import projectstore
+
+    projectstore.save_project("p_lock_ok", {
+        "name": "原始", "updated": "2026-10-31T00:00:00", "nodes": []})
+    projectstore.save_project("p_lock_ok", {
+        "name": "改的", "updated": "2026-10-31T01:00:00", "nodes": []},
+        expect_updated="2026-10-31T00:00:00")
+    assert projectstore.load_project("p_lock_ok")["name"] == "改的"
+
+
+def test_api_allocate_project_id(client):
+    """HTTP 分配 id。"""
+    r = client.post("/projects/allocate")
+    assert r.status_code == 200
+    sid = r.json()["id"]
+    assert sid
+    r2 = client.post("/projects/allocate")
+    assert r2.json()["id"] != sid
+
+
+def test_api_create_conflict_returns_409(client):
+    """新建撞 id → 409（前端据此提示，不覆盖）。"""
+    sid = "p_api_conflict"
+    body = {"id": sid, "name": "第一个", "nodes": [], "viewport": {}}
+    assert client.put(f"/projects/{sid}", json=body).status_code == 200
+
+    body2 = {"id": sid, "name": "第二个", "nodes": [], "viewport": {}, "create": True}
+    r = client.put(f"/projects/{sid}", json=body2)
+    assert r.status_code == 409, r.text
+    # 第一个还在
+    assert client.get(f"/projects/{sid}").json()["name"] == "第一个"
+    client.delete(f"/projects/{sid}")
+
+
+def test_api_optimistic_lock_returns_409(client):
+    """乐观锁冲突 → 409。"""
+    sid = "p_api_lock"
+    body = {"id": sid, "name": "原始", "updated": "2026-10-31T00:00:00",
+            "nodes": [], "viewport": {}}
+    assert client.put(f"/projects/{sid}", json=body).status_code == 200
+
+    r = client.put(f"/projects/{sid}", json={
+        "id": sid, "name": "A 改的", "updated": "2026-10-31T01:00:00",
+        "nodes": [], "viewport": {}, "expect_updated": "2026-10-31T00:00:00"})
+    assert r.status_code == 200, r.text
+
+    r2 = client.put(f"/projects/{sid}", json={
+        "id": sid, "name": "B 改的", "updated": "2026-10-31T02:00:00",
+        "nodes": [], "viewport": {}, "expect_updated": "2026-10-31T00:00:00"})
+    assert r2.status_code == 409, r2.text
+    assert "修改" in r2.json()["detail"]
+    client.delete(f"/projects/{sid}")
+
+
+def test_import_to_existing_scope_refused():
+    """**导入到已存在的项目 id → 报错**。
+
+    素材要写进 `assets/projects/<scope>/imported/`，撞了就会把两个项目的
+    素材混在一起（删项目时连带删掉别人的图）。
+    """
+    from workflows import projectio, projectstore
+
+    sid = "p_import_conflict"
+    projectstore.save_project(sid, {"name": "已存在", "nodes": []})
+    try:
+        # 先造一个正常归档（用另一个 id）
+        payload = {"nodes": [{"id": "n1", "params": {"prompt": "x"}}]}
+        blob = projectio.pack({"name": "归档"}, payload)
+        # 再往已存在的 id 上导 → 必须报错
+        with pytest.raises(projectio.ArchiveError):
+            projectio.unpack(blob, sid)
+    finally:
+        projectstore.delete_project(sid)

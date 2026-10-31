@@ -311,8 +311,15 @@ def unpack(data: bytes, scope: str) -> Dict[str, Any]:
 
     素材落到 `assets/projects/<scope>/imported/<n>/`，路径重写成新位置。
     原项目不受任何影响。
+
+    **目标已存在时报错，不覆盖**：素材要写进 `assets/projects/<scope>/`，
+    如果这个 scope 已经有项目（导入了两次、或者 id 撞了），直接写进去会把
+    两个项目的素材混在一起——删项目时连带删掉别人的图。
+    调用方应先用一个**新分配**的 scope。
     """
     scope = _scope_name(scope)
+    if project_dir(scope).exists():
+        raise ArchiveError(f"目标项目目录已存在：{scope}（换一个项目 id 再导入）")
     dest_root = project_dir(scope) / "imported"
     try:
         zf = zipfile.ZipFile(io.BytesIO(data))
@@ -442,9 +449,29 @@ def list_templates() -> List[Dict[str, Any]]:
         except Exception:            # noqa: BLE001 —— 坏模板不该让列表整个挂掉
             pass
         out.append(info)
-    out.sort(key=lambda t: t.get("created") or 0, reverse=True)
+    # **排序键要统一类型**：`created` 可能是 float（文件 mtime）也可能是 str
+    # （meta 里的 ISO 时间）。混着比会抛 `TypeError: '<' not supported between
+    # instances of 'float' and 'str'` —— 新旧模板各一个时列表接口直接 500。
+    out.sort(key=_sort_key, reverse=True)
     return out
 
+
+def _sort_key(t: Dict[str, Any]) -> float:
+    """模板排序键：统一成 float。
+
+    ISO 字符串（`2026-10-31T12:00:00`）能直接被 `datetime.fromisoformat`
+    解析；解析不了就退化成 0（排在最后），**不能让排序整个崩掉**。
+    """
+    v = t.get("created")
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        try:
+            from datetime import datetime
+            return datetime.fromisoformat(v).timestamp()
+        except (ValueError, TypeError):
+            return 0.0
+    return 0.0
 
 def read_template(tid: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """读模板的 meta 与 payload（不解素材，只看内容）。"""

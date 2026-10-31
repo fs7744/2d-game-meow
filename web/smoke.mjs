@@ -26,6 +26,10 @@ function makeFetch() {
   let serverCurrent = ''
   // 任务查询是否一直失败（模拟服务端异常）
   let jobsFailMode = false
+  // 分配项目 id 的计数器
+  let serverSeq = 0
+  // 保存时是否报冲突（模拟别的窗口改了同一个项目）
+  let saveConflictMode = false
   const fetchFn = async (url, init = {}) => {
     calls.push({ url: String(url), method: init.method || 'GET', body: init.body })
     if (String(url).endsWith('/health')) {
@@ -202,6 +206,16 @@ function makeFetch() {
       }
     }
     // ---- 项目落盘存储（服务端磁盘）----
+    // **分配 id**：服务端保证唯一（随机后缀 + 存在性检查）。
+    // 必须排在 `/projects` 列表分支前面吗？——`/projects/allocate` 不以
+    // `/projects` 结尾，所以不冲突；但为了可读性放在这里。
+    if (String(url).endsWith('/projects/allocate')) {
+      let id
+      do {
+        id = `pm${(serverSeq++).toString(36)}${Math.random().toString(36).slice(2, 8)}`
+      } while (serverProjects.has(id))
+      return { ok: true, json: async () => ({ id }) }
+    }
     if (String(url).endsWith('/projects') && (init.method || 'GET') === 'GET') {
       return {
         ok: true,
@@ -221,6 +235,11 @@ function makeFetch() {
     if (String(url).includes('/projects/') && (init.method || 'GET') === 'PUT') {
       const id = decodeURIComponent(String(url).split('/projects/')[1].split('?')[0])
       const doc = JSON.parse(init.body || '{}')
+      // **冲突模式**：模拟别的窗口改了同一个项目 → 409
+      if (saveConflictMode) {
+        return { ok: false, status: 409,
+          json: async () => ({ detail: '项目已被其他窗口修改' }) }
+      }
       serverProjects.set(id, { ...doc, id })
       return { ok: true, json: async () => ({ id, name: doc.name, count: (doc.nodes || []).length }) }
     }
@@ -267,6 +286,7 @@ function makeFetch() {
   fetchFn.serverProjects = serverProjects
   fetchFn.setServerCurrent = (v) => { serverCurrent = v }
   fetchFn.setJobsFail = (v) => { jobsFailMode = v }
+  fetchFn.setSaveConflict = (v) => { saveConflictMode = v }
   return fetchFn
 }
 
@@ -1071,6 +1091,60 @@ function check(name, cond, extra = '') {
   check('项目数回到 1', projRows().length === 1, String(projRows().length))
 
   check('项目场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 16c) id 冲突：服务端分配 id + 冲突要提示
+{
+  const { dom, errors, fetch: f } = await boot('?demo=1')
+  const doc = dom.window.document
+  const win = dom.window
+  await new Promise((r) => setTimeout(r, 700))
+
+  // ---- 新建项目：id 来自服务端，不是本地生成 ----
+  const projSec = () => section(doc, '项目')
+  const before = projSec().querySelectorAll('.project-item').length
+  projSec().querySelector('.rail-new').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 700))
+  check('新建项目时向服务端要 id',
+    calls.some((c) => c.url.includes('/projects/allocate')),
+    JSON.stringify(calls.slice(-4).map((c) => `${c.method} ${c.url}`)))
+  check('新建后项目数 +1',
+    projSec().querySelectorAll('.project-item').length === before + 1,
+    String(projSec().querySelectorAll('.project-item').length))
+  // 服务端分配到的 id 真的落盘了
+  check('服务端分配的 id 被用来落盘',
+    [...f.serverProjects.keys()].length >= 1,
+    JSON.stringify([...f.serverProjects.keys()]))
+
+  // ---- 保存冲突：要让用户看见，不能静默失败 ----
+  // **先切回有节点的项目**：新建的项目是空画布（没有节点可改，
+  // 也就不会触发自动保存）。
+  const rows = [...projSec().querySelectorAll('.project-item')]
+  rows[0]?.querySelector('.rail-item-main')
+    .dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 400))
+
+  f.setSaveConflict(true)
+  const ta = doc.querySelector('textarea.prompt')
+  check('切回后有节点可以改', !!ta)
+  if (ta) {
+    const setter = Object.getOwnPropertyDescriptor(win.HTMLTextAreaElement.prototype, 'value').set
+    setter.call(ta, '冲突测试提示词')
+    ta.dispatchEvent(new win.Event('input', { bubbles: true }))
+  }
+  await new Promise((r) => setTimeout(r, 1200))
+  // 提示渲染在 .toast 里（见 App.tsx 的 uploadMsg / notice）
+  const toast = doc.querySelector('.toast')
+  check('保存冲突时弹出了提示条', !!toast, '没有 .toast')
+  check('提示内容说明了是冲突', (toast?.textContent || '').includes('冲突'),
+    (toast?.textContent || '').slice(0, 120))
+  check('提示里带上了服务端的原因',
+    (toast?.textContent || '').includes('其他窗口'),
+    (toast?.textContent || '').slice(0, 160))
+  f.setSaveConflict(false)
+
+  check('id 冲突场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 

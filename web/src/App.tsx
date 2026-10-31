@@ -17,7 +17,7 @@ import {
   exportProject, importProject, fetchTemplates, saveTemplate, instantiateTemplate,
   deleteTemplate, type TemplateInfo,
   fetchServerProjects, fetchServerProject, saveServerProject, deleteServerProject,
-  saveWorkspace,
+  saveWorkspace, allocateProjectId,
 } from './api'
 import ConfirmDialog from './components/ConfirmDialog'
 import Lightbox from './components/Lightbox'
@@ -315,15 +315,37 @@ export default function App() {
   // 启动时从服务端拉，改动后写回服务端。
 
   /** 把一个项目写到服务端磁盘。 */
-  const persistProject = useCallback(async (p: Project) => {
-    await saveServerProject({
+  const persistProject = useCallback(async (
+    p: Project,
+    opts: { create?: boolean; expectUpdated?: string } = {},
+  ) => {
+    // **版本号与时间戳要分开**：
+    //   expectUpdated = 我读到的那个版本（乐观锁的比对基准）
+    //   updated       = 本次保存的新时间戳（写进磁盘，作为下一个版本号）
+    // 搞混的话：本地 updated 一改就跟磁盘上的对不上 → 每次都报冲突。
+    const stamp = new Date().toISOString()
+    const r = await saveServerProject({
       id: p.id,
       name: p.name,
       created: p.created,
-      updated: p.updated,
+      updated: stamp,
       nodes: p.nodes as unknown[],
       viewport: p.viewport as unknown as Record<string, unknown>,
+      create: opts.create,
+      expectUpdated: opts.expectUpdated,
     })
+    if (r.ok) {
+      // 保存成功 → 把版本号推进到刚写进去的那个时间戳
+      // （否则下次保存的 expectUpdated 还是旧的，会误报冲突）
+      p.updated = stamp
+      return true
+    }
+    // **冲突要告诉用户**：静默失败 = 用户以为存上了，其实没存
+    if (r.conflict) {
+      setUploadMsg(`保存冲突：${r.message}`)
+      window.setTimeout(() => setUploadMsg(''), 8000)
+    }
+    return false
   }, [])
 
   /**
@@ -373,10 +395,11 @@ export default function App() {
       }
       if (legacy) loaded.push(legacy)
       if (!alive) return
-      // 一个项目都没有 → 建一个空的
+      // 一个项目都没有 → 建一个空的（id 由服务端分配，避免撞上已有项目）
       if (loaded.length === 0) {
-        const fresh = makeProject('我的项目')
-        await persistProject(fresh)
+        const sid = await allocateProjectId()
+        const fresh = makeProject('我的项目', [], undefined, sid || undefined)
+        await persistProject(fresh, { create: true })
         loaded.push(fresh)
       }
       // 当前打开哪个：服务端记的优先，否则第一个
@@ -461,19 +484,21 @@ export default function App() {
   // 自动保存（防抖 400ms）：只写回**当前项目**，别的项目原封不动。
   //
   // **只写服务端磁盘**。浏览器不留任何项目内容。
+  //
+  // **乐观锁**：带上「我读到的那个版本」。别的窗口改了同一个项目时，
+  // 服务端会返回 409 而不是默默覆盖——两个窗口同时编辑时，至少有一个
+  // 能保住自己的内容。
   useEffect(() => {
     const t = setTimeout(() => {
       const st = storeRef.current
       const projects = st.projects.map((p) =>
-        p.id === currentId
-          ? { ...p, nodes, viewport, updated: new Date().toISOString() }
-          : p,
+        p.id === currentId ? { ...p, nodes, viewport } : p,
       )
       storeRef.current = { current: currentId, projects }
       setProjectMeta(projects.map(metaOf))
-      // 落盘到服务端
+      // 落盘到服务端（expectUpdated 用「上次保存后」的版本号）
       const cur = projects.find((p) => p.id === currentId)
-      if (cur) void persistProject(cur)
+      if (cur) void persistProject(cur, { expectUpdated: cur.updated })
     }, 400)
     return () => clearTimeout(t)
   }, [nodes, viewport, currentId])
@@ -488,10 +513,11 @@ export default function App() {
   /** 把当前内存里的节点/视口写回 store（切项目、新建项目、删项目前都要先做） */
   const flushCurrent = useCallback(() => {
     const st = storeRef.current
+    // **不要动 updated**：它是乐观锁的版本号（= 服务端上那个版本的时间戳）。
+    // 这里冲成当前时间的话，本地版本号就跟磁盘上的对不上 → 每次保存都误报冲突。
     const projects = st.projects.map((p) =>
       p.id === currentIdRef.current
-        ? { ...p, nodes: nodesRef.current, viewport: viewportRef.current,
-            updated: new Date().toISOString() }
+        ? { ...p, nodes: nodesRef.current, viewport: viewportRef.current }
         : p,
     )
     storeRef.current = { ...st, projects }
@@ -516,9 +542,18 @@ export default function App() {
     void saveWorkspace(id)
   }, [flushCurrent, persistProject])
 
-  const createProject = useCallback((name?: string) => {
+  const createProject = useCallback(async (name?: string) => {
     const projects = flushCurrent()
-    const p = makeProject(name?.trim() || `项目 ${projects.length + 1}`)
+    // **id 由服务端分配**：本地用「时间戳+序号」生成的话，两个标签页在同一
+    // 毫秒建项目会拿到完全相同的 id（两边序号都从 0 开始），后保存的直接
+    // 覆盖先保存的——用户的画布无声消失。服务端分配保证唯一。
+    const sid = await allocateProjectId()
+    if (!sid) {
+      setUploadMsg('新建失败：连不上后端，无法分配项目 id')
+      window.setTimeout(() => setUploadMsg(''), 6000)
+      return
+    }
+    const p = makeProject(name?.trim() || `项目 ${projects.length + 1}`, [], undefined, sid)
     const next = [...projects, p]
     storeRef.current = { current: p.id, projects: next }
     setProjectMeta(next.map(metaOf))
@@ -527,7 +562,7 @@ export default function App() {
     setViewport({ x: canvasBox().left + 40, y: 90, z: 1 })
     setSelectedId(null)
     // 立刻落盘：空项目也要在磁盘上占个位（不然刷新就没了）
-    void persistProject(p)
+    await persistProject(p, { create: true })
     void saveWorkspace(p.id)
   }, [flushCurrent, persistProject])
 
@@ -539,7 +574,8 @@ export default function App() {
     setProjectMeta(projects.map(metaOf))
     // 改名也要落盘：下次从磁盘拉回来的名字得是新的
     const renamed = projects.find((p) => p.id === id)
-    if (renamed) void persistProject(renamed)
+    // 带乐观锁：改名也是一次修改，别把别处的改动覆盖掉
+    if (renamed) void persistProject(renamed, { expectUpdated: renamed.updated })
   }, [flushCurrent, persistProject])
 
   /** 删项目：hard=true 时连这个项目的产物文件一起删（不可恢复）。 */
@@ -629,8 +665,16 @@ export default function App() {
     try {
       // **先定好 id 再导入**：导入的素材要落到 `assets/projects/<id>/`，
       // 项目定义也写在这个 id 下——两边必须同一个 id。
+      // **id 由服务端分配**：本地生成可能撞上已有项目（素材会写进别人的
+      // 目录，两个项目的图混在一起）。服务端分配保证是全新的目录。
       const projects = flushCurrent()
-      const p = makeProject(file.name.replace(/\.mproj$/i, '') || '导入的项目')
+      const sid = await allocateProjectId()
+      if (!sid) {
+        setUploadMsg('导入失败：连不上后端，无法分配项目 id')
+        window.setTimeout(() => setUploadMsg(''), 6000)
+        return
+      }
+      const p = makeProject(file.name.replace(/\.mproj$/i, '') || '导入的项目', [], undefined, sid)
       const imp = await importProject(file, p.id)
       const merged = projectFromImported(imp, p.id, p.name)
       const next = [...projects, merged]
@@ -655,7 +699,14 @@ export default function App() {
   const useTemplate = useCallback(async (tid: string) => {
     try {
       const projects = flushCurrent()
-      const p = makeProject('新项目')
+      // **id 由服务端分配**（理由同导入：新目录，不能撞已有项目）
+      const sid = await allocateProjectId()
+      if (!sid) {
+        setUploadMsg('从模板新建失败：连不上后端，无法分配项目 id')
+        window.setTimeout(() => setUploadMsg(''), 6000)
+        return
+      }
+      const p = makeProject('新项目', [], undefined, sid)
       const imp = await instantiateTemplate(tid, p.id)
       const merged = projectFromImported(imp, p.id, p.name)
       const next = [...projects, merged]

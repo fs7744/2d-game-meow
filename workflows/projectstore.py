@@ -29,6 +29,7 @@ import json
 import os
 import shutil
 import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -40,7 +41,18 @@ PROJECT_FILE = "project.json"
 #: 工作区状态文件：记「当前打开的是哪个项目」
 WORKSPACE_FILE = "workspace.json"
 
-_WRITE_LOCK = threading.Lock()
+#: 写锁。**必须用 RLock（可重入）**：`save_project` 持锁时调 `_atomic_write`，
+# 而后者内部也要拿锁——普通 Lock 重复获取会直接死锁（测试表现为整个 pytest
+# 卡住、不报错）。
+_WRITE_LOCK = threading.RLock()
+
+
+class ProjectConflict(Exception):
+    """项目冲突：要么 id 已被占用，要么内容被别人改过。
+
+    **必须让调用方能区分「冲突」与「出错」**：冲突是可恢复的
+    （换个 id 重来 / 提示用户），出错不是。
+    """
 
 
 def safe_scope(scope: str) -> str:
@@ -89,10 +101,21 @@ def _atomic_write(path: Path, text: str) -> None:
         os.replace(str(tmp), str(path))
 
 
-def save_project(scope: str, doc: Dict[str, Any]) -> Dict[str, Any]:
+def save_project(scope: str, doc: Dict[str, Any],
+                 expect_updated: Optional[str] = None,
+                 create: bool = False) -> Dict[str, Any]:
     """把一个项目定义写到磁盘。返回落盘的摘要。
 
     `doc` 要有 `nodes`（列表）。`id` 缺省用 scope，`name` 缺省用 scope。
+
+    **`create=True`（新建）**：磁盘上已经有这个 id → 抛 `ProjectConflict`。
+    以前是直接覆盖，于是两个标签页在同一毫秒建项目（id 撞了）时，
+    后保存的把先保存的**静默覆盖**——用户的画布无声消失，还以为保存成功了。
+
+    **乐观锁**（`expect_updated`）：调用方带上「我读到的那份项目的 updated 时间戳」。
+    磁盘上当前的 updated 与之不符 → 抛 `ProjectConflict`。
+    这解决的是**两个标签页同时编辑同一个项目**：A 保存后 B 再保存，
+    B 的 `expect_updated` 已经是旧的了 → 冲突报错，而不是把 A 的改动覆盖掉。
     """
     if not isinstance(doc, dict):
         raise ValueError("项目定义必须是对象")
@@ -109,9 +132,48 @@ def save_project(scope: str, doc: Dict[str, Any]) -> Dict[str, Any]:
         "nodes": nodes,
         "viewport": doc.get("viewport") or {"x": 120, "y": 90, "z": 1},
     }
-    _atomic_write(project_file(sid),
-                 json.dumps(out, ensure_ascii=False, indent=1))
+    with _WRITE_LOCK:
+        # **新建模式**：id 已被占用 → 冲突，不覆盖
+        if create and (project_file(sid).exists() or project_dir(sid).exists()):
+            raise ProjectConflict(f"项目 id 已被占用：{sid}")
+        # **乐观锁校验**：在写之前比对磁盘上的 updated
+        if expect_updated is not None:
+            cur = load_project(sid)
+            cur_updated = str((cur or {}).get("updated") or "")
+            if cur is not None and cur_updated != expect_updated:
+                raise ProjectConflict(
+                    f"项目已被其他窗口修改（磁盘上是 {cur_updated or '空'}，"
+                    f"你手上是 {expect_updated or '空'}）")
+        _atomic_write(project_file(sid),
+                      json.dumps(out, ensure_ascii=False, indent=1))
     return summarize(out)
+
+
+def allocate_project_id(prefix: str = "p") -> str:
+    """分配一个**保证没用过**的项目 id。
+
+    **为什么由服务端分配**：id 原先由浏览器用「时间戳 + 序号」生成，
+    两个标签页在同一毫秒建项目会拿到**完全相同**的 id（实测 `pmdr5q6ns0`），
+    后保存的直接覆盖先保存的——用户毫无察觉地丢了项目。
+
+    服务端分配用「随机后缀 + 存在性检查」，并带重试：
+    万一撞了（概率极低）就换一个，绝不返回已存在的 id。
+    """
+    import secrets
+
+    paths.PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+    for _ in range(20):
+        sid = f"{prefix}{time.strftime('%y%m%d')}{secrets.token_hex(3)}"
+        # 检查两处：项目定义文件、以及目录本身（有目录但没定义 = 残留）
+        if not project_file(sid).exists() and not project_dir(sid).exists():
+            return sid
+    # 极端情况（20 次全撞）：退回带序号的
+    n = 1
+    while True:
+        sid = f"{prefix}{time.strftime('%y%m%d')}{secrets.token_hex(2)}{n}"
+        if not project_file(sid).exists() and not project_dir(sid).exists():
+            return sid
+        n += 1
 
 
 def summarize(doc: Dict[str, Any]) -> Dict[str, Any]:
