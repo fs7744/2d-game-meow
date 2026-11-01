@@ -3602,8 +3602,8 @@ function check(name, cond, extra = '') {
   const input = doc.querySelector('.chars-wizard-input')
   check('属性页有一句话输入框', !!input)
   const btn = [...doc.querySelectorAll('.chars-body button')]
-    .find((b) => (b.textContent || '').includes('用一句话生成'))
-  check('有「用一句话生成」按钮', !!btn)
+    .find((b) => (b.textContent || '').includes('一句话生成'))
+  check('有「一句话生成」按钮', !!btn)
   check('没输入时按钮是禁用的（避免空提交）', btn?.disabled === true)
 
   setInput(input, '一个苍白的精灵女剑士，银发红瞳，身材纤细')

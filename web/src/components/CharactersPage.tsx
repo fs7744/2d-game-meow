@@ -976,31 +976,40 @@ export default function CharactersPage({ onNotice }: Props) {
 
             {tab === 'info' && (
               <div className="chars-body">
-                <div className="chars-row">
-                  <button type="button" className="mini" onClick={() => void doAnalyze()}
-                    disabled={anaBusy}
-                    title="用本地 4B 模型看一张图，读出身高体型/发色瞳色这些可见特征">
-                    {anaBusy ? '看图反推中…' : '从图片反推属性'}
-                  </button>
-                  <span className="chars-sub">
-                    官方 Cloner 的做法：拿一张图读<b>看得见的身体特征</b>
-                    （不含服装 / 姿势 / 表情），读完先给你看，确认了才写进角色。
-                  </span>
+                {/* 顶部 hero：官方 CHARACTER WIZARD 的对应物 —— 两种造角色方式 */}
+                <div className="chars-hero">
+                  <div className="chars-hero-title">定义这个角色</div>
+                  <div className="chars-hero-sub">
+                    两种方式二选一：一句话让 AI 拆出属性，或给张图反推长相。
+                    改完属性，去「出图」页生成第一张底图。
+                  </div>
+                  <div className="chars-row">
+                    <input
+                      className="chars-wizard-input"
+                      placeholder="一句话造角色，例：一个苍白的精灵女剑士，银发红瞳，身材纤细"
+                      value={wizText}
+                      onChange={(e) => setWizText(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') void doWizard() }}
+                    />
+                    <button type="button" className="chars-cta" onClick={() => void doWizard()}
+                      disabled={wizBusy || !wizText.trim()}
+                      title="官方 AI 向导：把一句话拆成 9 个结构化属性（不落盘，先给你看）">
+                      {wizBusy ? '生成中…' : '一句话生成'}
+                    </button>
+                  </div>
+                  <div className="chars-row">
+                    <button type="button" className="chars-cta ghost" onClick={() => void doAnalyze()}
+                      disabled={anaBusy}
+                      title="用本地 4B 模型看一张图，读出身高体型/发色瞳色这些可见特征">
+                      {anaBusy ? '看图反推中…' : '从图片反推属性'}
+                    </button>
+                    <span className="chars-sub">
+                      拿一张图读<b>看得见的身体特征</b>（不含服装/姿势/表情），
+                      读完先给你看，确认了才写进角色。
+                    </span>
+                  </div>
                 </div>
-                <div className="chars-row">
-                  <input
-                    className="chars-wizard-input"
-                    placeholder="一句话造角色，例：一个苍白的精灵女剑士，银发红瞳，身材纤细"
-                    value={wizText}
-                    onChange={(e) => setWizText(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === 'Enter') void doWizard() }}
-                  />
-                  <button type="button" className="mini" onClick={() => void doWizard()}
-                    disabled={wizBusy || !wizText.trim()}
-                    title="官方 AI 向导：把一句话拆成 9 个结构化属性（不落盘，先给你看）">
-                    {wizBusy ? '生成中…' : '用一句话生成'}
-                  </button>
-                </div>
+
                 {anaMsg && <p className="chars-sub">{anaMsg}</p>}
                 {anaResult && (
                   <div className="chars-analyze">
@@ -1036,51 +1045,56 @@ export default function CharactersPage({ onNotice }: Props) {
                     </div>
                   </div>
                 )}
-                <div className="chars-row">
-                  <label>
-                    性别
-                    <select
-                      value={String(draft.sex ?? 'female')}
-                      onChange={(e) => {
-                        setDraft((d) => ({ ...d, sex: e.target.value }))
-                        void saveInfo({ sex: e.target.value })
-                      }}
-                    >
-                      <option value="female">女</option>
-                      <option value="male">男</option>
-                    </select>
-                  </label>
-                  {INFO_NUM.map(([k, label]) => (
-                    <label key={k}>
-                      {label}
-                      <input
-                        type="number"
-                        value={Number(draft[k] ?? 18)}
-                        onChange={(e) => setDraft((d) => ({ ...d, [k]: Number(e.target.value) }))}
-                        onBlur={(e) => void saveInfo({ [k]: Number(e.target.value) })}
-                      />
+                <div className="chars-sec">
+                  <div className="chars-sec-title">基础</div>
+                  <div className="chars-row">
+                    <label>
+                      性别
+                      <select
+                        value={String(draft.sex ?? 'female')}
+                        onChange={(e) => {
+                          setDraft((d) => ({ ...d, sex: e.target.value }))
+                          void saveInfo({ sex: e.target.value })
+                        }}
+                      >
+                        <option value="female">女</option>
+                        <option value="male">男</option>
+                      </select>
                     </label>
-                  ))}
-                  <label>
-                    背景色
-                    <select
-                      value={String(draft.background_color ?? 'green')}
-                      onChange={(e) => {
-                        setDraft((d) => ({ ...d, background_color: e.target.value }))
-                        void saveInfo({ background_color: e.target.value })
-                      }}
-                      title="出图时的幕布色，抠图按它取样（官方 background_color）"
-                    >
-                      {BG_COLORS.map((c) => (
-                        <option key={c} value={c}>{zh(BG_COLOR_LABEL, c)}</option>
-                      ))}
-                    </select>
-                  </label>
+                    {INFO_NUM.map(([k, label]) => (
+                      <label key={k}>
+                        {label}
+                        <input
+                          type="number"
+                          value={Number(draft[k] ?? 18)}
+                          onChange={(e) => setDraft((d) => ({ ...d, [k]: Number(e.target.value) }))}
+                          onBlur={(e) => void saveInfo({ [k]: Number(e.target.value) })}
+                        />
+                      </label>
+                    ))}
+                    <label>
+                      背景色
+                      <select
+                        value={String(draft.background_color ?? 'green')}
+                        onChange={(e) => {
+                          setDraft((d) => ({ ...d, background_color: e.target.value }))
+                          void saveInfo({ background_color: e.target.value })
+                        }}
+                        title="出图时的幕布色，抠图按它取样（官方 background_color）"
+                      >
+                        {BG_COLORS.map((c) => (
+                          <option key={c} value={c}>{zh(BG_COLOR_LABEL, c)}</option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
                 </div>
 
-                {INFO_TEXT.map(([k, label, hint]) => {
-                  const raw = String(draft[k] ?? '')
-                  const isTags = INFO_TAGS.has(k)
+                <div className="chars-sec">
+                  <div className="chars-sec-title">外貌标签</div>
+                  {INFO_TEXT.map(([k, label, hint]) => {
+                    const raw = String(draft[k] ?? '')
+                    const isTags = INFO_TAGS.has(k)
                   // 标签字段：按逗号拆成 chips，可逐个删；点「选」开官方标签库
                   const chips = isTags
                     ? raw.split(',').map((s) => s.trim()).filter(Boolean)
@@ -1131,23 +1145,25 @@ export default function CharactersPage({ onNotice }: Props) {
                     </div>
                   )
                 })}
+                </div>
 
-                <div className="chars-style">
-                  <div className="chars-style-head">
-                    <b>画风</b>
-                    <span className="chars-sub">
-                      {flatStyles.length} 条 · 官方 character_styles.json
-                    </span>
-                    <span className="spacer" />
-                    {currentStyle && (
-                      <span className="chars-style-current">
-                        当前：{currentStyleLabel || currentStyle}
+                <div className="chars-sec">
+                  <div className="chars-sec-title">画风</div>
+                  <div className="chars-style">
+                    <div className="chars-style-head">
+                      <span className="chars-sub">
+                        {flatStyles.length} 条 · 官方 character_styles.json
                       </span>
-                    )}
-                    <button
-                      type="button"
-                      className="mini"
-                      onClick={() => setStyleOpen((v) => !v)}
+                      <span className="spacer" />
+                      {currentStyle && (
+                        <span className="chars-style-current">
+                          当前：{currentStyleLabel || currentStyle}
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        className="mini"
+                        onClick={() => setStyleOpen((v) => !v)}
                     >
                       {styleOpen ? '收起' : '浏览画风'}
                     </button>
@@ -1199,6 +1215,7 @@ export default function CharactersPage({ onNotice }: Props) {
                       </p>
                     </>
                   )}
+                  </div>
                 </div>
               </div>
             )}
