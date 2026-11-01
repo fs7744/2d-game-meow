@@ -324,10 +324,15 @@ def test_underwear_prompt_is_official_verbatim():
 
 
 def test_underwear_defaults_are_official():
-    """官方 `:880-900`：target_size 1024、背景 White、20 步 / cfg 1.0。"""
+    """官方 `:880-900`：target_size 1024、20 步 / cfg 1.0。
+
+    背景官方字面值是 White，但我们默认走 Transparent：官方抠背景是独立的
+    bg_remove 阶段用 native 原生透明输出，不是键控抠白底。白底 + 白内衣 +
+    深发色用 chroma 键控必然误抠（白内衣当幕布、深色当黑残留），所以默认透明。
+    """
     d = clothesgen.UNDERWEAR_DEFAULTS
     assert d["target_size"] == 1024
-    assert d["background_color"] == "White"
+    assert d["background_color"] == "Transparent"
     assert d["steps"] == 20 and d["cfg"] == 1.0
     assert d["costume"] == "Underwear"
 

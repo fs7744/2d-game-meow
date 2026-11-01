@@ -48,6 +48,7 @@ export const BG_COLOR_LABEL: Record<string, string> = {
   white: '白幕',
   grey: '灰幕',
   magenta: '品红幕',
+  transparent: '透明',
 }
 
 /* ------------------------------------------------------------------ *

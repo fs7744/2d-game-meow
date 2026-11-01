@@ -87,12 +87,15 @@ def _write_temp_png(image: Image.Image) -> str:
 #: 官方 `:879`（**逐字**，整条指令就这一句，没有背景段）
 UNDERWEAR_PROMPT = "Dress character: White underwear"
 
-#: 官方 `:880-893`：target_size 1024、背景 White、采样 20 步 / cfg 1.0
+#: 官方 `:880-893`：target_size 1024、背景 White、采样 20 步 / cfg 1.0。
+#: 背景默认改成 **Transparent**（官方 `:890` 写 White，但抠背景是独立的 bg_remove
+#: 阶段用 native 原生透明输出，不是键控抠白底）。白底 + 白内衣 + 深发色走 chroma
+#: 键控必然误抠（白内衣当幕布、深色当黑残留），所以这里直接走原生透明，别再用键控。
 UNDERWEAR_DEFAULTS: Dict[str, Any] = {
     "target_size": 1024,
     "steps": 20,
     "cfg": 1.0,
-    "background_color": "White",
+    "background_color": "Transparent",
     "costume": "Underwear",
 }
 
@@ -156,6 +159,8 @@ def remove_clothes(
     lora_scale = float(params.get("lora_scale") or 1.0)
     background = str(params.get("background_color")
                      or UNDERWEAR_DEFAULTS["background_color"])
+    # 透明底（Transparent / transparent / alpha）→ 原生透明输出，不走键控
+    want_transparent = background.strip().lower() in {"transparent", "alpha"}
 
     lora_name = ""
     if edit is None:
@@ -165,9 +170,13 @@ def remove_clothes(
         lora_name = Engine.CLOTHES_LORA
 
         def _edit(image: Image.Image, p: str, n: str, sd: int, st: int, cf: float):
+            # **透明底走原生透明输出**（官方 bg_remove 的 `native` 预设，
+            # `_is_native_bg_remove`）：让 QI2 的 VAE 直接出 alpha 通道。
+            # 白底 + 白内衣 + 深发色用 chroma 键控必然误抠（白内衣当幕布、深色
+            # 被当黑残留，身上全是黑斑）——官方从不用键控抠内衣底图。
             return gen.qwen_edit_image(
                 engine, image=image, prompt=p, negative=n, seed=sd, steps=st,
-                cfg=cf, label="wunderwear",
+                cfg=cf, label="wunderwear", transparent=want_transparent,
                 lora=Engine.CLOTHES_LORA, lora_scale=lora_scale)
 
         edit = _edit
@@ -185,7 +194,10 @@ def remove_clothes(
         image = image.resize(base.size, Image.LANCZOS)
 
     matte_error = ""
-    if params.get("matte"):
+    # **只有实色幕布（绿/蓝）才走 chroma 键控**：透明底已经由原生输出带了 alpha，
+    # 再过一遍键控只会把正确的 alpha 破坏掉。白底 + 白内衣用键控也必然误抠，
+    # 所以透明/白底都跳过键控。
+    if params.get("matte") and not want_transparent:
         try:
             from workflows import matte_screen
             matte_fn = matte_fn or matte_screen.matte_pil

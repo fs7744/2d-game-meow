@@ -69,7 +69,7 @@ const INFO_TAGS = new Set([
 const INFO_NUM: Array<[key: string, label: string]> = [['age', '年龄']]
 
 /** 背景色（官方 background_color，用于抠图与预览） */
-const BG_COLORS = ['green', 'blue', 'white', 'grey', 'magenta']
+const BG_COLORS = ['green', 'blue', 'white', 'grey', 'magenta', 'transparent']
 
 type Props = {
   /** 一次性提示（走 App 里那条 toast） */
