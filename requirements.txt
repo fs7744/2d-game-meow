@@ -25,3 +25,17 @@ rembg>=2.0
 fastapi
 uvicorn[standard]
 python-multipart
+
+# ---- 角色中心：可选（不装其余功能照常用）----
+#
+# **llama-cpp-python 不能 pip install 官方版**：官方包没有 Qwen35ChatHandler
+# （多模态投影用的 chat handler），必须装 JamePeng fork 的预编译 wheel，
+# 按 Python 版本 / CUDA 版本 / 平台拼 URL（照官方 install.py:21-47）：
+#   pip install --only-binary=:all: \
+#     https://github.com/JamePeng/llama-cpp-python/releases/download/\
+# v0.3.46-cu124-win-20260808/llama_cpp_python-0.3.46+cu124-cp313-cp313-win_amd64.whl
+# 用 `python tools/fetch_vnccs_weights.py` 会打印你机器上该装的那一个。
+# 别加 --no-deps：那样会缺 diskcache，Qwen35ChatHandler import 不起来。
+diskcache
+# 表情批量生成的人脸检测（配 models/bbox/face_yolov8m.pt）
+ultralytics

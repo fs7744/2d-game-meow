@@ -384,8 +384,16 @@ def main() -> int:
     ap.add_argument("--endpoint", default="",
                     help="HuggingFace 镜像地址（国内常用 https://hf-mirror.com）。"
                          "等价于设环境变量 HF_ENDPOINT")
+    ap.add_argument("--proxy", default="",
+                    help="HTTP 代理（如 http://127.0.0.1:7897）。"
+                         "**实测镜像 1.2MB/s、走代理 11.7MB/s**——下 4GB 时差 10 倍，"
+                         "所以留了这个口子")
     args = ap.parse_args()
 
+    if args.proxy:
+        os.environ["HTTP_PROXY"] = args.proxy
+        os.environ["HTTPS_PROXY"] = args.proxy
+        print(f"用代理：{args.proxy}")
     if args.endpoint:
         os.environ["HF_ENDPOINT"] = args.endpoint
         print(f"用镜像：{args.endpoint}")

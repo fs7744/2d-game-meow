@@ -63,6 +63,7 @@ python tools/convert_lora.py models/lora/vnccs_pose.safetensors \
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -75,12 +76,30 @@ GATE_UP = ".img_mlp.gate_up."
 SPLIT_TARGETS = ("gate_layer", "proj")
 
 
+#: 下/上投影的键名。**兼容两种 ComfyUI 变体**：
+#:   · `.lora_A.weight`           （Comfy-Org 那种）
+#:   · `.lora_A.default.weight`   （带 LoRA 名的，多 LoRA 合并导出时常见）
+#: 中间的 `.default` 是 LoRA 自己的名字，跟结构无关，吃掉即可。
+_DOWN_RE = re.compile(r"\.lora_A(?:\.[^.]+)?\.weight$")
+_UP_RE = re.compile(r"\.lora_B(?:\.[^.]+)?\.weight$")
+
+#: 无前缀变体的主体起始（见 `_strip_prefix`）
+_BODY_ROOT = "transformer_blocks."
+
+
 def _strip_prefix(k: str) -> str | None:
-    """去掉 ComfyUI / diffusers 的前缀，只留主体。"""
+    """去掉 ComfyUI / diffusers 的前缀，只留主体。
+
+    第三种变体：**没有 `diffusion_model.` 前缀**，直接从 `transformer_blocks.`
+    开始，而且键名带 LoRA 名（`.lora_A.default.weight`）。不认它的后果是
+    整个文件一个键都转不出来 —— 用户看到的是"LoRA 挂了但界面什么都不报"。
+    """
     if k.startswith("diffusion_model."):
         return k[len("diffusion_model."):]
     if k.startswith("transformer."):
         return k[len("transformer."):]
+    if k.startswith(_BODY_ROOT):
+        return k                      # 已经就是主体了
     return None
 
 
@@ -114,8 +133,8 @@ def convert_weights(sd: dict) -> tuple[dict, list[str]]:
         if body is None:
             skipped.append(k)
             continue
-        is_down = ".lora_A.weight" in body or ".lora.down.weight" in body
-        is_up = ".lora_B.weight" in body or ".lora.up.weight" in body
+        is_down = bool(_DOWN_RE.search(body)) or ".lora.down.weight" in body
+        is_up = bool(_UP_RE.search(body)) or ".lora.up.weight" in body
         if not (is_down or is_up):
             # ComfyUI 有些 LoRA 另带 alpha 标记，diffusers 不需要
             skipped.append(k)
@@ -127,11 +146,9 @@ def convert_weights(sd: dict) -> tuple[dict, list[str]]:
             continue
 
         if is_down:
-            nk = "transformer." + body.replace(".lora_A.weight", ".lora.down.weight") \
-                                    .replace(".lora.down.weight", ".lora.down.weight")
+            nk = "transformer." + _DOWN_RE.sub(".lora.down.weight", body)
         else:
-            nk = "transformer." + body.replace(".lora_B.weight", ".lora.up.weight") \
-                                    .replace(".lora.up.weight", ".lora.up.weight")
+            nk = "transformer." + _UP_RE.sub(".lora.up.weight", body)
         out[nk] = v
     return out, skipped
 

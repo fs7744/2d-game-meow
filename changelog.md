@@ -194,6 +194,51 @@ face_yolov8m.pt（49.6MB → 校验 → 落盘 → 清掉空壳目录）。
 
 ---
 
+## 2026-11-01 · 五个权重装齐，顺手修好项目里挂不上的 4 个 LoRA
+
+### 1. 权重全部到位（实测）
+
+| 权重 | 体积 | 验证 |
+|---|---|---|
+| Qwen3.5-4B-Q8_0.gguf | 4.27 GB | 落 `models/llm/Qwen3.5-4B/` |
+| mmproj-F16.gguf | 641 MB | 同上 |
+| VNCCS_QI2_AnimeOverhaulV2 | 152 MB | 转格式后引擎能列出 |
+| VNCCS_QI2_ClothesCoreV2.6 | 152 MB | 同上 |
+| face_yolov8m.pt | 49.6 MB | 人偶图上检出人脸 conf 0.751 |
+
+**下载速度差 10 倍**：直连 huggingface.co 502（代理拦），hf-mirror 通但只有
+1.2 MB/s；走 127.0.0.1:7897 代理 **11.7 MB/s**。脚本加了 `--proxy`。
+（中途用镜像下了 577MB/4.2GB 才测出这个差距，切代理后 6 分钟下完。）
+
+### 2. 运行时依赖
+
+- **llama-cpp-python 0.3.46（JamePeng fork wheel）**：装完实测
+  `Qwen35ChatHandler` 能 import；**torch 没被动**（装前装后都 2.6.0+cu124）。
+  ⚠️ 别加 `--no-deps` —— 那样会缺 `diskcache`，handler import 不起来
+  （我就是这么踩的，补装 diskcache 才好）。
+- **ultralytics 8.4.196**：`YOLO('face_yolov8m.pt')` 类别 `{0:'face'}`，
+  实测检出人脸。依赖清单里写清了 llama-cpp-python 不能装官方版及原因。
+
+### 3. 项目里 4 个 LoRA 一直挂不上（静默）
+
+`available_loras()` 只列出 7 个，但目录里有 11 个文件 —— 4 个是 ComfyUI 格式，
+挂上去**一个层都匹配不到，界面什么都不报**，只是"出图跟没挂一样"。
+
+其中 `nsfw-posture-v3` / `qwen21-nsfw-image-edit` 是 ComfyUI 的**第三种变体**：
+没有 `diffusion_model.` 前缀、键名带 LoRA 名（`.lora_A.default.weight`）。
+`convert_lora.py` 原先只认带前缀的两种，遇到它一个键都转不出来。
+已扩展 `_strip_prefix`（认无前缀）与 A/B 判定（正则兼容 `.default`）。
+
+现在 11 个 LoRA 全部可用。四种格式都能转：
+
+| 格式 | 键样例 |
+|---|---|
+| diffusers 原生 | `transformer...lora.down.weight` |
+| ComfyUI | `diffusion_model...lora_A.weight` |
+| ComfyUI 变体 | `transformer_blocks...lora_A.default.weight` |
+
+---
+
 ## 现状
 
 **底模只有 Qwen-Image-2.1**——SD 的代码与权重都已移除（见「底模」章节）。

@@ -179,6 +179,46 @@ shifted = exp(shift) / (exp(shift) + (1/nodes - 1))
 | **4.3 两个 QI2 LoRA** | ✅ **下载 VNCCS Overhaul QI2 + Clothes Core QI2**（各约 300MB，`MIUProject/VNCCS_v3.0`） | 走我们已有的 `/loras` 挂载机制；**Viggle Turbo 暂不下**（可选加速） |
 | **4.4 表情库内容** | ✅ **157 条全量原样入库并显示**（含 Sexual 🔥 24 条） | 与官方一致，不做内容过滤 |
 
+### 还需要下载的权重 —— **已全部装好（2026-11-01）**
+
+脚本 `tools/fetch_vnccs_weights.py`。五个文件**都已下载并验证**：
+
+| 权重 | 来源 | 实测 | 落点 | 状态 |
+|---|---|---|---|---|
+| `Qwen3.5-4B-Q8_0.gguf` | `unsloth/Qwen3.5-4B-GGUF` @ `e966cca` | 4.27 GB | `models/llm/Qwen3.5-4B/` | ✅ |
+| `mmproj-F16.gguf` | 同上 | 641 MB | 同上 | ✅ |
+| `VNCCS_QI2_AnimeOverhaulV2` | `MIUProject/VNCCS_v3.0` | 152 MB | `models/lora/` | ✅ 已转格式 |
+| `VNCCS_QI2_ClothesCoreV2.6` | 同上 | 152 MB | `models/lora/` | ✅ 已转格式 |
+| `face_yolov8m.pt` | `Tenofas/ComfyUI`（用户提供） | 49.6 MB | `models/bbox/` | ✅ 实测检出人脸 |
+
+运行时依赖也都装了：
+
+- **llama-cpp-python 0.3.46（JamePeng fork，cu124/cp313 wheel）** —— 装完实测
+  `Qwen35ChatHandler` 能 import（上游包没有这个 handler，装错 fork 的典型症状
+  就是 `ImportError`）。torch **没被动**（装前装后都是 2.6.0+cu124）。
+  ⚠️ 别加 `--no-deps`：那样会缺 `diskcache`，handler import 不起来。
+- **ultralytics 8.4.196** —— `YOLO('face_yolov8m.pt')` 加载正常，类别 `{0:'face'}`；
+  在 768² 人偶图上实测检出 1 张脸（conf 0.751，位置对）。
+
+**下载速度**：这台机器直连 huggingface.co 是 502（代理拦），
+`hf-mirror.com` 通但只有 **1.2 MB/s**；走你给的 `127.0.0.1:7897` 代理是
+**11.7 MB/s**——差 10 倍。脚本留了 `--proxy` 和 `--endpoint` 两个口子。
+
+**顺带处理了项目里原有的 4 个挂不上的 LoRA**：`available_loras()` 只列出 7 个，
+实际有 11 个文件 —— 4 个是 ComfyUI 格式（挂上去**静默不生效**）：
+
+| 文件 | 原格式 | 处理 |
+|---|---|---|
+| `NSFW Qwen by TheseAlpacas V2` | `diffusion_model.` + `lora_A/B` | 转 |
+| `qwen2_1-femaledVaginus-nsfw-v1_3-fine_L22-31` | 同上 | 转 |
+| `nsfw-posture-v3` | **无前缀** + `lora_A.default` | 转（工具原先不认） |
+| `qwen21-nsfw-image-edit` | 同上 | 转（工具原先不认） |
+
+后两个是 ComfyUI 的**第三种变体**：没有 `diffusion_model.` 前缀、键名还带
+LoRA 名（`.lora_A.default.weight`）。`convert_lora.py` 原先只认带前缀的两种，
+遇到它一个键都转不出来（`skipped` 全是它）。已扩展 `_strip_prefix` 与 A/B
+判定（正则兼容 `.default`）。现在 11 个 LoRA 全部可用。
+
 ### 还需要下载的权重 —— **已写成脚本 `tools/fetch_vnccs_weights.py`**
 
 体积是**联网核对过的真实值**（走 hf-mirror 镜像查的 `files_metadata`）：

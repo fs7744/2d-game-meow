@@ -225,3 +225,31 @@ def test_prune_only_removes_empty_dirs(tmp_path):
     (root / "ultralytics" / "bbox" / "keep.pt").write_bytes(b"x")
     fw._prune_empty_dirs(root, "ultralytics/bbox/face_yolov8m.pt")
     assert (root / "ultralytics" / "bbox" / "keep.pt").is_file()
+
+
+def test_convert_handles_prefixless_comfyui_variant(tmp_path):
+    """ComfyUI 的**第三种变体**：没有 `diffusion_model.` 前缀，且键名带 LoRA 名
+    （`.lora_A.default.weight`）。
+
+    项目里 `nsfw-posture-v3` / `qwen21-nsfw-image-edit` 就是这种。转换工具原来
+    只认带前缀的两种，遇到它**一个键都转不出来**（`skipped` 全是它），
+    用户看到的现象是"LoRA 挂了但界面什么都不报"。
+    """
+    import torch
+    from safetensors.torch import save_file
+    src = tmp_path / "in.safetensors"
+    save_file({
+        "transformer_blocks.0.attn.to_q.lora_A.default.weight": torch.zeros(8, 16),
+        "transformer_blocks.0.attn.to_q.lora_B.default.weight": torch.zeros(16, 8),
+    }, str(src), metadata={"format": "pt"})
+
+    out = tmp_path / "out.safetensors"
+    code = subprocess.run(                                    # noqa: S603
+        [sys.executable, str(ROOT / "tools" / "convert_lora.py"), str(src), str(out)],
+        cwd=str(ROOT), capture_output=True, text=True, check=False)
+    assert code.returncode == 0, code.stdout + code.stderr
+    fw.validate_lora(out)
+    from workflows.engine import _lora_keys
+    keys = _lora_keys(out)
+    assert any(k.endswith(".lora.down.weight") for k in keys)
+    assert not any(".default." in k for k in keys), "LoRA 名不该留在键里"
