@@ -88,8 +88,6 @@ export default function PoseStudio({
   const [saving, setSaving] = useState(false)
   const [saveName, setSaveName] = useState('')
   const [libSel, setLibSel] = useState('')
-  // 「相机视角」：开 = 画布始终显示导出机位（所见即所得），拖角度滑块实时转
-  const [cameraMode, setCameraMode] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
   // 导出/取姿势没有回执就没法收尾：超时要明确告诉用户，别让按钮一直转
   const exportTimer = useRef<number | null>(null)
@@ -137,7 +135,7 @@ export default function PoseStudio({
       if (!iframeRef.current || e.source !== iframeRef.current.contentWindow) return
       const d = e.data as {
         type?: string; dataURL?: string; message?: string
-        text?: string; pose?: unknown; yaw?: number; camera?: boolean
+        text?: string; pose?: unknown; yaw?: number
       } | null
       if (!d || typeof d.type !== 'string') return
       if (d.type === 'ready') {
@@ -157,10 +155,6 @@ export default function PoseStudio({
         askPoseRef.current = null
         cb?.(d.pose)
         onPoseRef.current(d.pose)
-        // 相机视角下右键拖动 = 换机位：子窗把反算出的 yaw 推回来，同步给宿主
-        if (d.camera && typeof d.yaw === 'number') {
-          onYaw(((Math.round(d.yaw) % 360) + 360) % 360)
-        }
       } else if (d.type === 'error') {
         setStatus('')
         setErr(String(d.message || '未知错误'))
@@ -187,12 +181,6 @@ export default function PoseStudio({
     if (!ready) return
     post({ type: 'init', pose: poseRef.current ?? null, yaw: yawRef.current })
   }, [ready, post])
-
-  // ---- 相机视角开关同步给子窗（就绪后每次切换都推一次） ----
-  useEffect(() => {
-    if (!ready) return
-    post({ type: 'setCameraMode', on: cameraMode })
-  }, [ready, cameraMode, post])
 
   // ---- 「从图片」提好的 2D 点 → 官方转换器（真 3D 骨骼） ----
   useEffect(() => {
@@ -233,7 +221,7 @@ export default function PoseStudio({
       exportTimer.current = null
       setErr('导出超时：人偶渲染器没回图，看看它是不是还在加载')
     }, EXPORT_TIMEOUT_MS)
-    post({ type: 'export', yaw: yawRef.current, size: 768 })
+    post({ type: 'export', size: 768 })   // 导出当前视角（所见即所得），不传 yaw
   }, [ready, post])
 
   const setYaw = useCallback((deg: number) => {
@@ -363,8 +351,8 @@ export default function PoseStudio({
           value={YAWS.some(([d]) => d === yaw) ? String(yaw) : ''}
           onChange={(e) => setYaw(Number(e.target.value))}
           disabled={!ready}
-          title={'导出机位：0° 正面 / 90° 右侧面 / 180° 背面 / 270° 左侧面。\n'
-            + '开启下方「相机视角」后，画布看到的就是导出机位，右键拖动可直接换角度。'}
+          title={'快捷对齐：点一下把相机摆到标准角度（0° 正面 / 90° 右侧 / 180° 背面 / 270° 左侧）。\n'
+            + '导出永远以编辑器当前视角为准——右键拖动转到的角度就是导出的角度。'}
         >
           {!YAWS.some(([d]) => d === yaw) && <option value="">{yaw}°</option>}
           {YAWS.map(([d, label]) => (
@@ -394,18 +382,9 @@ export default function PoseStudio({
         <b className="pose-yaw-val">{yaw}°</b>
       </label>
 
-      <label className="pose-row pose-cam-toggle" title={'开启后，画布显示的就是导出机位（所见即所得）：\n'
-        + '拖机位滑块人偶实时转；右键拖动也能直接换角度（换的就是机位）。\n'
-        + '关闭则回到自由检查视角，右键只转视角、不影响导出机位。'}>
-        <input
-          type="checkbox"
-          checked={cameraMode}
-          disabled={!ready}
-          onChange={(e) => setCameraMode(e.target.checked)}
-        />
-        <span>相机视角</span>
-        <span className="pose-cam-hint">所见即所得 · 右键可换角度</span>
-      </label>
+      <div className="pose-cam-hint-row">
+        导出以编辑器当前视角为准（所见即所得）——右键拖动即可换角度；上面的朝向/机位只是快速对齐。
+      </div>
 
       <div className="pose-actions">
         <button type="button" className="mini" onClick={() => post({ type: 'resetView' })}

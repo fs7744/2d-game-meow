@@ -72,8 +72,6 @@ const YAW_LABELS = [
 let viewerPromise = null
 let viewer = null
 let currentYaw = 0
-// 「相机视角」模式：开 = 导航相机始终对齐导出机位（所见即所得），拖滑块实时转。
-let cameraFollow = false
 
 /* ------------------------------------------------------------------ *
  * 画布尺寸
@@ -159,7 +157,6 @@ async function getViewer() {
       onPoseChange: (pose) => post({ type: 'pose', pose, yaw: currentYaw }),
     })
     await v.init()
-    bindFollow(v)
     // **方向天穹（彩虹网格球）在嵌入模式下一律关掉**，理由有两条：
     //  · 编辑时：节点卡片只有 280px，人身后糊一层彩虹网格纯属干扰；
     //  · 导出时：官方 `capture()` 会隐藏 gridHelper / skeletonHelper / 关节标记，
@@ -214,19 +211,36 @@ function applyPoints(v, points) {
 /**
  * 出图（导出 / 缩略图都走这里）。
  *
+ * **导出以编辑器当前视角为准（所见即所得）**：走官方 `capture` 的
+ * `viewport: true`，用**导航相机**（`this.camera`）而不是 `captureCamera`
+ * 渲染。这样用户在画布里右键转到什么角度，导出的就是什么角度，不被
+ * 「朝向」选项锁死。朝向下拉只是**快捷对齐**（点一下把相机摆到标准角度），
+ * 摆完还能继续右键微调。
+ *
  * **天穹必须在 capture 期间藏起来**：官方只会隐藏 gridHelper /
  * skeletonHelper / 关节标记，彩虹网格球不在那份清单里。capture 是同步的
  * （`canvas.toDataURL`），所以 try/finally 兜得住。
  */
-function renderOut(size, yaw) {
+function renderOut(size) {
   if (!viewer) return null
   const n = Math.max(256, Math.min(2048, Math.round(size) || 768))
   const prevSky = viewer.directionalSkydomeVisible
+  const cam = viewer.camera
+  const prevAspect = cam ? cam.aspect : null
   try {
     viewer.setDirectionalSkydomeVisible?.(false)
-    // 官方 capture：自动隐藏骨架线与关节标记、白底、按 yaw 定机位
-    return viewer.capture(n, n, 1.0, [255, 255, 255], 0, 0, yaw, 0)
+    // 导出是正方形，把导航相机 aspect 临时对齐到 1:1，避免编辑器非方形时拉伸
+    if (cam) {
+      cam.aspect = 1
+      cam.updateProjectionMatrix?.()
+    }
+    // viewport:true —— 用当前导航相机（所见即所得），隐藏骨架线/关节标记、白底
+    return viewer.capture(n, n, 1.0, [255, 255, 255], 0, 0, 0, 0, { viewport: true })
   } finally {
+    if (cam && prevAspect != null) {
+      cam.aspect = prevAspect
+      cam.updateProjectionMatrix?.()
+    }
     viewer.setDirectionalSkydomeVisible?.(prevSky)
   }
 }
@@ -262,17 +276,18 @@ function setStatus(text, isError = false) {
 function setYaw(deg) {
   currentYaw = ((Math.round(Number(deg) || 0) % 360) + 360) % 360
   if (yawSel) yawSel.value = String(currentYaw)
-  // 相机视角开着就把导航相机对齐到新机位，所见即所得
-  if (cameraFollow && viewer) snapCamera(viewer)
+  // 「朝向」是**快捷对齐**：把导航相机摆到标准角度，摆完用户还能右键继续微调。
+  // 导出始终以导航相机为准（renderOut 用 viewport:true），所以这里只是摆相机。
+  if (viewer) snapCamera(viewer)
 }
 
 /**
- * 把导航相机（视口相机 + OrbitControls）对齐到当前导出机位。
+ * 把导航相机（视口相机 + OrbitControls）对齐到当前选中的标准角度（快捷对齐）。
  *
  * 走官方 `snapToCaptureCamera`：它把 capture 相机的 position / orbit.target
  * 拷到视口相机，但**不复制 fov/aspect**（capture frame 会以盒子的形式显示在
- * 3D 空间里，而不是占满整个画面）。这样画布里看到的 = 导出时的取景 + 一个
- * 机位框，拖角度滑块人偶会实时转。
+ * 3D 空间里）。点「朝向」下拉就是摆一下相机，摆完用户还能右键继续自由转。
+ * 导出始终用导航相机（renderOut 的 viewport:true），不依赖这个值。
  */
 function snapCamera(v) {
   if (!v || !v.snapToCaptureCamera) return
@@ -285,53 +300,9 @@ function snapCamera(v) {
   v.requestRender?.()
 }
 
-/**
- * 从导航相机当前的朝向反算出 yaw（绕 Y 的方位角）。
- *
- * yaw 约定（和官方 capture 一致）：相机绕目标点，0° = 相机在 +Z（看正面），
- * 90° = 相机在 +X（看右侧面）。即 yaw = atan2(dx, dz)，dx/dz 是相机相对
- * orbit.target 的水平偏移。
- */
-function yawFromCamera(v) {
-  if (!v || !v.camera || !v.orbit) return null
-  const dx = v.camera.position.x - v.orbit.target.x
-  const dz = v.camera.position.z - v.orbit.target.z
-  if (Math.abs(dx) < 1e-6 && Math.abs(dz) < 1e-6) return null
-  const deg = (Math.atan2(dx, dz) * 180) / Math.PI
-  return ((Math.round(deg) % 360) + 360) % 360
-}
-
-// orbit 拖动 → yaw 的节流（rAF 合帧，避免 change 高频触发刷屏）
-let followRaf = 0
-let followDirty = false
-function queueFollowSync(v) {
-  if (followDirty) return
-  followDirty = true
-  followRaf = requestAnimationFrame(() => {
-    followDirty = false
-    if (!cameraFollow || !viewer) return
-    const y = yawFromCamera(v)
-    if (y == null) return
-    currentYaw = y
-    if (yawSel) yawSel.value = String(y)
-    // 推给宿主：滑块 / 数值 / 存档的 yaw 都跟着走，所见即所得
-    post({ type: 'pose', pose: v.getPose(), yaw: currentYaw, camera: true })
-  })
-}
-
-/** 相机视角模式下挂一个 orbit 监听：右键拖动实时反算成机位。 */
-function bindFollow(v) {
-  if (!v || !v.orbit || v.__followBound) return
-  v.__followBound = true
-  v.orbit.addEventListener('change', () => {
-    if (cameraFollow) queueFollowSync(v)
-  })
-}
-
 function resetCamera() {
   if (!viewer) return
-  if (cameraFollow) snapCamera(viewer)   // 相机视角下「重置」= 对齐导出机位
-  else frameView(viewer)
+  frameView(viewer)
   viewer.requestRender()
 }
 
@@ -388,28 +359,16 @@ window.addEventListener('message', async (e) => {
       post({ type: 'pose', pose: v.getPose(), yaw: currentYaw })
     } else if (msg.type === 'resetView') {
       resetCamera()
-    } else if (msg.type === 'setCameraMode') {
-      // 相机视角开关：开 = 导航相机对齐导出机位，且右键拖动实时反算成机位
-      // （所见即所得 + 右键任意换视角）。关 = 回到自由检查视角，右键不影响机位。
-      cameraFollow = !!msg.on
-      if (cameraFollow) {
-        bindFollow(v)
-        snapCamera(v)
-      } else {
-        frameView(v)
-      }
-      v.requestRender?.()
     } else if (msg.type === 'snap') {
       snapCamera(v)
     } else if (msg.type === 'preview') {
       // 存库时要一张小缩略图，浏览面板得靠它认人。**走和导出同一条通路**
-      // （同一个 capture），只是尺寸小、不算正式产物，所以单独回一个类型。
-      if (typeof msg.yaw === 'number') setYaw(msg.yaw)
-      const url = renderOut(msg.size || 256, currentYaw)
+      // （同一个 viewport capture），只是尺寸小、不算正式产物，所以单独回一个类型。
+      const url = renderOut(msg.size || 256)
       if (url) post({ type: 'preview', dataURL: url })
     } else if (msg.type === 'export') {
-      if (typeof msg.yaw === 'number') setYaw(msg.yaw)
-      const url = renderOut(msg.size, currentYaw)
+      // 导出**当前编辑器视角**（所见即所得）：不做任何对齐，直接 viewport capture。
+      const url = renderOut(msg.size)
       if (url) post({ type: 'result', dataURL: url, yaw: currentYaw })
       else post({ type: 'error', message: 'capture 没出图（渲染器还没就绪？）' })
     }

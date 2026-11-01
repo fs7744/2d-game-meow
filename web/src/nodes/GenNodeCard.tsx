@@ -1632,41 +1632,25 @@ export default function GenNodeCard({
             />
           </div>
 
-          {/* 朝向：**默认不写任何方向词**（和 VNCCS 官方一致）。
-              官方条件是「打好光的 3D 人偶 + 相机机位」，方向长在图里，prompt 只写
-              光照；他们从不写 "front view"。我们没有那套渲染，只能用文字补方向，
-              而实测文字会**压过骨架姿势**：同一张分腿张臂骨架，不加词照做，
-              加 "front view"（或更弱的 "viewed from the front"）就变回站立。
-              所以：正面 / 自动 0° 一律不写；只有选了非正面方向才补一句，并提示代价。 */}
-          <label className="bg-mode" title={'人物的朝向。\n'
-            + '默认「自动」不加任何方向词——VNCCS 官方也是这么做的：方向由渲染的\n'
-            + '相机机位决定，prompt 里不写视角。我们的骨架图没有那层 3D 渲染，\n'
-            + '所以「侧面 / 背面」只能用文字补一句。\n'
-            + '代价：方向词会压过骨架的姿势（实测加了 front view 的分腿骨架会被\n'
-            + '画成站立）。要姿势优先就别选方向；要换视角再选。'}>
+          {/* 朝向：**不再写方向词**（和 VNCCS 官方一致）。
+              方向由「动作参考图」决定：用 3D 人偶图时朝向烘焙在图里（相机机位），
+              用真人照片时朝向也长在图里。往 prompt 塞 front/side/back 方向词
+              实测会**压过姿势**（分腿张臂会被画回站立），所以这里不提供方向词，
+              要换视角就去人偶编辑器里转机位（所见即所得）。 */}
+          <label className="bg-mode" title={'人物的朝向由「动作参考图」决定，不在 prompt 里写方向词。\n'
+            + '用 3D 人偶图：朝向烘焙在图里（相机机位渲染）。\n'
+            + '要换视角，回到人偶编辑器转机位（导出所见即所得），\n'
+            + '或换一张朝向你需要的动作参考图。\n'
+            + '（曾经的「文字方向词」会压过姿势，已移除。）'}>
             朝向
-            <select
-              value={p.pcView ?? 'auto'}
-              onChange={(e) => setParam('pcView', e.target.value as typeof p.pcView)}
-            >
-              <option value="auto">自动</option>
-              <option value="front">正面</option>
-              <option value="q34front_r">右前 3/4</option>
-              <option value="side_r">右侧面</option>
-              <option value="q34back_r">右后 3/4</option>
-              <option value="back">背面</option>
-              <option value="q34back_l">左后 3/4</option>
-              <option value="side_l">左侧面</option>
-              <option value="q34front_l">左前 3/4</option>
+            <select value="auto" disabled>
+              <option value="auto">由图决定</option>
             </select>
           </label>
-          {/* 选了非正面才写方向词：把代价说清楚，别让人以为是免费的 */}
-          {p.pcView && p.pcView !== 'auto' && p.pcView !== 'front' && (
-            <p className="src-note">
-              会额外补一句方向词给模型——视角更准，但**姿势贴合会下降**。
-              要动作优先就选「自动」。
-            </p>
-          )}
+          <p className="src-note">
+            朝向由动作参考图决定，不在 prompt 里写方向词（方向词会压过姿势）。
+            要换视角就回人偶编辑器转机位。
+          </p>
           <details className="adv">
             <summary>更多设置</summary>
             {/* 「姿态」「身份」两根强度滑块是 SD 那条路（ControlNet / IP-Adapter）

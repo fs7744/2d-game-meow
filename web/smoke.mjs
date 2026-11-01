@@ -3105,9 +3105,9 @@ function check(name, cond, extra = '') {
     .find((l) => (l.textContent || '').trim().startsWith('朝向'))?.querySelector('select')
   check('节点上有「朝向」下拉', !!viewSel,
     viewSel ? [...viewSel.options].map((o) => o.value).join(',') : '（没有）')
-  check('朝向默认「自动」',
-    viewSel?.value === 'auto',
-    viewSel?.options?.[0]?.textContent)
+  check('朝向已改为「由图决定」且禁用（不再写方向词）',
+    viewSel?.value === 'auto' && viewSel?.disabled,
+    `value=${viewSel?.value} disabled=${viewSel?.disabled}`)
 
   // 自动：上游是人偶编辑器（默认机位 0° 正面）
   const genCalls = () => calls.filter((c) => c.url.endsWith('/generate'))
@@ -3146,28 +3146,6 @@ function check(name, cond, extra = '') {
   check('人偶机位切到 90°（界面回显）', yawSel2?.value === '90', yawSel2?.value)
   body = await submitAndRead()
   check('自动（即使人偶 90°）也不写方向词',
-    !String(body.params.prompt || '').includes('viewing direction'),
-    body.params.prompt)
-
-  // 手动选「右侧面」→ 同样写 side view（不依赖骨骼的方位角）
-  Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value')
-    .set.call(viewSel, 'side_r')
-  viewSel?.dispatchEvent(new win.Event('change', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 150))
-  check('朝向下拉切到右侧面', viewSel?.value === 'side_r', viewSel?.value)
-
-  body = await submitAndRead()
-  check('手动选「右侧面」写进指令（side view, facing right）',
-    String(body.params.prompt || '').includes('viewing direction: side view, facing right'),
-    body.params.prompt)
-
-  // 手动选「正面」→ 回到不写（不然会把姿势压掉）
-  Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value')
-    .set.call(viewSel, 'front')
-  viewSel?.dispatchEvent(new win.Event('change', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 150))
-  body = await submitAndRead()
-  check('手动选「正面」也不写方位词',
     !String(body.params.prompt || '').includes('viewing direction'),
     body.params.prompt)
 

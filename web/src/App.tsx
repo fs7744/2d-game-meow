@@ -167,17 +167,6 @@ const newId = () => `n${Date.now().toString(36)}${(seq++).toString(36)}`
  * （那个 LoRA 是在他们自己的 PoseStudio 渲染上训的）。所以角度做成**显式输入**：
  * 骨骼编辑器的方位角，或用户自己在下拉里选。
  */
-const PC_VIEW_PHRASES = {
-  front: 'front view, facing the viewer',
-  q34front_r: 'three-quarter front view from the right',
-  side_r: 'side view, facing right',
-  q34back_r: 'three-quarter rear view from the right',
-  back: 'back view, seen from behind',
-  q34back_l: 'three-quarter rear view from the left',
-  side_l: 'side view, facing left',
-  q34front_l: 'three-quarter front view from the left',
-} as const
-
 function makeNode(
   x: number,
   y: number,
@@ -1269,23 +1258,18 @@ export default function App() {
           ? nodesRef.current.find((x) => x.id === node.source!.nodeId)
           : undefined
         const fromEditor = upNode?.kind === 'poseedit'
-        const hasMannequin = !!upNode?.mannequin?.path
         const pcParams: GenParams = { ...node.params }
         if (fromEditor) pcParams.pcRefMode = 'skeleton'
         // 朝向：**默认「自动」一个字都不写**（VNCCS 官方从不写方向词——方向长在
         // 渲染的相机机位里，prompt 只描述光照）。只有用户**手动选非正面**才补一句，
         // 代价是方向词会压过姿势（实测）。详见 docs/VNCCS-REAL.md。
         //
-        // 用了 3D 人偶图时**一律不补**：朝向已经在图里，补了是重复指令，还会
-        // 把姿势压掉（实测 front view 会让分腿张臂的姿势退回站立）。
-        const view = node.params.pcView ?? 'auto'
-        const phrase = hasMannequin || view === 'auto' || view === 'front'
-          ? ''
-          : PC_VIEW_PHRASES[view]
-        if (phrase) {
-          pcParams.prompt = [node.params.prompt.trim(),
-            `viewing direction: ${phrase}`].filter(Boolean).join('. ')
-        }
+        // **方向词一律不写**（对齐官方 VNCCS，也解决「方向词压过姿势」的痛点）：
+        //   · 3D 人偶图：朝向已经烘焙在图里（相机机位渲染），再写是重复指令。
+        //   · 真人照片 / 骨架：实测任何方向词（哪怕弱化的 "viewed from the front"）
+        //     都会把分腿张臂的姿势压回站立 —— 视角没换来，姿势先没了。
+        // 所以这里的 `pcView` 只作参考，不再往 prompt 里塞方向词。
+        // 要换视角，直接在人偶编辑器里转（viewport 导出所见即所得），别靠文字。
         // 两条引擎：
         //   wpc    —— 角色图 + 姿态条件图，自写指令（旧路线，姿态硬、外观容易飘）
         //   wvnccs —— 官方 VNCCS 工作流复刻：专用 LoRA + 固定指令，
