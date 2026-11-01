@@ -935,10 +935,6 @@ export default function CharactersPage({ onNotice }: Props) {
                 {detail.costumes.map((c) => zh(COSTUME_LABEL, c)).join(' / ')}
               </span>
               <span className="spacer" />
-              {/* 主 CTA：直达出图（官方左栏顶部就是 GENERATE PREVIEW 主按钮） */}
-              <button type="button" className="mini primary" onClick={() => setTab('gen')}>
-                出图
-              </button>
               <button type="button" className="mini" onClick={() => void doRename()}>改名</button>
             </div>
             <div className="chars-tabs">
@@ -1668,25 +1664,22 @@ export default function CharactersPage({ onNotice }: Props) {
               <div className="chars-ops-group-title">① 干净底图</div>
               <button type="button" className="mini" onClick={() => void doUnderwear()}
                 disabled={uwBusy}
-                title="官方 remove_clothes：换成白色内衣，得到一张干净底图（后续每套服装都从它出发）">
+                title="官方 remove_clothes：换成白色内衣，得到干净底图（后续每套服装都从它出发）">
                 {uwBusy ? '处理中…' : '换白内衣底图'}
               </button>
-              <span className="chars-sub">
-                换成白色内衣，得到干净底图（存成「白内衣」），后续衣服都从它出发。
-              </span>
               {uwMsg && <p className="chars-sub">{uwMsg}</p>}
             </div>
 
             <div className="chars-ops-group">
               <div className="chars-ops-group-title">② 换装 / 姿势 / 表情</div>
               <button type="button" className="mini" onClick={() => setTab('clothes')}>
-                换装（服装页）
+                换装
               </button>
               <button type="button" className="mini" onClick={() => setTab('gen')}>
-                出姿势（出图页）
+                出姿势
               </button>
               <button type="button" className="mini" onClick={() => setTab('emotions')}>
-                出表情（表情库页）
+                出表情
               </button>
             </div>
 
@@ -1700,10 +1693,6 @@ export default function CharactersPage({ onNotice }: Props) {
                   : '先在上面的「出姿势」里选一个骨架帧目录'}>
                 {pipeBusy ? '全套生成中…' : '一键出全套'}
               </button>
-              <span className="chars-sub">
-                换白内衣 → 出姿势 → 出表情，按官方顺序一次跑完。
-                {!poseDir && '（先选骨架帧目录）'}
-              </span>
               {pipeMsg && <p className="chars-sub">{pipeMsg}</p>}
             </div>
 

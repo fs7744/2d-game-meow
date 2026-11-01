@@ -1238,15 +1238,17 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
 
 .chars {
   flex: 1; min-width: 0; display: grid;
-  grid-template-columns: 300px 1fr 280px; gap: 0; overflow: hidden;
+  grid-template-columns: 270px 1fr 232px; gap: 0; overflow: hidden;
 }
 .chars-list {
   display: flex; flex-direction: column; gap: 8px;
   border-right: 1px solid var(--line); padding: 12px; overflow: auto;
+  min-width: 0;
 }
 .chars-ops {
   display: flex; flex-direction: column; gap: 8px;
   border-left: 1px solid var(--line); padding: 12px; overflow: auto;
+  min-width: 0;
 }
 .chars-ops-head {
   font-size: 10.5px; font-weight: 700; color: var(--muted);
@@ -1261,6 +1263,7 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
   padding-bottom: 4px; border-bottom: 1px solid var(--line);
 }
 .chars-ops-group .mini { width: 100%; text-align: left; }
+.chars-ops-group .chars-sub { font-size: 9.5px; line-height: 1.35; }
 .chars-list-head { display: flex; align-items: center; gap: 8px; }
 .chars-count {
   font-family: var(--mono); font-size: 10px; color: var(--cyan);
@@ -1307,7 +1310,7 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
 }
 .chars-card-del:hover { color: var(--pink); border-color: var(--pink); }
 
-.chars-detail { display: flex; flex-direction: column; gap: 8px; padding: 12px; overflow: auto; }
+.chars-detail { display: flex; flex-direction: column; gap: 8px; padding: 12px; overflow: auto; min-width: 0; }
 .chars-err {
   font-size: 11px; color: var(--pink); border: 1px solid var(--pink);
   border-radius: 2px; padding: 5px 8px;
