@@ -83,7 +83,7 @@ UPLOAD_FORMATS = {"PNG": ".png", "JPEG": ".jpg", "WEBP": ".webp",
                   "BMP": ".bmp", "GIF": ".gif"}
 
 app = FastAPI(title="2D Game Asset Pipeline", version="0.1.0")
-engine = Engine(ROOT / "models")
+engine = Engine(paths.MODELS_DIR)
 index = AssetIndex(ASSETS)
 
 # 任务表要有上限：老实现是无界 dict，长跑服务会把每个任务的完整 result/meta

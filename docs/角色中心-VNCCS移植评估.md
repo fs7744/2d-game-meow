@@ -179,6 +179,44 @@ shifted = exp(shift) / (exp(shift) + (1/nodes - 1))
 | **4.3 两个 QI2 LoRA** | ✅ **下载 VNCCS Overhaul QI2 + Clothes Core QI2**（各约 300MB，`MIUProject/VNCCS_v3.0`） | 走我们已有的 `/loras` 挂载机制；**Viggle Turbo 暂不下**（可选加速） |
 | **4.4 表情库内容** | ✅ **157 条全量原样入库并显示**（含 Sexual 🔥 24 条） | 与官方一致，不做内容过滤 |
 
+### 还需要下载的权重 —— **已写成脚本 `tools/fetch_vnccs_weights.py`**
+
+体积是**联网核对过的真实值**（走 hf-mirror 镜像查的 `files_metadata`）：
+
+| 权重 | 来源 | 实测体积 | 落点 |
+|---|---|---|---|
+| `Qwen3.5-4B-Q8_0.gguf` | `unsloth/Qwen3.5-4B-GGUF` @ `e966cca` | **4.17 GB** | `models/llm/Qwen3.5-4B/` |
+| `mmproj-F16.gguf` | 同上 | ~1 GB | 同上 |
+| `VNCCS_QI2_AnimeOverhaulV2.safetensors` | `MIUProject/VNCCS_v3.0` | **152 MB**（不是 300！） | `models/lora/` |
+| `VNCCS_QI2_ClothesCoreV2.6.safetensors` | 同上 | **152 MB** | `models/lora/` |
+| `face_yolov8m.pt` | `Tenofas/ComfyUI`（用户提供，官方只给了路径） | **49.6 MB** | `models/bbox/` |
+
+脚本用法：
+
+```
+python tools/fetch_vnccs_weights.py --dry-run                     # 只看要下什么
+python tools/fetch_vnccs_weights.py --only lora                   # 只下两个 LoRA
+python tools/fetch_vnccs_weights.py --endpoint https://hf-mirror.com   # 国内走镜像
+```
+
+三个坑（都是核对时抓出来的）：
+
+1. **mmproj 的文件名跟官方代码对不上**。官方 `qwen_vl.py:68` 写的是
+   `mmproj-Qwen3.5-4B-F16.gguf`，但仓库里**没这个文件**（实际是
+   `mmproj-F16.gguf`），照官方那个名字下会 404。官方自己的查找顺序也是
+   先找短名（`_find_qwen_vl_mmproj`，:171-187），带模型名的那两个只是兜底。
+2. **LoRA 下完必须转格式**。官方发的是 ComfyUI 格式（`diffusion_model.` +
+   `lora_A/B`），我们的引擎只认 diffusers 原生（`transformer.` +
+   `lora.down/up`）—— 不转挂上去会**静默不生效**（一个层都匹配不到，
+   界面上什么都不报，只是"出图跟没挂一样"）。脚本自动跑 `convert_lora.py`。
+3. **两个 QI2 LoRA 的真实文件名带版本号**（AnimeOverhaulV2 /
+   ClothesCoreV2.6），不是 `VNCCS_Overhaul_QI2` 这种写法。
+
+运行时依赖：llama-cpp-python **必须装 JamePeng fork**（上游没有
+`Qwen35ChatHandler`），官方是装按 Python/CUDA/平台拼好的预编译 wheel
+（`install.py:21-47`），不是 `pip install llama-cpp-python`。脚本会打印
+该装的那个 wheel URL，**不自动装**（装 wheel 有换掉 torch 的风险）。
+
 ### 还需要下载的权重（交给安装脚本/手动）
 
 | 权重 | 来源 | 体积 | 落点 |

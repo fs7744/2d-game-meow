@@ -53,6 +53,15 @@
 | 磁盘 | 约 **60GB**（模型权重 51GB + 依赖和产物） |
 | 软件 | Python 3.11+、Node 18+（`start.bat` 会自动检查，缺什么会告诉你装什么） |
 
+角色中心还有**四个可选权重**（AI 向导 / 表情批量 / 二次元风格 / 换装一致性），
+不装其余功能照常用。要装就一条命令（会顺手转格式、校验文件）：
+
+```
+python tools/fetch_vnccs_weights.py                            # 全部（约 4.5GB）
+python tools/fetch_vnccs_weights.py --only lora                 # 只要两个 LoRA（304MB）
+python tools/fetch_vnccs_weights.py --endpoint https://hf-mirror.com   # 国内走镜像
+```
+
 ## 装起来：三步
 
 **第 1 步 · 装 Python 依赖**

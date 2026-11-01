@@ -148,6 +148,52 @@ json 是 PoseStudio 原生格式，`setPose()` 直接吃，不用转换。
 
 ---
 
+## 2026-11-01 · 权重下载脚本 `tools/fetch_vnccs_weights.py`
+
+四个可选权重（AI 向导的 gguf、表情的人脸框、二次元风格与换装一致性两个 LoRA）
+装齐要 4.5GB，之前只写在文档里等人手动下。现在一条命令搞定，并且**核对过一遍**：
+
+**真实体积**（走镜像查的 files_metadata，跟之前记的估算不一样）：
+
+| 权重 | 体积 |
+|---|---|
+| Qwen3.5-4B-Q8_0.gguf | 4.17 GB |
+| mmproj-F16.gguf | ~1 GB |
+| VNCCS_QI2_AnimeOverhaulV2 | **152 MB**（之前估 300） |
+| VNCCS_QI2_ClothesCoreV2.6 | **152 MB** |
+| face_yolov8m.pt | 49.6 MB |
+
+核对时抓出三个坑：
+
+1. **mmproj 的文件名跟官方代码对不上**。官方 `qwen_vl.py:68` 写
+   `mmproj-Qwen3.5-4B-F16.gguf`，仓库里**没这个文件**（实际 `mmproj-F16.gguf`），
+   照抄会 404。官方自己也是先找短名（`_find_qwen_vl_mmproj`，:171-187）。
+2. **LoRA 下完必须转格式**：官方是 ComfyUI 格式，我们的引擎只认 diffusers 原生，
+   不转挂上去会**静默不生效**（什么都不报，只是"出图跟没挂一样"）。
+   脚本自动跑 `convert_lora.py`。
+3. 两个 LoRA 真实文件名**带版本号**（AnimeOverhaulV2 / ClothesCoreV2.6）。
+
+`face_yolov8m.pt` 官方只给了路径（`bbox/face_yolov8m.pt`）没给来源，仓库是
+用户提供的（Tenofas/ComfyUI），已联网核对存在（49.6 MB）并真跑下载验证通过。
+
+脚本行为：已存在且校验通过就跳过（不重复下 4GB）；校验照官方做（GGUF magic +
+>1MB，`.pt` 看 zip magic 但**不 torch.load**，没装 ultralytics 时会炸）；
+`--dry-run` 真的不写磁盘；`--endpoint` 支持国内镜像（这里直连 huggingface.co
+是 502，镜像通）。
+
+llama-cpp-python 必须装 **JamePeng fork**（上游没有 Qwen35ChatHandler）。官方
+是装按 Python/CUDA/平台拼好的预编译 wheel（`install.py:21-47`），不是
+`pip install llama-cpp-python`。脚本会打印该装的 wheel URL，**不自动装**——
+装 wheel 有换掉 torch 的风险。
+
+顺带：`ROOT / "models"` 这种硬编码收进 `paths.MODELS_DIR`，新增
+`LORA_DIR` / `LLM_DIR` / `BBOX_DIR`（路径只有一处定义）。
+
+验证：`tests/test_fetch_weights.py` 12 条（离线，不联网）；真跑下载过
+face_yolov8m.pt（49.6MB → 校验 → 落盘 → 清掉空壳目录）。
+
+---
+
 ## 现状
 
 **底模只有 Qwen-Image-2.1**——SD 的代码与权重都已移除（见「底模」章节）。

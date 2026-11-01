@@ -52,6 +52,18 @@ VNCCS_TEMPLATE_DIR = ROOT / "web" / "public" / "vnccs" / "character_template"
 #: 没有项目归属的上传（旧路径，保留兼容）
 UPLOAD_DIR = ASSETS / "uploads"
 
+#: 模型权重根。以前散在各处硬编码 `ROOT / "models"`，路径只有一处定义才改得动。
+MODELS_DIR = _env_dir("MEOW_MODELS_DIR", ROOT / "models")
+#: Qwen LoRA 目录（**只放 diffusers 原生格式**，见 engine.lora_dir 的注释）
+LORA_DIR = MODELS_DIR / "lora"
+#: 本地 LLM（gguf）目录。官方 VNCCS 的搜索路径是 `models/llm` 与
+#: `models/llm/Qwen3.5-4B` 两层（`nodes/qwen_vl.py:154`），我们固定放在后者，
+#: 一层就够 —— 但目录名沿用官方的 `llm`，免得以后照官方代码找不着。
+LLM_DIR = MODELS_DIR / "llm" / "Qwen3.5-4B"
+#: 人脸检测权重目录。官方 VNCCS 里是 `bbox/face_yolov8m.pt`
+#: （`nodes/character_generator.py:845`），ComfyUI 生态的惯例路径。
+BBOX_DIR = MODELS_DIR / "bbox"
+
 #: 项目模板根。模板是**跨项目共享**的用户资源（同一套「像素精灵产线」要开好几个
 # 项目时复用），不属于任何一个项目的产物，所以不放 assets 下。
 TEMPLATES_DIR = _env_dir("MEOW_TEMPLATES_DIR", ROOT / "templates")
