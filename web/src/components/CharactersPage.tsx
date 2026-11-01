@@ -24,6 +24,7 @@ import {
   fetchCharacterPrompt, generateForCharacter, fetchJob,
   type CharacterPrompt,
 } from '../api'
+import SpritePreview from './SpritePreview'
 
 /** 角色属性字段（官方 character_creator_v2.py:2138-2146 的字段清单） */
 const INFO_TEXT: Array<[key: string, label: string, hint?: string]> = [
@@ -68,6 +69,13 @@ export default function CharactersPage({ onNotice }: Props) {
   const [enhance, setEnhance] = useState(true)
   /** 抠背景：官方 bg_remove 阶段，纯 torch 零模型 */
   const [matte, setMatte] = useState(true)
+  /** 素材页当前在翻哪一组（服装 / 表情） */
+  const [browseCostume, setBrowseCostume] = useState('Naked')
+  const [browseEmotion, setBrowseEmotion] = useState('neutral')
+  const [browseFiles, setBrowseFiles] = useState<string[]>([])
+  /** 翻看器汇报上来的 meta（连 Node 的数量与清单，避免二次请求） */
+  const setBrowseMeta = useCallback(
+    (m: { count: number; files: string[] }) => setBrowseFiles(m.files), [])
   const [genBusy, setGenBusy] = useState(false)
   const [genMsg, setGenMsg] = useState('')
 
@@ -217,6 +225,12 @@ export default function CharactersPage({ onNotice }: Props) {
       setGenBusy(false)
     }
   }, [sel, genBusy, costume, cPrompt, onNotice])
+
+  /** 素材页能选哪些表情：服务端该服装下真有的 + 保底 neutral（空素材也要能选） */
+  const browseEmotions = useMemo(() => {
+    const had = Object.keys(detail?.assets?.[browseCostume] || {})
+    return had.length ? had : ['neutral']
+  }, [detail, browseCostume])
 
   const costumeFields = useMemo(
     () => detail?.config.costumes?.[costume] ?? {}, [detail, costume])
@@ -576,23 +590,39 @@ export default function CharactersPage({ onNotice }: Props) {
             {tab === 'assets' && (
               <div className="chars-body">
                 <p className="chars-sub">
-                  磁盘上的真实素材：<code>assets/characters/{detail.name}/Sprites/&lt;服装&gt;/&lt;表情&gt;/</code>
+                  翻这一套角色用过哪些帧。路径
+                  <code>assets/characters/{detail.name}/Sprites/&lt;服装&gt;/&lt;表情&gt;/</code>
                 </p>
-                {Object.entries(detail.assets).map(([c, byEmotion]) => (
-                  <div key={c} className="chars-asset-group">
-                    <b>{c}</b>
-                    {Object.entries(byEmotion).map(([emo, urls]) => (
-                      <div key={emo} className="chars-asset-row">
-                        <span className="chars-asset-label">{emo}</span>
-                        {urls.map((u) => (
-                          <img key={u} src={u} alt={`${c}/${emo}`} loading="lazy" />
-                        ))}
-                      </div>
+                <div className="chars-row">
+                  <label>
+                    服装
+                    <select value={browseCostume} onChange={(e) => setBrowseCostume(e.target.value)}>
+                      {detail.costumes.map((c) => <option key={c} value={c}>{c}</option>)}
+                    </select>
+                  </label>
+                  <label>
+                    表情
+                    <select value={browseEmotion} onChange={(e) => setBrowseEmotion(e.target.value)}>
+                      {browseEmotions.map((e) => <option key={e} value={e}>{e}</option>)}
+                    </select>
+                  </label>
+                </div>
+                <SpritePreview
+                  character={detail.name}
+                  costume={browseCostume}
+                  emotion={browseEmotion}
+                  onMeta={setBrowseMeta}
+                />
+                {browseFiles.length > 0 && (
+                  <div className="chars-asset-row">
+                    <span className="chars-asset-label">全部 {browseFiles.length}</span>
+                    {browseFiles.map((u, i) => (
+                      <img
+                        key={u} src={u} alt={`第 ${i + 1} 帧`} loading="lazy"
+                        title={`${browseCostume}/${browseEmotion} 第 ${i + 1} 帧`}
+                      />
                     ))}
                   </div>
-                ))}
-                {Object.keys(detail.assets).length === 0 && (
-                  <p className="chars-empty">这个角色还没有出过图。</p>
                 )}
               </div>
             )}

@@ -2,7 +2,7 @@ import type {
   FavoritePrompt, GenParams, JobState, ModelRecommend, PosePreset,
 } from './types'
 
-const base = ''                                   // 生产同源；开发由 vite proxy 转发
+export const base = ''                            // 生产同源；开发由 vite proxy 转发
 
 function basename(p: string): string {
   const parts = p.split(/[\\/]/)

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import io
 import inspect
+import random
 import logging
 import json
 import mimetypes
@@ -1090,6 +1091,45 @@ def character_generate_api(name: str, req: CharacterGenerateReq) -> Dict[str, An
     _prune(_jobs, JOB_KEEP)
     return {"job_id": job_id, "status": "queued", "position": _q.qsize(),
             "prompt": prompt, "resolution": [w, h]}
+
+
+@app.get("/characters/{name}/poses/meta")
+def character_poses_meta(name: str, costume: str = "", emotion: str = "") -> Dict[str, Any]:
+    """一个可翻看的姿势序列有多少张（官方 `character_creator_v2.py:1701`）。
+
+    **先问数量再取图**：一次性把 N 张全塞进 JSON 的话，精灵帧一多（几十上百张）
+    首屏就卡住。官方也是这个顺序，前端拿着 count 再按 index 单张取。
+    """
+    try:
+        safe = characters.ensure_safe_name(name, "角色名")
+        files = characters.list_pose_preview_files(safe, costume or None, emotion or None)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"count": len(files), "files": [_asset_url(p) for p in files]}
+
+
+@app.get("/characters/{name}/poses")
+def character_poses(name: str, index: Optional[int] = None, costume: str = "",
+                    emotion: str = "") -> Any:
+    """取序列里的某一帧（官方 `character_creator_v2.py:1666`）。
+
+    `index` 省略就是**随机一张**——官方在没人指定时用它做封面式的随机展示。
+    越界按 `index % count` 取模，所以前端翻到头会绕回第一张。
+    """
+    try:
+        safe = characters.ensure_safe_name(name, "角色名")
+        files = characters.list_pose_preview_files(safe, costume or None, emotion or None)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not files:
+        raise HTTPException(404, "这个角色还没有精灵帧素材（Sprites/ 是空的）")
+    count = len(files)
+    pick = random.randrange(count) if index is None else index % count
+    return FileResponse(files[pick], headers={
+        "X-VNCCS-Preview-Index": str(pick),
+        "X-VNCCS-Preview-Count": str(count),
+        "Cache-Control": "no-store",
+    })
 
 
 @app.delete("/characters/{name}/costumes/{costume}")

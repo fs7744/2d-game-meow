@@ -299,6 +299,20 @@ QWEN_VL_MODEL_REVISION  = "e966ccab6d3f3c91e94d858b4a01c921a5d7ef53"
 - 验证：合成"绿幕 + 灰人偶"跑真值断言（幕布 alpha<8、主体 alpha>247、RGB 不偏色），
   蓝幕/品红幕同样过。`tests/test_matte_screen.py` 7 条。
 
+## 5b. 已搬完的：精灵帧翻看器（`SpritePreview.tsx`）
+
+移植自官方 `web/vnccs_common.js:739` `createSpritePreviewNavigator` + 后端
+`character_creator_v2.py:1666-1717` / `utils.py:936-981`。
+
+- 前端两步走：`poses/meta` 拿 count → `poses?index=N` 单张取（顺便给
+  `X-VNCCS-Preview-Index` / `-Count` 两个响应头，与官方同名）。
+- `index` 省略时**随机一张**（官方 :1686 的封面式展示），越界取模。
+- 官方 `interactions.presentPreview` 那种「点图开大图」先留白，目前只做翻看。
+- **目录大小写两种都认**：官方 `Neutral/` 与我们 `neutral/` 互通。
+- 验证：`tests/test_char_poses.py` 11 条（含取模绕回、随机落在范围内、
+  非法路径 400、官方大写目录可读、素材走 `/files/` 能真取到字节），
+  前端冒烟一组 12 条。
+
 ## 5. 可以直接搬的纯代码 / 数据（无模型依赖）
 
 ### 5.1 `utils.py`（根目录，980 行）—— **零 ComfyUI 依赖，最值得整文件搬**

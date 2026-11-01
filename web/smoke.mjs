@@ -99,6 +99,21 @@ function makeFetch() {
         }),
       }
     }
+    // 精灵帧序列：**先 meta 后单帧**（官方 vnccs_common.js:739 的顺序）
+    if (String(url).includes('/characters/') && String(url).includes('/poses/meta')) {
+      // 注意：这里的 url 是**相对路径**（/characters/...），new URL 必须给 base
+      const ps = new URL(String(url), 'http://x').searchParams
+      const emo = ps.get('emotion') || 'neutral'
+      // 用不同表情给出不同数量，好验证「只有一张时不显示翻页按钮」
+      const n = emo === 'angry' ? 1 : 3
+      return {
+        ok: true,
+        json: async () => ({
+          count: n,
+          files: Array.from({ length: n }, (_, i) => `/files/frame_${emo}_${i}.png`),
+        }),
+      }
+    }
     if (String(url).includes('/characters/') && (init.method || 'GET') === 'GET') {
       const name = decodeURIComponent(String(url).split('/characters/')[1].split('?')[0])
       return {
@@ -107,7 +122,13 @@ function makeFetch() {
           name,
           config: { character_info: { name, sex: 'female', age: 18 },
             costumes: {}, costume_ids: {}, config_version: '2.0' },
-          costumes: ['Naked'], assets: {}, cover_url: '',
+          costumes: ['Naked'],
+          // 有素材才会有可选表情：Neutral 3 张、angry 1 张
+          assets: { Naked: {
+            neutral: ['/files/a.png', '/files/b.png', '/files/c.png'],
+            angry: ['/files/d.png'],
+          } },
+          cover_url: '',
         }),
       }
     }
@@ -3173,6 +3194,86 @@ function check(name, cond, extra = '') {
     [...doc.querySelectorAll('.chars-tab')].some(
       (t) => t.classList.contains('on') && (t.textContent || '').includes('素材')))
   check('出图场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 48) 素材页：官方那套精灵帧翻看器（先看数量 → 再按帧号单张取）
+//
+// 用户要翻的是"这一套角色用过哪些帧"，而不是把所有图一次性塞进列表——
+// 精灵帧一多（几十上百张）首屏就卡死。所以按官方的顺序做两步。
+{
+  const { dom, errors } = await boot('')
+  const doc = dom.window.document
+  const win = dom.window
+  await new Promise((r) => setTimeout(r, 400))
+
+  ;[...doc.querySelectorAll('.view-tab')][1]
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 250))
+  const setInput = (el, v) => {
+    Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value').set.call(el, v)
+    el.dispatchEvent(new win.Event('input', { bubbles: true }))
+  }
+  setInput(doc.querySelector('.chars-new input'), 'Alice')
+  await new Promise((r) => setTimeout(r, 80))
+  ;[...doc.querySelectorAll('.chars-new button')][0]
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 300))
+  ;[...doc.querySelectorAll('.chars-card')].find((c) =>
+    (c.textContent || '').includes('Alice'))
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 300))
+
+  const assetsTab = [...doc.querySelectorAll('.chars-tab')]
+    .find((t) => (t.textContent || '').includes('素材'))
+  assetsTab?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 400))
+
+  check('素材页有服装/表情两个下拉', doc.querySelectorAll('.chars-body select').length === 2,
+    String(doc.querySelectorAll('.chars-body select').length))
+  check('先去问这个序列有多少帧（不是一次性把图拉回来）',
+    calls.some((c) => c.url.includes('/characters/Alice/poses/meta')),
+    calls.map((c) => c.url).slice(-2).join())
+  check('翻看器挂上了', !!doc.querySelector('.sprite-preview'))
+
+  const img = doc.querySelector('.sprite-stage img')
+  check('按帧号单张取图（src 带 index=0）',
+    (img?.getAttribute('src') || '').includes('index=0'),
+    img?.getAttribute('src'))
+  check('src 带时间戳（同名文件被替换后浏览器不能拿旧图）',
+    (img?.getAttribute('src') || '').includes('t='))
+  check('多帧时显示计数 1/3',
+    (doc.querySelector('.sprite-count')?.textContent || '') === '1/3',
+    doc.querySelector('.sprite-count')?.textContent)
+
+  // 翻页：采样 index 前进，且相邻帧会被预取
+  ;[...doc.querySelectorAll('.sprite-nav button')][1]
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 250))
+  check('点下一帧后计数变 2/3',
+    (doc.querySelector('.sprite-count')?.textContent || '') === '2/3',
+    doc.querySelector('.sprite-count')?.textContent)
+  check('翻页后 src 的 index 跟着变',
+    (doc.querySelector('.sprite-stage img')?.getAttribute('src') || '').includes('index=1'),
+    doc.querySelector('.sprite-stage img')?.getAttribute('src'))
+
+  // 全部帧的缩略图条
+  check('缩略图条列出全部 3 帧',
+    (doc.querySelector('.chars-asset-row')?.querySelectorAll('img').length || 0) === 3,
+    String(doc.querySelector('.chars-asset-row')?.querySelectorAll('img').length))
+
+  // 只有一帧时不给翻页按钮 —— 否则用户点了没反应，也没人告诉为什么
+  const emoSel = doc.querySelectorAll('.chars-body select')[1]
+  Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value')
+    .set.call(emoSel, 'angry')
+  emoSel.dispatchEvent(new win.Event('change', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 450))
+  check('只有一帧时不显示翻页按钮（不给无声的失败）', !doc.querySelector('.sprite-nav'),
+    doc.querySelector('.sprite-count')?.textContent || '（有导航条）')
+  check('单帧时明说只有一帧',
+    (doc.querySelector('.chars-body')?.textContent || '').includes('只有这一帧'),
+    (doc.querySelector('.chars-body')?.textContent || '').slice(-40))
+  check('素材翻看场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 

@@ -1372,3 +1372,32 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
 }
 .chars-check input { margin-top: 3px; flex: none; }
 .chars-check .chars-sub { display: block; }
+
+/* 精灵帧翻看器（移植自官方 vnccs_common.js:739） */
+.sprite-preview { display: flex; flex-direction: column; gap: 6px; max-width: 520px; }
+.sprite-stage {
+  position: relative; display: grid; place-items: center;
+  border: 1px solid var(--line); background:
+    repeating-conic-gradient(#191b22 0% 25%, #12141a 0% 50%) 0 0 / 16px 16px;
+  min-height: 280px; overflow: hidden;
+}
+.sprite-stage img { max-width: 100%; max-height: 460px; object-fit: contain; display: block; }
+.sprite-missing {
+  font-size: 11.5px; color: var(--muted); line-height: 1.7;
+  text-align: center; padding: 20px 12px; margin: 0;
+}
+/* 加载态必须看得见：精灵帧原图好几 MB，没有提示用户会以为卡住了 */
+.sprite-loading {
+  position: absolute; right: 8px; top: 8px; padding: 2px 8px;
+  background: rgba(10, 10, 12, 0.85); border: 1px solid var(--line);
+  border-radius: 2px; font-family: var(--mono); font-size: 11px; color: var(--cyan);
+}
+.sprite-nav { display: flex; align-items: center; gap: 10px; }
+.sprite-nav button {
+  width: 30px; height: 26px; background: var(--bg-3); color: var(--white);
+  border: 1px solid var(--line-strong); border-radius: 2px; cursor: pointer;
+  font-size: 15px; line-height: 1;
+}
+.sprite-nav button:hover { border-color: var(--green); color: var(--green); }
+.sprite-count { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.sprite-err { font-size: 10.5px; color: var(--pink); }

@@ -55,6 +55,11 @@ COSTUME_TEXT_FIELDS = {"top", "bottom", "shoes", "head", "face", "negative_promp
 BASE_COSTUMES = {"naked", "original"}
 #: 认得出的图片后缀（官方 `utils.py:960` 的同款过滤）
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+#: `list_pose_preview_files` 的兜底目录名（官方 `utils.py:947-950`）。
+#: 官方写的是首字母大写（Naked/Original/Neutral），我们用小写 neutral 归档；
+#: **两种都列着**——否则官方工作流产出的角色（`Neutral/`）在这边一张都翻不出来。
+POSE_PREVIEW_COSTUMES = ["Naked", "Original", "naked", "original"]
+POSE_PREVIEW_EMOTIONS = ["Neutral", "neutral"]
 
 #: 写锁，按路径哈希分片（官方 `utils.py:29`）
 _LOCKS = tuple(threading.RLock() for _ in range(64))
@@ -533,6 +538,56 @@ def publish_image(
         "path": out, "file": fname, "index": index, "cover": cover,
         "matte": matte_path or "", "matte_error": matte_err or "",
     }
+
+
+_POSE_PREVIEW_EXTS = IMAGE_EXTS
+
+
+def list_pose_preview_files(name: str, costume: Optional[str] = None,
+                            emotion: Optional[str] = None) -> List[str]:
+    """一个「可翻看的姿势序列」——官方 `utils.py:936-981`。
+
+    候选根目录**有优先级**（先指定服装的 neutral、再指定服装、再 Naked、
+    Original），**第一个非空就停**。所以不给服装名时退到最基础的裸装帧，
+    而不是把所有服装的图混在一起翻。
+
+    `emotion` 是我们加的一维：官方只有 Neutral。给它就只看那一个表情目录。
+    """
+    n = ensure_safe_name(name, "角色名")
+    base = character_dir(n)
+    roots: List[str] = []
+    c = ensure_safe_name(costume, "服装名") if costume else ""
+    e = ensure_safe_name(emotion, "表情名") if emotion else ""
+    if c:
+        for does_emo in ([e] if e else POSE_PREVIEW_EMOTIONS):
+            roots.append(os.path.join(base, "Sprites", c, does_emo))
+        roots.append(os.path.join(base, "Sprites", c))
+    for base_costume in POSE_PREVIEW_COSTUMES:
+        for does_emo in ([e] if e else POSE_PREVIEW_EMOTIONS):
+            roots.append(os.path.join(base, "Sprites", base_costume, does_emo))
+        roots.append(os.path.join(base, "Sprites", base_costume))
+    files: List[str] = []
+    for d in roots:
+        try:
+            d = safe_join_under(base, os.path.relpath(d, base))
+        except ValueError:                                 # noqa: PERF203
+            continue
+        if not os.path.isdir(d):
+            continue
+        found = []
+        for fn in os.listdir(d):
+            if os.path.splitext(fn)[1].lower() not in _POSE_PREVIEW_EXTS:
+                continue
+            try:
+                p = safe_join_under(base, os.path.relpath(os.path.join(d, fn), base))
+            except ValueError:
+                continue
+            if os.path.isfile(p):
+                found.append(p)
+        if found:
+            files = sorted(found)
+            break
+    return files
 
 
 def character_summary(name: str) -> Dict[str, Any]:
