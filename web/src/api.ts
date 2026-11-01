@@ -615,12 +615,12 @@ export function deleteCostume(name: string,
     { method: 'DELETE' })
 }
 
-/** 把 character_info + 风格拼成官方结构的 prompt（**不跑模型**，用来预览） */
+/** 拼 prompt。`enhance=true` 会跑 PE（用图像模型自己的 Qwen3-VL 改写） */
 export function fetchCharacterPrompt(
-  name: string, style = '', info?: Record<string, unknown>,
+  name: string, style = '', info?: Record<string, unknown>, enhance = true,
 ): Promise<CharacterPrompt> {
   return req(`/characters/${encodeURIComponent(name)}/prompt`,
-    { method: 'POST', body: JSON.stringify({ style, info: info || {} }) })
+    { method: 'POST', body: JSON.stringify({ style, info: info || {}, enhance }) })
 }
 
 /** 给角色出图；出完后端自动按官方命名收进角色目录 */
@@ -632,6 +632,7 @@ export function generateForCharacter(
     prompt?: string
     negative?: string
     params?: Record<string, unknown>
+    enhance?: boolean
   },
 ): Promise<{ job_id: string; status: string; prompt: string; resolution: number[] }> {
   return req(`/characters/${encodeURIComponent(name)}/generate`,
@@ -642,6 +643,10 @@ export type CharacterPrompt = {
   name: string
   style: string
   prompt: string
+  /** 未扩写版（PE 失败或不启用时跟 prompt 一样） */
+  raw_prompt: string
+  /** PE 是否真的生效了 */
+  enhanced: boolean
   negative: string
   resolution: [number, number]
   defaults: { steps: number; cfg: number; sampler: string; scheduler: string }

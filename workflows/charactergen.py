@@ -31,6 +31,7 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from workflows import paths
+from workflows import qwen_text
 
 #: 官方：`character_creator_v2.py:263`
 QI2_COMPOSITION_PROMPT = (
@@ -238,6 +239,98 @@ def character_prompt(info: Dict[str, Any], style_id: str = "") -> str:
     """一条龙：character_info + 风格 id → 官方结构的 prompt。"""
     style = style_prompt_of(style_id or str(info.get("style", "") or ""))
     return structured_prompt(qi2_fields(info), style)
+
+
+# ---------------------------------------------------------------- Prompt Enhancement
+#
+# 官方 `character_creator_v2.py:1271-1317` `generate_creator_qi2_prompt`。
+# 用的是**图像模型自己的 Qwen3-VL 文本编码器**（workflows/qwen_text.py），
+# 不需要任何新权重。整条流程逐句照搬，包括两个容易被漏掉的细节：
+#   · 送进 PE 的 request 要**先切掉 `LoRA triggers:` 那一行**（:1285）；
+#   · 风格参考是**在 PE 之后**再追加一次（:1315），不是只在结构化 prompt 里。
+
+
+def _strip_unit_prompt_weights(value: str) -> str:
+    """官方 `character_creator_v2.py:493`：去掉 `:1.0` 这种无效权重。"""
+    return re.sub(r":\s*1\.0+\b", "", str(value or ""))
+
+
+def _qi2_rewritten_prompt(generated: str, original: str) -> str:
+    """官方 `:1034`：生成结果为空 / 带 think、JSON、代码块的，一律算改写失败。
+
+    **这里跟官方有一处刻意不同**：官方是失败时返回 `original`（:1042），
+    我们返回空串让调用方统一走"退回原文"。原因是拿返回值跟 request 比来判断
+    "有没有改写成功"会有**假阳性**——`.strip()` 一去尾空格就不相等了
+    （实测：`Additional details: ` 这种结尾带空格的行，比出来是"改写了"）。
+    """
+    text = str(generated or "").strip()
+    if not text or any(m in text for m in ("<think>", "{", "```")):
+        return ""
+    return text
+
+
+def enhance_character_prompt(
+    pipe: Any, info: Dict[str, Any], style_id: str = "",
+    enhance: bool = True,
+) -> Dict[str, str]:
+    """造角色的完整 prompt：结构化 → PE → 补透明底 → 追加风格参考与 LoRA 触发词。
+
+    返回 `{prompt, raw}`，`raw` 是未扩写版——**PE 失败时调用方要用 raw**，
+    增强不能成为出图的必要条件。
+    """
+    style = style_prompt_of(style_id or str(info.get("style") or ""))
+    fields = {k: _strip_unit_prompt_weights(v) for k, v in qi2_fields(info).items()}
+    original = structured_prompt(fields, style)
+    if not enhance or pipe is None:
+        return {"prompt": original, "raw": original, "applied": "0"}
+
+    # PE 的请求体：切掉 LoRA triggers 那一行（官方 :1285）
+    request = original.rsplit("\nLoRA triggers:", 1)[0]
+    generated = qwen_text.enhance(pipe, request, kind="t2i")
+    rewritten = _strip_unit_prompt_weights(_qi2_rewritten_prompt(generated, request))
+    # 空串 = 改写没成功（见 _qi2_rewritten_prompt 的注释），不要跟 request 比
+    applied = bool(rewritten.strip())
+    if not applied:
+        # 官方 :1303-1306 也是这么兜的：改写没生效就用原 prompt，只记一条日志
+        rewritten = original
+    else:
+        # 透明底：PE 可能把它改写没了，官方 :1308-1312 会补回来
+        if (QI2_ALPHA_BACKGROUND_PROMPT in request.lower()
+                and QI2_ALPHA_BACKGROUND_PROMPT not in rewritten.lower()):
+            rewritten = f"{rewritten.rstrip()}\n{QI2_ALPHA_BACKGROUND_PROMPT}"
+        # 风格参考在 PE 之后原样追加（官方 :1313-1315）
+        if style:
+            rewritten = (f"{rewritten}\n\n{QI2_STYLE_REFERENCE_HEADING}\n{style}")
+    lora = str(fields.get("lora_prompt") or "").strip()
+    if lora:
+        rewritten = f"{rewritten}\n\nLoRA triggers: {lora}"
+    return {"prompt": rewritten, "raw": original, "applied": "1" if applied else "0"}
+
+
+def expand_character_fields(
+    pipe: Any, info: Dict[str, Any], style_reference: str = "",
+) -> str:
+    """官方 `generate_qi2_prompt`（:1235）：把 character_fields 的 JSON 扩写。
+
+    `aesthetics` 与 `lora_prompt` **不参与扩写**（官方 `QI2_LITERAL_FIELDS`，
+    :262）——它们是要原样保留的字面值。
+    """
+    if pipe is None:
+        return ""
+    fields = qi2_fields(info)
+    pe_fields = {k: v for k, v in fields.items() if k not in QI2_LITERAL_FIELDS}
+    request = "character_fields:\n" + json.dumps(pe_fields, ensure_ascii=False)
+    out = qwen_text.generate_text(
+        pipe, request, qwen_text.system_prompt_of("fields"))
+    if not out:
+        return ""
+    if style_reference:
+        out = f"{out}\n\n{QI2_STYLE_REFERENCE_HEADING}\n{style_reference}"
+    return _strip_unit_prompt_weights(out)
+
+
+#: 官方 `character_creator_v2.py:262`：这两个字段扩写时要原样保留
+QI2_LITERAL_FIELDS = {"aesthetics", "lora_prompt"}
 
 
 def generation_resolution(target_size: int = 1024) -> Tuple[int, int]:

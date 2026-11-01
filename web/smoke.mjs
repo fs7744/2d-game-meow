@@ -3138,6 +3138,22 @@ function check(name, cond, extra = '') {
   check('显示官方公式算出的分辨率 792×1408',
     (doc.querySelector('.chars-body')?.textContent || '').includes('792×1408'))
 
+  // Prompt Enhancement：官方用**图像模型自己的 Qwen3-VL** 改写（不新增权重）
+  const peBox = doc.querySelector('.chars-check input[type=checkbox]')
+  check('有 Prompt Enhancement 开关', !!peBox)
+  check('PE 默认开（官方默认开）', peBox?.checked === true)
+  check('PE 说明里写清了用的是图像模型自己的 Qwen3-VL',
+    (doc.querySelector('.chars-check')?.textContent || '').includes('Qwen3-VL'),
+    (doc.querySelector('.chars-check')?.textContent || '').slice(0, 50))
+  peBox?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 400))
+  const peCall = calls.filter((c) => c.url.includes('/characters/Alice/prompt')).pop()
+  check('关掉 PE 后重新拼 prompt 且带 enhance=false',
+    !!peCall && JSON.parse(peCall.body).enhance === false,
+    peCall?.body)
+  peBox?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 400))
+
   const genBtn = [...doc.querySelectorAll('.chars-body button')]
     .find((b) => (b.textContent || '').includes('生成底图'))
   check('有「生成底图」按钮', !!genBtn)

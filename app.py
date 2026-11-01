@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import io
 import inspect
+import logging
 import json
 import mimetypes
 import os
@@ -65,6 +66,7 @@ from workflows.assetdb import AssetIndex
 from workflows.engine import Engine
 
 ROOT = Path(__file__).resolve().parent
+log = logging.getLogger("meow.app")
 ASSETS = paths.ASSETS
 UPLOAD_DIR = paths.UPLOAD_DIR
 PROJECTS_DIR = paths.PROJECTS_DIR
@@ -947,9 +949,13 @@ def save_costume_api(name: str, costume: str, req: CostumeReq) -> Dict[str, Any]
 
 
 class CharacterPromptReq(BaseModel):
-    """拼装 prompt 的请求。style 省略就用角色自己存的那个。"""
+    """拼装 prompt 的请求。style 省略就用角色自己存的那个。
+
+    `enhance`：跑 Prompt Enhancement（用图像模型自己的 Qwen3-VL 改写）。
+    """
     style: str = ""
     info: Dict[str, Any] = Field(default_factory=dict)
+    enhance: bool = True
 
 
 class CharacterGenerateReq(BaseModel):
@@ -966,6 +972,8 @@ class CharacterGenerateReq(BaseModel):
     negative: str = ""
     params: Dict[str, Any] = Field(default_factory=dict)
     init_image: str = ""
+    #: 跑 Prompt Enhancement（用图像模型自己的 Qwen3-VL）。失败自动退回未扩写。
+    enhance: bool = True
 
 
 @app.post("/characters/{name}/prompt")
@@ -983,10 +991,23 @@ def character_prompt_api(name: str, req: CharacterPromptReq) -> Dict[str, Any]:
     info = dict(cfg.get("character_info") or {})
     info.update(req.info or {})
     style = req.style or str(info.get("style") or "")
+    # PE 用图像模型自己的 Qwen3-VL 文本编码器，**不新增权重**；
+    # 但它要常驻 GPU 跑自回归解码——显存紧或没装好时静默退回未扩写版。
+    pipe = None
+    if req.enhance:
+        try:
+            pipe = engine.txt2img_pipe()
+        except Exception as exc:                   # noqa: BLE001
+            log.warning("PE 拿不到管线，退回未扩写：%s", exc)
+            pipe = None
+    built = charactergen.enhance_character_prompt(
+        pipe, info, style, enhance=req.enhance)
     return {
         "name": safe,
         "style": style,
-        "prompt": charactergen.character_prompt(info, style),
+        "prompt": built["prompt"],
+        "raw_prompt": built["raw"],
+        "enhanced": built["applied"] == "1",
         "negative": str(info.get("negative_prompt") or ""),
         "resolution": charactergen.generation_resolution(
             int((req.params or {}).get("target_size") or 0)
@@ -1016,8 +1037,19 @@ def character_generate_api(name: str, req: CharacterGenerateReq) -> Dict[str, An
 
     cfg = characters.load_config(safe) or {}
     info = cfg.get("character_info") or {}
-    prompt = req.prompt.strip() or charactergen.character_prompt(
-        info, str(info.get("style") or ""))
+    if req.prompt.strip():
+        prompt = req.prompt.strip()
+    else:
+        pipe = None
+        if req.enhance:
+            try:
+                pipe = engine.txt2img_pipe()
+            except Exception as exc:               # noqa: BLE001
+                log.warning("PE 拿不到管线，退回未扩写：%s", exc)
+                pipe = None
+        prompt = charactergen.enhance_character_prompt(
+            pipe, info, str(info.get("style") or ""),
+            enhance=req.enhance)["prompt"]
     negative = req.negative.strip() or str(info.get("negative_prompt") or "")
     w, h = charactergen.generation_resolution(
         int((req.params or {}).get("target_size") or 0)

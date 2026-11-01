@@ -1364,3 +1364,11 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
   padding: 6px; font-family: var(--mono); font-size: 10.5px; line-height: 1.6;
 }
 .chars-prompt.short { min-height: 60px; }
+
+/* 出图页：Prompt Enhancement 开关 */
+.chars-check {
+  display: flex; align-items: flex-start; gap: 6px;
+  font-size: 11.5px; color: var(--white); line-height: 1.5;
+}
+.chars-check input { margin-top: 3px; flex: none; }
+.chars-check .chars-sub { display: block; }

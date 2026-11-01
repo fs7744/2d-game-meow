@@ -64,6 +64,8 @@ export default function CharactersPage({ onNotice }: Props) {
   const [draft, setDraft] = useState<Record<string, unknown>>({})
   /** 后端按官方结构拼好的 prompt（不跑模型，改属性就能立刻看到） */
   const [cPrompt, setCPrompt] = useState<CharacterPrompt | null>(null)
+  /** Prompt Enhancement：用图像模型自己的 Qwen3-VL 改写 prompt（官方默认开） */
+  const [enhance, setEnhance] = useState(true)
   const [genBusy, setGenBusy] = useState(false)
   const [genMsg, setGenMsg] = useState('')
 
@@ -92,7 +94,8 @@ export default function CharactersPage({ onNotice }: Props) {
     void fetchCharacter(sel)
       .then((d) => { if (alive) { setDetail(d); setDraft(d.config.character_info ?? {}) } })
       .catch((e) => { if (alive) setErr(String(e instanceof Error ? e.message : e)) })
-    void fetchCharacterPrompt(sel).then((p) => { if (alive) setCPrompt(p) })
+    void fetchCharacterPrompt(sel, '', undefined, enhance)
+      .then((p) => { if (alive) setCPrompt(p) })
       .catch(() => { if (alive) setCPrompt(null) })
     return () => { alive = false }
   }, [sel])
@@ -162,7 +165,7 @@ export default function CharactersPage({ onNotice }: Props) {
       const d = await fetchCharacter(sel)
       setDetail(d)
       // prompt 是属性拼出来的，属性变了它就得跟着变
-      const p = await fetchCharacterPrompt(sel).catch(() => null)
+      const p = await fetchCharacterPrompt(sel, '', undefined, enhance).catch(() => null)
       if (p) setCPrompt(p)
       onNotice('已保存')
     } catch (e) {
@@ -182,6 +185,7 @@ export default function CharactersPage({ onNotice }: Props) {
         emotion: 'neutral',
         prompt: cPrompt?.prompt || '',
         negative: cPrompt?.negative || '',
+        enhance,
       })
       for (let i = 0; i < 400; i++) {
         const j = await fetchJob(r.job_id)
@@ -422,8 +426,31 @@ export default function CharactersPage({ onNotice }: Props) {
                 <p className="chars-sub">
                   这是<b>官方 QI2 的结构化 prompt</b>：每个字段一行，不是一句自然语言。
                   风格 LoRA 就是照这个格式调的，自己另写一句会明显偏。
-                  <b>Prompt Enhancement（字段扩写）还没接</b>，等 Qwen3.5-4B gguf 到位。
                 </p>
+                <label className="chars-check">
+                  <input type="checkbox" checked={enhance}
+                    onChange={(e) => {
+                      setEnhance(e.target.checked)
+                      if (sel) {
+                        fetchCharacterPrompt(sel, '', undefined, e.target.checked)
+                          .then(setCPrompt).catch(() => {})
+                      }
+                    }} />
+                  Prompt Enhancement（官方默认开）
+                  <span className="chars-sub">
+                    用<b>图像模型自己的 Qwen3-VL</b> 改写——不新增权重，且改写出来的
+                    措辞跟模型训练时见到的文本同分布，风格跟随更准。
+                    代价：编码器要常驻 GPU 跑自回归解码（显存/耗时，见评估文档 §4.1）。
+                    失败会自动退回下面的原始 prompt。
+                  </span>
+                </label>
+                {cPrompt?.enhanced ? (
+                  <p className="chars-sub">✓ 已改写（下面是扩写后的版本）</p>
+                ) : (
+                  <p className="chars-sub">
+                    · 当前是<b>未扩写</b>版（PE 关掉了，或这次没生效）
+                  </p>
+                )}
                 <label className="chars-field">
                   正向 prompt（可改，改了就用你这份出图）
                   <textarea
@@ -460,7 +487,7 @@ export default function CharactersPage({ onNotice }: Props) {
                     换装（图生图）
                   </button>
                   <button type="button" className="mini"
-                    onClick={() => sel && fetchCharacterPrompt(sel)
+                    onClick={() => sel && fetchCharacterPrompt(sel, '', undefined, enhance)
                       .then(setCPrompt).catch(() => {})}>
                     重拼 prompt
                   </button>

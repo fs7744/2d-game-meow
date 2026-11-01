@@ -195,6 +195,37 @@ shifted = exp(shift) / (exp(shift) + (1/nodes - 1))
 
 ## 4b. 原始选项（保留以备回看）
 
+### 4.1a Prompt Enhancement：已按官方接上（用图像模型自己的 Qwen3-VL）
+
+**PE 和「AI 向导」是两件事，官方用的也不是同一个模型**：
+
+| 功能 | 官方用什么 |
+|---|---|
+| **Prompt Enhancement**（把结构化字段扩写成描述段落） | **QI2 自己的 CLIP = Qwen3-VL 8B**（`character_creator_v2.py:1293`，走原生 `TextGenerate`） |
+| Character Wizard / Analyze Captions | Qwen3.5-4B gguf |
+
+所以 PE **不需要 gguf**，用我们已有的 `Qwen3VLForConditionalGeneration`
+（`engine.py:478`）就能做，零新权重。已按官方 `generate_creator_qi2_prompt`
+（:1271-1317）整条流程实现（`workflows/qwen_text.py` + `charactergen.enhance_character_prompt`）：
+
+1. 结构化 prompt → 2. **切掉 `LoRA triggers:` 那行再送进 PE**（:1285）
+3. PE 改写 → 4. 透明底被改写没了的补回来（:1308）
+5. 风格参考**在 PE 之后**追加（:1315）→ 6. 末尾补 LoRA 触发词
+
+采样参数照抄 `:159-174`：max 2048 / temp 0.3 / top_k 64 / top_p 0.95 / min_p 0.05 /
+rep_pen 1.05 / thinking=False。
+
+> ⚠️ **已知代价（先记着，后面再解决）**
+>
+> 1. **显存**：PE 要跑自回归解码，文本编码器得**常驻 GPU**；而我们的管线为了
+>    省显存是「编码完就挪走」（`engine.py:439`，注释写明两块 fp8 常驻 15.5GB
+>    已经压线）。24GB 上跟 transformer 抢是真的。
+> 2. **耗时**：8B 自回归最多 2048 token，PE 是每次出图都跑。
+>
+> 缓解：每个入口都做了**失败降级**（PE 挂了退回未扩写 prompt，不阻断出图），
+> 前端有开关可关。待办：量一遍真实显存/耗时，再决定默认值与是否做
+> 「PE 完立刻卸载」的策略。
+
 ### 4.1 AI 向导 / 看图反推属性（VNCCS 用 Qwen3.5-4B-GGUF）
 
 **涉及**：Character Wizard（`character_creator_v2.py:1740-1869`）、

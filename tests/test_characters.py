@@ -13,6 +13,8 @@ from pathlib import Path
 
 from workflows import characters as ch
 from workflows import paths
+from workflows import charactergen as cg
+from workflows import qwen_text
 
 
 def _fresh(name: str = "Alice") -> str:
@@ -312,3 +314,96 @@ def test_staged_batch_versions_when_publishing_a_set():
     assert Path(d, "sprite_pose_0001.png").read_bytes() == b"new"
     assert Path(d, "V1", "sprite_pose_0001.png").read_bytes() == b"old"
     shutil.rmtree(d)
+
+
+# ---------------------------------------------------------------- Prompt Enhancement
+
+
+class _FakePipe:
+    """占位：PE 只需要一个有 text_encoder / tokenizer 的对象，测试里用假货。"""
+
+
+def _pe(monkeypatch, out: str):
+    monkeypatch.setattr(cg.qwen_text, "enhance",
+                        lambda pipe, req, kind="t2i", **kw: out)
+
+
+def test_pe_returns_raw_when_disabled():
+    """不启用 PE 就是结构化原文，applied=0（前端要据此显示"未扩写"）。"""
+    r = cg.enhance_character_prompt(None, {"name": "A"}, "", enhance=False)
+    assert r["applied"] == "0"
+    assert r["prompt"] == r["raw"]
+
+
+def test_pe_rewrites_then_appends_style_and_lora(monkeypatch):
+    """官方 `character_creator_v2.py:1271-1317` 的顺序：
+
+    PE → 补回透明底 → 追加风格参考 → 追加 LoRA 触发词。
+    **风格参考是在 PE 之后才追加的**（:1315），不是只在结构化 prompt 里。
+    """
+    _pe(monkeypatch, "A lone elven girl stands in a sunlit clearing.")
+    info = {"name": "Alice", "background_color": "transparent",
+            "lora_prompt": "vnccs_style"}
+    r = cg.enhance_character_prompt(_FakePipe(), info, "ghibli_miyazaki")
+    assert r["applied"] == "1"
+    p = r["prompt"]
+    assert p.startswith("A lone elven girl")
+    # 透明底：PE 改写没了要补回来（:1308-1312）
+    assert cg.QI2_ALPHA_BACKGROUND_PROMPT in p
+    # 风格参考在 PE 之后原样追加
+    assert cg.QI2_STYLE_REFERENCE_HEADING in p
+    assert "Hayao Miyazaki" in p
+    # LoRA 触发词放最后，且只出现一次（送进 PE 的那份要先切掉它，:1285）
+    assert p.endswith("LoRA triggers: vnccs_style")
+    assert p.count("LoRA triggers") == 1
+
+
+def test_pe_falls_back_when_rewriting_fails(monkeypatch):
+    """PE 是增强不是依赖：改写失败（返回空/带 think/JSON）就退回原文。"""
+    for bad in ("", "   ", "<think>想一下</think>结果", '{"rewritten_prompt": "x"}', "```json\n{}\n```"):
+        _pe(monkeypatch, bad)
+        r = cg.enhance_character_prompt(_FakePipe(), {"name": "A"}, "")
+        assert r["applied"] == "0", f"这种输出不该算改写成功：{bad!r}"
+        assert r["prompt"] == r["raw"]
+
+
+def test_pe_request_excludes_lora_line(monkeypatch):
+    """送进 PE 的 request 要切掉 `LoRA triggers:` 那一行（官方 :1285）。"""
+    seen = {}
+
+    def fake(pipe, req, kind="t2i", **kw):
+        seen["req"] = req
+        return "rewritten text here"
+    monkeypatch.setattr(cg.qwen_text, "enhance", fake)
+    info = {"lora_prompt": "secret_trigger"}
+    cg.enhance_character_prompt(_FakePipe(), info, "")
+    assert "secret_trigger" not in seen["req"], "LoRA 触发词不该送进 PE"
+
+
+def test_field_expansion_excludes_literal_fields(monkeypatch):
+    """字段扩写时 aesthetics / lora_prompt 不参与（官方 QI2_LITERAL_FIELDS，:262）。"""
+    seen = {}
+    monkeypatch.setattr(cg.qwen_text, "generate_text",
+                        lambda pipe, req, sp="", **kw: (seen.update(req=req) or "expanded"))
+    out = cg.expand_character_fields(_FakePipe(),
+                                     {"aesthetics": "masterpiece", "lora_prompt": "t", "hair": "blonde"})
+    assert out == "expanded"
+    import json as _json
+    payload = seen["req"].split("character_fields:\n", 1)[1]
+    fields = _json.loads(payload)
+    assert "aesthetics" not in fields and "lora_prompt" not in fields
+    assert fields["hair"] == "blonde"
+
+
+def test_pe_defaults_are_official():
+    """采样参数照抄官方 `character_creator_v2.py:159-174`。"""
+    d = cg.qwen_text.QI2_TEXT_DEFAULTS
+    assert d["max_length"] == 2048
+    assert d["temperature"] == 0.3 and d["top_k"] == 64 and d["top_p"] == 0.95
+    assert d["min_p"] == 0.05 and d["repetition_penalty"] == 1.05
+
+
+def test_official_system_prompts_are_bundled():
+    """官方那三份提示词模板必须随项目发行（不能读不到就自己编）。"""
+    for kind in ("t2i", "fields", "edit"):
+        assert cg.qwen_text.system_prompt_of(kind), f"缺官方模板：{kind}"
