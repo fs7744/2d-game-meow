@@ -39,6 +39,8 @@ library/
 # ---- 前端 ----
 web/node_modules/
 web/dist/
+web/dist_shot/
+tools/shot/
 web/*.tsbuildinfo
 
 # ---- 本地临时与缓存 ----
