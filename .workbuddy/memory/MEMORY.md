@@ -39,6 +39,7 @@
 | clothesgen.py（换装） | test_clothes | 5s |
 | posegen.py（多姿势批量） | test_posegen | 5s |
 | spriteatlas.py（图集导出） | test_spriteatlas | 4s |
+| labels.ts（界面译文） | test_labels | 1s |
 | projectio.py / paths.py | test_projects | 5s |
 | 前端 web/src | `cd web && npm run smoke`（568 条，纯 mock，不用 GPU） | 60s |
 | workflows/library.py / poselib.py | test_library | 1s |
@@ -139,3 +140,27 @@
 - Qwen 768²/24 步：单帧 24~28s、峰值 11~15GB；低于 16 步出糊块（PLAN §2.6）。
 - 逐帧路线的短板是**姿态贴合**不是帧间一致性（PLAN §2.8）：腿部常被参考图站姿覆盖。
 - 白毛/白甲角色别用白底抠图——换 `bg=dark`，或出图时直接勾透明底。
+
+## 界面中文化：只翻译显示层，别改标识（2026-11-01 起）
+
+界面上的 `Naked` / `angry 😠` / `Shonen Anime` / `Ballet` **不是文案，是数据标识**——
+同时是磁盘目录名、后端接口键、以及要写进 prompt 的内容。**改一个就全盘失效**。
+
+规矩：**值一律传原样英文，只在渲染处显示中文。**
+
+- 映射表全在 `web/src/labels.ts`（约 1000 条）。查不到就回落到原值
+  （用户自建的服装名/姿势名本来就该原样显示）。
+- **官方 JSON 一个字不改**（`emotions.json` / `character_styles.json` /
+  `character_presets_v2.json` / `PoseLibrary/`）—— 改了就不好升级官方版本。
+- `tests/test_labels.py` 逐条核对覆盖率：官方加了新条目而我们忘译，测试直接红。
+  已抓到过 `sitting`（小写变体）这种漏。
+- **漏接比映射表更容易出错**：映射做对了，渲染处漏接照样露英文。
+  改完必须**重新扫一遍渲染处**（`CharactersPage` / `TagPicker` / `LibraryDrawer` /
+  `SpritePreview` / `App`），不能只验映射表。
+- 表情 emoji **别手抄**（`😮‍💨` 带 U+FE0F 和 U+200D），从原 `key` 末尾用
+  `\p{Extended_Pictographic}` 正则摘。
+- `neutral` 是**我们这边的默认表情**（官方库从 angry 开始，没有这一条），
+  官方对齐测试测不到，得单独断言。
+- 要保持英文的：提示词示例（`blonde hair, twin tails`）、官方固定指令
+  （`Dress character: White underwear`）、错误码（`MODEL_MISSING` ——
+  前端和测试靠它做字符串匹配，翻译会断契约）、文件路径与目录名。
