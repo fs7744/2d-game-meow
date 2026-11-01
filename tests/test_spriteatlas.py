@@ -251,20 +251,59 @@ def client():
         yield c
 
 
+def _wait_job(client, job_id: str, timeout: float = 30.0) -> dict:
+    import time as _t
+
+    deadline = _t.time() + timeout
+    while _t.time() < deadline:
+        job = client.get(f"/jobs/{job_id}").json()
+        if job.get("status") in ("done", "failed"):
+            return job
+        _t.sleep(0.05)
+    raise AssertionError(f"任务超时：{job_id}")
+
+
 def test_api_atlas_export_and_info(client):
+    """导出走**队列**：提交拿 job_id，结果在 job.result 里。
+
+    以前是同步的（帧一多请求就超时、界面没进度）。现在提交时就把帧数告诉用户，
+    真正的拼接在 worker 里做。
+    """
     name = "AtlasApi"
     _character(name, ((24, 32), (24, 32)))
     r = client.post(f"/characters/{name}/atlas", json={"padding": 1})
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["frames"] == 2 and body["animations"] == 1
-    assert body["image"].startswith("/files/"), body["image"]
-    assert Path(body["image_path"]).is_file()
+    assert body["job_id"]
+    # 提交时就能报出帧数（先扫了一遍，别让用户等一个注定失败的任务）
+    assert body["frames"] == 2, body
+
+    job = _wait_job(client, body["job_id"])
+    assert job["status"] == "done", job
+    assert job["workflow"] == "watlas"
+    result = job["result"]
+    assert result["frames"] == 2 and result["animations"] == 1
+    assert result["image"].startswith("/files/"), result["image"]
+    assert Path(result["image_path"]).is_file()
+    # 进度跑完了
+    assert job["progress"]["done"] == job["progress"]["total"]
 
     info = client.get(f"/characters/{name}/atlas").json()
     assert info["exists"] is True
     assert info["frames"] == 2
-    assert info["size"] == body["size"]
+    assert info["size"] == result["size"]
+    ch.delete_character(name)
+
+
+def test_api_atlas_rejects_empty_before_queueing(client):
+    """没帧时**立刻 400**，不入队 —— 让用户等一个必然失败的任务是最糟的体验。"""
+    name = "AtlasApiNoFrames"
+    if ch.character_exists(name):
+        ch.delete_character(name)
+    ch.create_character(name)
+    r = client.post(f"/characters/{name}/atlas", json={})
+    assert r.status_code == 400
+    assert "没有可导出" in r.json()["detail"]
     ch.delete_character(name)
 
 

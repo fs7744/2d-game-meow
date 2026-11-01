@@ -58,6 +58,7 @@ class Frame:
 
 @dataclass
 class AtlasResult:
+    character: str
     image_path: str
     meta_path: str
     frames: int = 0
@@ -235,15 +236,24 @@ def export_character_atlas(
     padding: int = 2,
     max_width: int = 4096,
     frame_rate: float = 8.0,
+    job: Optional[Dict[str, Any]] = None,
 ) -> AtlasResult:
     """导出 `atlas.png` + `atlas.json`，返回落盘信息。
 
     默认输出到 `<角色目录>/Atlas/`（跟着角色走，删角色时一起删掉）。
+    `job` 给了就写进度（收集 → 拼接 → 落盘三步）。
     """
+    def _tick(done: int, current: str) -> None:
+        if job is not None:
+            job["progress"] = {"done": done, "total": 3, "current": current}
+
+    _tick(0, "收集帧清单")
     frames = collect_frames(name, costumes, emotions)
+    _tick(1, f"拼接 {len(frames)} 帧")
     atlas, positions, canvas = build_atlas(
         frames, padding=padding, max_width=max_width)
 
+    _tick(2, "写 atlas.png / atlas.json")
     target = Path(out_dir) if out_dir else Path(characters.character_dir(name)) / "Atlas"
     target.mkdir(parents=True, exist_ok=True)
     image_path = target / "atlas.png"
@@ -316,7 +326,9 @@ def export_character_atlas(
                         encoding="utf-8")
     os.replace(tmp_meta, meta_path)
 
+    _tick(3, "")
     return AtlasResult(
+        character=name,
         image_path=str(image_path), meta_path=str(meta_path),
         frames=len(frames), animations=len(animations),
         size=(atlas.width, atlas.height), canvas=canvas,

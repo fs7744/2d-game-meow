@@ -11,6 +11,9 @@ import os
 import shutil
 from pathlib import Path
 
+import pytest
+from PIL import Image
+
 from workflows import characters as ch
 from workflows import paths
 from workflows import charactergen as cg
@@ -448,3 +451,81 @@ def test_tag_picker_values_round_trip_through_prompt():
     assert "Typical species features" in p, "选择器写的 elf 没被认出来"
     assert "Hair: bob haircut, black hair" in p
     assert "Eyes: blue eyes, green eyes" in p
+
+
+# ---------------------------------------------------------------- 名字校验（中文）
+#
+# 以前用官方那条 `[A-Za-z0-9 _-]` 白名单，中文角色名直接被拒。
+# 而这个项目里中文命名才是最自然的（整套 prompt 都是中文），
+# 白名单只是在给用户添麻烦。改成黑名单：只挡真正会出问题的。
+
+
+def test_chinese_names_are_accepted():
+    """中文 / 日文 / 带空格的名字都要能过。"""
+    for name in ("白猫骑士", "アリス", "猫 骑士", "红魔女-2", "角色_01"):
+        assert ch.ensure_safe_name(name) == name
+
+
+def test_name_rejects_path_traversal():
+    """路径分隔符与 `..` 必须挡住 —— 这个白名单换成黑名单后最容易漏掉。"""
+    for bad in ("a/b", "a\\b", "..", "../etc", "x/../y"):
+        with pytest.raises(ValueError):
+            ch.ensure_safe_name(bad)
+
+
+def test_name_rejects_windows_illegal_chars():
+    for bad in ('a<b', 'a>b', 'a:b', 'a"b', 'a|b', 'a?b', "a*b"):
+        with pytest.raises(ValueError):
+            ch.ensure_safe_name(bad)
+
+
+def test_name_rejects_invisible_and_controls():
+    """零宽空格最阴：两个名字看起来一样，实际是两个目录。"""
+    for bad in ("a\x00b", "a\u200bb", "a\nb", "a\tb"):
+        with pytest.raises(ValueError):
+            ch.ensure_safe_name(bad)
+
+
+def test_name_rejects_trailing_dot_and_reserved():
+    """Windows 会静默吃掉结尾的点；保留设备名建不出目录。"""
+    for bad in ("x.", "CON", "con.txt", "nul", "COM1", "lpt9.log"):
+        with pytest.raises(ValueError):
+            ch.ensure_safe_name(bad)
+
+
+def test_name_length_limit():
+    assert ch.ensure_safe_name("角" * 120) == "角" * 120
+    with pytest.raises(ValueError):
+        ch.ensure_safe_name("角" * 121)
+
+
+def test_chinese_character_end_to_end():
+    """中文角色名要能真的建目录、存图、删掉（不是只过校验）。"""
+    name = "白猫骑士"
+    if ch.character_exists(name):
+        ch.delete_character(name)
+    ch.create_character(name)
+    assert ch.character_exists(name)
+    d = Path(ch.sprites_dir(name, "护士服", "中性"))
+    d.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (8, 8), (1, 2, 3)).save(d / "sprite_pose_0001.png")
+    assert Path(ch.sprites_dir(name, "护士服", "中性")).is_dir()
+    assert "护士服" in ch.list_costumes(name)
+    assert len(ch.list_sprite_images(name, "护士服", "中性")) == 1
+    ch.delete_character(name)
+    assert not ch.character_exists(name)
+
+
+def test_chinese_name_survives_api(client):
+    """接口层也要能用中文名（URL 编码往返不能把名字弄坏）。"""
+    from urllib.parse import quote
+
+    name = "猫娘 小玉"
+    if ch.character_exists(name):
+        ch.delete_character(name)
+    r = client.post("/characters", json={"name": name})
+    assert r.status_code == 200, r.text
+    got = client.get(f"/characters/{quote(name)}")
+    assert got.status_code == 200, got.text
+    assert ch.character_exists(name)
+    client.delete(f"/characters/{quote(name)}?remove_files=1")

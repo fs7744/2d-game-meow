@@ -42,6 +42,9 @@ function makeFetch() {
   let underwearJob = null
   // 图集导出了没有（GET /atlas 用）
   let atlasState = { exists: false }
+  // 图集导出任务 / 一键出全套任务
+  let atlasJob = null
+  let pipeJob = null
   // 多姿势批量的模拟进度
   // 保存时是否报冲突（模拟别的窗口改了同一个项目）
   let saveConflictMode = false
@@ -79,6 +82,26 @@ function makeFetch() {
       }
     }
 
+    // ---- 一键出全套（编排：内衣 → 姿势 → 表情）----
+    if (String(url).includes('/characters/') && String(url).endsWith('/pipeline')) {
+      const b = JSON.parse(init.body || '{}')
+      jobSeq += 1
+      pipeJob = { polls: 0 }
+      const steps = []
+      if (b.underwear) steps.push('underwear')
+      if (b.pose_dir || (b.poses && b.poses.length)) steps.push('poses')
+      if (b.emotions && b.emotions.length) steps.push('emotions')
+      return {
+        ok: true,
+        json: async () => ({
+          job_id: `job-${jobSeq}`, status: 'queued', costume: b.costume || 'Naked',
+          steps, total: steps.length * 2,
+          labels: { underwear: '换白内衣底图', poses: '出多姿势', emotions: '出表情' },
+          position: 1,
+        }),
+      }
+    }
+
     // ---- 内衣底图（官方 remove_clothes）----
     if (String(url).includes('/characters/') && String(url).endsWith('/clothes/underwear')) {
       jobSeq += 1
@@ -113,19 +136,13 @@ function makeFetch() {
           }),
         }
       }
-      atlasState = {
-        exists: true, frames: 4, animations: 2,
-        size: [192, 288], canvas: [96, 144], bytes: 24 * 1024,
-      }
+      // **走队列**：提交返回 job_id，真正的结果在 /jobs 里
+      jobSeq += 1
+      atlasJob = { polls: 0 }
       return {
         ok: true,
         json: async () => ({
-          character: 'Alice',
-          image: '/files/characters/Alice/Atlas/atlas.png',
-          image_path: 'assets/characters/Alice/Atlas/atlas.png',
-          meta_path: 'assets/characters/Alice/Atlas/atlas.json',
-          frames: 4, animations: 2, size: [192, 288], canvas: [96, 144],
-          bytes: 24 * 1024, notes: [],
+          job_id: `job-${jobSeq}`, status: 'queued', frames: 4, position: 1,
         }),
       }
     }
@@ -141,42 +158,6 @@ function makeFetch() {
           position: 1,
           prompt: 'Dress character: White underwear',
           defaults: { target_size: 1024, steps: 20, cfg: 1, costume: 'Underwear' },
-        }),
-      }
-    }
-
-    // ---- 精灵图集导出 ----
-    // GET 查状态、POST 导出，**按 method 分开**：不然前端一进页面就把导出跑了
-    if (String(url).includes('/characters/') && String(url).endsWith('/atlas')) {
-      const method = (init.method || 'GET')
-      if (method === 'GET') {
-        if (!atlasState.exists) {
-          return { ok: true, json: async () => ({ character: 'Alice', exists: false }) }
-        }
-        return {
-          ok: true,
-          json: async () => ({
-            character: 'Alice', exists: true,
-            image: '/files/characters/Alice/Atlas/atlas.png',
-            frames: atlasState.frames, animations: atlasState.animations,
-            size: atlasState.size, canvas: atlasState.canvas,
-            bytes: atlasState.bytes, modified: 1,
-          }),
-        }
-      }
-      atlasState = {
-        exists: true, frames: 4, animations: 2,
-        size: [192, 288], canvas: [96, 144], bytes: 24 * 1024,
-      }
-      return {
-        ok: true,
-        json: async () => ({
-          character: 'Alice',
-          image: '/files/characters/Alice/Atlas/atlas.png',
-          image_path: 'assets/characters/Alice/Atlas/atlas.png',
-          meta_path: 'assets/characters/Alice/Atlas/atlas.json',
-          frames: 4, animations: 2, size: [192, 288], canvas: [96, 144],
-          bytes: 24 * 1024, notes: [],
         }),
       }
     }
@@ -477,6 +458,53 @@ function makeFetch() {
     if (String(url).includes('/jobs/')) {
       // 表情批量：第一次查询返回「跑到一半」，第二次返回完成。
       // 进度是这一批任务的**唯一**可见信号，必须能在界面上看到。
+      if (atlasJob) {
+        atlasJob.polls += 1
+        // **三轮才完成**：两轮的话 800ms 就结束了，测试抓不到"打包中"那一帧。
+        if (atlasJob.polls < 3) {
+          return {
+            ok: true,
+            json: async () => ({
+              job_id: 'job-atlas', status: 'running',
+              progress: { done: 1, total: 3, current: '拼接 4 帧' },
+            }),
+          }
+        }
+        atlasState = {
+          exists: true, frames: 4, animations: 2,
+          size: [192, 288], canvas: [96, 144], bytes: 24 * 1024,
+        }
+        return {
+          ok: true,
+          json: async () => ({
+            job_id: 'job-atlas', status: 'done',
+            progress: { done: 3, total: 3, current: '' },
+            result: { frames: 4, animations: 2, size: [192, 288],
+              canvas: [96, 144], bytes: 24 * 1024 },
+          }),
+        }
+      }
+      if (pipeJob) {
+        pipeJob.polls += 1
+        if (pipeJob.polls < 3) {
+          return {
+            ok: true,
+            json: async () => ({
+              job_id: 'job-pipe', status: 'running',
+              progress: { done: 2, total: 6, step: 'poses',
+                current: '出多姿势：第 2/4 张姿势' },
+            }),
+          }
+        }
+        return {
+          ok: true,
+          json: async () => ({
+            job_id: 'job-pipe', status: 'done',
+            progress: { done: 6, total: 6, step: '', current: '' },
+            result: { steps: ['underwear', 'poses', 'emotions'], poses: { count: 4 } },
+          }),
+        }
+      }
       if (underwearJob) {
         underwearJob.polls += 1
         if (underwearJob.polls < 2) {
@@ -3828,10 +3856,16 @@ function check(name, cond, extra = '') {
     JSON.stringify(atlasCalls().map((c) => `${c.method} ${c.url}`)))
 
   click(exportBtn())
-  await new Promise((r) => setTimeout(r, 700))
+  // **走队列**：提交 → 轮询（running → done），前端轮询间隔 800ms。
+  // 进度反馈要在**提交的瞬间**就出现（以前是同步的，界面只能干等）。
+  await new Promise((r) => setTimeout(r, 120))
   const post = atlasCalls().filter((c) => c.method === 'POST')
   check('点按钮才 POST 导出', post.length === 1,
     JSON.stringify(atlasCalls().map((c) => `${c.method} ${c.url}`)))
+  check('提交后立刻有进度反馈',
+    body().includes('打包中') || body().includes('已提交'),
+    body().slice(-160))
+  await new Promise((r) => setTimeout(r, 3000))
   check('导出后显示帧数与组数', body().includes('4 帧') && body().includes('2 组动画'),
     body().slice(-160))
   check('导出后显示图集尺寸与单帧画布',
@@ -3850,66 +3884,12 @@ function check(name, cond, extra = '') {
   dom.window.close()
 }
 
-// 46g) 换白内衣底图（官方 remove_clothes）
+// 46h) 一键出全套：换内衣 → 出姿势 → 出表情（顺序照官方）
 //
-// 官方的预处理一步：把角色换成白色内衣，得到一张干净底图给后续每套服装当起点。
-// **它是一条换装指令 + Clothes LoRA，不是"去掉衣服变裸体"** —— 界面上也要这么说，
-// 否则用户会以为点下去会得到一张裸图。
-{
-  const { dom, errors } = await boot('')
-  const doc = dom.window.document
-  const win = dom.window
-  await new Promise((r) => setTimeout(r, 400))
-  const click = (el) => el.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  const setInput = (el, v) => {
-    Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value').set.call(el, v)
-    el.dispatchEvent(new win.Event('input', { bubbles: true }))
-  }
-
-  ;[...doc.querySelectorAll('.view-tab')][1]?.dispatchEvent(
-    new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 250))
-  setInput(doc.querySelector('.chars-new input'), 'Alice')
-  await new Promise((r) => setTimeout(r, 80))
-  click([...doc.querySelectorAll('.chars-new button')][0])
-  await new Promise((r) => setTimeout(r, 300))
-
-  const tab = [...doc.querySelectorAll('.chars-tab')]
-    .find((t) => (t.textContent || '').includes('服装'))
-  click(tab)
-  await new Promise((r) => setTimeout(r, 400))
-
-  const body = () => doc.querySelector('.chars-body')?.textContent || ''
-  const uwBtn = () => [...doc.querySelectorAll('.chars-body button')]
-    .find((b) => (b.textContent || '').includes('换白内衣'))
-
-  check('服装页有「换白内衣底图」按钮', !!uwBtn())
-  check('说明里写清了官方指令原文', body().includes('Dress character: White underwear'))
-  check('说明里写清了产物是「干净底图」而不是裸体', body().includes('干净底图'))
-
-  click(uwBtn())
-  await new Promise((r) => setTimeout(r, 500))
-  const call = calls.find((c) => c.url.includes('/clothes/underwear'))
-  check('提交到 /clothes/underwear', !!call, call?.url)
-  if (call) {
-    const b = JSON.parse(call.body || '{}')
-    // 默认参数走官方：20 步 / cfg 1.0
-    check('默认不带覆盖参数（用官方 20 步 / cfg 1.0）',
-      b.steps === undefined && b.cfg === undefined, JSON.stringify(b))
-  }
-
-  await new Promise((r) => setTimeout(r, 1500))
-  check('完成后提示存成了哪套服装', body().includes('Underwear'), body().slice(-140))
-  check('内衣场景无脚本错误', errors.length === 0, errors[0] || '')
-  dom.window.close()
-}
-
-// 46f) 导出图集：帧 → 引擎能直接读的 atlas + 坐标表
-//
-// 这一层**不是官方功能**，但它是"接进引擎"的关键一步。要钉住三件事：
-//   1. 进页面只**查状态**（GET），不会顺手把导出跑一遍；
-//   2. 导出后统计（帧数/组数/尺寸）要摆给用户看；
-//   3. 对齐规则要在界面上写清楚（底边对齐 —— 不然动画里角色上下抖）。
+// 这一条要钉住的是**顺序**和**顺序的依赖**：
+//   · 姿势必须在表情之前（表情是在姿势帧上改脸）；
+//   · 勾了内衣，姿势就得从内衣那张底图出发（后端 source_costume）；
+//   · 三步的进度要合成一条（以前是三个独立按钮，用户得自己等三次）。
 {
   const { dom, errors } = await boot('')
   const doc = dom.window.document
@@ -3932,35 +3912,49 @@ function check(name, cond, extra = '') {
   const tab = [...doc.querySelectorAll('.chars-tab')]
     .find((t) => (t.textContent || '').includes('素材'))
   click(tab)
-  await new Promise((r) => setTimeout(r, 600))
+  await new Promise((r) => setTimeout(r, 500))
 
   const body = () => doc.querySelector('.chars-body')?.textContent || ''
-  const exportBtn = () => [...doc.querySelectorAll('.chars-body button')]
-    .find((b) => (b.textContent || '').includes('导出图集'))
+  const pipeBtn = () => [...doc.querySelectorAll('.chars-body button')]
+    .find((b) => (b.textContent || '').includes('一键出全套'))
 
-  check('素材页有「导出图集」按钮', !!exportBtn())
-  check('说明里写清了底边对齐（不然动画会抖）', body().includes('底边对齐'))
-  check('说明里写清了输出位置（Atlas/）', body().includes('Atlas'))
-  // `calls` 是全局累积的（前面用例的请求都在里面），只统计**本用例开始后**的
-  const mark = calls.length
-  const atlasCalls = () => calls.slice(mark)
-    .filter((c) => c.url.endsWith('/atlas'))
-  check('进页面只 GET 查状态，没有自动导出',
-    atlasCalls().every((c) => (c.method || 'GET') === 'GET'),
-    JSON.stringify(atlasCalls().map((c) => `${c.method} ${c.url}`)))
+  check('素材页有「一键出全套」按钮', !!pipeBtn())
+  check('说明里写清了顺序（内衣→姿势→表情）',
+    body().includes('换白内衣') && body().includes('出姿势') && body().includes('出表情'))
+  check('说明里写清了顺序不能乱', body().includes('顺序不能乱'))
 
-  click(exportBtn())
-  await new Promise((r) => setTimeout(r, 700))
-  const post = atlasCalls().filter((c) => c.method === 'POST')
-  check('点按钮才 POST 导出', post.length === 1,
-    JSON.stringify(atlasCalls().map((c) => `${c.method} ${c.url}`)))
-  check('导出后显示帧数与组数', body().includes('4 帧') && body().includes('2 组动画'),
-    body().slice(-160))
-  check('导出后显示图集尺寸与单帧画布',
-    body().includes('192×288') && body().includes('96×144'), body().slice(-160))
-  check('导出后出现「现有图集」统计', body().includes('现有图集'))
+  // 表情多选：默认空（只出姿势）
+  const multi = doc.querySelector('.chars-body select[multiple]')
+  check('有表情多选下拉', !!multi)
+  check('默认不选表情（只出姿势，别让人等半天）',
+    (multi?.selectedOptions.length || 0) === 0,
+    String(multi?.selectedOptions.length))
 
-  check('图集导出场景无脚本错误', errors.length === 0, errors[0] || '')
+  click(pipeBtn())
+  await new Promise((r) => setTimeout(r, 600))
+
+  const call = calls.find((c) => c.url.includes('/characters/Alice/pipeline'))
+  check('提交到 /pipeline', !!call, call?.url)
+  if (call) {
+    const b = JSON.parse(call.body)
+    check('默认勾了「先换白内衣」', b.underwear === true, String(b.underwear))
+    check('带上了骨架帧目录', !!b.pose_dir, b.pose_dir)
+    check('没选表情就不传 emotions',
+      !b.emotions || b.emotions.length === 0, JSON.stringify(b.emotions))
+  }
+
+  // 轮询到 running（前端间隔 1200ms，mock 前两轮都返回 running）：
+  // 进度条 + 当前步骤名必须在
+  await new Promise((r) => setTimeout(r, 1500))
+  check('流水线有进度条', !!doc.querySelector('.chars-prog'))
+  check('进度里带当前步骤与细节',
+    (doc.querySelector('.chars-body')?.textContent || '').includes('出多姿势'),
+    (doc.querySelector('.chars-body')?.textContent || '').slice(-160))
+
+  await new Promise((r) => setTimeout(r, 3000))
+  check('完成后给出可执行的下一步（导出图集）',
+    body().includes('导出图集'), body().slice(-160))
+  check('一键出全套场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 
@@ -4154,9 +4148,10 @@ function check(name, cond, extra = '') {
   assetsTab?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
   await new Promise((r) => setTimeout(r, 400))
 
-  // 服装 / 表情 两个下拉是翻看器的；第三个是「多姿势批量」的骨架帧目录
-  check('素材页有服装/表情两个下拉（外加多姿势的目录选择）',
-    doc.querySelectorAll('.chars-body select').length === 3,
+  // 服装 + 表情两个是翻看器的；多姿势批量一个骨架帧目录；
+  // 「一键出全套」再两个（骨架帧目录 + 表情多选）
+  check('素材页下拉齐全（翻看器 2 + 多姿势 1 + 一键出全套 2）',
+    doc.querySelectorAll('.chars-body select').length === 5,
     String(doc.querySelectorAll('.chars-body select').length))
   check('先去问这个序列有多少帧（不是一次性把图拉回来）',
     calls.some((c) => c.url.includes('/characters/Alice/poses/meta')),

@@ -36,6 +36,7 @@ import os
 import shutil
 import subprocess
 import sys
+import unicodedata
 
 import numpy as np
 import queue
@@ -46,6 +47,7 @@ import uuid
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -61,6 +63,7 @@ from workflows import charactergen
 from workflows import clothesgen
 from workflows import posegen
 from workflows import spriteatlas
+from workflows import pipeline
 from workflows import emotiongen
 from workflows import qwen_llm
 from workflows import library
@@ -125,6 +128,19 @@ class DeleteReq(BaseModel):
     paths: list[str] = Field(default_factory=list)
 
 
+def _pipeline_fns():
+    """pipeline 三步的默认实现。
+
+    **抽成函数是为了测试能整体替换**：编排层要验的是顺序/进度/依赖传递，
+    真跑一遍三步要几分钟还占一张卡，测试里换成假的就行。
+    """
+    from workflows import clothesgen as _cg
+    from workflows import emotiongen as _eg
+    from workflows import posegen as _pg
+
+    return _cg.remove_clothes, _pg.run_batch, _eg.run_batch
+
+
 def _run(job_id: str, workflow: str, params: Dict[str, Any]) -> None:
     job = _jobs[job_id]
     job.update(status="running", started=time.time())
@@ -134,6 +150,46 @@ def _run(job_id: str, workflow: str, params: Dict[str, Any]) -> None:
             from workflows import posegen as _posegen
             with _gpu_lock:                # 单卡不并发
                 job["result"] = _posegen.run_batch(engine, params, job=job)
+            job["status"] = "done"
+            return
+        if workflow == "watlas":
+            # **图集导出**。它不碰 GPU（纯 PIL 拼接），所以**不抢 `_gpu_lock`**：
+            # 不然用户在生图排着队的时候连图集都导不出来。但帧多的时候要读几百张
+            # 图 + 拼一张大图，会占住几秒到几十秒，仍然走队列 —— 别让 HTTP
+            # 请求线程干这个（以前是同步的，帧一多请求就超时）。
+            from workflows import spriteatlas as _atlas
+            job["progress"] = {"done": 0, "total": 2, "current": "收集帧清单"}
+            result = _atlas.export_character_atlas(
+                str(params.get("character") or ""),
+                costumes=params.get("costumes") or None,
+                emotions=params.get("emotions") or None,
+                padding=int(params.get("padding") or 2),
+                max_width=int(params.get("max_width") or 4096),
+                frame_rate=float(params.get("frame_rate") or 8.0),
+                job=job)
+            job["result"] = {
+                "character": result.character,
+                "image": _asset_url(result.image_path),
+                "image_path": result.image_path,
+                "meta_path": result.meta_path,
+                "frames": result.frames,
+                "animations": result.animations,
+                "size": list(result.size),
+                "canvas": list(result.canvas),
+                "bytes": result.bytes,
+                "notes": result.notes,
+            }
+            job["status"] = "done"
+            return
+        if workflow == "wpipe":
+            # **一键出全套**：编排层按官方 order 串起「内衣 → 姿势 → 表情」，
+            # 每一步仍走各自的实现，这里只负责顺序与进度换算。
+            from workflows import pipeline as _pipeline
+            uw_fn, pose_fn, emo_fn = _pipeline_fns()
+            with _gpu_lock:                # 整条流水线独占单卡
+                job["result"] = _pipeline.run_pipeline(
+                    engine, params, job=job,
+                    underwear_fn=uw_fn, pose_fn=pose_fn, emotion_fn=emo_fn)
             job["status"] = "done"
             return
         if workflow == "wunderwear":
@@ -1080,6 +1136,80 @@ class PoseGenReq(BaseModel):
     lora: str = ""
 
 
+class PipelineReq(BaseModel):
+    """一键出全套的请求（编排层：内衣 → 姿势 → 表情，顺序照官方）。
+
+    **出不出姿势看有没有给姿势来源**（`poses` 或 `pose_dir`），没有单独的开关：
+    只出表情的用户不该被迫先跑一遍姿势。
+    """
+    costume: str = "Naked"
+    #: 先换白内衣底图（官方 `remove_clothes`），得到干净底图给姿势当起点
+    underwear: bool = False
+    poses: List[str] = Field(default_factory=list)
+    pose_dir: str = ""
+    #: 姿势的追加描述（一句话，或"每张一句"的列表）
+    poses_prompt: Any = ""
+    emotions: List[str] = Field(default_factory=list)
+    steps: int = int(pipeline.PIPELINE_DEFAULTS["steps"])
+    cfg: float = float(pipeline.PIPELINE_DEFAULTS["cfg"])
+    emotion_steps: int = int(pipeline.PIPELINE_DEFAULTS["emotion_steps"])
+    emotion_cfg: float = float(pipeline.PIPELINE_DEFAULTS["emotion_cfg"])
+    emotion_target_size: int = int(pipeline.PIPELINE_DEFAULTS["emotion_target_size"])
+    background_color: str = ""
+    seed: int = -1
+    matte: bool = True
+    transparent: bool = False
+    #: 某一步失败后是否继续后面的（默认继续，别把整条流水线拖死）
+    continue_on_error: bool = True
+
+
+@app.post("/characters/{name}/pipeline")
+def character_pipeline_api(name: str, req: PipelineReq) -> Dict[str, Any]:
+    """一键出全套：换内衣 → 出姿势 → 出表情（顺序照官方 `:3115-3123`）。
+
+    它**不重新实现任何一步**，只是按顺序调用三个已有产线，并把进度换算成一条。
+    所以参数也是那三条产线的合集。
+
+    两步依赖关系（容易搞错）：
+      · 勾了内衣 → 姿势**从内衣那张底图出发**（`source_costume=Underwear`），
+        不是从上一套遗留的服装底图；
+      · 表情永远在姿势帧之上（所以姿势必须在表情之前跑完）。
+    """
+    try:
+        safe = characters.ensure_safe_name(name, "角色名")
+        costume = characters.ensure_safe_name(req.costume or "Naked", "服装名")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not characters.character_exists(safe):
+        raise HTTPException(404, f"没有这个角色：{safe}")
+
+    params: Dict[str, Any] = req.model_dump()
+    params["character"] = safe
+    params["costume"] = costume
+    try:
+        steps = pipeline.plan_steps(safe, costume, params)
+    except pipeline.PipelineError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    total = float(sum(s["weight"] for s in steps))
+    job_id = uuid.uuid4().hex[:12]
+    _jobs[job_id] = {
+        "job_id": job_id, "workflow": "wpipe", "params": params,
+        "status": "queued", "created": time.time(),
+        "progress": {"done": 0.0, "total": total,
+                     "step": steps[0]["key"], "current": steps[0]["label"]},
+    }
+    _q.put((job_id, "wpipe", params))
+    _prune(_jobs, JOB_KEEP)
+    return {
+        "job_id": job_id, "status": "queued", "costume": costume,
+        "steps": [s["key"] for s in steps],
+        "total": total,
+        "labels": {s["key"]: s["label"] for s in steps},
+        "position": _q.qsize(),
+    }
+
+
 class UnderwearReq(BaseModel):
     """内衣底图请求（官方 `remove_clothes`，`character_generator.py:878-900`）。
 
@@ -1432,43 +1562,50 @@ class AtlasReq(BaseModel):
 
 @app.post("/characters/{name}/atlas")
 def character_atlas_export(name: str, req: AtlasReq) -> Dict[str, Any]:
-    """把这个角色的精灵帧打成 `atlas.png` + `atlas.json`。
+    """把这个角色的精灵帧打成 `atlas.png` + `atlas.json`（**走队列**）。
 
     输出在 `<角色目录>/Atlas/`。JSON 是 TexturePacker Hash（Aseprite 能直接导入），
     另外多一层 `animations`：把「服装/表情」映射成帧序列，引擎侧不用再自己分组。
 
     **对齐规则**：所有帧统一到「最大宽高」的画布，**水平居中 + 底边对齐**。
     不同姿势的包围盒不一样，按左上角拼会让角色在动画里上下抖。
+
+    **为什么改成异步**：以前是同步的，几十帧要 1~2 秒还行，几百帧就几秒到几十秒，
+    HTTP 请求会超时、界面也没有任何进度。现在提交后拿 `job_id` 去轮询。
+
+    **没帧时立刻报错**（不入队）：让用户等一个必然失败的任务是最糟的体验。
     """
     try:
         safe = characters.ensure_safe_name(name, "角色名")
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    # 先确认有帧，别入队一个注定失败的任务
     try:
-        result = spriteatlas.export_character_atlas(
-            safe,
-            costumes=req.costumes or None,
-            emotions=req.emotions or None,
-            padding=max(0, int(req.padding)),
-            max_width=max(64, int(req.max_width)),
-            frame_rate=float(req.frame_rate or 8.0),
-        )
+        frames = spriteatlas.collect_frames(
+            safe, req.costumes or None, req.emotions or None)
     except spriteatlas.AtlasError as exc:
         raise HTTPException(400, str(exc)) from exc
     except OSError as exc:
-        raise HTTPException(500, f"写图集失败：{exc}") from exc
-    return {
+        raise HTTPException(500, f"读角色目录失败：{exc}") from exc
+
+    params: Dict[str, Any] = {
         "character": safe,
-        "image": _asset_url(result.image_path),
-        "image_path": result.image_path,
-        "meta_path": result.meta_path,
-        "frames": result.frames,
-        "animations": result.animations,
-        "size": list(result.size),
-        "canvas": list(result.canvas),
-        "bytes": result.bytes,
-        "notes": result.notes,
+        "costumes": list(req.costumes or []),
+        "emotions": list(req.emotions or []),
+        "padding": max(0, int(req.padding)),
+        "max_width": max(64, int(req.max_width)),
+        "frame_rate": float(req.frame_rate or 8.0),
     }
+    job_id = uuid.uuid4().hex[:12]
+    _jobs[job_id] = {
+        "job_id": job_id, "workflow": "watlas", "params": params,
+        "status": "queued", "created": time.time(),
+        "progress": {"done": 0, "total": 2, "current": "排队中"},
+    }
+    _q.put((job_id, "watlas", params))
+    _prune(_jobs, JOB_KEEP)
+    return {"job_id": job_id, "status": "queued", "frames": len(frames),
+            "position": _q.qsize()}
 
 
 @app.get("/characters/{name}/atlas")
@@ -1935,16 +2072,22 @@ def export_project(req: ProjectArchiveReq) -> Response:
     except Exception as exc:                       # noqa: BLE001
         raise HTTPException(400, f"导出失败：{exc}") from exc
     name = str(req.meta.get("name") or "project").strip() or "project"
-    # **文件名必须是 latin-1**：HTTP 头只允许 latin-1，中文名会让
-    # starlette 编码头时抛 UnicodeEncodeError（整个导出 500）。
-    # 中文项目名保留在归档内部，这里只给一个安全的下载名。
-    safe = "".join(ch for ch in name if ch.isascii() and (ch.isalnum() or ch in "-_"))[:48]
-    if not safe:
-        safe = "project"
+    # **HTTP 头只允许 latin-1**：直接塞中文会让 starlette 编码头时抛
+    # UnicodeEncodeError（整个导出 500，踩过）。
+    #
+    # 但**不该因此把中文名丢掉** —— 老浏览器的 `filename=` 给一个 ASCII 兜底，
+    # 同时用 RFC 5987 的 `filename*=UTF-8''<百分号编码>` 给真名。
+    # 现代浏览器优先用后者，下载下来就是「白猫骑士.mproj」。
+    ascii_name = "".join(ch for ch in name if ch.isascii()
+                         and (ch.isalnum() or ch in "-_"))[:48] or "project"
     return Response(
         content=data,
         media_type="application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="{safe}.mproj"'},
+        headers={
+            "Content-Disposition":
+                f'attachment; filename="{ascii_name}.mproj"; '
+                f"filename*=UTF-8''{quote(name[:64] + '.mproj')}",
+        },
     )
 
 
@@ -1992,7 +2135,13 @@ def save_template(req: ProjectArchiveReq) -> Dict[str, Any]:
     """把当前项目存成模板（`.mproj` 落在 `templates/`）。"""
     meta = dict(req.meta)
     name = str(meta.get("name") or "模板").strip() or "模板"
-    tid = "".join(ch for ch in name if ch.isascii() and (ch.isalnum() or ch in "-_"))[:48]
+    # **模板 id 保留中文**：以前按 ASCII 过滤，中文项目名的模板全变成
+    # `template` / `template_12345`，文件列表里根本看不出哪个是哪个。
+    # 只去掉文件系统不接受的那几个字符，其余照原名（中文文件名没问题）。
+    tid = "".join(ch for ch in name
+                  if ch not in characters._FORBIDDEN_CHARS
+                  and not unicodedata.category(ch).startswith("C"))[:48]
+    tid = tid.strip().strip(".").strip()
     if not tid:
         tid = "template"
     # 同名模板不覆盖：加时间后缀

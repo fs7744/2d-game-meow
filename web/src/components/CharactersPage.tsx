@@ -25,7 +25,7 @@ import {
   detectEmotionFaces, generateEmotions, type EmotionFrame,
   analyzeCharacter, wizardCharacter, designClothes, clothesWizard,
   generatePoses, fetchPoseDirs, exportAtlas, fetchAtlasInfo, designUnderwear,
-  type PoseDir, type AtlasInfo,
+  runPipeline, type PoseDir, type AtlasInfo,
   type CharacterPrompt, type TagCatalog,
 } from '../api'
 import SpritePreview from './SpritePreview'
@@ -132,6 +132,13 @@ export default function CharactersPage({ onNotice }: Props) {
   /** 内衣底图：出图中 / 提示 */
   const [uwBusy, setUwBusy] = useState(false)
   const [uwMsg, setUwMsg] = useState('')
+  /** 一键出全套：勾选项 / 表情多选 / 进度 / 提示 */
+  const [pipeUnderwear, setPipeUnderwear] = useState(true)
+  const [pipeEmotions, setPipeEmotions] = useState<string[]>([])
+  const [pipeBusy, setPipeBusy] = useState(false)
+  const [pipeMsg, setPipeMsg] = useState('')
+  const [pipeProg, setPipeProg] = useState<{ done: number; total: number;
+    current: string; step: string } | null>(null)
 
   const reload = useCallback(async () => {
     try {
@@ -430,21 +437,88 @@ export default function CharactersPage({ onNotice }: Props) {
   const doExportAtlas = useCallback(async () => {
     if (!sel || atlasBusy) return
     setAtlasBusy(true)
-    setAtlasMsg('打包中…')
+    setAtlasMsg('已提交，打包中…')
     try {
       const r = await exportAtlas(sel)
-      const kb = Math.max(1, Math.round(r.bytes / 1024))
-      setAtlasMsg(
-        `完成：${r.frames} 帧 / ${r.animations} 组动画，`
-        + `图集 ${r.size[0]}×${r.size[1]}，单帧画布 ${r.canvas[0]}×${r.canvas[1]}，${kb} KB`)
-      setAtlasInfo(await fetchAtlasInfo(sel))
-      onNotice('图集已导出')
+      // 走队列：轮询到 done 再读统计（以前是同步的，帧多了请求会超时）
+      for (let i = 0; i < 900; i++) {
+        const j = await fetchJob(r.job_id)
+        if (j.status === 'done') {
+          const info = await fetchAtlasInfo(sel)
+          setAtlasInfo(info)
+          const kb = Math.max(1, Math.round((info.bytes || 0) / 1024))
+          setAtlasMsg(
+            `完成：${info.frames} 帧 / ${info.animations} 组动画，`
+            + `图集 ${info.size?.[0]}×${info.size?.[1]}，`
+            + `单帧画布 ${info.canvas?.[0]}×${info.canvas?.[1]}，${kb} KB`)
+          onNotice('图集已导出')
+          return
+        }
+        if (j.status === 'failed') {
+          setAtlasMsg(`导出失败：${j.error || '未知错误'}`)
+          return
+        }
+        setAtlasMsg(j.progress?.current ? `打包中：${j.progress.current}` : '打包中…')
+        await new Promise((res) => setTimeout(res, 800))
+      }
+      setAtlasMsg('等太久了：任务还在跑，去画布那边看任务状态')
     } catch (e) {
       setAtlasMsg(`导出失败：${e instanceof Error ? e.message : e}`)
     } finally {
       setAtlasBusy(false)
     }
   }, [sel, atlasBusy, onNotice])
+
+  /**
+   * 一键出全套：换内衣 → 出姿势 → 出表情（顺序照官方）。
+   *
+   * 顺序不能乱：姿势要在表情之前（表情是在姿势帧上改脸），内衣要在姿势之前
+   * （姿势从内衣那张底图出发）。这三步以前要用户自己点三次、还得记住顺序。
+   */
+  const doRunPipeline = useCallback(async () => {
+    if (!sel || pipeBusy || !poseDir) return
+    setPipeBusy(true)
+    setPipeProg(null)
+    setPipeMsg('已提交，排队中…')
+    try {
+      const r = await runPipeline(sel, {
+        costume: browseCostume,
+        underwear: pipeUnderwear,
+        pose_dir: poseDir,
+        emotions: pipeEmotions,
+        matte: true,
+      })
+      setPipeMsg(`开始：${r.steps.map((k) => r.labels[k] || k).join(' → ')}`)
+      for (let i = 0; i < 3600; i++) {
+        const j = await fetchJob(r.job_id)
+        if (j.status === 'done') {
+          const d = await fetchCharacter(sel)
+          setDetail(d)
+          setBrowseEmotion('neutral')
+          setPipeMsg('全套完成：素材页可看，要接引擎就去导出图集')
+          onNotice('一键出全套完成')
+          return
+        }
+        if (j.status === 'failed') {
+          setPipeMsg(`失败：${j.error || '未知错误'}`)
+          return
+        }
+        if (j.progress) {
+          setPipeProg({
+            done: j.progress.done, total: j.progress.total,
+            current: j.progress.current || '', step: j.progress.step || '',
+          })
+          setPipeMsg(j.progress.current || '生成中…')
+        }
+        await new Promise((res) => setTimeout(res, 1200))
+      }
+      setPipeMsg('等太久了：任务还在跑，去画布那边看任务状态')
+    } catch (e) {
+      setPipeMsg(`失败：${e instanceof Error ? e.message : e}`)
+    } finally {
+      setPipeBusy(false)
+    }
+  }, [sel, pipeBusy, poseDir, pipeUnderwear, pipeEmotions, browseCostume, onNotice])
 
   /**
    * 换白色内衣底图（官方 `remove_clothes`）。
@@ -652,7 +726,7 @@ export default function CharactersPage({ onNotice }: Props) {
           <input
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
-            placeholder="新角色名（字母/数字/空格）"
+            placeholder="新角色名（中文、日文、英文都行）"
             onKeyDown={(e) => { if (e.key === 'Enter') void doCreate() }}
           />
           <button type="button" className="mini" onClick={() => void doCreate()}
@@ -1195,6 +1269,70 @@ export default function CharactersPage({ onNotice }: Props) {
                   emotion={browseEmotion}
                   onMeta={setBrowseMeta}
                 />
+                <div className="chars-posegen">
+                  <b>一键出全套</b>
+                  <p className="chars-sub">
+                    按官方的顺序把三步跑完：<b>换白内衣 → 出姿势 → 出表情</b>。
+                    顺序不能乱 —— 姿势要在表情之前（表情是在姿势帧上改脸），
+                    内衣要在姿势之前（姿势从内衣那张底图出发）。
+                    <br />
+                    以前这三步要自己点三次、还得记住顺序；点错一次出来的图就不能用。
+                  </p>
+                  <div className="chars-row">
+                    <label className="chars-check">
+                      <input type="checkbox" checked={pipeUnderwear}
+                        onChange={(e) => setPipeUnderwear(e.target.checked)} />
+                      先换白内衣底图
+                    </label>
+                    <label>
+                      骨架帧目录
+                      <select value={poseDir} onChange={(e) => setPoseDir(e.target.value)}>
+                        {poseDirs.length === 0 && <option value="">（没有可用目录）</option>}
+                        {poseDirs.map((d) => (
+                          <option key={d.path} value={d.path}>{d.name}（{d.count} 张）</option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                  <div className="chars-row">
+                    <label>
+                      顺带出表情（可多选，不选就只出姿势）
+                      <select
+                        multiple
+                        size={5}
+                        value={pipeEmotions}
+                        onChange={(e) => setPipeEmotions(
+                          [...e.target.selectedOptions].map((o) => o.value))}
+                      >
+                        {flatEmotions.map((e2) => (
+                          <option key={e2.safe_name} value={e2.safe_name}>{e2.key}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <span className="chars-sub">
+                      已选 {pipeEmotions.length} 个
+                      {pipeEmotions.length > 0 && (
+                        <> · 表情比姿势慢得多（一张约 110s），选之前先估一下时间</>
+                      )}
+                    </span>
+                  </div>
+                  <div className="chars-row">
+                    <button type="button" className="mini wide"
+                      onClick={() => void doRunPipeline()}
+                      disabled={pipeBusy || !poseDir}>
+                      {pipeBusy ? '跑流水线中…' : '一键出全套'}
+                    </button>
+                  </div>
+                  {pipeProg && pipeProg.total > 0 && (
+                    <div className="chars-prog">
+                      <div className="chars-prog-bar"
+                        style={{ width: `${Math.round((pipeProg.done / pipeProg.total) * 100)}%` }} />
+                      <span>{Math.round(pipeProg.done)}/{Math.round(pipeProg.total)}</span>
+                    </div>
+                  )}
+                  {pipeMsg && <p className="chars-sub">{pipeMsg}</p>}
+                </div>
+
                 <div className="chars-posegen">
                   <b>多姿势批量</b>
                   <p className="chars-sub">

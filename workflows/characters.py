@@ -34,6 +34,7 @@ import json
 import os
 import re
 import shutil
+import unicodedata
 import tempfile
 import threading
 import uuid
@@ -45,8 +46,25 @@ from workflows import paths
 #: 默认表情与主目录（官方 `utils.py:23-24`）
 EMOTIONS = ["neutral"]
 MAIN_DIRS = ["Sprites", "Faces", "Sheets"]
-#: 路径片段白名单（官方 `utils.py:25`）
+#: 官方那条白名单（`utils.py:25`）。**我们不再用它做校验**，只留着说明来源：
+#: 官方是英文环境，`[A-Za-z0-9 _-]` 够用；而中文命名在这里是最自然的写法
+#: （整套 prompt 都是中文），白名单只会把正常输入挡在外面。
 SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9 _-]{1,120}$")
+
+#: 路径片段里**绝对不能出现**的字符：路径分隔符 + Windows 非法字符。
+#: 这些是真会造成问题的（跳出目录、建不出文件），其余一律放行。
+_FORBIDDEN_CHARS = frozenset('/\\:*?"<>|')
+
+#: Windows 保留设备名。建目录/写文件会直接失败，而且**带扩展名也算**
+#: （`CON.txt` 同样打不开），所以按第一个点之前的部分判。
+_WINDOWS_RESERVED = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)}
+)
+
+#: 名字长度上限（按字符数，不按字节：中文一个字符占 3 字节但仍是 1 个字符）
+NAME_MAX_CHARS = 120
 #: 旧版本目录（重生成时旧图归档进去，官方 `utils.py:26`）
 ARCHIVE_DIR_RE = re.compile(r"^V[0-9]+$", re.IGNORECASE)
 #: 服装可编辑字段（官方 `utils.py:30`）
@@ -73,14 +91,47 @@ class CharacterConflict(ValueError):
 
 
 def ensure_safe_name(value: str, field: str = "name") -> str:
-    """校验用户输入的路径片段。"""
+    """校验用户输入的路径片段（角色名 / 服装名 / 表情名）。
+
+    **允许中文、日文、任何 Unicode 文字**。以前用官方的 `[A-Za-z0-9 _-]` 白名单，
+    中文角色名直接被拒 —— 而这个项目里中文命名才是最自然的（整套 prompt 都是中文），
+    白名单只是在给用户添麻烦。官方那条正则是英文环境下的省事写法，我们没这个约束。
+
+    改成**黑名单**，只挡真正会出问题的：
+
+    | 挡什么 | 为什么 |
+    |---|---|
+    | `/` `\\` | 路径分隔符，能跳出角色目录 |
+    | `<>:"|?*` | Windows 非法字符，建不出文件 |
+    | 控制字符 / 零宽字符 | 渲染出来是空白，两个名字看起来一样但其实是两个目录 |
+    | `.` / `..` | 路径穿越 |
+    | 结尾的点 | Windows 会静默吃掉，目录名和记录对不上 |
+    | `CON` / `NUL` / `COM1`… | Windows 保留设备名，建目录直接失败 |
+
+    路径安全由 `safe_join_under` 的 realpath 校验兜底（它会挡住任何跳出去的路径），
+    所以这里不需要用白名单自我限制。
+    """
     if value is None:
         raise ValueError(f"{field} 不能为空")
-    value = str(value).strip()
-    if not SAFE_NAME_RE.match(value):
-        raise ValueError(
-            f"{field} 只能用字母/数字/空格/下划线/连字符（1~120 字符）：{value!r}")
-    return value
+    raw = str(value).strip()
+    if not raw:
+        raise ValueError(f"{field} 不能为空")
+    if len(raw) > NAME_MAX_CHARS:
+        raise ValueError(f"{field} 太长（最多 {NAME_MAX_CHARS} 个字符）：{len(raw)} 个")
+    for ch in raw:
+        if ch in _FORBIDDEN_CHARS:
+            raise ValueError(f"{field} 不能包含 {ch!r}：{raw!r}")
+        # Cc 控制 / Cf 格式（零宽空格、方向标记）/ Cs 代理 / Co 私用 / Cn 未分配
+        if unicodedata.category(ch).startswith("C"):
+            raise ValueError(
+                f"{field} 不能包含控制字符或不可见字符（U+{ord(ch):04X}）：{raw!r}")
+    if raw in (".", ".."):
+        raise ValueError(f"{field} 不能是 {raw!r}")
+    if raw.endswith("."):
+        raise ValueError(f"{field} 不能以点结尾（Windows 会吃掉它）：{raw!r}")
+    if raw.split(".")[0].strip().upper() in _WINDOWS_RESERVED:
+        raise ValueError(f"{field} 不能用系统保留名（{raw!r}）")
+    return raw
 
 
 def is_path_under(root: str, target: str) -> bool:

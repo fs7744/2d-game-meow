@@ -851,6 +851,52 @@ export function designUnderwear(
     { method: 'POST', body: JSON.stringify(body) })
 }
 
+// ---------------- 一键出全套（编排：内衣 → 姿势 → 表情） ----------------
+//
+// 顺序照官方 `character_generator.py:3115-3123`。顺序错了出来的图不能用
+// （先出表情再出姿势，表情全白做）。
+
+export type PipelineBody = {
+  costume?: string
+  /** 先换白内衣底图（官方 remove_clothes），姿势从它出发 */
+  underwear?: boolean
+  poses?: string[]
+  pose_dir?: string
+  poses_prompt?: string | string[]
+  emotions?: string[]
+  steps?: number
+  cfg?: number
+  emotion_steps?: number
+  emotion_cfg?: number
+  emotion_target_size?: number
+  background_color?: string
+  seed?: number
+  matte?: boolean
+  transparent?: boolean
+  /** 某一步失败后是否继续（默认继续，别把整条流水线拖死） */
+  continue_on_error?: boolean
+}
+
+export type PipelineSubmit = {
+  job_id: string
+  status: string
+  costume: string
+  /** 实际会跑哪几步，顺序即执行顺序 */
+  steps: string[]
+  /** 进度总量（= 各步预计张数之和） */
+  total: number
+  labels: Record<string, string>
+  position: number
+}
+
+/** 提一键出全套（走单卡队列，整条流水线独占）。 */
+export function runPipeline(
+  name: string, body: PipelineBody,
+): Promise<PipelineSubmit> {
+  return req(`/characters/${encodeURIComponent(name)}/pipeline`,
+    { method: 'POST', body: JSON.stringify(body) })
+}
+
 // ---------------- 精灵图集导出 ----------------
 //
 // 不是官方功能：官方只管把帧出到 Sprites/<服装>/<表情>/；打成图集是接引擎那一步。
@@ -882,12 +928,17 @@ export type AtlasInfo = {
   modified?: number
 }
 
-/** 导出图集（覆盖上一次）。 */
+/**
+ * 提导出图集（**走队列**，覆盖上一次）。
+ *
+ * 以前是同步的：几十帧 1~2 秒还行，几百帧就几秒到几十秒，请求会超时、
+ * 界面也没有任何进度。现在拿 `job_id` 去轮询，结果用 `fetchAtlasInfo` 读。
+ */
 export function exportAtlas(
   name: string,
   body: { costumes?: string[]; emotions?: string[]; padding?: number
     max_width?: number; frame_rate?: number } = {},
-): Promise<AtlasResult> {
+): Promise<{ job_id: string; status: string; frames: number; position: number }> {
   return req(`/characters/${encodeURIComponent(name)}/atlas`,
     { method: 'POST', body: JSON.stringify(body) })
 }

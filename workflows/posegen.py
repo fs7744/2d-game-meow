@@ -82,6 +82,11 @@ def _resolve_pose_paths(poses: Sequence[str], pose_dir: str = "") -> List[str]:
     return uniq
 
 
+def resolve_pose_paths(poses: Sequence[str], pose_dir: str = "") -> List[str]:
+    """公开入口（`app.py` / `pipeline.py` 都调它，别直接摸下划线版本）。"""
+    return _resolve_pose_paths(poses, pose_dir)
+
+
 #: 官方 `character_generator.py:988`（透明底那句，跟换装/表情共用同一句）
 NATIVE_BACKGROUND_PROMPT = "Transparent background with alpha channel."
 
@@ -145,9 +150,23 @@ def run_batch(
     if not pose_paths:
         raise PoseGenError("没有可用的姿势图：给几张姿势图，或指定一个骨架帧目录")
 
-    # 角色底图：这套服装最新的那张；没有就退 Naked（跟换装一个道理）
-    char_path = (characters.latest_sprite_path(name, costume)
-                 or characters.latest_sprite_path(name, "Naked"))
+    # 角色底图：**显式指定 source_costume 时只认它**，否则按「这套服装 → Naked」退。
+    #
+    # `source_costume` 是给编排用的：一键出全套时先跑「换白内衣」得到 Underwear
+    # 底图，再让姿势从**那张**出发（而不是从上一次遗留的服装底图出发）。
+    # 官方的 `naked_pose_generation` 就是从 `remove_clothes` 的产物出发的
+    # （`character_generator.py:3149-3175`）。
+    source_costume = str(params.get("source_costume") or "").strip()
+    char_path = None
+    if source_costume:
+        char_path = characters.latest_sprite_path(name, source_costume)
+        if not char_path:
+            raise PoseGenError(
+                f"「{name}」的「{source_costume}」没有底图："
+                "编排里先跑的那一步没产出图，或者服装名写错了")
+    if not char_path:
+        char_path = (characters.latest_sprite_path(name, costume)
+                     or characters.latest_sprite_path(name, "Naked"))
     if not char_path:
         raise PoseGenError(
             f"「{name}」还没有角色底图：先在「出图」页生成一张，或者先换装")

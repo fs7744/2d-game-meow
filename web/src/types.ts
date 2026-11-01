@@ -258,7 +258,12 @@ export type JobState = {
    * 一批几十张要跑几分钟，只给 `queued/running` 的话用户完全不知道还剩多久；
    * 后端 `emotiongen.run_batch` 每张更新一次。
    */
-  progress?: { done: number; total: number; current?: string }
+  /**
+   * 任务进度。`step` 只有「一键出全套」会填（underwear / poses / emotions），
+   * 因为那一条任务内部跑了好几步，前端要知道现在在哪一步。
+   * `done/total` 在流水线里是**加权张数**（不是整数）。
+   */
+  progress?: { done: number; total: number; current?: string; step?: string }
   /** 批量任务的结果摘要（表情批量：`count` / `failed[]` / `items[]`） */
   result?: Record<string, unknown>
 }
