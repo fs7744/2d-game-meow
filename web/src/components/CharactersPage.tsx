@@ -30,20 +30,29 @@ import {
 } from '../api'
 import SpritePreview from './SpritePreview'
 import TagPicker from './TagPicker'
+import {
+  BG_COLOR_LABEL, COSTUME_LABEL, EMOTION_CATEGORY_LABEL, STYLE_GROUP_LABEL,
+  STYLE_LABEL, emotionLabel, zh,
+} from '../labels'
 
-/** 角色属性字段（官方 character_creator_v2.py:2138-2146 的字段清单） */
+/**
+ * 角色属性字段（官方 character_creator_v2.py:2138-2146 的字段清单）
+ *
+ * **hint 里明确写了"要英文"** —— 这几个字段的内容会直接拼进 prompt 喂给图像模型，
+ * 用户填中文出图会跑偏。与其让用户踩坑，不如在输入框下面就写清楚。
+ */
 const INFO_TEXT: Array<[key: string, label: string, hint?: string]> = [
-  ['race', '种族', 'human / elf / demon …'],
-  ['skin_color', '肤色', ''],
-  ['hair', '发型发色', '逗号分隔，如 "blonde hair, twin tails"'],
-  ['eyes', '眼睛', ''],
-  ['face', '脸部特征', '如 freckles'],
-  ['body', '体型', ''],
-  ['breast_size', '胸围', ''],
-  ['additional_details', '附加细节', ''],
-  ['aesthetics', '画质词', 'masterpiece 之类'],
-  ['negative_prompt', '负向词', ''],
-  ['lora_prompt', 'LoRA 触发词', ''],
+  ['race', '种族', '填英文，如 human / elf / demon'],
+  ['skin_color', '肤色', '填英文，如 fair skin'],
+  ['hair', '发型发色', '填英文，逗号分隔，如 "blonde hair, twin tails"'],
+  ['eyes', '眼睛', '填英文，如 blue eyes'],
+  ['face', '脸部特征', '填英文，如 freckles'],
+  ['body', '体型', '填英文，如 slim build'],
+  ['breast_size', '胸围', '填英文，如 medium breasts'],
+  ['additional_details', '附加细节', '填英文，如 long hair'],
+  ['aesthetics', '画质词', '填英文，如 masterpiece'],
+  ['negative_prompt', '负向词', '填英文，如 blurry'],
+  ['lora_prompt', 'LoRA 触发词', '填英文，如 <lora_name>'],
 ]
 
 /**
@@ -195,10 +204,16 @@ export default function CharactersPage({ onNotice }: Props) {
   }, [sel])
 
   const flatStyles = useMemo(() => {
-    const out: Array<StyleEntry & { group: string }> = []
+    const out: Array<StyleEntry & { group: string; zhLabel: string; zhGroup: string }> = []
     for (const g of styles?.groups ?? []) {
+      const groupLabel = g.label || g.name || ''
       for (const s of g.styles ?? []) {
-        out.push({ ...s, group: g.label || g.name || '' })
+        out.push({
+          ...s,
+          group: groupLabel,
+          zhLabel: zh(STYLE_LABEL, s.label),
+          zhGroup: zh(STYLE_GROUP_LABEL, groupLabel),
+        })
       }
     }
     return out
@@ -344,7 +359,7 @@ export default function CharactersPage({ onNotice }: Props) {
           setBrowseCostume(costume)
           setBrowseEmotion('neutral')
           setClothMsg('换装完成，已存成这套服装的底图（素材页可看）')
-          onNotice(`「${costume}」换装完成`)
+          onNotice(`「${zh(COSTUME_LABEL, costume)}」换装完成`)
           return
         }
         if (j.status === 'failed') {
@@ -616,7 +631,7 @@ export default function CharactersPage({ onNotice }: Props) {
       setEmoFrames(r.items)
       const hit = r.items.filter((f) => f.detected).length
       setEmoMsg(r.count === 0
-        ? `「${costume}」没有源帧：表情是从 Neutral 姿势帧上改脸的，先去「出图」页生成一张`
+        ? `「${zh(COSTUME_LABEL, costume)}」没有源帧：表情是从平静姿势帧上改脸的，先去「出图」页生成一张`
         : `${r.count} 张源帧，${hit} 张检出脸框` +
           (hit < r.count ? '（没检出的整图重画，官方行为）' : ''))
     } catch (e) {
@@ -694,7 +709,7 @@ export default function CharactersPage({ onNotice }: Props) {
       await saveCostume(sel, costume, data)
       const d = await fetchCharacter(sel)
       setDetail(d)
-      onNotice(`服装「${costume}」已保存`)
+      onNotice(`服装「${zh(COSTUME_LABEL, costume)}」已保存`)
     } catch (e) {
       setErr(`保存服装失败：${e instanceof Error ? e.message : e}`)
     }
@@ -713,6 +728,11 @@ export default function CharactersPage({ onNotice }: Props) {
   }, [sel, costume])
 
   const currentStyle = String(draft.style ?? '')
+
+  /** 当前选中的画风（按 id 存的，界面上显示中文名） */
+  const currentStyleLabel = useMemo(
+    () => flatStyles.find((s) => s.id === currentStyle)?.zhLabel ?? '',
+    [flatStyles, currentStyle])
 
   return (
     <div className="chars">
@@ -783,8 +803,8 @@ export default function CharactersPage({ onNotice }: Props) {
             <div className="chars-detail-head">
               <b>{detail.name}</b>
               <span className="chars-sub">
-                {detail.config.config_version ? `config v${detail.config.config_version} · ` : ''}
-                {detail.costumes.join(' / ')}
+                {detail.config.config_version ? `配置 v${detail.config.config_version} · ` : ''}
+                {detail.costumes.map((c) => zh(COSTUME_LABEL, c)).join(' / ')}
               </span>
               <span className="spacer" />
               <button type="button" className="mini" onClick={() => void doRename()}>改名</button>
@@ -899,7 +919,9 @@ export default function CharactersPage({ onNotice }: Props) {
                       }}
                       title="出图时的幕布色，抠图按它取样（官方 background_color）"
                     >
-                      {BG_COLORS.map((c) => <option key={c} value={c}>{c}</option>)}
+                      {BG_COLORS.map((c) => (
+                        <option key={c} value={c}>{zh(BG_COLOR_LABEL, c)}</option>
+                      ))}
                     </select>
                   </label>
                 </div>
@@ -936,21 +958,23 @@ export default function CharactersPage({ onNotice }: Props) {
                       {flatStyles.length} 条 · 官方 character_styles.json
                     </span>
                     <span className="spacer" />
-                    <span className="chars-sub">当前：{currentStyle || '（无）'}</span>
+                    <span className="chars-sub">
+                      当前：{currentStyleLabel || '（无）'}
+                    </span>
                   </div>
                   <div className="chars-style-grid">
                     {flatStyles.slice(0, 60).map((s) => (
                       <button
                         type="button" key={s.id}
                         className={`chars-style-card${currentStyle === s.id ? ' on' : ''}`}
-                        title={`${s.group} · ${s.description || s.prompt.slice(0, 60)}`}
+                        title={`${s.zhGroup} · ${s.description || s.prompt.slice(0, 60)}`}
                         onClick={() => {
                           setDraft((d) => ({ ...d, style: s.id }))
                           void saveInfo({ style: s.id })
                         }}
                       >
-                        <img src={stylePreviewUrl(s.id)} alt={s.label} loading="lazy" />
-                        <span>{s.label}</span>
+                        <img src={stylePreviewUrl(s.id)} alt={s.zhLabel} loading="lazy" />
+                        <span>{s.zhLabel}</span>
                       </button>
                     ))}
                   </div>
@@ -1057,7 +1081,9 @@ export default function CharactersPage({ onNotice }: Props) {
                   <label>
                     服装
                     <select value={costume} onChange={(e) => setCostume(e.target.value)}>
-                      {detail.costumes.map((c) => <option key={c} value={c}>{c}</option>)}
+                      {detail.costumes.map((c) => (
+                    <option key={c} value={c}>{zh(COSTUME_LABEL, c)}</option>
+                  ))}
                     </select>
                   </label>
                   <button type="button" className="mini"
@@ -1070,7 +1096,7 @@ export default function CharactersPage({ onNotice }: Props) {
                   <button type="button" className="mini"
                     onClick={() => void doDeleteCostume()}
                     disabled={costume === 'Naked'}
-                    title="Naked / Original 是基础集，不能删">
+                    title="裸装 / 原始 是基础集，不能删">
                     删除
                   </button>
                 </div>
@@ -1114,7 +1140,7 @@ export default function CharactersPage({ onNotice }: Props) {
                   <span className="chars-sub">
                     <b>换白内衣</b>是官方的预处理一步：把角色换成
                     <code>Dress character: White underwear</code>，
-                    得到一张干净底图（默认存成 <code>Underwear</code> 服装）。
+                    得到一张干净底图（默认存成 <code>Underwear</code>（白内衣）服装）。
                     后面每套衣服都从它出发，新衣服就不会带着上一套的袖子残留。
                   </span>
                 </div>
@@ -1126,7 +1152,7 @@ export default function CharactersPage({ onNotice }: Props) {
                     title={costume === 'Naked' || costume === 'Original'
                       ? '裸装/原始是基础集，换装要挑一套具体的衣服'
                       : '挂 Clothes Core LoRA 出这张换装底图（25 步，约 1 分钟）'}>
-                    {clothBusy ? '换装中…' : `出换装底图（${costume}）`}
+                    {clothBusy ? '换装中…' : `出换装底图（${zh(COSTUME_LABEL, costume)}）`}
                   </button>
                 </div>
                 {clothMsg && <p className="chars-sub">{clothMsg}</p>}
@@ -1136,7 +1162,11 @@ export default function CharactersPage({ onNotice }: Props) {
             {tab === 'emotions' && (
               <div className="chars-body">
                 <p className="chars-sub">
-                  官方表情库 {flatEmotions.length} 条（9 个分类，全量原样入库）。
+                  官方表情库 {flatEmotions.length} 条（
+                  {Object.keys(emotions ?? {}).length} 个分类：
+                  {Object.keys(emotions ?? {})
+                    .map((c) => zh(EMOTION_CATEGORY_LABEL, c))
+                    .join('、')}），全量原样入库。
                   每条带 <code>natural_prompt</code>——QI2 直接用它当指令。
                   <br />
                   <b>表情是"只改脸"</b>：把脸框裁出来放大重画，再按羽化蒙版贴回原图，
@@ -1150,8 +1180,8 @@ export default function CharactersPage({ onNotice }: Props) {
                   </button>
                   <span className="chars-sub">
                     {emoFrames
-                      ? `源帧 ${emoFrames.length} 张（${costume}）`
-                      : `尚未检测（${costume} 的 Neutral 姿势帧就是源帧）`}
+                      ? `源帧 ${emoFrames.length} 张（${zh(COSTUME_LABEL, costume)}）`
+                      : `尚未检测（${zh(COSTUME_LABEL, costume)} 的平静姿势帧就是源帧）`}
                   </span>
                   {emoFrames && emoFrames.filter((f) => f.box).length > 0 && (
                     <span className="chars-sub">
@@ -1185,8 +1215,12 @@ export default function CharactersPage({ onNotice }: Props) {
                           ? list.filter((x) => x !== e.safe_name)
                           : [...list, e.safe_name]))}
                       >
-                        <img src={emotionIconUrl(e.safe_name)} alt={e.key} loading="lazy" />
-                        <span>{e.key}</span>
+                        <img
+                          src={emotionIconUrl(e.safe_name)}
+                          alt={emotionLabel(e.safe_name, e.key)}
+                          loading="lazy"
+                        />
+                        <span>{emotionLabel(e.safe_name, e.key)}</span>
                       </button>
                     )
                   })}
@@ -1253,13 +1287,17 @@ export default function CharactersPage({ onNotice }: Props) {
                   <label>
                     服装
                     <select value={browseCostume} onChange={(e) => setBrowseCostume(e.target.value)}>
-                      {detail.costumes.map((c) => <option key={c} value={c}>{c}</option>)}
+                      {detail.costumes.map((c) => (
+                    <option key={c} value={c}>{zh(COSTUME_LABEL, c)}</option>
+                  ))}
                     </select>
                   </label>
                   <label>
                     表情
                     <select value={browseEmotion} onChange={(e) => setBrowseEmotion(e.target.value)}>
-                      {browseEmotions.map((e) => <option key={e} value={e}>{e}</option>)}
+                      {browseEmotions.map((e) => (
+                        <option key={e} value={e}>{emotionLabel(e, e)}</option>
+                      ))}
                     </select>
                   </label>
                 </div>
@@ -1305,7 +1343,9 @@ export default function CharactersPage({ onNotice }: Props) {
                           [...e.target.selectedOptions].map((o) => o.value))}
                       >
                         {flatEmotions.map((e2) => (
-                          <option key={e2.safe_name} value={e2.safe_name}>{e2.key}</option>
+                          <option key={e2.safe_name} value={e2.safe_name}>
+                            {emotionLabel(e2.safe_name, e2.key)}
+                          </option>
                         ))}
                       </select>
                     </label>
@@ -1339,7 +1379,7 @@ export default function CharactersPage({ onNotice }: Props) {
                     一个骨架帧目录 → 一整批 <code>sprite_pose_0001..N</code>。
                     整批<b>共用一个种子</b>（官方做法：每张随机会让衣服/发型飘）。
                     <br />
-                    ⚠️ 这是<b>整批替换</b>：这套服装现有的 Neutral 帧会被推进
+                    ⚠️ 这是<b>整批替换</b>：这套服装现有的平静帧会被推进
                     <code>V1/</code>（能找回）。表情那条是逐张追加，两者不一样。
                   </p>
                   <div className="chars-row">
@@ -1410,7 +1450,7 @@ export default function CharactersPage({ onNotice }: Props) {
                       {atlasInfo.image && (
                         <a className="chars-atlas-link" href={atlasInfo.image}
                           target="_blank" rel="noreferrer">
-                          <img src={atlasInfo.image} alt="atlas" loading="lazy" />
+                          <img src={atlasInfo.image} alt="图集" loading="lazy" />
                           <span>打开图集图（新标签页 · 右键可另存）</span>
                         </a>
                       )}
@@ -1435,7 +1475,7 @@ export default function CharactersPage({ onNotice }: Props) {
                     {browseFiles.map((u, i) => (
                       <img
                         key={u} src={u} alt={`第 ${i + 1} 帧`} loading="lazy"
-                        title={`${browseCostume}/${browseEmotion} 第 ${i + 1} 帧`}
+                        title={`${zh(COSTUME_LABEL, browseCostume)}/${emotionLabel(browseEmotion, browseEmotion)} 第 ${i + 1} 帧`}
                       />
                     ))}
                   </div>

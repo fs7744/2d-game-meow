@@ -11,6 +11,7 @@
  */
 import { useEffect, useMemo, useState } from 'react'
 import { presetGroups, presetSelection, type TagCatalog, type TagItem } from '../store/characterTags'
+import { tagGroupLabel, tagLabel } from '../labels'
 
 type Props = {
   open: boolean
@@ -60,22 +61,23 @@ export default function TagPicker({
         </div>
         {groups.length === 0 ? (
           <p className="tag-empty">
-            官方标签库里没有这一项的可选值（{field}），手填就行。
+            官方标签库里没有「{label}」的可选值，手填就行。
           </p>
         ) : (
           <div className="tag-grid">
             {groups.map((g) => (
               <div key={g.header} className="tag-group">
-                <div className="tag-group-head">{g.header}</div>
+                <div className="tag-group-head">{tagGroupLabel(g.header)}</div>
                 {g.items.map((item) => (
                   <button
                     key={item.tag}
                     type="button"
                     className={`tag-chip${sel.has(item) ? ' on' : ''}`}
-                    title={item.prompt || item.tag.split('_').join(' ')}
+                    title={`${tagLabel(item.tag, item.label)}${item.prompt
+                      ? ` · ${item.prompt}` : ''}`}
                     onClick={() => toggle(item)}
                   >
-                    {item.label || item.tag.split('_').join(' ')}
+                    {tagLabel(item.tag, item.label)}
                   </button>
                 ))}
               </div>

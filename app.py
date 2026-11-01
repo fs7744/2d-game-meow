@@ -900,7 +900,7 @@ def files(path: str, download: int = 0) -> FileResponse:
     """取产物。download=1 时带 Content-Disposition，浏览器直接存盘。"""
     target = (ASSETS / path).resolve()
     if not _inside(ASSETS.resolve(), target) or not target.exists():
-        raise HTTPException(404, "not found")
+        raise HTTPException(404, "文件不存在")
     if download:
         # FileResponse(filename=…) 会设成 attachment；产物名已经带后缀
         return FileResponse(target, filename=target.name)

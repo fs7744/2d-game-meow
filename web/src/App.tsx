@@ -37,6 +37,7 @@ import type {
   NodeKind, NodeSource, PosePreset, Viewport,
 } from './types'
 import type { NodePatch } from './nodes/GenNodeCard'
+import { POSE_NAME_LABEL, zh } from './labels'
 import { styleFromParams } from './genStyles'
 import { NODE_W } from './nodes/GenNodeCard'
 
@@ -971,7 +972,7 @@ export default function App() {
     try {
       const r = await addPoseApi(name, pose, yaw, preview)
       setLib((l) => ({ ...l, poses: r.poses ?? l.poses }))
-      setNotice(`姿势「${name}」已存入资料库（disk: library/poses.json）`)
+      setNotice(`姿势「${zh(POSE_NAME_LABEL, name)}」已存入资料库（磁盘：library/poses.json）`)
     } catch (e) {
       setNotice(`存姿势失败：${e instanceof Error ? e.message : '未知错误'}`)
     }
@@ -1617,7 +1618,7 @@ export default function App() {
       // 灌一次存档姿势，之后是单向往外推的。带 nodeId：别的人偶节点不能跟着动。
       poseApply: { nodeId: n.id, pose: p.pose, yaw: p.yaw, tick: Date.now() },
     })
-    setNotice(`已把「${p.name}」套到选中节点（含 ${p.yaw}° 朝向）`)
+    setNotice(`已把「${zh(POSE_NAME_LABEL, p.name)}」套到选中节点（含 ${p.yaw}° 朝向）`)
     window.setTimeout(() => setNotice(''), 3000)
   }, [patchNode, selectedId])
 
@@ -1656,7 +1657,7 @@ export default function App() {
               的唯一提示；视图 tab 只是加在旁边，不能把它挤出 brand。 */}
           <span className="sub">
             {view === 'characters'
-              ? '角色中心 · 与官方 VNCCS 同一套目录与 config'
+              ? '角色中心 · 与官方 VNCCS 同一套目录与配置'
               : `${projectMeta.find((p) => p.id === currentId)?.name ?? '画布'} · 文生图 / 图生图`}
           </span>
         </div>

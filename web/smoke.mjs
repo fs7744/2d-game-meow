@@ -3302,7 +3302,7 @@ function check(name, cond, extra = '') {
   // 5. 应用一条官方姿势：先取本体 json，再写进**选中的人偶节点**。
   //    没有选中人偶节点时按钮必须是禁用的（不然点了什么都没发生，也没人说明原因）。
   const applyBtn0 = [...doc.querySelectorAll('.lib-modal .lib-card')]
-    .find((c) => (c.textContent || '').includes('Crawling'))
+    .find((c) => (c.textContent || '').includes('爬行'))
     ?.querySelector('.lib-card-actions button')
   check('没选人偶节点时「应用」禁用并说明原因', applyBtn0?.disabled === true,
     applyBtn0?.title || String(applyBtn0?.disabled))
@@ -3317,7 +3317,7 @@ function check(name, cond, extra = '') {
   poseNode?.dispatchEvent(new win.Event('pointerdown', { bubbles: true }))
   await new Promise((r) => setTimeout(r, 150))
   const applyBtn = [...doc.querySelectorAll('.lib-modal .lib-card')]
-    .find((c) => (c.textContent || '').includes('Crawling'))
+    .find((c) => (c.textContent || '').includes('爬行'))
     ?.querySelector('.lib-card-actions button')
   applyBtn?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
   await new Promise((r) => setTimeout(r, 400))
@@ -4251,7 +4251,9 @@ function check(name, cond, extra = '') {
   check('点「选」弹出标签面板', !!doc.querySelector('.tag-modal'))
   const heads = [...doc.querySelectorAll('.tag-group-head')].map((h) => h.textContent)
   check('头发分成 6 组（颜色/挑染/长度/质感/发型/刘海）', heads.length === 6, heads.join('/'))
-  check('chip 显示官方 label', !!doc.querySelector('.tag-chip'))
+  check('chip 有内容（显示的是中文译文）',
+    (doc.querySelector('.tag-chip')?.textContent || '').trim().length > 0,
+    doc.querySelector('.tag-chip')?.textContent || '')
 
   // 眼睛：预置值是 'blue_eyes, my own trait' —— 验别名 + 保留自定义文本
   ;[...doc.querySelectorAll('.tag-mask')][0]
@@ -4262,8 +4264,8 @@ function check(name, cond, extra = '') {
   eyeBtn?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
   await new Promise((r) => setTimeout(r, 250))
   const chips = [...doc.querySelectorAll('.tag-chip')]
-  const blueChip = chips.find((c) => (c.textContent || '').trim() === 'Blue')
-  check('下划线写法 blue_eyes 也能匹配到 Blue 这个 chip（别名）',
+  const blueChip = chips.find((c) => (c.textContent || '').trim() === '蓝眼')
+  check('下划线写法 blue_eyes 也能匹配到「蓝眼」这个 chip（别名）',
     blueChip?.classList.contains('on'),
     blueChip?.className || '（没找到 chip）')
   const shown = doc.querySelector('.tag-result input')?.value || ''
@@ -4271,7 +4273,7 @@ function check(name, cond, extra = '') {
     shown === 'blue_eyes, my own trait', shown)
 
   // 点一个 chip：写入的是**空格形式**（官方 toggle 的写法）
-  const greenChip = chips.find((c) => (c.textContent || '').trim() === 'Green')
+  const greenChip = chips.find((c) => (c.textContent || '').trim() === '绿眼')
   greenChip?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
   await new Promise((r) => setTimeout(r, 150))
   check('选一项后写入框更新（含新增的 green eyes）',

@@ -16,6 +16,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { base } from '../api'
+import { COSTUME_LABEL, EMOTION_LABEL, zh } from '../labels'
 
 type Props = {
   character: string
@@ -143,7 +144,10 @@ export default function SpritePreview({ character, costume, emotion, onMeta }: P
         </div>
       )}
       {count === 1 && (
-        <p className="chars-sub">当前只有这一帧（{costume || 'Naked'}/{emotion || 'neutral'}）。</p>
+        <p className="chars-sub">
+          当前只有这一帧（{zh(COSTUME_LABEL, costume || 'Naked')}
+          /{zh(EMOTION_LABEL, emotion || 'neutral')}）。
+        </p>
       )}
       {error && <p className="sprite-err">{error}</p>}
     </div>

@@ -18,6 +18,7 @@ import type { PresetPose } from '../api'
 import { fetchPoseBody } from '../api'
 import { filterPrompts } from '../store/prompts'
 import { filterPoses } from '../store/poses'
+import { POSE_CATEGORY_LABEL, POSE_NAME_LABEL, POSE_TAG_LABEL, zh } from '../labels'
 
 export type LibraryTab = 'prompt' | 'pose'
 /** 姿势页的两种来源：用户自己的 / 随项目发行的官方库 */
@@ -189,7 +190,9 @@ export default function LibraryDrawer({
                   title="按分类筛（分类来自官方库自己的标签）"
                 >
                   <option value="">全部分类</option>
-                  {presetCategories.map((c) => <option key={c} value={c}>{c}</option>)}
+                  {presetCategories.map((c) => (
+                    <option key={c} value={c}>{zh(POSE_CATEGORY_LABEL, c)}</option>
+                  ))}
                 </select>
               )}
             </div>
@@ -277,17 +280,24 @@ export default function LibraryDrawer({
                   <div className="lib-card lib-pose" key={p.id}>
                     <div className="lib-thumb">
                       {p.preview
-                        ? <img src={p.preview} alt={p.name} draggable={false} loading="lazy" />
+                        ? <img
+                          src={p.preview}
+                          alt={zh(POSE_NAME_LABEL, p.name)}
+                          draggable={false}
+                          loading="lazy"
+                        />
                         : <span>无预览</span>}
                     </div>
                     <div className="lib-card-text">
-                      {p.name}
+                      {zh(POSE_NAME_LABEL, p.name)}
                       <em>{p.yaw}° {YAW_LABEL[p.yaw] ?? ''}</em>
                     </div>
                     <div className="lib-card-sub lib-tags">
-                      {p.category ? <span className="lib-tag">{p.category}</span> : null}
+                      {p.category ? (
+                        <span className="lib-tag">{zh(POSE_CATEGORY_LABEL, p.category)}</span>
+                      ) : null}
                       {p.tags.slice(0, 3).map((t) => (
-                        <span className="lib-tag" key={t}>{t}</span>
+                        <span className="lib-tag" key={t}>{zh(POSE_TAG_LABEL, t)}</span>
                       ))}
                     </div>
                     <div className="lib-card-actions">
@@ -325,7 +335,12 @@ export default function LibraryDrawer({
                           setBusyId(`${p.id}#save`)
                           try {
                             const body = await fetchPoseBody(p.json)
-                            onSavePresetAsMine(p.name, body, p.yaw, p.preview)
+                            // 落盘用**中文名**：「我存的」那一栏不翻译（那里显示的都是
+                            // 用户自己起的名字），官方姿势收藏进来若存英文原名，
+                            // 就会跟用户自建的名字混在一格里，一半中文一半英文。
+                            // 后端 id 是时间戳、跟名字无关，同名会原地覆盖，重复收藏不会翻倍。
+                            onSavePresetAsMine(
+                              zh(POSE_NAME_LABEL, p.name), body, p.yaw, p.preview)
                           } catch (e) {
                             window.alert(`取姿势失败：${e instanceof Error ? e.message : e}`)
                           } finally {
