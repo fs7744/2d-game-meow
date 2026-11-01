@@ -72,6 +72,8 @@ const YAW_LABELS = [
 let viewerPromise = null
 let viewer = null
 let currentYaw = 0
+// 「相机视角」模式：开 = 导航相机始终对齐导出机位（所见即所得），拖滑块实时转。
+let cameraFollow = false
 
 /* ------------------------------------------------------------------ *
  * 画布尺寸
@@ -157,6 +159,7 @@ async function getViewer() {
       onPoseChange: (pose) => post({ type: 'pose', pose, yaw: currentYaw }),
     })
     await v.init()
+    bindFollow(v)
     // **方向天穹（彩虹网格球）在嵌入模式下一律关掉**，理由有两条：
     //  · 编辑时：节点卡片只有 280px，人身后糊一层彩虹网格纯属干扰；
     //  · 导出时：官方 `capture()` 会隐藏 gridHelper / skeletonHelper / 关节标记，
@@ -247,12 +250,6 @@ function frameView(v) {
   v.orbit.update()
 }
 
-function resetCamera() {
-  if (!viewer) return
-  frameView(viewer)
-  viewer.requestRender()
-}
-
 function post(msg) { window.parent?.postMessage(msg, '*') }
 
 function setStatus(text, isError = false) {
@@ -265,6 +262,77 @@ function setStatus(text, isError = false) {
 function setYaw(deg) {
   currentYaw = ((Math.round(Number(deg) || 0) % 360) + 360) % 360
   if (yawSel) yawSel.value = String(currentYaw)
+  // 相机视角开着就把导航相机对齐到新机位，所见即所得
+  if (cameraFollow && viewer) snapCamera(viewer)
+}
+
+/**
+ * 把导航相机（视口相机 + OrbitControls）对齐到当前导出机位。
+ *
+ * 走官方 `snapToCaptureCamera`：它把 capture 相机的 position / orbit.target
+ * 拷到视口相机，但**不复制 fov/aspect**（capture frame 会以盒子的形式显示在
+ * 3D 空间里，而不是占满整个画面）。这样画布里看到的 = 导出时的取景 + 一个
+ * 机位框，拖角度滑块人偶会实时转。
+ */
+function snapCamera(v) {
+  if (!v || !v.snapToCaptureCamera) return
+  const { w, h } = measure()
+  try {
+    v.snapToCaptureCamera(w, h, 1.0, 0, 0, currentYaw, 0)
+  } catch (e) {
+    // 某些初始帧 captureCamera 还没就绪，忽略这一次
+  }
+  v.requestRender?.()
+}
+
+/**
+ * 从导航相机当前的朝向反算出 yaw（绕 Y 的方位角）。
+ *
+ * yaw 约定（和官方 capture 一致）：相机绕目标点，0° = 相机在 +Z（看正面），
+ * 90° = 相机在 +X（看右侧面）。即 yaw = atan2(dx, dz)，dx/dz 是相机相对
+ * orbit.target 的水平偏移。
+ */
+function yawFromCamera(v) {
+  if (!v || !v.camera || !v.orbit) return null
+  const dx = v.camera.position.x - v.orbit.target.x
+  const dz = v.camera.position.z - v.orbit.target.z
+  if (Math.abs(dx) < 1e-6 && Math.abs(dz) < 1e-6) return null
+  const deg = (Math.atan2(dx, dz) * 180) / Math.PI
+  return ((Math.round(deg) % 360) + 360) % 360
+}
+
+// orbit 拖动 → yaw 的节流（rAF 合帧，避免 change 高频触发刷屏）
+let followRaf = 0
+let followDirty = false
+function queueFollowSync(v) {
+  if (followDirty) return
+  followDirty = true
+  followRaf = requestAnimationFrame(() => {
+    followDirty = false
+    if (!cameraFollow || !viewer) return
+    const y = yawFromCamera(v)
+    if (y == null) return
+    currentYaw = y
+    if (yawSel) yawSel.value = String(y)
+    // 推给宿主：滑块 / 数值 / 存档的 yaw 都跟着走，所见即所得
+    post({ type: 'pose', pose: v.getPose(), yaw: currentYaw, camera: true })
+  })
+}
+
+/** 相机视角模式下挂一个 orbit 监听：右键拖动实时反算成机位。 */
+function bindFollow(v) {
+  if (!v || !v.orbit || v.__followBound) return
+  v.__followBound = true
+  v.orbit.addEventListener('change', () => {
+    if (cameraFollow) queueFollowSync(v)
+  })
+}
+
+function resetCamera() {
+  if (!viewer) return
+  if (cameraFollow) snapCamera(viewer)   // 相机视角下「重置」= 对齐导出机位
+  else frameView(viewer)
+  viewer.requestRender()
 }
 
 // ---- 朝向下拉 ----
@@ -320,6 +388,19 @@ window.addEventListener('message', async (e) => {
       post({ type: 'pose', pose: v.getPose(), yaw: currentYaw })
     } else if (msg.type === 'resetView') {
       resetCamera()
+    } else if (msg.type === 'setCameraMode') {
+      // 相机视角开关：开 = 导航相机对齐导出机位，且右键拖动实时反算成机位
+      // （所见即所得 + 右键任意换视角）。关 = 回到自由检查视角，右键不影响机位。
+      cameraFollow = !!msg.on
+      if (cameraFollow) {
+        bindFollow(v)
+        snapCamera(v)
+      } else {
+        frameView(v)
+      }
+      v.requestRender?.()
+    } else if (msg.type === 'snap') {
+      snapCamera(v)
     } else if (msg.type === 'preview') {
       // 存库时要一张小缩略图，浏览面板得靠它认人。**走和导出同一条通路**
       // （同一个 capture），只是尺寸小、不算正式产物，所以单独回一个类型。

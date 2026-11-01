@@ -57,6 +57,7 @@ const log = (s) => {
   document.title = s.split(' b64=')[0]
 }
 let stage = 0
+let yawCheck = ''
 const POSE = {pose_path}
 window.addEventListener('message', (e) => {
   if (e.source !== f.contentWindow) return
@@ -68,16 +69,24 @@ window.addEventListener('message', (e) => {
       stage = 1
       // 1) 套一个官方姿势库的姿势（真 3D 骨骼 JSON）
       f.contentWindow.postMessage({ type:'setPose', pose: POSE }, '*')
-      f.contentWindow.postMessage({ type:'setYaw', yaw: 90 }, '*')
-      setTimeout(() => f.contentWindow.postMessage({ type:'export', yaw: 90, size: 768 }, '*'), 800)
+      // 相机视角：开 → 任意角度（30°，非 45 倍数）
+      f.contentWindow.postMessage({ type:'setCameraMode', on: true }, '*')
+      f.contentWindow.postMessage({ type:'setYaw', yaw: 30 }, '*')
+      // 2) 问子窗要姿势 + 朝向，验证相机视角下 yaw 是否被正确保持
+      setTimeout(() => f.contentWindow.postMessage({ type:'getPose' }, '*'), 400)
+      setTimeout(() => f.contentWindow.postMessage({ type:'export', yaw: 30, size: 768 }, '*'), 1400)
+    }
+  } else if (d.type === 'pose') {
+    // 相机视角下 getPose 应该把 yaw 原样回传（不是被 orbit 干扰的随机值）
+    if (stage === 1 && d.yaw !== undefined) {
+      yawCheck = 'yaw=' + d.yaw + ' expect=30 '
     }
   } else if (d.type === 'result') {
     const url = d.dataURL || ''
     const b64 = url.split(',')[1] || ''
     const bin = atob(b64)
     const okHead = url.startsWith('data:image/png')
-    // 白底灰人偶：中心应该有内容（不是纯白/纯黑），边缘应该是白的
-    log('POSE_OK bytes=' + bin.length + ' head=' + okHead + ' b64=' + b64)
+    log('POSE_OK ' + yawCheck + 'bytes=' + bin.length + ' head=' + okHead + ' b64=' + b64)
   }
 })
 setTimeout(() => { if (!document.title.startsWith('POSE_')) log('POSE_FAIL 超时（模型没加载完？）') }, 170000)
