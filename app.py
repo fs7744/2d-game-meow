@@ -1500,8 +1500,7 @@ def character_prompt_api(name: str, req: CharacterPromptReq) -> Dict[str, Any]:
         "enhanced": built["applied"] == "1",
         "negative": str(info.get("negative_prompt") or ""),
         "resolution": charactergen.generation_resolution(
-            int((req.params or {}).get("target_size") or 0)
-            or charactergen.QI2_DEFAULTS["target_size"]),
+            int(charactergen.QI2_DEFAULTS["target_size"])),
         "defaults": dict(charactergen.QI2_DEFAULTS),
     }
 

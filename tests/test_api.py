@@ -759,3 +759,26 @@ def test_clone_llm_failure_leaves_no_character(client, monkeypatch):
     # 关键断言：**角色没被建出来**
     assert not characters.character_exists(name)
     assert not Path(characters.character_dir(name)).exists()
+
+
+# ---------------- 角色 prompt 端点 ----------------
+
+def test_character_prompt_endpoint(client):
+    """拼 prompt 端点（不跑模型）。之前这里访问 req.params 直接 500，
+    因为 CharacterPromptReq 没有 params 字段——这是拼 prompt，不涉及生成参数。"""
+    from workflows import characters
+
+    name = "Prompt端点测试"
+    characters.delete_character(name, remove_files=True)
+    try:
+        characters.create_character(name)
+        r = client.post(f"/characters/{name}/prompt",
+                        json={"style": "", "info": {}, "enhance": False})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        # 返回结构：prompt / raw_prompt / negative / resolution / defaults
+        assert "prompt" in body
+        assert isinstance(body["resolution"], list) and len(body["resolution"]) == 2
+        assert body["defaults"]["target_size"] > 0
+    finally:
+        characters.delete_character(name, remove_files=True)
