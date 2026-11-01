@@ -1367,6 +1367,105 @@ def character_analyze_api(name: str, req: CharacterAnalyzeReq) -> Dict[str, Any]
     }
 
 
+class CharacterFromImageReq(BaseModel):
+    """「从参考图一键建角色」的入参。"""
+    name: str
+    #: 参考图：assets 里的相对路径，或 `/files/...` 的展示 URL
+    image: str = ""
+    #: 收编到哪套服装（默认裸装）
+    costume: str = "Naked"
+    #: 收编成哪个表情的帧（默认平静）
+    emotion: str = "neutral"
+    #: 幕布色（抠图按它取样）
+    background_color: str = ""
+    #: 收编时先抠掉纯色背景（官方 bg_remove）
+    matte: bool = True
+    timeout: float = 300.0
+
+
+@app.post("/characters/from-image")
+def character_from_image_api(req: CharacterFromImageReq) -> Dict[str, Any]:
+    """一张参考图 → 一个角色（官方 `character_cloner.py` 的「一键建角色」）。
+
+    **为什么要有这个**：反推属性（`/characters/{name}/analyze`）要求角色**已经存在**
+    （不存在就 404）。所以原来的流程是「手动新建一个空角色 → 反推 → 逐条粘进去 →
+    再去出图页生成」——四步，中间任何一步关掉浏览器，前面的功夫就白费。
+
+    这里把三步合成一步：
+
+    1. **先反推**（本地 Qwen3.5-4B）—— 失败就**什么都不留**，
+       不会在列表里留下一个空壳角色
+    2. **再建角色**，把反推出来的属性直接写进 config
+    3. **收编参考图**成第一张精灵帧（`publish_image`，顺带抠背景）
+
+    属性反推错了也不要紧：建完照样能改（`PUT /characters/{name}/info`），改完再出图。
+    重跑反推的代价是重新建一个角色，所以名字先想好。
+
+    **没有官方那么全**：官方的 `VNCCS_CharacterCloneGenerator` 还会跑一整条
+    支线（`original_pose_generation → remove_clothes → naked_pose_generation`），
+    一次出原服装 + 裸装两套精灵帧。那需要生成模型跑三次，
+    我们把「出图」留给「一键出全套」那一步（`/characters/{name}/pipeline`）。
+    """
+    try:
+        safe = characters.ensure_safe_name(req.name, "角色名")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if characters.character_exists(safe):
+        raise HTTPException(409, f"角色已存在：{safe}")
+
+    raw_path = str(req.image or "").strip()
+    if not raw_path:
+        raise HTTPException(400, "没给参考图")
+    if raw_path.startswith("/files/"):
+        raw_path = raw_path[len("/files/"):]
+    target = _readable_asset_path(raw_path)
+    if target is None:
+        raise HTTPException(400, "图片路径不在 assets 内（或不是图片文件）")
+
+    # 1. 先反推 —— 失败就什么都不留
+    try:
+        result = qwen_llm.analyze_character_image(
+            str(target), background_color=req.background_color,
+            timeout=float(req.timeout or 300.0))
+    except qwen_llm.LlmError as exc:
+        _raise_llm_error(exc)
+    except OSError as exc:
+        raise HTTPException(500, f"读图失败：{exc}") from exc
+
+    fields = result.get("fields") or {}
+    # `filter_traits` 已经有白名单（防注入），这里再去掉 `name`：
+    # 它会盖掉角色名（`_default_character_info` 里 name 是角色名）。
+    info = {k: v for k, v in fields.items() if k != "name"}
+
+    # 2. 建角色，属性直接写进 config
+    try:
+        characters.create_character(safe, info=info)
+    except characters.CharacterConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+    # 3. 收编参考图成第一张精灵帧（publish_image 自带抠像，抠完另存 _matte.png）
+    try:
+        pub = characters.publish_image(
+            safe, str(target),
+            costume=str(req.costume or "Naked"),
+            emotion=str(req.emotion or "neutral"),
+            matte=bool(req.matte))
+    except (ValueError, OSError) as exc:
+        # 角色已经建好了（属性在里头），只是图没收编成功 ——
+        # 别把整个角色删掉，用户还能手动出图。
+        raise HTTPException(500, f"角色已建好，但参考图收编失败：{exc}") from exc
+
+    return {
+        "character": safe,
+        "fields": fields,
+        "image": _asset_url(str(target)),
+        "sprite": _asset_url(str(pub.get("path") or "")),
+        "matte": _asset_url(str(pub.get("matte") or "")) if pub.get("matte") else "",
+        "seconds": result.get("seconds", 0),
+        "raw": result.get("raw", ""),
+    }
+
+
 @app.post("/characters/{name}/prompt")
 def character_prompt_api(name: str, req: CharacterPromptReq) -> Dict[str, Any]:
     """把 character_info + 风格拼成官方结构的 prompt。

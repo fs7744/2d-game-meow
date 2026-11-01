@@ -1242,6 +1242,13 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
   border: 1px solid var(--line); border-radius: 2px; padding: 0 5px;
 }
 .chars-new { display: flex; gap: 5px; }
+.chars-clone { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.chars-clone-row { display: flex; gap: 5px; align-items: center; }
+.chars-clone-row input[type="file"] { flex: 1; min-width: 0; font-size: 10px; }
+.chars-clone-preview {
+  max-height: 130px; max-width: 100%; object-fit: contain;
+  background: var(--bg-3); border: 1px solid var(--line); border-radius: 2px;
+}
 .chars-new input {
   flex: 1; min-width: 0; background: var(--bg-3); color: var(--white);
   border: 1px solid var(--line-strong); border-radius: 2px;

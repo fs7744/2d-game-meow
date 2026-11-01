@@ -648,3 +648,114 @@ def test_generate_rejects_topixel_without_input(client):
         time.sleep(0.5)
     assert job["status"] == "failed"
     assert "prompt 或 init_image" in (job.get("error") or "")
+
+
+# ---------------- 一键建角色（官方 Cloner） ----------------
+#
+# 这条链路有个**顺序上的讲究**：先反推、再建角色。反推失败（模型没装 / 超时）
+# 就什么都不留 —— 否则用户会得到一个空壳角色，还得手动删。
+
+def _clone_ref_png(filename: str = "clone_ref.png") -> Path:
+    """在 assets 内放一张测试参考图（绿幕，方便抠像）。"""
+    from PIL import Image
+    import app as app_module
+    d = Path(app_module.ASSETS) / "uploads"
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / filename
+    Image.new("RGB", (64, 64), (60, 160, 90)).save(p)
+    return p
+
+
+def _fake_analyze(fields: dict, seconds: float = 1.0):
+    def _fake(image_path, background_color="", timeout=300.0):
+        return {"fields": dict(fields), "seconds": seconds, "raw": "{}",
+                "image": image_path}
+    return _fake
+
+
+def test_clone_from_image_creates_character(client, monkeypatch):
+    """一张参考图 → 角色建好 + 属性写进 config + 参考图收编成精灵帧。"""
+    import app as app_module
+    from workflows import characters
+
+    ref = _clone_ref_png("clone_ok.png")
+    name = "克隆测试角色"
+    characters.delete_character(name, remove_files=True)
+
+    monkeypatch.setattr(
+        app_module.qwen_llm, "analyze_character_image",
+        _fake_analyze({"race": "elf", "hair": "silver hair", "eyes": "blue eyes"}))
+
+    r = client.post("/characters/from-image", json={
+        "name": name, "image": str(ref), "matte": False,
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["character"] == name
+    assert body["fields"]["hair"] == "silver hair"
+
+    # 属性确实落进了 config
+    cfg = characters.load_config(name, strict=True)
+    assert cfg["character_info"]["race"] == "elf"
+    assert cfg["character_info"]["hair"] == "silver hair"
+
+    # 参考图被收编成第一张精灵帧
+    sprites = characters.list_sprite_images(name, "Naked", "neutral")
+    assert len(sprites) >= 1, sprites
+    assert Path(sprites[0]).exists()
+
+    characters.delete_character(name, remove_files=True)
+
+
+def test_clone_rejects_existing_name(client, monkeypatch):
+    """同名角色已存在 → 409，不覆盖（免得无声吞掉别人的角色）。"""
+    import app as app_module
+    from workflows import characters
+
+    ref = _clone_ref_png("clone_dup.png")
+    name = "克隆重名"
+    characters.create_character(name)
+    try:
+        monkeypatch.setattr(
+            app_module.qwen_llm, "analyze_character_image",
+            _fake_analyze({"race": "human"}))
+        r = client.post("/characters/from-image", json={
+            "name": name, "image": str(ref), "matte": False})
+        assert r.status_code == 409, r.text
+        assert "已存在" in r.text
+    finally:
+        characters.delete_character(name, remove_files=True)
+
+
+def test_clone_rejects_image_outside_assets(client, monkeypatch):
+    """图不在 assets 内 → 400（不许读盘上任意文件）。"""
+    import app as app_module
+
+    monkeypatch.setattr(
+        app_module.qwen_llm, "analyze_character_image",
+        _fake_analyze({"race": "human"}))
+    r = client.post("/characters/from-image", json={
+        "name": "越界角色", "image": "C:/Windows/win.ini", "matte": False})
+    assert r.status_code == 400, r.text
+    assert "assets" in r.text
+
+
+def test_clone_llm_failure_leaves_no_character(client, monkeypatch):
+    """**反推失败不留半成品**：报错，且磁盘上没有这个角色。"""
+    import app as app_module
+    from workflows import characters, qwen_llm
+
+    ref = _clone_ref_png("clone_fail.png")
+    name = "克隆失败角色"
+    characters.delete_character(name, remove_files=True)
+
+    def _boom(image_path, background_color="", timeout=300.0):
+        raise qwen_llm.LlmError("MODEL_MISSING", "模型没装")
+
+    monkeypatch.setattr(app_module.qwen_llm, "analyze_character_image", _boom)
+    r = client.post("/characters/from-image", json={
+        "name": name, "image": str(ref), "matte": False})
+    assert r.status_code >= 500, r.text
+    # 关键断言：**角色没被建出来**
+    assert not characters.character_exists(name)
+    assert not Path(characters.character_dir(name)).exists()

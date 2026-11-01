@@ -742,6 +742,29 @@ export async function analyzeCharacter(
 }
 
 /**
+ * 一键建角色：一张参考图 → 建好角色 + 收编成第一张精灵帧（官方 Cloner）。
+ *
+ * **跟 `analyzeCharacter` 的区别**：那个要求角色**已经存在**（反推完填进
+ * 已有角色里给你看），这个是**从零建** —— 反推 → 建角色 → 收编参考图，一步到位。
+ *
+ * 失败语义：反推失败（模型没装 / 超时）会抛错，**不会留下空壳角色**；
+ * 角色已建但收编失败时后端报 500 并在消息里说明「角色已建好」。
+ */
+export async function createCharacterFromImage(
+  body: {
+    name: string
+    image: string
+    costume?: string
+    emotion?: string
+    background_color?: string
+    matte?: boolean
+    timeout?: number
+  },
+): Promise<AnalyzeResult & { sprite: string; matte: string }> {
+  return req('/characters/from-image', { method: 'POST', body: JSON.stringify(body) })
+}
+
+/**
  * 一句话造角色（官方 `character_creator_v2.py:1740-1869`）。
  *
  * 纯文本，不需要视觉投影器。后端会做一层后处理：race 只留物种、

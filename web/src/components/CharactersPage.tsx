@@ -24,6 +24,7 @@ import {
   fetchCharacterPrompt, generateForCharacter, fetchJob, fetchCharacterTags,
   detectEmotionFaces, generateEmotions, type EmotionFrame,
   analyzeCharacter, wizardCharacter, designClothes, clothesWizard,
+  createCharacterFromImage, uploadImage,
   generatePoses, fetchPoseDirs, exportAtlas, fetchAtlasInfo, designUnderwear,
   runPipeline, type PoseDir, type AtlasInfo,
   type CharacterPrompt, type TagCatalog,
@@ -85,6 +86,12 @@ export default function CharactersPage({ onNotice }: Props) {
   const [emotions, setEmotions] = useState<EmotionCatalog | null>(null)
   const [tab, setTab] = useState<'info' | 'gen' | 'clothes' | 'emotions' | 'assets'>('info')
   const [newName, setNewName] = useState('')
+  /** 「一键建角色」面板（官方 Cloner）：参考图 + 角色名 */
+  const [cloneOpen, setCloneOpen] = useState(false)
+  const [cloneFile, setCloneFile] = useState<File | null>(null)
+  const [clonePreview, setClonePreview] = useState('')
+  const [cloneBusy, setCloneBusy] = useState(false)
+  const [cloneMsg, setCloneMsg] = useState('')
   const [costume, setCostume] = useState('Naked')
   const [draft, setDraft] = useState<Record<string, unknown>>({})
   /** 后端按官方结构拼好的 prompt（不跑模型，改属性就能立刻看到） */
@@ -242,6 +249,51 @@ export default function CharactersPage({ onNotice }: Props) {
       setErr(`建角色失败：${e instanceof Error ? e.message : e}`)
     }
   }, [newName, reload, onNotice])
+
+  /**
+   * 一键建角色（官方 Cloner）：一张参考图 → 反推属性 → 建角色 → 收编成第一张精灵帧。
+   *
+   * **为什么要有这个独立入口**：`/characters/{name}/analyze` 要求角色**已经存在**
+   * （不存在直接 404），所以「看图反推」只对已有角色有用。从零起一个角色得
+   * 「手动新建空角色 → 反推 → 逐条粘进去 → 再去出图页生成」——四步，
+   * 中间关掉浏览器前面的功夫就白费。
+   *
+   * 后端是**先反推后建角色**：反推失败就什么都不留，不会剩下一个空壳角色。
+   */
+  const doClone = useCallback(async () => {
+    const name = newName.trim()
+    if (!name || !cloneFile || cloneBusy) return
+    setCloneBusy(true)
+    setCloneMsg('正在上传参考图…')
+    try {
+      const up = await uploadImage(cloneFile)
+      setCloneMsg('正在看图反推属性（本地 4B 模型，约 20~40 秒）…')
+      const r = await createCharacterFromImage({
+        name,
+        image: up.path,
+        background_color: String(draft.background_color ?? 'green'),
+      })
+      setCloneMsg('')
+      setCloneOpen(false)
+      setCloneFile(null)
+      setClonePreview('')
+      setNewName('')
+      await reload()
+      setSel(name)
+      onNotice(`已建角色「${name}」，反推出 ${Object.keys(r.fields || {}).length} 项属性`)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      // 错误码 → 该说哪一步。跟「看图反推」用同一套话术。
+      let hint = ''
+      if (msg.includes('DEPENDENCY_MISSING')) hint = '（llama-cpp-python 装错了 fork，需要 JamePeng 版）'
+      else if (msg.includes('MODEL_MISSING') || msg.includes('MMPROJ_MISSING')) hint = '（models/llm/Qwen3.5-4B 下的 gguf 没装齐）'
+      else if (msg.includes('TIMEOUT')) hint = '（超时了，模型还占着，等半分钟再试）'
+      else if (msg.includes('PARSE_ERROR') || msg.includes('INVALID_RESPONSE')) hint = '（模型没答成 JSON，重试一次通常就好）'
+      setCloneMsg(`建角色失败：${msg}${hint}`)
+    } finally {
+      setCloneBusy(false)
+    }
+  }, [newName, cloneFile, cloneBusy, draft.background_color, reload, onNotice])
 
   const doRename = useCallback(async () => {
     if (!sel) return
@@ -754,6 +806,58 @@ export default function CharactersPage({ onNotice }: Props) {
             新建
           </button>
         </div>
+        {!cloneOpen ? (
+          <button
+            type="button"
+            className="mini wide"
+            title="给一张参考图，本地模型反推属性、自动建角色，并把参考图收编成第一张精灵帧"
+            onClick={() => setCloneOpen(true)}
+          >
+            从参考图建角色
+          </button>
+        ) : (
+          <div className="chars-clone">
+            <div className="chars-clone-row">
+              <input
+                type="file"
+                accept="image/png,image/jpeg,image/webp,image/bmp"
+                onChange={(e) => {
+                  const f = e.target.files?.[0] ?? null
+                  setCloneFile(f)
+                  setClonePreview(f ? URL.createObjectURL(f) : '')
+                }}
+              />
+              <button
+                type="button"
+                className="mini"
+                onClick={() => {
+                  setCloneOpen(false)
+                  setCloneFile(null)
+                  setClonePreview('')
+                  setCloneMsg('')
+                }}
+              >
+                取消
+              </button>
+            </div>
+            {clonePreview && (
+              <img className="chars-clone-preview" src={clonePreview} alt="参考图" />
+            )}
+            <button
+              type="button"
+              className="mini wide"
+              onClick={() => void doClone()}
+              disabled={cloneBusy || !cloneFile || !newName.trim()}
+            >
+              {cloneBusy ? '建角色中…' : '一键建角色'}
+            </button>
+            <p className="chars-sub">
+              用上面那个角色名。参考图会被收编成这个角色的第一张精灵帧（并抠掉纯色背景）；
+              属性反推错了不要紧，建完还能改。
+            </p>
+            {cloneMsg && <p className="chars-sub">{cloneMsg}</p>}
+          </div>
+        )}
         {loading && <p className="chars-empty">正在读角色库…</p>}
         {!loading && items.length === 0 && (
           <p className="chars-empty">
