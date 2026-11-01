@@ -22,6 +22,76 @@
 
 ---
 
+## 2026-11-01 · 角色中心 T1：表情批量生成（只改脸）
+
+官方 Emotion Studio 的 QI2 分支（`character_generator.py:1591-1708` 单张 +
+`emotion_generator_v2.py:675-761` 编排）整套搬进 `workflows/emotiongen.py`。
+
+**它跟"再出一张整图"的区别**：表情是把**脸框那块裁出来放大重画**，再按羽化蒙版
+贴回原图，所以脖子、衣服、动作逐像素不变。一套姿势帧换 5 个表情，动作不会漂。
+
+### 管线（每一段都有官方行号）
+
+```
+YOLO 找脸框（外扩 2×50px） → 裁 → 正方形补边到 32 的倍数（replicate）
+  → 按总像素档位放大（2048 → 2MP，边长向下取 32 倍数）
+  → Qwen 指令改图（denoise 1.0，只给表情 prompt）
+  → 缩回对齐尺寸 → 切掉 pad → 羽化蒙版贴回原图（alpha 不动）
+  → Sprites/<服装>/<表情>/sprite_<表情>_<源帧序号>.png
+  → Faces/<服装>/<表情>/face_<表情>_<源帧序号>.png（生成的那块脸原图）
+```
+
+### 六个纯几何函数（零模型，逐行翻译）
+
+| 这里 | 官方 | 备注 |
+|---|---|---|
+| `pad_to_square_multiple` | `:1571` | **replicate 补边**，不是补黑/灰 |
+| `crop_feather_mask` | `:1516` | 边缘斜坡：`min(到上下边, 到左右边)/feather` |
+| `paste_mask` | `_blur_detail_mask:1449` | 斜坡再高斯模糊，半径 = feather |
+| `paste_crop_direct` | `:1483` | **只混合到 patch 的通道数** —— patch 是 RGB 时不动 alpha |
+| `cut_padding` | `:1671` | 贴回前把 pad 反向切掉 |
+| `crop_target_size` | `:1636` + `ImageScaleToTotalPixels` | `target_size` 是**总像素档位**不是边长 |
+
+### 几个容易抄错的地方
+
+1. **`target_size` 不是边长**：`megapixels = target_size/1024`，2048 就是 2.0 MP
+   （1024² → 1440²）。边长**向下**取 32 的倍数，向上取会白算 token。
+2. **dilation 官方用了两次**：传进 Impact 的 `detect()`（内部已扩一次）后又手动
+   扩一次，净效果 `2 × dilation`（默认 100px）。这是照抄不是笔误——脸框要带上
+   头发和脖子，模型才知道这张脸长在什么身上。
+3. **QI2 分支只用 template**：不拼 `face_details`、种族、发型、服装（`:4142`）。
+   拼了反而会把脸画成另一个角色。
+4. **负向词要多一串水/汗**（`emotion_generator_v2.py:669`）：不然"难过"会顺手
+   画一串眼泪，而精灵帧不要那个图层。
+5. **产物序号跟源帧对齐**：`sprite_pose_0003.png` → `sprite_angry_0003.png`
+   （官方 `save_index`，`:4541`）。不是"下一个序号"——那样两张对不上，翻图就错位。
+
+### 两处刻意的取舍（都有理由，不是猜的）
+
+| 项 | 官方 | 我们 | 为什么 |
+|---|---|---|---|
+| 推理边长 | 2048 → 1440² | **封顶 1024** | 24GB 单卡 1440² 单张 60s+ 且显存压线；脸框本身只有 200~400px，1024² 已远超源信息量。要按官方原值跑传 `crop_max_side=2048` |
+| 人脸检测设备 | ComfyUI 里跟模型同卡 | **CPU** | Qwen 的 transformer 已经占着卡，YOLO 再挤进去会让出图阶段显存碎片化；CPU 上一张 1024 的图约 100ms |
+
+### 实测（RTX 4090，人偶 768² 源图，脸框 256²）
+
+- 1024² / 8 步 / cfg 3.0：**42.7s 一张**（cfg>1 是真 CFG，每步两遍 transformer）
+- 25 步（官方默认）约 **110s 一张**：一批 3 帧 × 5 表情 ≈ 27 分钟。
+  所以界面上**必须有进度条**，`/jobs` 的 `progress` 每张更新一次。
+- 贴回后除脸以外逐像素不变，接缝不可见（羽化带里是渐变的中间值，不是 0/255 硬边）。
+
+### 接口
+
+| 端点 | 作用 |
+|---|---|
+| `POST /characters/<名>/emotions/detect` | 列源帧 + 检出脸框（**不跑生成模型**） |
+| `POST /characters/<名>/emotions/generate` | 提交批量任务（走同一个单卡队列，返回 `job_id`，`/jobs` 带 `progress`） |
+
+先检脸框再提交是官方 Emotion Studio 的顺序：没有源帧或一张脸都没检出时要立刻
+说清楚，别等提交完 3 分钟才告知"没源帧"。
+
+---
+
 ## 2026-11-01 · 3D 人偶取代骨架编辑 + 资料库落盘
 
 ### 1. 「骨骼编辑」节点 → 「人偶姿势」节点：2D 骨架编辑器整个删掉
@@ -1939,6 +2009,8 @@ MEOW_SLOW=1 pytest tests -m slow                  # 真跑 Qwen 的端到端组�
 | `app.py` / `workflows/assetdb.py` | test_api test_review_p2 | 15s |
 | `workflows/projectio.py` / `paths.py` | test_projects | 5s |
 | `workflows/projectstore.py`（项目落盘） | test_project_store | 3s |
+| `workflows/emotiongen.py`（表情批量） | test_emotiongen（含一条真 YOLO） | 6s |
+| `workflows/characters.py` / `charactergen.py` | test_characters test_char_poses | 9s |
 | `tools/*` `docs/*` `README` | 不跑（工具靠自身输出验证） | — |
 | 合并 / 发版前 | 全量 | 150s |
 
@@ -1956,6 +2028,7 @@ test_stability 的 free 与泄漏、test_matte 的缓存素材）需要 GPU。
 | `tests/test_qwen_workflows.py` | **十个工作流的能力表与「近似」标记**、**局部重绘选区外逐点不变**、**output_resolution 真的对齐**、**逐帧尺度归一**、**透明底 alpha 不被白底吃掉**、**Qwen 路径不许碰已删的 SD 管线**、**非人形主体不补提**、**两阶段每帧调两次模型** | 37 |
 | `tests/test_gate.py` | 公共闸门组件（候选怎么跑、同分取第一个、非人形不补提） | 6 |
 | `tests/test_e2e_qwen.py` | **十个工作流各真跑一次模型**（`-m slow`，约 80s） | 10 |
+| `tests/test_emotiongen.py` | **pad 到 32 倍数用 replicate**、**羽化蒙版是斜坡+模糊（不是硬边）**、**贴回只动框内、alpha 不被贴出方块**、**推理尺寸按官方总像素公式**、**prompt 模板逐字**、**dilation 用了两次**、**产物序号跟源帧对齐**、**没源帧要说清原因**、**单张失败不丢整批**、**队列里的 progress** | 34 |
 | `tests/test_matte.py` | 背景估计、连通域不误抠内部同色区、去白边、alpha 二值、**u2net 抠空自动回退**、**已有 alpha 复用（IoU 1.000）**、**雾状 alpha 仍重抠**、**补内部洞但不动通到边界的缺口** | 18 |
 | `tests/test_api.py` | 各工作流队列往返、**未知 workflow 报错**、蒙版端点、上传端点、真删（连带 sidecar/raw、路径穿越）、资产按项目过滤、**参数按签名过滤并记 params_ignored** | 33 |
 | `tests/test_projects.py` | **项目归档往返**（.mproj 打包/解包）、**目录与通配引用还原成同构目录**、**路径与 URL 一起重算**、缺失素材清空而非报错、**Windows 反斜杠相对路径**、模板存/列/实例化/删 | 14 |

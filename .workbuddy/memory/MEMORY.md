@@ -3,9 +3,9 @@
 ## 角色中心：接手先看这两份文档
 
 - `docs/角色中心-VNCCS移植评估.md` —— 功能全表、模型清单、已拍板的取舍（"为什么"）
-- **`docs/角色中心-剩余工作与做法.md` —— 待办 T1~T5 的开工手册（"怎么做"）**，
+- **`docs/角色中心-剩余工作与做法.md` —— 剩余待办的开工手册（"怎么做"）**，
   每项带源仓库 `file:line`、参数默认值、prompt 原文、落点文件、验证方式。
-  下一个 agent 直接从这份的 §3 开始做即可，不用再翻源码。
+  **T1（表情批量）已完成**（`workflows/emotiongen.py`），下一个从 §4 的 T2 开始。
 
 移植总规矩：**以 `D:\code\gen\others\ComfyUI_VNCCS-main` 为准，不自己写自己猜。**
 明确不做：Control Center、8 方向帧（官方没有这功能）、SeedVR2 放大（官方支持
@@ -32,8 +32,10 @@
 | matte.py / refprep.py | test_matte test_refprep | 20s |
 | postprocess.py / pixelfy.py | test_postprocess test_pixelfy test_sheet | 15s |
 | app.py / assetdb.py | test_api test_review_p2 | 15s |
+| characters.py / charactergen.py | test_characters test_char_poses | 9s |
+| emotiongen.py（表情批量） | test_emotiongen（含一条真 YOLO） | 6s |
 | projectio.py / paths.py | test_projects | 5s |
-| 前端 web/src | `cd web && npm run smoke`（415 条，纯 mock，不用 GPU） | 60s |
+| 前端 web/src | `cd web && npm run smoke`（488 条，纯 mock，不用 GPU） | 60s |
 | workflows/library.py / poselib.py | test_library | 1s |
 | app.py 加了端点 | test_api（含 library 相关时加 test_library） | 75s |
 | tools/ docs/ README | 不跑 | — |

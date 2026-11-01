@@ -1335,12 +1335,31 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
 .chars-emo {
   display: flex; flex-direction: column; gap: 3px; align-items: center;
   padding: 5px; border: 1px solid var(--line); background: var(--bg-2);
+  cursor: pointer; color: inherit; font: inherit;
 }
+/* 选中态：官方 Emotion Studio 是「点卡片选/取消」，所以必须看得出来选没选 */
+.chars-emo.on {
+  border-color: var(--cyan);
+  box-shadow: inset 0 0 0 1px var(--cyan);
+}
+.chars-emo.on span { color: var(--cyan); }
 .chars-emo img {
   width: 56px; height: 56px; object-fit: contain;
   background: #fff; border: 1px solid var(--line);
 }
 .chars-emo span { font-size: 9.5px; color: var(--muted); text-align: center; }
+
+/* 批量生成的进度条：一批几十张要跑几分钟，没有进度只能干等 */
+.chars-prog {
+  position: relative; height: 16px; border: 1px solid var(--line);
+  background: var(--bg-3); max-width: 460px;
+}
+.chars-prog-bar { height: 100%; background: var(--cyan-2, #2b6f7a); opacity: .55; }
+.chars-prog span {
+  position: absolute; inset: 0; display: flex; align-items: center;
+  justify-content: center; font-family: var(--mono); font-size: 9.5px;
+  color: var(--white);
+}
 
 .chars-asset-group {
   display: flex; flex-direction: column; gap: 5px;

@@ -22,6 +22,7 @@ import {
   fetchCharacters, renameCharacter, saveCostume, updateCharacterInfo,
   fetchStyleCatalog, fetchEmotionCatalog, stylePreviewUrl, emotionIconUrl,
   fetchCharacterPrompt, generateForCharacter, fetchJob, fetchCharacterTags,
+  detectEmotionFaces, generateEmotions, type EmotionFrame,
   type CharacterPrompt, type TagCatalog,
 } from '../api'
 import SpritePreview from './SpritePreview'
@@ -93,6 +94,14 @@ export default function CharactersPage({ onNotice }: Props) {
     (m: { count: number; files: string[] }) => setBrowseFiles(m.files), [])
   const [genBusy, setGenBusy] = useState(false)
   const [genMsg, setGenMsg] = useState('')
+  /** 表情批量生成：选中的表情（官方 safe_name）、源帧脸框信息、进度 */
+  const [emoSel, setEmoSel] = useState<string[]>([])
+  const [emoFrames, setEmoFrames] = useState<EmotionFrame[] | null>(null)
+  const [emoBusy, setEmoBusy] = useState(false)
+  const [emoMsg, setEmoMsg] = useState('')
+  const [emoProg, setEmoProg] = useState<{ done: number; total: number } | null>(null)
+  /** 表情生成参数（官方默认值；target_size 是「总像素档位」不是边长） */
+  const [emoParams, setEmoParams] = useState({ target_size: 2048, steps: 25, matte: true })
 
   const reload = useCallback(async () => {
     try {
@@ -117,6 +126,8 @@ export default function CharactersPage({ onNotice }: Props) {
   useEffect(() => {
     if (!sel) { setDetail(null); return }
     let alive = true
+    // 换角色时把表情批量的中间态清掉（不然会显示上一个角色的源帧与选中）
+    setEmoFrames(null); setEmoSel([]); setEmoMsg(''); setEmoProg(null)
     void fetchCharacter(sel)
       .then((d) => { if (alive) { setDetail(d); setDraft(d.config.character_info ?? {}) } })
       .catch((e) => { if (alive) setErr(String(e instanceof Error ? e.message : e)) })
@@ -241,6 +252,81 @@ export default function CharactersPage({ onNotice }: Props) {
       setGenBusy(false)
     }
   }, [sel, genBusy, costume, cPrompt, onNotice])
+
+  /**
+   * 表情批量生成：先检脸框（不跑生成模型），让用户看到"会在哪几张上改脸"。
+   *
+   * **先检再生成**是官方 Emotion Studio 的顺序：没有源帧或一张脸都没检出时
+   * 要立刻说清楚，别等提交完再报错——一批几十张，等 3 分钟才被告知"没源帧"
+   * 是最糟的体验。
+   */
+  const doDetect = useCallback(async () => {
+    if (!sel || emoBusy) return
+    setEmoMsg('检测脸框…')
+    try {
+      const r = await detectEmotionFaces(sel, { costume })
+      setEmoFrames(r.items)
+      const hit = r.items.filter((f) => f.detected).length
+      setEmoMsg(r.count === 0
+        ? `「${costume}」没有源帧：表情是从 Neutral 姿势帧上改脸的，先去「出图」页生成一张`
+        : `${r.count} 张源帧，${hit} 张检出脸框` +
+          (hit < r.count ? '（没检出的整图重画，官方行为）' : ''))
+    } catch (e) {
+      setEmoMsg(`检测失败：${e instanceof Error ? e.message : e}`)
+    }
+  }, [sel, costume, emoBusy])
+
+  const doGenerateEmotions = useCallback(async () => {
+    if (!sel || emoBusy || emoSel.length === 0) return
+    setEmoBusy(true)
+    setEmoProg(null)
+    setEmoMsg('已提交，排队中…')
+    try {
+      const r = await generateEmotions(sel, {
+        costume,
+        emotions: emoSel,
+        steps: emoParams.steps,
+        target_size: emoParams.target_size,
+        matte: emoParams.matte,
+      })
+      setEmoProg({ done: 0, total: r.total })
+      setEmoMsg(`排队第 ${r.position} 位，共 ${r.total} 张`)
+      for (let i = 0; i < 1800; i++) {
+        const j = await fetchJob(r.job_id)
+        if (j.status === 'done') {
+          const d = await fetchCharacter(sel)
+          setDetail(d)
+          const res = (j.result || {}) as {
+            count?: number; failed?: Array<{ error: string }>
+          }
+          const bad = res.failed?.length ?? 0
+          setEmoMsg(bad
+            ? `完成 ${res.count ?? 0} 张，${bad} 张失败：${res.failed?.[0]?.error || ''}`
+            : `完成 ${res.count ?? 0} 张，已收进角色目录`)
+          setBrowseCostume(costume)
+          setBrowseEmotion(emoSel[0])
+          setTab('assets')
+          onNotice(`表情生成完成（${res.count ?? 0} 张）`)
+          return
+        }
+        if (j.status === 'failed') {
+          setEmoMsg(`生成失败：${j.error || '未知错误'}`)
+          return
+        }
+        const p = j.progress
+        if (p) {
+          setEmoProg({ done: p.done, total: p.total })
+          setEmoMsg(`${p.done}/${p.total}${p.current ? ` · ${p.current}` : ''}`)
+        }
+        await new Promise((res) => setTimeout(res, 1200))
+      }
+      setEmoMsg('等太久了：任务还在跑，去画布那边看任务状态')
+    } catch (e) {
+      setEmoMsg(`生成失败：${e instanceof Error ? e.message : e}`)
+    } finally {
+      setEmoBusy(false)
+    }
+  }, [sel, costume, emoSel, emoParams, emoBusy, onNotice])
 
   /** 素材页能选哪些表情：服务端该服装下真有的 + 保底 neutral（空素材也要能选） */
   const browseEmotions = useMemo(() => {
@@ -549,17 +635,7 @@ export default function CharactersPage({ onNotice }: Props) {
                     白毛白甲会被一起判成背景。
                   </span>
                 </label>
-                <label className="chars-check">
-                  <input type="checkbox" checked={matte}
-                    onChange={(e) => setMatte(e.target.checked)} />
-                  抠掉纯色幕布（官方 bg_remove）
-                  <span className="chars-sub">
-                    用官方那套纯 torch 抠像（边框估幕布色 → 去溢色 → 边缘净化），
-                    <b>不加载任何模型</b>。抠完另存一份 <code>_matte.png</code>，
-                    原图保留。白底/浅色角色慎用——幕布色是按边框取的，
-                    白毛白甲会被一起判成背景。
-                  </span>
-                </label>
+
                 {genMsg && <p className="chars-sub">{genMsg}</p>}
               </div>
             )}
@@ -604,15 +680,108 @@ export default function CharactersPage({ onNotice }: Props) {
                 <p className="chars-sub">
                   官方表情库 {flatEmotions.length} 条（9 个分类，全量原样入库）。
                   每条带 <code>natural_prompt</code>——QI2 直接用它当指令。
+                  <br />
+                  <b>表情是"只改脸"</b>：把脸框裁出来放大重画，再按羽化蒙版贴回原图，
+                  所以脖子、衣服、动作逐像素不变。**点表情卡选中**，再点「批量生成」。
                 </p>
-                <div className="chars-emo-grid">
-                  {flatEmotions.map((e) => (
-                    <div className="chars-emo" key={`${e.category}/${e.key}`} title={e.natural_prompt}>
-                      <img src={emotionIconUrl(e.safe_name)} alt={e.key} loading="lazy" />
-                      <span>{e.key}</span>
-                    </div>
-                  ))}
+
+                <div className="chars-row">
+                  <button type="button" className="mini" onClick={() => void doDetect()}
+                    disabled={emoBusy} title="跑 YOLO 找人脸框，不跑生成模型">
+                    检出脸框
+                  </button>
+                  <span className="chars-sub">
+                    {emoFrames
+                      ? `源帧 ${emoFrames.length} 张（${costume}）`
+                      : `尚未检测（${costume} 的 Neutral 姿势帧就是源帧）`}
+                  </span>
+                  {emoFrames && emoFrames.filter((f) => f.box).length > 0 && (
+                    <span className="chars-sub">
+                      脸框 {emoFrames.filter((f) => f.box).map(
+                        (f) => `#${f.index} ${f.box![2] - f.box![0]}×${f.box![3] - f.box![1]}`).join(' / ')}
+                    </span>
+                  )}
                 </div>
+
+                <div className="chars-row">
+                  <button type="button" className="mini"
+                    onClick={() => setEmoSel(flatEmotions.map((e) => e.safe_name))}>
+                    全选
+                  </button>
+                  <button type="button" className="mini" onClick={() => setEmoSel([])}>
+                    清空
+                  </button>
+                  <span className="chars-sub">已选 {emoSel.length} 个</span>
+                </div>
+
+                <div className="chars-emo-grid">
+                  {flatEmotions.map((e) => {
+                    const on = emoSel.includes(e.safe_name)
+                    return (
+                      <button
+                        type="button"
+                        className={`chars-emo${on ? ' on' : ''}`}
+                        key={`${e.category}/${e.key}`}
+                        title={e.natural_prompt || e.key}
+                        onClick={() => setEmoSel((list) => (on
+                          ? list.filter((x) => x !== e.safe_name)
+                          : [...list, e.safe_name]))}
+                      >
+                        <img src={emotionIconUrl(e.safe_name)} alt={e.key} loading="lazy" />
+                        <span>{e.key}</span>
+                      </button>
+                    )
+                  })}
+                </div>
+
+                <div className="chars-row">
+                  <label>
+                    目标像素档
+                    <select
+                      value={emoParams.target_size}
+                      onChange={(ev) => setEmoParams((p) => ({
+                        ...p, target_size: Number(ev.target.value) }))}
+                    >
+                      <option value={2048}>2048（官方默认，2.0 MP）</option>
+                      <option value={1024}>1024（1.0 MP，快一倍）</option>
+                    </select>
+                  </label>
+                  <label>
+                    步数
+                    <input
+                      type="number" min={8} max={60} value={emoParams.steps}
+                      onChange={(ev) => setEmoParams((p) => ({
+                        ...p, steps: Number(ev.target.value) || 25 }))}
+                    />
+                  </label>
+                  <label className="chars-check">
+                    <input type="checkbox" checked={emoParams.matte}
+                      onChange={(ev) => setEmoParams((p) => ({ ...p, matte: ev.target.checked }))} />
+                    贴回后抠纯色幕布
+                  </label>
+                </div>
+                <p className="chars-sub">
+                  推理边长封顶 1024（24GB 单卡在 1440² 上单张 60s 以上且显存压线）。
+                  目标像素档决定官方公式算出的裁切尺寸，封顶值再压一档。
+                  <b>实测一张到底多久</b>：1024² / 8 步 ≈ 43s，25 步 ≈ 110s。
+                  所以「姿势数 × 表情数」要算着来——3 帧 × 5 表情 ≈ 27 分钟。
+                </p>
+
+                <div className="chars-row">
+                  <button type="button" className="mini wide"
+                    onClick={() => void doGenerateEmotions()}
+                    disabled={emoBusy || emoSel.length === 0}>
+                    {emoBusy ? '生成中…' : `批量生成（${emoSel.length} 个表情）`}
+                  </button>
+                </div>
+                {emoProg && emoProg.total > 0 && (
+                  <div className="chars-prog">
+                    <div className="chars-prog-bar"
+                      style={{ width: `${Math.round((emoProg.done / emoProg.total) * 100)}%` }} />
+                    <span>{emoProg.done}/{emoProg.total}</span>
+                  </div>
+                )}
+                {emoMsg && <p className="chars-sub">{emoMsg}</p>}
               </div>
             )}
 

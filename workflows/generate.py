@@ -667,6 +667,27 @@ def txt2img(eng: Engine, *, prompt: str, negative: Optional[str] = None,
 
 # ---------------- W2 图生图 ----------------
 
+def qwen_edit_image(eng: Engine, *, image: Image.Image, prompt: str,
+                    negative: str = "", seed: int = -1, steps: int = 25,
+                    cfg: float = 3.0, transparent: bool = False,
+                    label: str = "wemo",
+                    model: str = DEFAULT_MODEL) -> Image.Image:
+    """Qwen 指令改图，**直接返回 PIL，不落盘、不做后处理**。
+
+    **为什么要有这条**：`img2img()` 是"出一条能收进资产库的图"——它会像素化、
+    调色板、抠图、写 sidecar、记索引。而表情/换装这类内部产线拿到的图只是
+    **中间态**（马上要被贴回原图或被下一步吃掉），落一次盘再读回来纯属白折腾，
+    还会在资产清单里堆一堆没人要的中间图。
+
+    尺寸跟 `image` 走（`_qwen_call` 会向下对到 16 的倍数）。
+    """
+    return _qwen_call(
+        eng, prompt=prompt, negative=negative or "",
+        width=image.width, height=image.height,
+        steps=steps, seed=seed, ref_image=image,
+        transparent=transparent, model=model, label=label, cfg=cfg)
+
+
 def _qwen_img2img(eng: Engine, *, init_image: str | Path, prompt: str,
                   negative: Optional[str], steps: int, seed: int,
                   transparent: bool, preset: Optional[str], pixel: int,

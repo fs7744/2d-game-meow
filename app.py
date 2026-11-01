@@ -58,6 +58,7 @@ from workflows import generate as gen
 from workflows import assetdb
 from workflows import characters
 from workflows import charactergen
+from workflows import emotiongen
 from workflows import library
 from workflows import matte_screen
 from workflows import paths
@@ -124,6 +125,15 @@ def _run(job_id: str, workflow: str, params: Dict[str, Any]) -> None:
     job = _jobs[job_id]
     job.update(status="running", started=time.time())
     try:
+        if workflow == "wemo":
+            # **表情批量生成**：一层循环出 N×M 张，必须自己报进度，否则前端
+            # 只能干看着「执行中」。它也不走 `publish` 那段——落盘在
+            # `emotiongen.run_batch` 里按源帧序号做（Sprites + Faces 两处）。
+            from workflows import emotiongen
+            with _gpu_lock:                # 单卡不并发
+                job["result"] = emotiongen.run_batch(engine, params, job=job)
+            job["status"] = "done"
+            return
         fn = {"w1": gen.txt2img, "w2": gen.img2img, "w3": gen.inpaint,
               "w4": gen.poseswap, "wbg": gen.matte_bg,
               "w5": gen.ai_repaint, "wpx": gen.pixelify,
@@ -981,6 +991,42 @@ class CharacterGenerateReq(BaseModel):
     matte: Optional[bool] = None
 
 
+class EmotionDetectReq(BaseModel):
+    """表情生成的「先看脸框」请求（**不跑模型**，纯 YOLO，CPU 上百毫秒）。
+
+    前端用它先告出「这套服装有几张源帧、每张的脸框在哪」，用户确认后再提交批量。
+    """
+    costume: str = "Naked"
+    #: 只看这几帧（1 基序号）；空 = 全部源帧
+    poses: List[int] = Field(default_factory=list)
+    threshold: float = float(emotiongen.EMOTION_DEFAULTS["bbox_threshold"])
+    dilation: int = int(emotiongen.EMOTION_DEFAULTS["bbox_dilation"])
+    drop_size: int = int(emotiongen.EMOTION_DEFAULTS["drop_size"])
+
+
+class EmotionGenerateReq(BaseModel):
+    """表情批量生成请求。
+
+    `emotions` 传官方表情库的 `safe_name`（认不出就当自定义表情名处理）。
+    `poses` 是**源帧的 1 基序号**——产物序号跟源帧对齐（`sprite_pose_0003` →
+    `sprite_angry_0003`），两张对着翻才不会错位（官方 `:4541-4543`）。
+    """
+    costume: str = "Naked"
+    emotions: List[str] = Field(default_factory=list)
+    poses: List[int] = Field(default_factory=list)
+    seed: int = -1
+    steps: int = 25
+    cfg: float = 3.0
+    #: 官方默认 2048（= 2.0 MP）；实际裁切尺寸还会被 `crop_max_side` 压一档
+    target_size: int = int(emotiongen.EMOTION_DEFAULTS["target_size"])
+    crop_max_side: int = int(emotiongen.MAX_CROP_SIDE)
+    feather: int = int(emotiongen.EMOTION_DEFAULTS["feather"])
+    #: 要不要把 `Transparent background with alpha channel.` 追加进 prompt
+    transparent: bool = False
+    #: 贴回后再走一遍官方的纯色幕抠像（bg_remove）
+    matte: bool = True
+
+
 @app.post("/characters/{name}/prompt")
 def character_prompt_api(name: str, req: CharacterPromptReq) -> Dict[str, Any]:
     """把 character_info + 风格拼成官方结构的 prompt。
@@ -1091,6 +1137,99 @@ def character_generate_api(name: str, req: CharacterGenerateReq) -> Dict[str, An
     _prune(_jobs, JOB_KEEP)
     return {"job_id": job_id, "status": "queued", "position": _q.qsize(),
             "prompt": prompt, "resolution": [w, h]}
+
+
+@app.post("/characters/{name}/emotions/detect")
+def character_emotions_detect(name: str, req: EmotionDetectReq) -> Dict[str, Any]:
+    """列出这套服装的**源帧**，以及每帧检出的脸框（官方 `:1533`）。
+
+    不带模型出图，只跑 YOLO。前端拿它先告诉用户「会在这几张上改脸、脸框多大」——
+    没有源帧时要能立刻说清「先去出图页生成一张底图」，而不是提交后才报错。
+    """
+    try:
+        safe = characters.ensure_safe_name(name, "角色名")
+        sources = characters.source_sprite_paths(safe, req.costume or "Naked")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not characters.character_exists(safe):
+        raise HTTPException(404, f"没有这个角色：{safe}")
+    wanted = set(int(v) for v in req.poses) if req.poses else None
+    items: List[Dict[str, Any]] = []
+    for index, path in enumerate(sources, start=1):
+        if wanted is not None and index not in wanted:
+            continue
+        box = None
+        size = [0, 0]
+        error = ""
+        try:
+            with Image.open(path) as opened:
+                image = opened.convert("RGBA")
+            size = [image.width, image.height]
+            box = emotiongen.detect_face(
+                image, threshold=req.threshold, dilation=req.dilation,
+                drop_size=req.drop_size)
+        except emotiongen.FaceModelMissing as exc:
+            raise HTTPException(503, str(exc)) from exc
+        except emotiongen.EmotionError as exc:
+            error = str(exc)
+        items.append({
+            "index": index, "path": path, "url": _asset_url(path),
+            "size": size, "box": list(box) if box else None,
+            "detected": box is not None, "error": error,
+        })
+    return {
+        "character": safe, "costume": req.costume or "Naked",
+        "count": len(items), "items": items,
+        "defaults": dict(emotiongen.EMOTION_DEFAULTS),
+        "max_crop_side": emotiongen.MAX_CROP_SIDE,
+    }
+
+
+@app.post("/characters/{name}/emotions/generate")
+def character_emotions_generate(name: str, req: EmotionGenerateReq) -> Dict[str, Any]:
+    """表情批量生成（官方 Emotion Studio）：N 张源帧 × M 个表情，只改脸。
+
+    走同一个单卡队列（一次出很多张，不能跟画布上的任务抢显存），
+    所以立刻返回 `job_id`，前端轮询 `/jobs/<id>` 看 `progress`。
+    """
+    try:
+        safe = characters.ensure_safe_name(name, "角色名")
+        costume = characters.ensure_safe_name(req.costume or "Naked", "服装名")
+        emotions = emotiongen.resolve_emotions(req.emotions)
+    except emotiongen.EmotionError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not characters.character_exists(safe):
+        raise HTTPException(404, f"没有这个角色：{safe}")
+    sources = characters.source_sprite_paths(safe, costume)
+    if not sources:
+        raise HTTPException(
+            400,
+            f"「{safe}」的「{costume}」没有源帧：表情是从 Neutral 姿势帧上改脸的，"
+            "先在「出图」页生成一张底图")
+
+    params: Dict[str, Any] = {
+        "character": safe, "costume": costume,
+        "emotions": [e["safe_name"] for e in emotions],
+        "poses": [int(v) for v in req.poses],
+        "seed": int(req.seed), "steps": int(req.steps), "cfg": float(req.cfg),
+        "target_size": int(req.target_size),
+        "crop_max_side": int(req.crop_max_side),
+        "feather": int(req.feather),
+        "transparent": bool(req.transparent),
+        "matte": bool(req.matte),
+    }
+    total = len(params["poses"] or sources) * len(params["emotions"])
+    job_id = uuid.uuid4().hex[:12]
+    _jobs[job_id] = {"job_id": job_id, "workflow": "wemo", "params": params,
+                     "status": "queued", "created": time.time(),
+                     "progress": {"done": 0, "total": total, "current": ""}}
+    _q.put((job_id, "wemo", params))
+    _prune(_jobs, JOB_KEEP)
+    return {"job_id": job_id, "status": "queued", "total": total,
+            "sources": len(sources), "emotions": params["emotions"],
+            "position": _q.qsize()}
 
 
 @app.get("/characters/{name}/poses/meta")

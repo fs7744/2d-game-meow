@@ -48,17 +48,15 @@ def _to_tensor(im: Image.Image) -> torch.Tensor:
     return t
 
 
-def matte_rgba(src: str, **params: Any) -> Optional[Image.Image]:
-    """抠一张图，返回 RGBA 的 PIL（失败返回 None，让调用方保留原图）。"""
-    if not os.path.isfile(src):
-        return None
-    try:
-        with Image.open(src) as im:
-            im.load()
-            tensor = _to_tensor(im)
-    except (OSError, ValueError) as exc:
-        raise ValueError(f"读不了这张图：{src}（{exc}）") from exc
+def matte_pil(im: Image.Image, **params: Any) -> Optional[Image.Image]:
+    """抠一张**已经在内存里**的图，返回 RGBA。
 
+    表情批量生成要边走边抠（贴回 → 抠 → 落盘），先写盘再读回来纯属白折腾，
+    而且中间那个临时文件还得管。算法与 `matte_rgba` 完全一样，只是不吃路径。
+    """
+    if im is None:
+        return None
+    tensor = _to_tensor(im)
     kw = dict(DEFAULT_PARAMS)
     kw.update({k: v for k, v in params.items() if v is not None and k in DEFAULT_PARAMS})
     with torch.inference_mode():
@@ -66,6 +64,18 @@ def matte_rgba(src: str, **params: Any) -> Optional[Image.Image]:
             tensor, output_mode="straight_rgba", **kw)
     arr = (rgba_t.clamp(0, 1) * 255.0).round().to(torch.uint8).cpu().numpy()
     return Image.fromarray(arr, mode="RGBA")
+
+
+def matte_rgba(src: str, **params: Any) -> Optional[Image.Image]:
+    """抠一张图，返回 RGBA 的 PIL（失败返回 None，让调用方保留原图）。"""
+    if not os.path.isfile(src):
+        return None
+    try:
+        with Image.open(src) as im:
+            im.load()
+            return matte_pil(im, **params)
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"读不了这张图：{src}（{exc}）") from exc
 
 
 def matte_image_file(

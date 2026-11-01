@@ -49,6 +49,12 @@ CHARACTERS_DIR = ASSETS / "characters"
 #: 后端拼 prompt 也从这里读，**不复制第二份**（复制就会有天对不上）。
 VNCCS_TEMPLATE_DIR = ROOT / "web" / "public" / "vnccs" / "character_template"
 
+#: 官方**表情库**（157 条 / 9 个分类，`emotions.json` + 预览 webp）。
+#: 前端直接 fetch `/vnccs/emotions/emotions.json`；后端做表情批量生成时
+#: 也从这里读**同一份**——表情的 natural_prompt / description 只有一份定义，
+#: 复制第二份就会出现「界面显示一个版本、实际喂给模型另一个版本」。
+VNCCS_EMOTION_DIR = ROOT / "web" / "public" / "vnccs" / "emotions"
+
 #: 没有项目归属的上传（旧路径，保留兼容）
 UPLOAD_DIR = ASSETS / "uploads"
 

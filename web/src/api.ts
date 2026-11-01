@@ -640,6 +640,67 @@ export function generateForCharacter(
     { method: 'POST', body: JSON.stringify(body) })
 }
 
+// ---------------- 表情批量生成（官方 Emotion Studio，只改脸） ----------------
+
+/** 一张源帧的人脸检测结果（只为「先看一眼再提交」）。 */
+export type EmotionFrame = {
+  /** 1 基序号：产物序号跟它对齐（`sprite_pose_0003` → `sprite_angry_0003`） */
+  index: number
+  url: string
+  size: number[]
+  /** `[x1, y1, x2, y2]`；没检出脸就是 null（官方此时整图重画） */
+  box: number[] | null
+  detected: boolean
+  error: string
+}
+
+export type EmotionDetectResult = {
+  character: string
+  costume: string
+  count: number
+  items: EmotionFrame[]
+  /** 官方默认参数（target_size 2048 = 2.0 MP / feather 50 …） */
+  defaults: Record<string, number>
+  max_crop_side: number
+}
+
+/** 列出这套服装的源帧并检出脸框（**不跑生成模型**，CPU 上很快）。 */
+export function detectEmotionFaces(
+  name: string, body: { costume?: string; poses?: number[] },
+): Promise<EmotionDetectResult> {
+  return req(`/characters/${encodeURIComponent(name)}/emotions/detect`,
+    { method: 'POST', body: JSON.stringify(body) })
+}
+
+export type EmotionGenerateBody = {
+  costume?: string
+  /** 官方表情库的 safe_name（认不出就当自定义表情名） */
+  emotions: string[]
+  /** 源帧的 1 基序号；空 = 全部 */
+  poses?: number[]
+  seed?: number
+  steps?: number
+  cfg?: number
+  /** 官方 `:1636` 的「总像素档位」（2048 = 2.0 MP），不是边长 */
+  target_size?: number
+  /** 我们的推理边长上限（默认 1024，见 emotiongen 模块注释） */
+  crop_max_side?: number
+  feather?: number
+  transparent?: boolean
+  matte?: boolean
+}
+
+/** 提交表情批量生成（走单卡队列，返回 job_id 轮询）。 */
+export function generateEmotions(
+  name: string, body: EmotionGenerateBody,
+): Promise<{
+  job_id: string; status: string; total: number
+  sources: number; emotions: string[]; position: number
+}> {
+  return req(`/characters/${encodeURIComponent(name)}/emotions/generate`,
+    { method: 'POST', body: JSON.stringify(body) })
+}
+
 export type CharacterPrompt = {
   name: string
   style: string
@@ -979,7 +1040,9 @@ type ApiJob = {
   job_id: string
   status: string
   error?: string
-  result?: { file?: string; meta?: Record<string, unknown> }
+  result?: { file?: string; meta?: Record<string, unknown> } & Record<string, unknown>
+  /** 批量任务的进度（表情批量生成） */
+  progress?: { done: number; total: number; current?: string }
 }
 
 /** meta 里的值类型是 unknown；只要数字，别把字符串混进去。 */
@@ -1013,6 +1076,9 @@ export async function fetchJob(jobId: string): Promise<JobState> {
     attempts: num(meta.attempts),
     gatePassed: num(meta.gate_passed),
     frames: num(meta.frames),
+    // 批量任务：进度 + 结果摘要（表情批量生成用；普通工作流这两个是空的）
+    progress: j.progress,
+    result: j.result as Record<string, unknown> | undefined,
   }
 }
 

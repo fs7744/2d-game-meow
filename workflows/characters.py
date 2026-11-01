@@ -447,6 +447,79 @@ def list_sprite_images(name: str, costume: str = "Naked",
     return _images_in(sprites_dir(name, costume, emotion))
 
 
+def source_sprite_paths(name: str, costume: str = "Naked") -> List[str]:
+    """一套服装的**源帧**（表情生成从这些帧上改脸）。
+
+    官方 `emotion_generator_v2.py:336` `list_costume_sprite_paths`：
+
+    - 候选目录按 `Neutral` → `neutral` → 服装根目录，**前一组非空就只用它**；
+    - 排序后**序号从 1 开始**（`sprite_pose_0001` 就是第 1 帧，表情产物也用同一个
+      序号，见 `:4541-4543` 的 `save_index`）；
+    - 用 `(st_dev, st_ino)` 去重目录：Windows 文件系统大小写不敏感，
+      `Neutral` 与 `neutral` 常常是**同一个目录**，不去重就会把每帧收两遍。
+    """
+    n = ensure_safe_name(name, "角色名")
+    c = ensure_safe_name(costume, "服装名")
+    base = safe_join_under(character_dir(n), "Sprites", c)
+    neutral: List[str] = []
+    direct: List[str] = []
+    seen_roots = set()
+    for sub in ("Neutral", "neutral", ""):
+        d = os.path.join(base, sub) if sub else base
+        if not os.path.isdir(d):
+            continue
+        try:
+            key = (os.stat(d).st_dev, os.stat(d).st_ino)
+            names = sorted(os.listdir(d))
+        except OSError:
+            continue
+        if key in seen_roots:
+            continue
+        seen_roots.add(key)
+        bucket = neutral if sub else direct
+        for fn in names:
+            if os.path.splitext(fn)[1].lower() not in IMAGE_EXTS:
+                continue
+            p = os.path.join(d, fn)
+            if os.path.isfile(p):
+                bucket.append(p)
+    out: List[str] = []
+    seen_paths = set()
+    for p in (neutral or direct):
+        k = os.path.normcase(os.path.abspath(p))
+        if k in seen_paths:
+            continue
+        seen_paths.add(k)
+        out.append(p)
+    return out
+
+
+def face_filename(emotion: str, index: int) -> str:
+    """官方 `_face_prefix_from_sprite_prefix:3982`：`sprite_` → `face_`。"""
+    e = ensure_safe_name(emotion, "表情名")
+    stem = "pose" if e.casefold() == "neutral" else e
+    return f"face_{stem}_{max(1, int(index)):04d}.png"
+
+
+def publish_face_image(name: str, src: str, costume: str, emotion: str,
+                       index: int) -> str:
+    """把**生成的裁切块**存进 `Faces/<服装>/<表情>/face_<表情>_%04d.png`。
+
+    官方 `:4633-4643`：Sprites 存贴回后的整图，Faces 存单独那张脸
+    （`record["face_crop"]`）。两者序号一致，方便对着翻。
+    """
+    n = ensure_safe_name(name, "角色名")
+    c = ensure_safe_name(costume, "服装名")
+    e = ensure_safe_name(emotion, "表情名")
+    if not os.path.isfile(src):
+        raise FileNotFoundError(f"要存的图不存在：{src}")
+    target = faces_dir(n, c, e)
+    os.makedirs(target, exist_ok=True)
+    out = os.path.join(target, face_filename(e, index))
+    shutil.copy2(src, out)
+    return out
+
+
 def cover_image(name: str) -> Optional[str]:
     """角色封面：`cache/preview.png`（官方 `character_creator_v2.py:1657`）。
 
@@ -491,7 +564,7 @@ def sprite_filename(emotion: str, index: int) -> str:
 def publish_image(
     name: str, src: str, costume: str = "Naked",
     emotion: str = "neutral", set_cover: bool = True,
-    matte: bool = False,
+    matte: bool = False, index: Optional[int] = None,
 ) -> Dict[str, Any]:
     """把一张生成出来的图**追加**进角色目录（不覆盖已有素材）。
 
@@ -499,6 +572,10 @@ def publish_image(
     给"一次出一整批（一组姿势帧）"用的——整批替换、旧的进 V1。我们这里是**逐张**
     发布（官方目录里本来也是 `sprite_pose_0001..N` 一张张攒起来的），
     一张新图把前面全推进 V1 显然是错的。等做批量姿势生成时再用 staged 那条路。
+
+    `index` 显式给了就用它（表情生成要用**源帧的序号**：
+    `sprite_pose_0003.png` 的表情版必须是 `sprite_angry_0003.png`，
+    两张对着翻才不会错位，官方 `:4541-4543` 的 `save_index` 就是干这个的）。
     """
     n = ensure_safe_name(name, "角色名")
     c = ensure_safe_name(costume, "服装名")
@@ -507,7 +584,7 @@ def publish_image(
         raise FileNotFoundError(f"要收编的图不存在：{src}")
     target = sprites_dir(n, c, e)
     os.makedirs(target, exist_ok=True)
-    index = next_sprite_index(n, c, e)
+    index = int(index) if index else next_sprite_index(n, c, e)
     fname = sprite_filename(e, index)
     ext = os.path.splitext(src)[1] or ".png"
     if ext.lower() != ".png":

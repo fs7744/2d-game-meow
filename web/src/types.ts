@@ -252,6 +252,15 @@ export type JobState = {
   gatePassed?: number
   frames?: number
   startedAt?: number
+  /**
+   * 批量任务的进度（表情批量生成用）。
+   *
+   * 一批几十张要跑几分钟，只给 `queued/running` 的话用户完全不知道还剩多久；
+   * 后端 `emotiongen.run_batch` 每张更新一次。
+   */
+  progress?: { done: number; total: number; current?: string }
+  /** 批量任务的结果摘要（表情批量：`count` / `failed[]` / `items[]`） */
+  result?: Record<string, unknown>
 }
 
 export type NodeView = 'expanded' | 'image'

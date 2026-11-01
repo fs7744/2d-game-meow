@@ -32,6 +32,8 @@ function makeFetch() {
   const serverCharacters = new Set()
   // 分配项目 id 的计数器
   let serverSeq = 0
+  // 表情批量任务的模拟进度（null = 没有在跑）
+  let emotionJob = null
   // 保存时是否报冲突（模拟别的窗口改了同一个项目）
   let saveConflictMode = false
   const fetchFn = async (url, init = {}) => {
@@ -55,6 +57,47 @@ function makeFetch() {
         }),
       }
     }
+    // ---- 表情批量生成（官方 Emotion Studio：只改脸）----
+    //
+    // **必须排在角色出图那条前面**：`/emotions/generate` 也以 `/generate` 结尾，
+    // 顺序反了会被「角色出图」分支抢走，然后测试怎么都等不到 progress。
+    if (String(url).includes('/emotions/detect')) {
+      return {
+        ok: true,
+        json: async () => ({
+          character: 'Alice', costume: 'Naked', count: 2,
+          items: [
+            { index: 1, url: '/files/a.png', size: [512, 768],
+              box: [180, 90, 300, 210], detected: true, error: '' },
+            // 第二张故意检不出脸：官方此时整图重画，前端要能把这事说出来
+            { index: 2, url: '/files/b.png', size: [512, 768],
+              box: null, detected: false, error: '' },
+          ],
+          defaults: { target_size: 2048, bbox_threshold: 0.5, bbox_dilation: 50,
+            drop_size: 10, feather: 50, face_denoise: 1 },
+          max_crop_side: 1024,
+        }),
+      }
+    }
+    if (String(url).includes('/emotions/generate')) {
+      jobSeq += 1
+      emotionJob = { polls: 0 }
+      return {
+        ok: true,
+        json: async () => ({
+          job_id: `job-${jobSeq}`, status: 'queued',
+          total: 4, sources: 2, emotions: ['angry', 'smile'], position: 1,
+        }),
+      }
+    }
+    if (String(url).includes('/vnccs/emotions/emotions.json')) {
+      return {
+        ok: true,
+        json: async () => JSON.parse(readFileSync(
+          resolve(here, 'public/vnccs/emotions/emotions.json'), 'utf8')),
+      }
+    }
+
     // ---- 角色中心（assets/characters/）----
     if (String(url).endsWith('/characters') && (init.method || 'GET') === 'POST') {
       const b = JSON.parse(init.body || '{}')
@@ -252,6 +295,31 @@ function makeFetch() {
       return { ok: true, json: async () => ({ job_id: `job-${jobSeq}` }) }
     }
     if (String(url).includes('/jobs/')) {
+      // 表情批量：第一次查询返回「跑到一半」，第二次返回完成。
+      // 进度是这一批任务的**唯一**可见信号，必须能在界面上看到。
+      if (emotionJob) {
+        emotionJob.polls += 1
+        if (emotionJob.polls < 2) {
+          return {
+            ok: true,
+            json: async () => ({
+              job_id: 'job-emo', status: 'running',
+              progress: { done: 2, total: 4, current: 'smile / 第 1 帧' },
+            }),
+          }
+        }
+        return {
+          ok: true,
+          json: async () => ({
+            job_id: 'job-emo', status: 'done',
+            progress: { done: 4, total: 4, current: '' },
+            result: {
+              count: 4, total: 4, failed: [],
+              items: [{ index: 1, emotion: 'angry' }, { index: 2, emotion: 'smile' }],
+            },
+          }),
+        }
+      }
       // **服务端异常模式**：模拟任务查询一直失败（服务挂了 / 网络断）。
       // 节点必须能自己从「执行中」退出来，不能一直转圈。
       if (jobsFailMode) {
@@ -3206,6 +3274,110 @@ function check(name, cond, extra = '') {
     [...doc.querySelectorAll('.chars-tab')].some(
       (t) => t.classList.contains('on') && (t.textContent || '').includes('素材')))
   check('出图场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 47b) 表情批量生成：官方 Emotion Studio 的「只改脸」
+//
+// 表情不是"再出一张整图"——官方把脸框裁出来放大重画，再按羽化蒙版贴回原图，
+// 所以脖子/衣服/动作逐像素不变（character_generator.py:1591-1708）。
+// 这一组钉住三件事：
+//   1. 先检脸框（不跑生成模型），把「几张源帧、脸框多大」摆给用户看；
+//   2. 选中的表情按 safe_name 提交，不是把 157 条全发过去；
+//   3. 批量任务的**进度**真的显示出来了（一批几十张，没进度只能干等）。
+{
+  const { dom, errors } = await boot('')
+  const doc = dom.window.document
+  const win = dom.window
+  await new Promise((r) => setTimeout(r, 400))
+  const click = (el) => el.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  const setInput = (el, v) => {
+    Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value').set.call(el, v)
+    el.dispatchEvent(new win.Event('input', { bubbles: true }))
+  }
+
+  // 进角色中心并建一个角色
+  ;[...doc.querySelectorAll('.view-tab')][1]?.dispatchEvent(
+    new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 250))
+  setInput(doc.querySelector('.chars-new input'), 'Alice')
+  await new Promise((r) => setTimeout(r, 80))
+  click([...doc.querySelectorAll('.chars-new button')][0])
+  await new Promise((r) => setTimeout(r, 300))
+
+  // 切到「表情」页
+  const tab = [...doc.querySelectorAll('.chars-tab')]
+    .find((t) => (t.textContent || '').includes('表情'))
+  check('详情有「表情」页', !!tab)
+  click(tab)
+  await new Promise((r) => setTimeout(r, 500))
+
+  const body = () => doc.querySelector('.chars-body')?.textContent || ''
+  check('表情库是真数据（157 条）',
+    body().includes('157 条'), body().slice(0, 80))
+  check('说明里写清了「只改脸」',
+    body().includes('只改脸') && body().includes('羽化'),
+    body().slice(0, 120))
+
+  // ---- 1. 先检脸框 ----
+  const detectBtn = [...doc.querySelectorAll('.chars-body button')]
+    .find((b) => (b.textContent || '').includes('检出脸框'))
+  check('有「检出脸框」按钮', !!detectBtn)
+  click(detectBtn)
+  await new Promise((r) => setTimeout(r, 500))
+  check('调用了 /emotions/detect',
+    calls.some((c) => c.url.includes('/characters/Alice/emotions/detect')))
+  check('检完显示源帧数与脸框尺寸',
+    body().includes('源帧 2 张') && body().includes('120×120'),
+    body().slice(0, 200))
+
+  // ---- 2. 选表情 ----
+  const cards = () => [...doc.querySelectorAll('.chars-emo')]
+  check('表情卡可点选（是 button，不是死图）',
+    cards().length > 0 && cards()[0].tagName === 'BUTTON', cards()[0]?.tagName)
+  click(cards()[0])
+  click(cards()[1])
+  await new Promise((r) => setTimeout(r, 150))
+  check('选中状态看得见（.on）',
+    doc.querySelectorAll('.chars-emo.on').length === 2,
+    String(doc.querySelectorAll('.chars-emo.on').length))
+  check('显示已选数量', body().includes('已选 2 个'))
+
+  // ---- 3. 提交批量生成 ----
+  const genBtn = [...doc.querySelectorAll('.chars-body button')]
+    .find((b) => (b.textContent || '').includes('批量生成'))
+  check('有「批量生成」按钮', !!genBtn)
+  check('选之前/没选时按钮是禁用的语义（有选中才可用）',
+    genBtn && !genBtn.disabled)
+  click(genBtn)
+  // **一次轮询之内**就要看到进度条：mock 的第一次 /jobs 查询返回 running 2/4，
+  // 第二次才 done。等太久的话任务已经结束、界面切到素材页，就再也断不到进度了。
+  await new Promise((r) => setTimeout(r, 450))
+
+  const genCall = calls.find((c) => c.url.includes('/characters/Alice/emotions/generate'))
+  check('提交到 /emotions/generate', !!genCall, genCall?.url)
+  if (genCall) {
+    const b = JSON.parse(genCall.body)
+    check('只提交选中的两个表情（按 safe_name）',
+      Array.isArray(b.emotions) && b.emotions.length === 2, JSON.stringify(b.emotions))
+    check('带上官方默认参数（target_size 2048 / 步数 25）',
+      b.target_size === 2048 && b.steps === 25, JSON.stringify(b))
+    check('带上服装', b.costume === 'Naked', b.costume)
+  }
+  check('批量任务有进度条', !!doc.querySelector('.chars-prog'),
+    String(doc.querySelectorAll('.chars-prog').length))
+  const ptext = doc.querySelector('.chars-prog')?.textContent || ''
+  check('进度显示 done/total', ptext.includes('/'), ptext)
+  check('进度里带当前在做哪一张',
+    (doc.querySelector('.chars-body')?.textContent || '').includes('smile'),
+    (doc.querySelector('.chars-body')?.textContent || '').slice(-80))
+
+  // 等到完成
+  await new Promise((r) => setTimeout(r, 1600))
+  check('完成后切到素材页（能马上翻刚出的图）',
+    [...doc.querySelectorAll('.chars-tab')].some(
+      (t) => t.classList.contains('on') && (t.textContent || '').includes('素材')))
+  check('表情批量场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 
