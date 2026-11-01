@@ -914,6 +914,10 @@ export default function CharactersPage({ onNotice }: Props) {
                 {detail.costumes.map((c) => zh(COSTUME_LABEL, c)).join(' / ')}
               </span>
               <span className="spacer" />
+              {/* 主 CTA：直达出图（官方左栏顶部就是 GENERATE PREVIEW 主按钮） */}
+              <button type="button" className="mini primary" onClick={() => setTab('gen')}>
+                出图
+              </button>
               <button type="button" className="mini" onClick={() => void doRename()}>改名</button>
             </div>
             <div className="chars-tabs">
@@ -1173,7 +1177,7 @@ export default function CharactersPage({ onNotice }: Props) {
                   </span>
                 </div>
                 <div className="chars-row">
-                  <button type="button" className="mini wide" onClick={() => void doGenerate('w1')}
+                  <button type="button" className="mini wide primary" onClick={() => void doGenerate('w1')}
                     disabled={genBusy || !cPrompt}>
                     {genBusy ? '生成中…' : '生成底图（文生图）'}
                   </button>
@@ -1612,6 +1616,66 @@ export default function CharactersPage({ onNotice }: Props) {
               </div>
             )}
           </>
+        )}
+
+        {/* ---------- 右：操作流水线（官方把生成阶段分组，这里照做） ---------- */}
+        {sel && detail && (
+          <div className="chars-ops">
+            <div className="chars-ops-head">生成流水线</div>
+
+            <div className="chars-ops-group">
+              <div className="chars-ops-group-title">① 干净底图</div>
+              <button type="button" className="mini" onClick={() => void doUnderwear()}
+                disabled={uwBusy}
+                title="官方 remove_clothes：换成白色内衣，得到一张干净底图（后续每套服装都从它出发）">
+                {uwBusy ? '处理中…' : '换白内衣底图'}
+              </button>
+              <span className="chars-sub">
+                换成白色内衣，得到干净底图（存成「白内衣」），后续衣服都从它出发。
+              </span>
+              {uwMsg && <p className="chars-sub">{uwMsg}</p>}
+            </div>
+
+            <div className="chars-ops-group">
+              <div className="chars-ops-group-title">② 换装 / 姿势 / 表情</div>
+              <button type="button" className="mini" onClick={() => setTab('clothes')}>
+                换装（服装页）
+              </button>
+              <button type="button" className="mini" onClick={() => setTab('gen')}>
+                出姿势（出图页）
+              </button>
+              <button type="button" className="mini" onClick={() => setTab('emotions')}>
+                出表情（表情库页）
+              </button>
+            </div>
+
+            <div className="chars-ops-group">
+              <div className="chars-ops-group-title">③ 一键全套</div>
+              <button type="button" className="mini primary"
+                onClick={() => void doRunPipeline()}
+                disabled={pipeBusy || !poseDir}
+                title={poseDir
+                  ? '按官方顺序：换白内衣 → 出姿势 → 出表情，一次跑完'
+                  : '先在上面的「出姿势」里选一个骨架帧目录'}>
+                {pipeBusy ? '全套生成中…' : '一键出全套'}
+              </button>
+              <span className="chars-sub">
+                换白内衣 → 出姿势 → 出表情，按官方顺序一次跑完。
+                {!poseDir && '（先选骨架帧目录）'}
+              </span>
+              {pipeMsg && <p className="chars-sub">{pipeMsg}</p>}
+            </div>
+
+            <div className="chars-ops-group">
+              <div className="chars-ops-group-title">④ 图集导出</div>
+              <button type="button" className="mini" onClick={() => void doExportAtlas()}
+                disabled={atlasBusy}
+                title="把当前角色所有帧打包成一张图集（Godot/Aseprite 兼容）">
+                {atlasBusy ? '打包中…' : '导出图集'}
+              </button>
+              {atlasMsg && <p className="chars-sub">{atlasMsg}</p>}
+            </div>
+          </div>
         )}
 
         <TagPicker
