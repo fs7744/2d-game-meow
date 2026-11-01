@@ -3985,7 +3985,7 @@ function check(name, cond, extra = '') {
   }
 
   await new Promise((r) => setTimeout(r, 1500))
-  check('完成后提示存成了哪套服装', body().includes('Underwear'), body().slice(-140))
+  check('完成后提示存成了哪套服装', body().includes('白内衣'), body().slice(-140))
   check('内衣场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }

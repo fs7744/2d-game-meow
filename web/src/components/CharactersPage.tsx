@@ -85,6 +85,9 @@ export default function CharactersPage({ onNotice }: Props) {
   const [styles, setStyles] = useState<StyleCatalog | null>(null)
   const [emotions, setEmotions] = useState<EmotionCatalog | null>(null)
   const [tab, setTab] = useState<'info' | 'gen' | 'clothes' | 'emotions' | 'assets'>('info')
+  /** 最近一次生成操作的完成反馈：成功后显示显眼绿条 + 一键跳去素材页看结果。
+   *  之前每个操作完成只有一行小字 setXxxMsg + 一闪而过的 toast，用户常看不到。 */
+  const [doneFlash, setDoneFlash] = useState<{ text: string; at: number } | null>(null)
   const [newName, setNewName] = useState('')
   /** 「一键建角色」面板（官方 Cloner）：参考图 + 角色名 */
   const [cloneOpen, setCloneOpen] = useState(false)
@@ -390,6 +393,21 @@ export default function CharactersPage({ onNotice }: Props) {
   }, [sel, wizBusy, wizText])
 
   /**
+   * 统一的「完成」反馈：生成操作成功后，弹一个显眼的成功条 + toast，
+   * 并把素材页切到刚产出的那套服装/表情，让用户一眼看到结果。
+   * 之前每个操作各写一句小字，toast 一闪而过，用户经常以为没生成。
+   */
+  const finishOp = useCallback((
+    text: string, costumeName: string, emotionName = 'neutral',
+  ) => {
+    setDoneFlash({ text, at: Date.now() })
+    onNotice(text)
+    setBrowseCostume(costumeName)
+    setBrowseEmotion(emotionName)
+    setTab('assets')
+  }, [onNotice])
+
+  /**
    * 换装：把当前服装的五个字段变成一张**换装底图**（官方 Clothes Designer）。
    *
    * 注意这不是"存描述下次拼 prompt"——它是真的出一张图，落到
@@ -408,10 +426,7 @@ export default function CharactersPage({ onNotice }: Props) {
         if (j.status === 'done') {
           const d = await fetchCharacter(sel)
           setDetail(d)
-          setBrowseCostume(costume)
-          setBrowseEmotion('neutral')
-          setClothMsg('换装完成，已存成这套服装的底图（素材页可看）')
-          onNotice(`「${zh(COSTUME_LABEL, costume)}」换装完成`)
+          finishOp(`「${zh(COSTUME_LABEL, costume)}」换装完成`, costume)
           return
         }
         if (j.status === 'failed') {
@@ -427,7 +442,7 @@ export default function CharactersPage({ onNotice }: Props) {
     } finally {
       setClothBusy(false)
     }
-  }, [sel, costume, costumeDraft, clothBusy, onNotice])
+  }, [sel, costume, costumeDraft, clothBusy, finishOp])
 
   /** 一句话拆服装：五字段填进表单，用户改完再保存（AI 向导不落盘）。 */
   const doClothesWizard = useCallback(async () => {
@@ -471,9 +486,7 @@ export default function CharactersPage({ onNotice }: Props) {
         if (j.status === 'done') {
           const d = await fetchCharacter(sel)
           setDetail(d)
-          setBrowseEmotion('neutral')
-          setPoseMsg(`完成 ${r.total} 张：旧帧已进 V1，素材页可看`)
-          onNotice('多姿势生成完成')
+          finishOp(`多姿势生成完成（${r.total} 张，旧帧已进 V1）`, browseCostume)
           return
         }
         if (j.status === 'failed') {
@@ -492,7 +505,7 @@ export default function CharactersPage({ onNotice }: Props) {
     } finally {
       setPoseBusy(false)
     }
-  }, [sel, poseBusy, poseDir, poseText, browseCostume, onNotice])
+  }, [sel, poseBusy, poseDir, poseText, browseCostume, finishOp])
 
   /**
    * 导出精灵图集（`atlas.png` + `atlas.json`）。
@@ -561,9 +574,7 @@ export default function CharactersPage({ onNotice }: Props) {
         if (j.status === 'done') {
           const d = await fetchCharacter(sel)
           setDetail(d)
-          setBrowseEmotion('neutral')
-          setPipeMsg('全套完成：素材页可看，要接引擎就去导出图集')
-          onNotice('一键出全套完成')
+          finishOp('一键出全套完成（要接引擎就去导出图集）', browseCostume)
           return
         }
         if (j.status === 'failed') {
@@ -585,7 +596,7 @@ export default function CharactersPage({ onNotice }: Props) {
     } finally {
       setPipeBusy(false)
     }
-  }, [sel, pipeBusy, poseDir, pipeUnderwear, pipeEmotions, browseCostume, onNotice])
+  }, [sel, pipeBusy, poseDir, pipeUnderwear, pipeEmotions, browseCostume, finishOp])
 
   /**
    * 换白色内衣底图（官方 `remove_clothes`）。
@@ -604,10 +615,7 @@ export default function CharactersPage({ onNotice }: Props) {
         if (j.status === 'done') {
           const d = await fetchCharacter(sel)
           setDetail(d)
-          setBrowseCostume(r.costume)
-          setBrowseEmotion('neutral')
-          setUwMsg(`完成：已存成「${r.costume}」底图（素材页可看）`)
-          onNotice(`内衣底图已生成`)
+          finishOp(`内衣底图已生成（存成「${zh(COSTUME_LABEL, r.costume)}」）`, r.costume)
           return
         }
         if (j.status === 'failed') {
@@ -623,7 +631,7 @@ export default function CharactersPage({ onNotice }: Props) {
     } finally {
       setUwBusy(false)
     }
-  }, [sel, uwBusy, onNotice])
+  }, [sel, uwBusy, finishOp])
 
   /** 出图：提交 → 轮询 → 完成后后端已经把图收进角色目录了，刷新即可 */
   const doGenerate = useCallback(async (workflow: 'w1' | 'w2') => {
@@ -645,12 +653,7 @@ export default function CharactersPage({ onNotice }: Props) {
         if (j.status === 'done') {
           const d = await fetchCharacter(sel)
           setDetail(d)
-          setTab('assets')
-          setGenMsg(d.assets[costume]?.neutral?.length
-            ? '已收进角色目录（素材页可看）'
-            : '出图完成了，但没收到角色目录里：'
-              + '看任务结果里的 publish_error')
-          onNotice('出图完成')
+          finishOp(`出图完成，已收进「${zh(COSTUME_LABEL, costume)}」`, costume)
           return
         }
         if (j.status === 'failed') {
@@ -666,7 +669,7 @@ export default function CharactersPage({ onNotice }: Props) {
     } finally {
       setGenBusy(false)
     }
-  }, [sel, genBusy, costume, cPrompt, onNotice])
+  }, [sel, genBusy, costume, cPrompt, finishOp])
 
   /**
    * 表情批量生成：先检脸框（不跑生成模型），让用户看到"会在哪几张上改脸"。
@@ -925,6 +928,28 @@ export default function CharactersPage({ onNotice }: Props) {
                 </button>
               ))}
             </div>
+
+            {/* 统一完成反馈：生成成功后的显眼绿条 + 一键跳去素材页看结果 */}
+            {doneFlash && (
+              <div className="chars-done" key={doneFlash.at}>
+                <span className="chars-done-icon">✓</span>
+                <span className="chars-done-text">{doneFlash.text}</span>
+                <button
+                  type="button"
+                  className="mini"
+                  onClick={() => setTab('assets')}
+                >
+                  查看结果
+                </button>
+                <button
+                  type="button"
+                  className="mini"
+                  onClick={() => setDoneFlash(null)}
+                >
+                  ✕
+                </button>
+              </div>
+            )}
 
             {tab === 'info' && (
               <div className="chars-body">
