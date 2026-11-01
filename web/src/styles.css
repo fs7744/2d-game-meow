@@ -1014,6 +1014,8 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
 .pose-row { font-size: 10.5px; color: var(--muted); }
 .pose-lib-sel, .pose-row select { flex: 1; min-width: 0; }
 .pose-row select { flex: 1; }
+.pose-yaw-slider input[type='range'] { flex: 1; min-width: 0; height: 16px; }
+.pose-yaw-val { font-family: var(--mono); font-weight: 400; color: var(--cyan); min-width: 30px; text-align: right; }
 .pose-save input {
   flex: 1; min-width: 0; background: var(--bg-3); color: var(--white);
   border: 1px solid var(--line-strong); border-radius: 2px;

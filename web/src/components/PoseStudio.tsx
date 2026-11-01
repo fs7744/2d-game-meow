@@ -368,6 +368,20 @@ export default function PoseStudio({
         </button>
       </label>
 
+      <label className="pose-row pose-yaw-slider">
+        机位微调
+        <input
+          type="range"
+          min={0}
+          max={359}
+          step={1}
+          value={yaw}
+          disabled={!ready}
+          onChange={(e) => setYaw(Number(e.target.value))}
+        />
+        <b className="pose-yaw-val">{yaw}°</b>
+      </label>
+
       <div className="pose-actions">
         <button type="button" className="mini" onClick={() => post({ type: 'resetView' })}
           disabled={!ready} title="把观察视角拉回正面（不改姿势）">视角</button>
