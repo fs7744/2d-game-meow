@@ -44,6 +44,20 @@
 （`publish_image`）。搞混的后果是把先出的帧挤进 V1 —— 这个坑项目里踩过一次，
 所以两条路的函数分开、注释里互相指明。
 
+### 还要往 prompt 追一句背景
+
+官方 `_prompt_with_solid_background:1827-1843`：非透明底时追
+`Change background to solid {bg} color`，透明底追 `Transparent background with
+alpha channel.`。**必须要**——姿势图与人偶图都带白底，不指定背景出来就是白底，
+抠像没法定阈值，也跟其它帧拼不到一起。（真机第一版就漏了这句，出的是白底图。）
+
+### 还要往 prompt 追一句背景
+
+官方 `_prompt_with_solid_background:1827-1843`：非透明底时追
+`Change background to solid {bg} color`，透明底追 `Transparent background with
+alpha channel.`。**必须要**——姿势图与人偶图都带白底，不指定背景出来就是白底，
+抠像没法定阈值，也跟其它帧拼不到一起。（真机第一版就漏了这句，出的是白底图。）
+
 ### 串行而不是 batch
 
 QI2 是逐张 encode→sample→decode（`:2205`），每张的 latent 尺寸可能都不一样，

@@ -38,6 +38,80 @@ def test_pose_defaults_are_official():
     assert posegen.POSE_DEFAULTS["cfg"] == 1.0
 
 
+def test_prompt_with_solid_background_is_official():
+    """官方 `_prompt_with_solid_background:1827-1843`。
+
+    姿势图带着白底，不指定背景时出来就是白底 —— 抠像没法定阈值，
+    也跟其它帧拼不到一起。
+    """
+    assert posegen.prompt_with_solid_background("", "Green") == (
+        "Change background to solid Green color")
+    assert posegen.prompt_with_solid_background("standing", "Green") == (
+        "standing, Change background to solid Green color")
+    # 已经有了就不重复追
+    assert posegen.prompt_with_solid_background(
+        "Change background to solid Green color", "Green") == (
+        "Change background to solid Green color")
+    # 透明底改追另一句
+    assert posegen.prompt_with_solid_background("standing", "alpha") == (
+        "standing, Transparent background with alpha channel.")
+    # 没给背景就原样
+    assert posegen.prompt_with_solid_background("standing", "") == "standing"
+
+
+def test_run_batch_passes_background_into_prompt(tmp_path):
+    name = "PoseBg"
+    _character(name)
+    seen = []
+
+    def fake_pose(pose_img, char_img, prompt):
+        seen.append(prompt)
+        return Image.new("RGB", (32, 48), (0, 0, 0))
+
+    posegen.run_batch(None, {"character": name, "poses": _poses(tmp_path, 1),
+                             "background_color": "Green", "matte": False},
+                      pose_fn=fake_pose)
+    assert "Change background to solid Green color" in seen[0]
+    ch.delete_character(name)
+
+
+def test_prompt_with_solid_background_is_official():
+    """官方 `_prompt_with_solid_background:1827-1843`。
+
+    姿势图带着白底，不指定背景时出来就是白底 —— 抠像没法定阈值，
+    也跟其它帧拼不到一起。
+    """
+    assert posegen.prompt_with_solid_background("", "Green") == (
+        "Change background to solid Green color")
+    assert posegen.prompt_with_solid_background("standing", "Green") == (
+        "standing, Change background to solid Green color")
+    # 已经有了就不重复追
+    assert posegen.prompt_with_solid_background(
+        "Change background to solid Green color", "Green") == (
+        "Change background to solid Green color")
+    # 透明底改追另一句
+    assert posegen.prompt_with_solid_background("standing", "alpha") == (
+        "standing, Transparent background with alpha channel.")
+    # 没给背景就原样
+    assert posegen.prompt_with_solid_background("standing", "") == "standing"
+
+
+def test_run_batch_passes_background_into_prompt(tmp_path):
+    name = "PoseBg"
+    _character(name)
+    seen = []
+
+    def fake_pose(pose_img, char_img, prompt):
+        seen.append(prompt)
+        return Image.new("RGB", (32, 48), (0, 0, 0))
+
+    posegen.run_batch(None, {"character": name, "poses": _poses(tmp_path, 1),
+                             "background_color": "Green", "matte": False},
+                      pose_fn=fake_pose)
+    assert "Change background to solid Green color" in seen[0]
+    ch.delete_character(name)
+
+
 def test_prompt_for_repeats_last_when_short():
     """官方 `_pose_prompts:1240-1243`：列表短了就重复最后一条，不报错。"""
     assert posegen._prompt_for(0, ["a", "b"], 4) == "a"
@@ -137,7 +211,8 @@ def test_run_batch_uses_one_seed(tmp_path):
     res = posegen.run_batch(None, {"character": name, "poses": _poses(tmp_path, 2),
                                    "prompts": "站立", "matte": False},
                             pose_fn=fake_pose)
-    assert len(set(seen)) == 1 and seen[0] == "站立"
+    # 每张的 prompt 完全一致（含官方那句背景指令），只有种子统一才谈得上"一致"
+    assert len(set(seen)) == 1 and seen[0].startswith("站立")
     assert isinstance(res["seed"], int) and res["seed"] >= 0
     ch.delete_character(name)
 

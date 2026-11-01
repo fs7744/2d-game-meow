@@ -1055,6 +1055,10 @@ class PoseGenReq(BaseModel):
     costume: str = "Naked"
     poses: List[str] = Field(default_factory=list)
     pose_dir: str = ""
+    #: 背景（官方会往 prompt 追一句"改成纯 X 色"）；空 = 用角色自己的
+    background_color: str = ""
+    #: 背景（官方会往 prompt 追一句"改成纯 X 色"）；空 = 用角色自己的
+    background_color: str = ""
     #: 一句话；也可以给"每张一句"的列表（官方 `_pose_prompts` 支持）
     prompts: Any = ""
     steps: int = int(posegen.POSE_DEFAULTS["steps"])
@@ -1342,6 +1346,8 @@ def pose_generate_api(name: str, req: PoseGenReq) -> Dict[str, Any]:
     params: Dict[str, Any] = {
         "character": safe, "costume": costume,
         "poses": poses, "prompts": req.prompts,
+        "background_color": req.background_color,
+        "background_color": req.background_color,
         "steps": int(req.steps), "cfg": float(req.cfg), "seed": int(req.seed),
         "transparent": bool(req.transparent), "matte": bool(req.matte),
         "lora": req.lora,

@@ -54,8 +54,12 @@ def _resolve_pose_paths(poses: Sequence[str], pose_dir: str = "") -> List[str]:
             cand = p[len("/files/"):]
         path = cand if os.path.isabs(cand) else str(paths.ASSETS / cand)
         if not os.path.isfile(path):
-            path2 = str(paths.ASSETS / os.path.basename(cand))
-            path = path2 if os.path.isfile(path2) else path
+            # 退一步：相对 assets 的文件名；再退一步：相对当前工作目录
+            # （tools/ 下的脚本与手工 curl 常直接给相对路径）
+            for alt in (str(paths.ASSETS / os.path.basename(cand)), cand):
+                if os.path.isfile(alt):
+                    path = alt
+                    break
         if os.path.isfile(path) and os.path.splitext(path)[1].lower() in characters.IMAGE_EXTS:
             out.append(path)
     if not out and pose_dir:
@@ -76,6 +80,35 @@ def _resolve_pose_paths(poses: Sequence[str], pose_dir: str = "") -> List[str]:
         seen.add(key)
         uniq.append(p)
     return uniq
+
+
+#: 官方 `character_generator.py:988`（透明底那句，跟换装/表情共用同一句）
+NATIVE_BACKGROUND_PROMPT = "Transparent background with alpha channel."
+
+
+def prompt_with_solid_background(prompt: str, background: str,
+                                 transparent: bool = False) -> str:
+    """官方 `_prompt_with_solid_background:1827-1843`（**逐字**）。
+
+    姿势生成这条会往 prompt 后面追一句"把背景改成纯 X 色"。**必须要**：
+    姿势图和人偶图本身带着白底，不指定背景时出来就是白底——抠像没法定阈值，
+    跟其它帧也拼不到一起。
+
+    `transparent`（或 `background` 本身就是 alpha/transparent）时改追透明底那句。
+    """
+    text = str(prompt or "").strip()
+    is_alpha = transparent or str(background or "").strip().lower() in {"alpha", "transparent"}
+    if is_alpha:
+        if NATIVE_BACKGROUND_PROMPT.lower() in text.lower():
+            return text
+        return f"{text}, {NATIVE_BACKGROUND_PROMPT}" if text else NATIVE_BACKGROUND_PROMPT
+    bg = str(background or "").strip()
+    if not bg:
+        return text
+    instruction = f"Change background to solid {bg} color"
+    if instruction.lower() in text.lower():
+        return text
+    return f"{text}, {instruction}" if text else instruction
 
 
 def _prompt_for(index: int, prompts: Any, total: int) -> str:
@@ -128,6 +161,10 @@ def run_batch(
         os.urandom(3), "big")
     transparent = bool(params.get("transparent"))
     do_matte = bool(params.get("matte"))
+    # 背景：参数优先，否则用角色自己的 background_color（没有就不追这句）
+    info = characters.load_config(name) or {}
+    background = str(params.get("background_color")
+                     or (info.get("character_info") or {}).get("background_color") or "")
 
     if pose_fn is None:
         from workflows import generate as gen
@@ -158,7 +195,9 @@ def run_batch(
         try:
             with Image.open(pose_path) as opened:
                 pose_img = opened.convert("RGB")
-            prompt = _prompt_for(index, params.get("prompts"), total)
+            prompt = prompt_with_solid_background(
+                _prompt_for(index, params.get("prompts"), total),
+                background, transparent)
             image = pose_fn(pose_img, char_img, prompt)
             if image is None:
                 raise PoseGenError("出图没有返回图像")
@@ -200,7 +239,7 @@ def run_batch(
         "character": name, "costume": costume,
         "source": char_path, "count": len(written),
         "sprites": written, "poses": pose_paths[:len(written)],
-        "seed": seed, "steps": steps, "cfg": cfg,
+        "seed": seed, "steps": steps, "cfg": cfg, "background": background,
         "items": items, "failed": failed,
         "seconds": round(time.time() - started, 2),
     }
