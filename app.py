@@ -58,6 +58,7 @@ from workflows import generate as gen
 from workflows import assetdb
 from workflows import characters
 from workflows import charactergen
+from workflows import clothesgen
 from workflows import emotiongen
 from workflows import qwen_llm
 from workflows import library
@@ -126,6 +127,14 @@ def _run(job_id: str, workflow: str, params: Dict[str, Any]) -> None:
     job = _jobs[job_id]
     job.update(status="running", started=time.time())
     try:
+        if workflow == "wcloth":
+            # **换装**：一次一张（25 步、cfg 3.0、挂 Clothes Core LoRA），
+            # 出完落两处：官方的 cache 预览 + 这套服装的第一张底图。
+            from workflows import clothesgen as _clothes
+            with _gpu_lock:                # 单卡不并发
+                job["result"] = _clothes.run_design(engine, params, job=job)
+            job["status"] = "done"
+            return
         if workflow == "wemo":
             # **表情批量生成**：一层循环出 N×M 张，必须自己报进度，否则前端
             # 只能干看着「执行中」。它也不走 `publish` 那段——落盘在
@@ -1011,6 +1020,30 @@ def _raise_llm_error(exc: "qwen_llm.LlmError") -> None:
     )
 
 
+class ClothesDesignReq(BaseModel):
+    """换装出图请求（官方 Clothes Designer 的 QI2 分支）。
+
+    `background_color` 留空就用角色自己的 `background_color`；
+    官方只认 Green/Blue/Transparent，别的值一律当 Green。
+    """
+    costume: str = ""
+    background_color: str = ""
+    #: 官方的另一种模式：照着第 2 张图的衣服穿（服装字段不参与）
+    clone: bool = False
+    steps: int = int(charactergen.CLOTHES_DEFAULTS["steps"])
+    cfg: float = float(charactergen.CLOTHES_DEFAULTS["cfg"])
+    seed: int = -1
+    lora_scale: float = 1.0
+    #: 出完顺带抠掉纯色幕布（绿/蓝底才有意义）
+    matte: bool = True
+
+
+class ClothesWizardReq(BaseModel):
+    """服装 AI 向导：一句话 → top/bottom/shoes/head/face 五个字段。"""
+    description: str = ""
+    timeout: float = 300.0
+
+
 class CharacterWizardReq(BaseModel):
     """AI 向导：一句话 → 9 个属性字段（官方 `character_creator_v2.py:1740`）。
 
@@ -1253,6 +1286,72 @@ def character_generate_api(name: str, req: CharacterGenerateReq) -> Dict[str, An
     _prune(_jobs, JOB_KEEP)
     return {"job_id": job_id, "status": "queued", "position": _q.qsize(),
             "prompt": prompt, "resolution": [w, h]}
+
+
+@app.post("/characters/{name}/clothes/wizard")
+def clothes_wizard_api(name: str, req: ClothesWizardReq) -> Dict[str, Any]:
+    """一句话服装描述 → 五个字段（官方 `clothes_designer.py:885-994`）。
+
+    **不落盘**：结果填进服装表单，用户改完点「保存服装」才写进 config。
+    """
+    try:
+        characters.ensure_safe_name(name, "角色名")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not characters.character_exists(name):
+        raise HTTPException(404, f"没有这个角色：{name}")
+    try:
+        result = qwen_llm.clothes_wizard(
+            req.description, timeout=float(req.timeout or 300.0))
+    except qwen_llm.LlmError as exc:
+        _raise_llm_error(exc)
+    return {
+        "fields": result.get("fields") or {},
+        "seconds": result.get("seconds", 0),
+        "raw": result.get("raw", ""),
+        "description": result.get("description", ""),
+    }
+
+
+@app.post("/characters/{name}/clothes/design")
+def clothes_design_api(name: str, req: ClothesDesignReq) -> Dict[str, Any]:
+    """按服装描述生成一张换装底图（官方 Clothes Designer 的 QI2 分支）。
+
+    **它跟「出图」是两回事**：这里挂 Clothes Core LoRA、走换装专用 prompt
+    （`Dress the character:` + 五个字段 + 背景段），产物落进
+    `Sprites/<服装>/neutral/sprite_pose_0001.png`——那是这套服装的第一张图，
+    后面出姿势/表情都从它出发。
+    """
+    try:
+        safe = characters.ensure_safe_name(name, "角色名")
+        costume = characters.ensure_safe_name(req.costume or "", "服装名")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not characters.character_exists(safe):
+        raise HTTPException(404, f"没有这个角色：{safe}")
+    if not clothesgen.base_sprite(safe):
+        raise HTTPException(
+            400,
+            f"「{safe}」还没有裸装/原始底图：换装是从底图改的，"
+            "先在「出图」页生成一张（Naked 或 Original 服装）")
+
+    params: Dict[str, Any] = {
+        "character": safe, "costume": costume,
+        "background_color": req.background_color,
+        "clone": bool(req.clone),
+        "steps": int(req.steps), "cfg": float(req.cfg), "seed": int(req.seed),
+        "lora_scale": float(req.lora_scale),
+        "matte": bool(req.matte),
+    }
+    job_id = uuid.uuid4().hex[:12]
+    _jobs[job_id] = {"job_id": job_id, "workflow": "wcloth", "params": params,
+                     "status": "queued", "created": time.time(),
+                     "progress": {"done": 0, "total": 1, "current": ""}}
+    _q.put((job_id, "wcloth", params))
+    _prune(_jobs, JOB_KEEP)
+    return {"job_id": job_id, "status": "queued", "costume": costume,
+            "position": _q.qsize(),
+            "defaults": dict(charactergen.CLOTHES_DEFAULTS)}
 
 
 @app.post("/characters/{name}/emotions/detect")

@@ -670,8 +670,9 @@ def txt2img(eng: Engine, *, prompt: str, negative: Optional[str] = None,
 def qwen_edit_image(eng: Engine, *, image: Image.Image, prompt: str,
                     negative: str = "", seed: int = -1, steps: int = 25,
                     cfg: float = 3.0, transparent: bool = False,
-                    label: str = "wemo",
-                    model: str = DEFAULT_MODEL) -> Image.Image:
+                    label: str = "wemo", model: str = DEFAULT_MODEL,
+                    lora: Optional[str] = None,
+                    lora_scale: float = 1.0) -> Image.Image:
     """Qwen 指令改图，**直接返回 PIL，不落盘、不做后处理**。
 
     **为什么要有这条**：`img2img()` 是"出一条能收进资产库的图"——它会像素化、
@@ -680,12 +681,28 @@ def qwen_edit_image(eng: Engine, *, image: Image.Image, prompt: str,
     还会在资产清单里堆一堆没人要的中间图。
 
     尺寸跟 `image` 走（`_qwen_call` 会向下对到 16 的倍数）。
+
+    `lora`：这条产线专用 LoRA（换装要挂 Clothes Core，强度 1.0、**没有触发词**）。
+    挂了它就**独占 LoRA 槽位**（`fast_lora=False`），所以这条路径不会附送
+    快速模式的 Lightning——官方换装也是 25 步全跑，不叠蒸馏。
     """
-    return _qwen_call(
-        eng, prompt=prompt, negative=negative or "",
-        width=image.width, height=image.height,
-        steps=steps, seed=seed, ref_image=image,
-        transparent=transparent, model=model, label=label, cfg=cfg)
+    pipe = eng.txt2img_pipe(model)
+    if not lora:
+        return _qwen_call(
+            eng, prompt=prompt, negative=negative or "",
+            width=image.width, height=image.height,
+            steps=steps, seed=seed, ref_image=image,
+            transparent=transparent, model=model, label=label, cfg=cfg)
+    eng.apply_loras(pipe, [{"name": lora, "scale": float(lora_scale)}], scope="temp")
+    try:
+        return _qwen_call(
+            eng, prompt=prompt, negative=negative or "",
+            width=image.width, height=image.height,
+            steps=steps, seed=seed, ref_image=image,
+            transparent=transparent, model=model, label=label, cfg=cfg,
+            fast_lora=False)      # LoRA 槽位归这条产线
+    finally:
+        eng.unload_loras(pipe, scope="temp")
 
 
 def _qwen_img2img(eng: Engine, *, init_image: str | Path, prompt: str,

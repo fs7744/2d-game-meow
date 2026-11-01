@@ -59,6 +59,28 @@ function makeFetch() {
         }),
       }
     }
+    // ---- 换装（官方 Clothes Designer）----
+    if (String(url).includes('/characters/') && String(url).endsWith('/clothes/wizard')) {
+      return {
+        ok: true,
+        json: async () => ({
+          fields: { top: 'white nurse uniform, mint trim', bottom: 'pleated skirt',
+            shoes: 'white shoes', head: 'nurse cap', face: 'goggles' },
+          seconds: 21.0, raw: '{}', description: '护士',
+        }),
+      }
+    }
+    if (String(url).includes('/characters/') && String(url).endsWith('/clothes/design')) {
+      jobSeq += 1
+      return {
+        ok: true,
+        json: async () => ({
+          job_id: `job-${jobSeq}`, status: 'queued', costume: 'Nurse',
+          position: 1, defaults: { steps: 25, cfg: 3, target_size: 1024 },
+        }),
+      }
+    }
+
     // ---- AI 向导：一句话造角色（纯文本，不需要 mmproj）----
     if (String(url).endsWith('/characters/wizard')) {
       const b = JSON.parse(init.body || '{}')
@@ -3444,6 +3466,93 @@ function check(name, cond, extra = '') {
   check('确认后才保存（向导也不落盘）', !!put, put?.url)
 
   check('AI 向导场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 46d) 换装：五个字段 → 一张换装底图（官方 Clothes Designer）
+//
+// **换装不是"只存描述"**：它把 top/bottom/head/shoes/face 拼成
+// `Dress the character:` 指令，拿裸装底图重画一张，存成这套服装的底图。
+// 这条用例钉住：AI 拆服装能把字段灌进表单；出图前会先把表单存进 config
+// （不然换装读到的是上一次的内容）。
+{
+  const { dom, errors } = await boot('')
+  const doc = dom.window.document
+  const win = dom.window
+  await new Promise((r) => setTimeout(r, 400))
+  const click = (el) => el.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  const setInput = (el, v) => {
+    Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value').set.call(el, v)
+    el.dispatchEvent(new win.Event('input', { bubbles: true }))
+  }
+
+  ;[...doc.querySelectorAll('.view-tab')][1]?.dispatchEvent(
+    new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 250))
+  setInput(doc.querySelector('.chars-new input'), 'Alice')
+  await new Promise((r) => setTimeout(r, 80))
+  click([...doc.querySelectorAll('.chars-new button')][0])
+  await new Promise((r) => setTimeout(r, 300))
+
+  // 进「服装」页
+  const tab = [...doc.querySelectorAll('.chars-tab')]
+    .find((t) => (t.textContent || '').includes('服装'))
+  check('详情有「服装」页', !!tab)
+  click(tab)
+  await new Promise((r) => setTimeout(r, 400))
+  const body = () => doc.querySelector('.chars-body')?.textContent || ''
+  check('说明里写清了换装是「把描述变成一张图」',
+    body().includes('把描述变成一张图') && body().includes('Dress the character'),
+    body().slice(0, 160))
+
+  // ---- 1. AI 拆服装 ----
+  const input = doc.querySelector('.chars-wizard-input')
+  check('服装页有一句话输入框', !!input)
+  setInput(input, '护士，白大褂 + 荧光绿内衬 + 护目镜')
+  await new Promise((r) => setTimeout(r, 80))
+  const wizBtn = [...doc.querySelectorAll('.chars-body button')]
+    .find((b) => (b.textContent || '').includes('AI 拆服装'))
+  check('有「AI 拆服装」按钮', !!wizBtn)
+  click(wizBtn)
+  await new Promise((r) => setTimeout(r, 500))
+  check('调用了 /clothes/wizard',
+    calls.some((c) => c.url.includes('/characters/Alice/clothes/wizard')))
+  const inputs = [...doc.querySelectorAll('.chars-costume input')]
+  check('拆出来的字段填进了表单（顶部第一个）',
+    (inputs[0]?.value || '').includes('nurse uniform'), inputs[0]?.value)
+  check('face 字段也填了（护目镜这种穿戴物）',
+    (inputs[4]?.value || '').includes('goggles'), inputs[4]?.value)
+
+  // ---- 2. 选一套具体服装（Naked 不能换装）----
+  const sel = doc.querySelector('.chars-row select')
+  const setSelect = (el, v) => {
+    Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value').set.call(el, v)
+    el.dispatchEvent(new win.Event('change', { bubbles: true }))
+  }
+  // mock 的角色只有 Naked，这里直接改成目标服装名（真实环境是新建后选中）
+  setSelect(sel, sel.options[0].value)
+  await new Promise((r) => setTimeout(r, 120))
+  const designBtn = () => [...doc.querySelectorAll('.chars-body button')]
+    .find((b) => (b.textContent || '').includes('换装底图'))
+  check('有「出换装底图」按钮', !!designBtn())
+  check('Naked 时按钮禁用（基础集不换装）', designBtn()?.disabled === true)
+
+  // ---- 3. 一句话拆完再保存，才算数 ----
+  const saveBtn = [...doc.querySelectorAll('.chars-costume button')]
+    .find((b) => (b.textContent || '').includes('保存服装'))
+  check('有「保存服装」按钮', !!saveBtn)
+  click(saveBtn)
+  await new Promise((r) => setTimeout(r, 400))
+  const put = calls.filter((c) => c.method === 'PUT'
+    && c.url.includes('/characters/Alice/costumes/')).pop()
+  check('保存服装发到 /costumes/<服装>', !!put, put?.url)
+  if (put) {
+    const b = JSON.parse(put.body)
+    check('存的是表单里的五个字段',
+      JSON.stringify(b).includes('nurse uniform'), JSON.stringify(b).slice(0, 120))
+  }
+
+  check('换装场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 

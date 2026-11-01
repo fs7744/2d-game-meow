@@ -342,15 +342,91 @@ def generation_resolution(target_size: int = 1024) -> Tuple[int, int]:
     return int(width_unit * scale_units), int(height_unit * scale_units)
 
 
-def clothes_prompt(info: Dict[str, Any], costume: Dict[str, str]) -> str:
-    """换装的编辑指令（官方 `clothes_designer.py:413-448`：`Dress the character: ...`）。
+# ---------------------------------------------------------------- 换装（Clothes Designer）
+#
+# 官方 `clothes_designer.py:413-448` `construct_prompt`。换装**不是"只存描述"**——
+# 它是把描述变成一张**换装后的底图**（图生图），这张底图再当后续出姿势的输入。
+# 所以 prompt 有三个必须照抄的部分：指令句、服装描述的顺序、背景段。
 
-    官方这里还会走 `qi2_edit_prompt_rewriter.txt` 扩写（要 LLM），我们暂时**原样**。
+#: 服装的五个字段，**顺序就是 prompt 里的顺序**（官方 `:434` 写死的）
+CLOTHES_FIELDS = ("top", "bottom", "head", "shoes", "face")
+
+#: 官方 `:55-59`：换装只认这三种背景，其余一律当 Green
+CLOTHES_BACKGROUNDS = {"Green", "Blue", "Transparent"}
+
+#: 官方 `:442`：负向词里那句 `(naked, nude, ...:2.0)` 是**带权重的**，别当普通词读
+CLOTHES_NEGATIVE = "bad quality, worst quality, (naked, nude, nipple, penis, vagina:2.0)"
+CLOTHES_NEGATIVE_CLONE = (
+    ", background scenery, patterned background, shapes in background, "
+    "multicolored background, textured background, gradient background")
+CLOTHES_NEGATIVE_BLUE = ", purple background, violet background, gradient background"
+
+#: 官方 QI2 换装采样（`clothes_designer.py:555-556` / `:163`）
+CLOTHES_DEFAULTS = {"steps": 25, "cfg": 3.0, "target_size": 1024}
+
+#: 官方 `:59`：透明底这个值的字面量（不是 "Alpha"——那是**输出**用的）
+TRANSPARENT_BACKGROUND = "Transparent"
+
+
+def normalize_background_color(value: Any, default: str = "Green") -> str:
+    """官方 `:354-356`：`green` / `GREEN` 一律归一到 `Green`/`Blue`/`Transparent`。
+
+    认不出就回 `Green`——不是"什么都不做"：prompt 里的背景段必须有值，
+    否则模型会自己画背景，抠像就废了。
     """
-    parts = [str(v or "").strip() for v in (
-        costume.get("head", ""), costume.get("face", ""),
-        costume.get("top", ""), costume.get("bottom", ""),
-        costume.get("shoes", ""),
-    )]
-    body = ", ".join(p for p in parts if p)
-    return f"Dress the character:\n{body}" if body else "Dress the character:\n"
+    text = str(value or default).strip().capitalize()
+    return text if text in CLOTHES_BACKGROUNDS else default
+
+
+def effective_background_color(value: Any, model_kind: str = "qi2") -> str:
+    """官方 `:359-363`：QI2 支持真透明；别的模型退回 Green。"""
+    background = normalize_background_color(value)
+    if background == TRANSPARENT_BACKGROUND and str(model_kind or "").lower() != "qi2":
+        return "Green"
+    return background
+
+
+def clothes_background_prompt(background_color: str) -> str:
+    """官方 `_clothes_background_prompt:124-135`（**逐字**）。
+
+    为什么把 RGB / hex 都写进 prompt：只说 "green" 模型会画出渐变、墨绿、
+    甚至带紫色的绿，抠像时 `tolerance` 一放宽就把衣服一起吃掉了。
+    """
+    if background_color == TRANSPARENT_BACKGROUND:
+        return "Transparent background with alpha channel."
+    if background_color == "Blue":
+        return ("flat uniform pure blue background, exact RGB (0, 0, 255), "
+                "hex #0000FF, no purple, no violet, no gradient")
+    return ("flat uniform pure green background, exact RGB (0, 255, 0), "
+            "hex #00FF00, no gradient")
+
+
+def clothes_description(costume: Dict[str, str]) -> str:
+    """五个字段按官方顺序用换行拼起来（空值丢掉）。"""
+    parts = [str(costume.get(key, "") or "").strip() for key in CLOTHES_FIELDS]
+    return "\n".join(p for p in parts if p)
+
+
+def construct_clothes_prompt(
+    costume: Dict[str, str], background_color: Any = None, clone: bool = False,
+) -> Tuple[str, str]:
+    """官方 `construct_prompt:413-448`：`(positive, negative)` 一次给全。
+
+    `clone=True` 是官方的另一种模式（"照着第 2 张图的衣服穿"），
+    此时服装字段不参与，而且要多一串"别画背景纹样"的负向词。
+    """
+    bg = effective_background_color(background_color)
+    background_prompt = clothes_background_prompt(bg)
+
+    if clone:
+        positive = f"Dress character to clothes from image 2\n{background_prompt}"
+    else:
+        desc = clothes_description(costume)
+        positive = f"Dress the character:\n{desc}\n{background_prompt}"
+
+    negative = CLOTHES_NEGATIVE
+    if clone:
+        negative += CLOTHES_NEGATIVE_CLONE
+    if bg == "Blue":
+        negative += CLOTHES_NEGATIVE_BLUE
+    return positive, negative

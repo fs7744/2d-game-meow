@@ -494,6 +494,61 @@ def source_sprite_paths(name: str, costume: str = "Naked") -> List[str]:
     return out
 
 
+def latest_sprite_path(name: str, costume: str = "Naked") -> Optional[str]:
+    """一套服装**最新**的一张图（换装的底图就是它）。
+
+    官方 `clothes_designer.py:191-232` `get_latest_sprite_path`，三级回退：
+
+    1. `Sprites/<服装>/Neutral` 递归找（**跳过 V1/V2 归档目录**）；
+    2. 服装目录下的**直接**文件（官方有些角色是把 png 平铺的）；
+    3. 服装目录递归找（同样跳过归档）。
+
+    判"最新"用的是 `(mtime, path)` 而不是文件名——用户可能把别人的角色库
+    拷进来，文件名序号不一定是本机生成的顺序。
+
+    **必须跳过 `V*` 归档目录**：重生成时旧图会被推进 `V1`，不跳过的话
+    "最新"会指到旧版本上去（官方专门写了 `is_sprite_archive_dir`）。
+    """
+    n = ensure_safe_name(name, "角色名")
+    c = ensure_safe_name(costume, "服装名")
+    base = safe_join_under(character_dir(n), "Sprites", c)
+
+    def newest(files: List[str]) -> Optional[str]:
+        usable = [p for p in files
+                  if os.path.isfile(p) and os.path.splitext(p)[1].lower() in IMAGE_EXTS]
+        if not usable:
+            return None
+        return max(usable, key=lambda p: (os.path.getmtime(p), p))
+
+    def walk(dirpath: str) -> List[str]:
+        found: List[str] = []
+        for root, dirs, files in os.walk(dirpath):
+            dirs[:] = [d for d in dirs if not ARCHIVE_DIR_RE.match(d)]
+            found.extend(os.path.join(root, f) for f in files)
+        return found
+
+    if not os.path.isdir(base):
+        return None
+    # 1) Neutral / neutral（大小写两种都认，见 source_sprite_paths 的说明）
+    for sub in ("Neutral", "neutral"):
+        d = os.path.join(base, sub)
+        if os.path.isdir(d):
+            best = newest(walk(d))
+            if best:
+                return best
+    # 2) 直接文件
+    try:
+        direct = [os.path.join(base, f) for f in os.listdir(base)
+                  if os.path.isfile(os.path.join(base, f))]
+    except OSError:
+        direct = []
+    best = newest(direct)
+    if best:
+        return best
+    # 3) 整个服装目录递归
+    return newest(walk(base))
+
+
 def face_filename(emotion: str, index: int) -> str:
     """官方 `_face_prefix_from_sprite_prefix:3982`：`sprite_` → `face_`。"""
     e = ensure_safe_name(emotion, "表情名")

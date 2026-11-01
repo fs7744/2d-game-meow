@@ -22,6 +22,72 @@
 
 ---
 
+## 2026-11-01 · 角色中心 T4：换装（Clothes Designer）+ T6 服装向导
+
+官方 `clothes_designer.py:413-448`（prompt）+ `:493-790`（QI2 出图分支），
+服装向导 `:885-994`（原计划的 T6，跟 T4 一起做掉了）。
+
+### 换装**不是"只存描述"**
+
+这是最容易理解错的地方：它是把五个字段拼成一条图生图指令，拿**裸装底图**
+重画一张**换装后的底图**，存成 `Sprites/<服装>/neutral/sprite_pose_0001.png`。
+之后所有姿势/表情都从这张底图出发。所以衣服是"画进图里"的。
+
+三个必须逐字照抄的部分：
+
+```
+Dress the character:
+{top} {bottom} {head} {shoes} {face}        ← 顺序是官方写死的，不是表单顺序
+flat uniform pure green background, exact RGB (0, 255, 0), hex #00FF00, no gradient
+```
+
+背景段把 **RGB 与 hex 都写进 prompt** 不是啰嗦：只说 "green" 时模型会画渐变、
+墨绿甚至带紫的绿，抠像 `tolerance` 一放宽就把衣服一起吃掉了。蓝底还要额外
+在负向词里压住紫色/渐变。
+
+负向词 `(naked, nude, nipple, penis, vagina:2.0)` 是**带权重的**（`:2.0`），
+不是普通关键词——换装时"别把人画成裸的"优先级必须压过"画衣服"。
+
+### Clothes Core LoRA
+
+`VNCCS_QI2_ClothesCoreV2.6.safetensors`，**强度 1.0、clip 强度 0、没有触发词**
+（`:286,301,711-716`）——它让模型"会换衣服"，不是某个角色/风格。挂了它就
+独占 LoRA 槽位（`fast_lora=False`），所以这条路径不叠快速模式的 Lightning
+（官方换装也是 25 步全跑）。
+
+### 采样与底图
+
+- `steps 25 / cfg 3.0`（`:555-556`）、`target_size 1024`（`:163`）。
+- 底图 = `Naked` 最新一张，没有就退 `Original`（`:479`）。**不能用目标服装
+  自己的图**：新服装本来就是空的，而换装的定义是"从裸装改成这套"。
+- "最新"用 `(mtime, path)` 判，并且**跳过 `V1/V2` 归档目录**（`:203-205`）——
+  不跳过的话重生成一次，"最新底图"就指到上一版，换装会照旧图改。
+
+### 实测（RTX 4090）
+
+灰人偶 + "白色护士服、薄荷绿镶边、护士帽、白鞋" → **37.8s**（768²/8 步/cfg 3）。
+图上确实穿上了这套衣服、背景是纯绿、姿态与体型不变。
+
+### 接口
+
+| 端点 | 作用 |
+|---|---|
+| `POST /characters/<名>/clothes/design` | 出换装底图（走单卡队列，挂 Clothes LoRA） |
+| `POST /characters/<名>/clothes/wizard` | 一句话 → 五字段（不落盘） |
+
+前端「服装」页：一句话拆服装 → 字段灌进表单 → 保存 → 「出换装底图」。
+**出图前会先把表单存进 config**：换装读的是 config 里的服装信息，不先存
+就等于拿上一次的内容去画。
+
+### 顺带修的一个真 bug
+
+**LoRA 文件名带点会让 peft 崩**：adapter 名沿用了文件名，而
+`torch.nn.Module.add_module` 禁止名字含 `.`，于是
+`VNCCS_QI2_ClothesCoreV2.6` 直接抛 `KeyError: module name can't contain "."`。
+现在 adapter 名统一走 `_adapter_name()` 清洗（文件名不变，用户认的是文件名）。
+
+---
+
 ## 2026-11-01 · 角色中心 T3：AI 向导（一句话造角色）
 
 官方 `character_creator_v2.py:1740-1869`，纯文本入口（**不需要 mmproj**），
@@ -2118,6 +2184,7 @@ MEOW_SLOW=1 pytest tests -m slow                  # 真跑 Qwen 的端到端组�
 | `workflows/projectstore.py`（项目落盘） | test_project_store | 3s |
 | `workflows/emotiongen.py`（表情批量） | test_emotiongen（含一条真 YOLO） | 6s |
 | `workflows/qwen_llm.py`（本地 LLM：反推 + 向导） | test_qwen_llm（真推理那条要 `MEOW_SLOW=1`） | 5s |
+| `workflows/clothesgen.py`（换装） | test_clothes | 5s |
 | `workflows/characters.py` / `charactergen.py` | test_characters test_char_poses | 9s |
 | `tools/*` `docs/*` `README` | 不跑（工具靠自身输出验证） | — |
 | 合并 / 发版前 | 全量 | 150s |
@@ -2136,6 +2203,7 @@ test_stability 的 free 与泄漏、test_matte 的缓存素材）需要 GPU。
 | `tests/test_qwen_workflows.py` | **十个工作流的能力表与「近似」标记**、**局部重绘选区外逐点不变**、**output_resolution 真的对齐**、**逐帧尺度归一**、**透明底 alpha 不被白底吃掉**、**Qwen 路径不许碰已删的 SD 管线**、**非人形主体不补提**、**两阶段每帧调两次模型** | 37 |
 | `tests/test_gate.py` | 公共闸门组件（候选怎么跑、同分取第一个、非人形不补提） | 6 |
 | `tests/test_e2e_qwen.py` | **十个工作流各真跑一次模型**（`-m slow`，约 80s） | 10 |
+| `tests/test_clothes.py` | **换装 prompt 逐字**（指令句 / 字段顺序 / 背景 RGB+hex / 权重负向词）、clone 模式、蓝底负向词、**底图优先级 Naked→Original**、**跳过 V1 归档**、出图落盘命名、进度、**接口只返回不落盘** | 21 |
 | `tests/test_qwen_llm.py` | **解析三级降级**（纯 JSON / 代码块 / 数组 / 带解说 / 尾逗号 / 废话）、**属性收敛**（list→逗号、sex/age clamp）、**白名单挡注入**、**透明图压背景色**、**送模型的图缩到 512**、**GGUF magic 校验**、**装错 fork 报 DEPENDENCY_MISSING**、**推理超时**、**错误码 → HTTP 状态**、**不写 config** | 30 |
 | `tests/test_emotiongen.py` | **pad 到 32 倍数用 replicate**、**羽化蒙版是斜坡+模糊（不是硬边）**、**贴回只动框内、alpha 不被贴出方块**、**推理尺寸按官方总像素公式**、**prompt 模板逐字**、**dilation 用了两次**、**产物序号跟源帧对齐**、**没源帧要说清原因**、**单张失败不丢整批**、**队列里的 progress** | 34 |
 | `tests/test_matte.py` | 背景估计、连通域不误抠内部同色区、去白边、alpha 二值、**u2net 抠空自动回退**、**已有 alpha 复用（IoU 1.000）**、**雾状 alpha 仍重抠**、**补内部洞但不动通到边界的缺口** | 18 |

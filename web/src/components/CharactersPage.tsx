@@ -23,7 +23,8 @@ import {
   fetchStyleCatalog, fetchEmotionCatalog, stylePreviewUrl, emotionIconUrl,
   fetchCharacterPrompt, generateForCharacter, fetchJob, fetchCharacterTags,
   detectEmotionFaces, generateEmotions, type EmotionFrame,
-  analyzeCharacter, wizardCharacter, type CharacterPrompt, type TagCatalog,
+  analyzeCharacter, wizardCharacter, designClothes, clothesWizard,
+  type CharacterPrompt, type TagCatalog,
 } from '../api'
 import SpritePreview from './SpritePreview'
 import TagPicker from './TagPicker'
@@ -109,6 +110,12 @@ export default function CharactersPage({ onNotice }: Props) {
   /** AI 向导：一句话造角色（同一块结果面板） */
   const [wizText, setWizText] = useState('')
   const [wizBusy, setWizBusy] = useState(false)
+  /** 换装：一句话拆服装 / 出换装底图 */
+  const [clothText, setClothText] = useState('')
+  const [clothBusy, setClothBusy] = useState(false)
+  const [clothMsg, setClothMsg] = useState('')
+  /** 服装表单的草稿（CostumeForm 受控时会回填，这里只用来喂换装 prompt） */
+  const [costumeDraft, setCostumeDraft] = useState<Record<string, string>>({})
 
   const reload = useCallback(async () => {
     try {
@@ -272,6 +279,64 @@ export default function CharactersPage({ onNotice }: Props) {
     }
   }, [sel, wizBusy, wizText])
 
+  /**
+   * 换装：把当前服装的五个字段变成一张**换装底图**（官方 Clothes Designer）。
+   *
+   * 注意这不是"存描述下次拼 prompt"——它是真的出一张图，落到
+   * `Sprites/<服装>/neutral/sprite_pose_0001.png`，后面出姿势/表情都从它走。
+   */
+  const doDesignClothes = useCallback(async () => {
+    if (!sel || clothBusy) return
+    setClothBusy(true)
+    setClothMsg('已提交，排队中…（25 步，约 1 分钟）')
+    try {
+      // 先把表单里的字段存下来：换装读的是 config 里的服装信息
+      await saveCostume(sel, costume, costumeDraft)
+      const r = await designClothes(sel, { costume })
+      for (let i = 0; i < 600; i++) {
+        const j = await fetchJob(r.job_id)
+        if (j.status === 'done') {
+          const d = await fetchCharacter(sel)
+          setDetail(d)
+          setBrowseCostume(costume)
+          setBrowseEmotion('neutral')
+          setClothMsg('换装完成，已存成这套服装的底图（素材页可看）')
+          onNotice(`「${costume}」换装完成`)
+          return
+        }
+        if (j.status === 'failed') {
+          setClothMsg(`换装失败：${j.error || '未知错误'}`)
+          return
+        }
+        setClothMsg(j.progress?.current ? `换装中：${j.progress.current}` : '换装中…')
+        await new Promise((res) => setTimeout(res, 1200))
+      }
+      setClothMsg('等太久了：任务还在跑，去画布那边看任务状态')
+    } catch (e) {
+      setClothMsg(`换装失败：${e instanceof Error ? e.message : e}`)
+    } finally {
+      setClothBusy(false)
+    }
+  }, [sel, costume, costumeDraft, clothBusy, onNotice])
+
+  /** 一句话拆服装：五字段填进表单，用户改完再保存（AI 向导不落盘）。 */
+  const doClothesWizard = useCallback(async () => {
+    const text = clothText.trim()
+    if (!sel || clothBusy || !text) return
+    setClothBusy(true)
+    setClothMsg('正在拆解（本地 4B 模型，约 20~40 秒）…')
+    try {
+      const r = await clothesWizard(sel, text)
+      const fields = r.fields as Record<string, string>
+      setCostumeDraft((d) => ({ ...d, ...fields }))
+      setClothMsg(`拆好了（${r.seconds}s）——检查下面的字段，确认后点「保存服装」`)
+    } catch (e) {
+      setClothMsg(`拆解失败：${e instanceof Error ? e.message : e}`)
+    } finally {
+      setClothBusy(false)
+    }
+  }, [sel, clothBusy, clothText])
+
   /** 出图：提交 → 轮询 → 完成后后端已经把图收进角色目录了，刷新即可 */
   const doGenerate = useCallback(async (workflow: 'w1' | 'w2') => {
     if (!sel || genBusy) return
@@ -396,8 +461,11 @@ export default function CharactersPage({ onNotice }: Props) {
     return had.length ? had : ['neutral']
   }, [detail, browseCostume])
 
-  const costumeFields = useMemo(
-    () => detail?.config.costumes?.[costume] ?? {}, [detail, costume])
+  // 服装字段的草稿：换角色 / 换服装时从 config 载入。
+  // **必须回填**：AI 向导把五字段灌进来之后，用户还要能在表单上改。
+  useEffect(() => {
+    setCostumeDraft({ ...(detail?.config.costumes?.[costume] ?? {}) })
+  }, [detail, costume])
 
   const saveCostumeFields = useCallback(async (data: Record<string, string>) => {
     if (!sel) return
@@ -788,12 +856,44 @@ export default function CharactersPage({ onNotice }: Props) {
                 <p className="chars-sub">
                   字段照抄官方 Clothes Designer（top/bottom/head/shoes/face/negative_prompt），
                   存进 <code>{(detail.name)}_config.json</code> 的 costumes。
+                  <br />
+                  <b>换装是"把描述变成一张图"</b>：把五个字段拼成
+                  <code>Dress the character:</code> 指令，拿裸装底图重画一张，
+                  存成这套服装的 <code>Sprites/&lt;服装&gt;/neutral/</code> 底图。
+                  之后出姿势/表情都从它出发。
                 </p>
+
+                <div className="chars-row">
+                  <input
+                    className="chars-wizard-input"
+                    placeholder="一句话拆服装，例：赛博朋克护士，白大褂 + 荧光绿内衬 + 护目镜"
+                    value={clothText}
+                    onChange={(e) => setClothText(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') void doClothesWizard() }}
+                  />
+                  <button type="button" className="mini" onClick={() => void doClothesWizard()}
+                    disabled={clothBusy || !clothText.trim()}
+                    title="官方 Clothes Wizard：把一句话拆成五个服装字段（不落盘）">
+                    {clothBusy ? '处理中…' : 'AI 拆服装'}
+                  </button>
+                </div>
                 <CostumeForm
                   key={`${detail.name}/${costume}`}
-                  fields={costumeFields}
+                  fields={costumeDraft}
+                  onChange={setCostumeDraft}
                   onSave={(data) => void saveCostumeFields(data)}
                 />
+                <div className="chars-row">
+                  <button type="button" className="mini wide"
+                    onClick={() => void doDesignClothes()}
+                    disabled={clothBusy || costume === 'Naked' || costume === 'Original'}
+                    title={costume === 'Naked' || costume === 'Original'
+                      ? '裸装/原始是基础集，换装要挑一套具体的衣服'
+                      : '挂 Clothes Core LoRA 出这张换装底图（25 步，约 1 分钟）'}>
+                    {clothBusy ? '换装中…' : `出换装底图（${costume}）`}
+                  </button>
+                </div>
+                {clothMsg && <p className="chars-sub">{clothMsg}</p>}
               </div>
             )}
 
@@ -968,13 +1068,22 @@ export default function CharactersPage({ onNotice }: Props) {
   )
 }
 
-/** 服装字段表单（官方 COSTUME_TEXT_FIELDS 六个字段） */
+/**
+ * 服装字段表单（官方 COSTUME_TEXT_FIELDS 六个字段）。
+ *
+ * **受控**：值由父组件持有，因为「AI 拆服装」要把五个字段直接灌进表单。
+ * 自己存一份 state 的话，向导填出来的东西用户看不到（踩过这个坑）。
+ */
 function CostumeForm({
-  fields, onSave,
-}: { fields: Record<string, string>; onSave: (data: Record<string, string>) => void }) {
-  const [d, setD] = useState<Record<string, string>>({
+  fields, onChange, onSave,
+}: {
+  fields: Record<string, string>
+  onChange: (data: Record<string, string>) => void
+  onSave: (data: Record<string, string>) => void
+}) {
+  const d: Record<string, string> = {
     top: '', bottom: '', shoes: '', head: '', face: '', negative_prompt: '', ...fields,
-  })
+  }
   const labels: Array<[string, string]> = [
     ['top', '上装'], ['bottom', '下装'], ['shoes', '鞋'],
     ['head', '头部'], ['face', '脸部'], ['negative_prompt', '负向词'],
@@ -984,7 +1093,10 @@ function CostumeForm({
       {labels.map(([k, label]) => (
         <label className="chars-field" key={k}>
           {label}
-          <input value={d[k] ?? ''} onChange={(e) => setD((s) => ({ ...s, [k]: e.target.value }))} />
+          <input
+            value={d[k] ?? ''}
+            onChange={(e) => onChange({ ...d, [k]: e.target.value })}
+          />
         </label>
       ))}
       <button type="button" className="mini wide" onClick={() => onSave(d)}>保存服装</button>

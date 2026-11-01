@@ -869,3 +869,120 @@ def wizard_character(
         "raw": str(content or "")[:2000],
         "description": text,
     }
+
+
+# ---------------------------------------------------------------- 服装 AI 向导（T6）
+#
+# 官方 `clothes_designer.py:885-994`。跟角色向导是同一套（纯文本、不需要 mmproj），
+# 差别只在 prompt：这里输出**五个服装字段**，而且对 `face` 有极严的约束。
+
+#: 官方 `:915-919`
+CLOTHES_SYSTEM_PROMPT = (
+    "You are a professional anime/game character costume designer. "
+    "Convert broad outfit ideas into concrete, visual clothing prompts. "
+    "Output valid JSON only."
+)
+
+#: 服装字段（顺序就是表单里的顺序）
+CLOTHES_WIZARD_KEYS = ("top", "bottom", "shoes", "head", "face")
+
+
+def clothes_user_prompt(user_description: str) -> str:
+    """官方 `:920-955` 的 user prompt（**逐字**）。
+
+    `face` 那段的限制是这份 prompt 里最长的一条，不是啰嗦：模型非常爱把
+    "害羞的表情/腮红/口红"塞进 `face`，而那个字段在换装 prompt 里是
+    "戴在脸上的东西"（眼镜、口罩、面纱），塞表情进去会直接把脸改掉。
+    """
+    return f"""
+Expand this abstract clothing idea into detailed outfit parts:
+{user_description}
+
+Return a raw JSON object with exactly these string keys:
+- top
+- bottom
+- shoes
+- head
+- face (ONLY wearable face items/accessories)
+
+Rules:
+- Each value must be a detailed visual description suitable for image generation.
+- Do not repeat the same abstract phrase from the user.
+- Describe materials, colors, shape, trims, accessories, fit, and distinctive details.
+- If a category is not needed, use an empty string.
+- Keep descriptions clothing-focused.
+- The "face" field is NOT for facial expression, makeup, blush, eyeshadow, lipstick, skin, cheeks, or facial features.
+- Use "face" only for wearable/accessory items placed on the face, such as glasses, sunglasses, goggles, mask, veil, eyepatch, respirator, scarf over mouth, piercings, stickers, or temporary tattoos.
+- If there is no wearable face item, set "face" to an empty string.
+- Do not describe the body, pose, background, camera, quality tags, nudity, sex acts, facial expression, makeup, blush, eyeshadow, lipstick, skin, or cheeks.
+
+Example for "Santa Claus costume":
+{{
+  "top": "red velvet Santa coat with thick white fur trim on cuffs, hem and front opening, black leather belt with square gold buckle, long sleeves, festive winter fabric texture",
+  "bottom": "matching red velvet trousers with white fur cuffs, fitted but comfortable costume pants",
+  "shoes": "black polished leather boots with rounded toes and folded cuffs",
+  "head": "red Santa hat with white fur brim and white pom-pom, slightly tilted",
+  "face": ""
+}}
+"""
+
+
+def parse_clothes_wizard_json(content: str) -> Optional[Dict[str, str]]:
+    """官方 `_parse_clothes_wizard_json:276-292`：只要那五个 key，都收敛成字符串。"""
+    data = parse_wizard_json(content)
+    if not isinstance(data, dict):
+        return None
+    out: Dict[str, str] = {}
+    for key in CLOTHES_WIZARD_KEYS:
+        value = data.get(key, "")
+        if isinstance(value, list):
+            value = ", ".join(str(item).strip() for item in value if str(item).strip())
+        elif not isinstance(value, str):
+            value = str(value) if value is not None else ""
+        out[key] = value.strip()
+    return out
+
+
+def clothes_wizard(
+    description: str, *, timeout: float = DEFAULT_TIMEOUT,
+    keep_loaded: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """一句话服装描述 → `top/bottom/shoes/head/face` 五个字段。
+
+    官方 `clothes_designer.py:885-994`：采样 `max_tokens=900 / temperature=0.35`
+    （比角色向导高 0.05——服装要"具体材质细节"，温度高一点描述更活）。
+    """
+    text = str(description or "").strip()
+    if not text:
+        raise LlmError("BAD_REQUEST", "没有输入服装描述")
+    llm = load_llm(vision=False)
+    messages = [
+        {"role": "system", "content": CLOTHES_SYSTEM_PROMPT},
+        {"role": "user", "content": clothes_user_prompt(text)},
+    ]
+
+    def call() -> Any:
+        return llm.create_chat_completion(
+            messages=messages, max_tokens=900, temperature=0.35)
+
+    started = time.time()
+    try:
+        response = _infer(call, timeout)
+    finally:
+        if not (KEEP_LOADED if keep_loaded is None else keep_loaded):
+            unload_llm()
+    seconds = round(time.time() - started, 2)
+    try:
+        content = response["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise LlmError("INFERENCE_ERROR", f"模型返回结构不对：{exc}") from exc
+    parsed = parse_clothes_wizard_json(str(content or ""))
+    if parsed is None:
+        raise LlmError("PARSE_ERROR", "服装向导没返回 JSON（原文见 raw）",
+                       raw=str(content or "")[:2000])
+    return {
+        "fields": parsed,
+        "seconds": seconds,
+        "raw": str(content or "")[:2000],
+        "description": text,
+    }

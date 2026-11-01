@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import gc
 import json
+import re
 import logging
 import os
 import time
@@ -26,6 +27,17 @@ log = logging.getLogger("engine")
 
 # 运行态只有 Qwen：SD 权重已移到 models/_archive/sd/（git tag `sd` 之前的状态）。
 DEFAULT_MODEL = "qwen-image-2.1"
+
+
+def _adapter_name(name: str) -> str:
+    """LoRA 文件名 → peft 的 adapter 名（**不能含 `.`**）。
+
+    peft 用 adapter 名当 `ModuleDict` 的 key，而 `torch.nn.Module.add_module`
+    明确禁止名字里有点：`VNCCS_QI2_ClothesCoreV2.6` 这种带版本号的官方权重
+    会直接抛 `KeyError: module name can't contain "."`（实测踩过）。
+    """
+    cleaned = re.sub(r"[^0-9A-Za-z_\-]+", "_", str(name or "")).strip("_")
+    return f"qwen_{cleaned or 'lora'}"
 
 
 def _lora_keys(path: Path) -> List[str]:
@@ -343,7 +355,10 @@ class Engine:
                 f = self.lora_dir() / name
             if not f.is_file():
                 raise FileNotFoundError(f"LoRA 文件不存在：{name}（见 models/lora/）")
-            adapter = f"qwen_{name}"
+            # **adapter 名不能带点**：peft 把它当模块名，`VNCCS_QI2_ClothesCoreV2.6`
+            # 这种带版本号的会直接抛 `KeyError: module name can't contain "."`。
+            # 文件名不改（用户认的是文件名），只把 adapter 名里的非法字符换掉。
+            adapter = _adapter_name(name)
             pipe.load_lora_weights(str(f), adapter_name=adapter)
             active.append({"name": name, "scale": scale, "adapter": adapter})
         if active:
@@ -383,6 +398,9 @@ class Engine:
     #: 与 `FAST_LORA` 不能同时挂（`_qwen_call` 的 `fast_lora=False` 会跳过
     #: Lightning），也不要和 Outpaint 混用。
     VNCCS_LORA = "vnccs_pose"
+    #: 换装专用（官方 `clothes_designer.py:286`）：**强度 1.0、clip 强度 0、
+    #: 没有触发词**——它的作用是让模型"会换衣服"，不是某个角色/风格。
+    CLOTHES_LORA = "VNCCS_QI2_ClothesCoreV2.6"
 
     def set_fast_mode(self, on: bool) -> Dict[str, Any]:
         """开关快速模式（挂/卸 Lightning + 后续生成步数压到 8）。

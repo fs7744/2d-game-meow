@@ -755,6 +755,43 @@ export async function wizardCharacter(
     { method: 'POST', body: JSON.stringify({ description, timeout }) })
 }
 
+// ---------------- 换装（官方 Clothes Designer） ----------------
+//
+// 换装**不是"只存描述"**：官方是把五个字段拼成一条图生图指令，拿裸装底图
+// 生成一张**换装后的底图**，之后所有姿势/表情都从这张底图出发。
+
+export type ClothesDesignBody = {
+  costume: string
+  /** green / blue / transparent；空 = 用角色自己的 background_color */
+  background_color?: string
+  /** 官方的另一种模式：照着第 2 张图的衣服穿 */
+  clone?: boolean
+  steps?: number
+  cfg?: number
+  seed?: number
+  lora_scale?: number
+  matte?: boolean
+}
+
+/** 提交换装出图（挂 Clothes Core LoRA，走单卡队列）。 */
+export function designClothes(
+  name: string, body: ClothesDesignBody,
+): Promise<{
+  job_id: string; status: string; costume: string; position: number
+  defaults: { steps: number; cfg: number; target_size: number }
+}> {
+  return req(`/characters/${encodeURIComponent(name)}/clothes/design`,
+    { method: 'POST', body: JSON.stringify(body) })
+}
+
+/** 一句话服装描述 → top/bottom/shoes/head/face（不落盘，填进表单让用户改）。 */
+export function clothesWizard(
+  name: string, description: string, timeout = 300,
+): Promise<AnalyzeResult & { description: string }> {
+  return req(`/characters/${encodeURIComponent(name)}/clothes/wizard`,
+    { method: 'POST', body: JSON.stringify({ description, timeout }) })
+}
+
 export type CharacterPrompt = {
   name: string
   style: string
