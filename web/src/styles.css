@@ -1116,6 +1116,11 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
 /* ---------------- 侧栏 LoRA 面板 ----------------
    LoRA 是**全局状态**：挂上后对所有生成生效，所以放在侧栏而不是节点里。
    （节点级的微调要等 LoRA 参数走通生成链路再说。） */
+.lora-item {
+  border-top: 1px solid var(--line, rgba(255,255,255,0.06));
+  padding: 3px 0 5px;
+}
+.lora-item:first-child { border-top: none; }
 .lora-row {
   display: flex; align-items: center; gap: 6px;
   font-size: 11px; color: var(--muted); padding: 2px 0;

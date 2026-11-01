@@ -6,6 +6,7 @@ W1 txt2img / W2 img2img / W3 inpaint / W4 poseswap(+sprite sheet)。
 """
 from __future__ import annotations
 
+import gc
 import itertools
 import json
 import time
@@ -258,8 +259,22 @@ def _infer(eng: Engine, pipe, kw: Dict[str, Any], *, shrink: bool = True,
         try:
             return pipe(**kw)
         except torch.OutOfMemoryError:
+            oom = True
+        except RuntimeError as exc:
+            # CPU 内存 OOM 抛的是 RuntimeError，不是 torch.OutOfMemoryError（那个
+            # 只对应 CUDA）。消息里带 "out of memory" / "alloc_cpu" 就是内存打爆。
+            # cpu offload 模式下权重每次前向都要反量化搬一次，挂了大 LoRA 后
+            # CPU 侧峰值会叠加，最容易在这里爆（GPU 显存反而没满）。
+            msg = str(exc)
+            oom = ("out of memory" in msg.lower()
+                   or "alloc_cpu" in msg
+                   or "cannot allocate memory" in msg.lower())
+            if not oom:
+                raise
+        if oom:
             if attempt >= 2:
                 raise
+            gc.collect()
             torch.cuda.empty_cache()
             eng.drop_others(())            # 清空缓存；正在用的这条仍被引用，不受影响
             w, h = kw.get("width"), kw.get("height")
