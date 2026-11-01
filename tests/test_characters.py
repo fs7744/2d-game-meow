@@ -407,3 +407,39 @@ def test_official_system_prompts_are_bundled():
     """官方那三份提示词模板必须随项目发行（不能读不到就自己编）。"""
     for kind in ("t2i", "fields", "edit"):
         assert cg.qwen_text.system_prompt_of(kind), f"缺官方模板：{kind}"
+
+
+def test_race_features_matches_tag_picker_output():
+    """标签选择器写进字段的值必须能被后端认出来。
+
+    选择器 toggle 写的是 `tag` 的**空格形式**（官方 `presetSelection.toggle`），
+    多个 trait 用 `", "` 拼起来。后端 `race_features` 要能照官方那样逐个查出
+    物种特征——官方 UI 上写着 "Combine species for hybrids"（允许多选混血），
+    所以这儿必须是**多值的**。
+    """
+    from workflows import charactergen as cg
+    # 选择器实际会产生的两种写法
+    one = cg.race_features("elf")
+    assert "Elf:" in one and "pointed ears" in one
+    # 多选（混血）—— 官方明确支持
+    two = cg.race_features("elf, demon")
+    assert "Elf:" in two and "Demon:" in two
+    # label / synonyms 别名也要认（官方给 "bunny girl" 之类留了同义词表）
+    # 注意别写臆测的 tag —— 官方库里没有 catgirl 这种说法，只有 feline beastfolk
+    for alias in ("elf", "dark elf", "feline beastfolk", "bunny girl"):
+        assert cg.race_features(alias), f"认不出 {alias}"
+    # 带权重的写法（用户在字段里随手加了 (...:1.2) 也能用）
+    assert "Elf:" in cg.race_features("(elf:1.3)")
+    # 认不出就别瞎编，返回空由上层决定要不要写这一行
+    assert cg.race_features("zzz_not_a_race") == ""
+
+
+def test_tag_picker_values_round_trip_through_prompt():
+    """端到端：选择器写的值 → 拼进 prompt， species 特征与 eye/hair 字段都在。"""
+    from workflows import charactergen as cg
+    info = {"name": "A", "sex": "female", "age": 18, "race": "elf",
+            "hair": "bob haircut, black hair", "eyes": "blue eyes, green eyes"}
+    p = cg.character_prompt(info, "")
+    assert "Typical species features" in p, "选择器写的 elf 没被认出来"
+    assert "Hair: bob haircut, black hair" in p
+    assert "Eyes: blue eyes, green eyes" in p

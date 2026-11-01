@@ -126,6 +126,28 @@ json 是 PoseStudio 原生格式，`setPose()` 直接吃，不用转换。
 
 ---
 
+## 2026-11-01 · 再续：官方属性标签选择器 + 精灵帧翻看器
+
+### 属性标签选择器（characterTags.ts / TagPicker.tsx）
+
+手填"blonde hair / blonde_hair / Blonde"三种写法混着用，出来的图会飘。官方的
+解法是给每个属性字段配一组标签，点选后写进 tag 里的标准写法。移植自
+`web/character_presets.mjs`（全文 60 行，两个纯函数）。
+
+**用哪份数据是个坑**：官方有两套标签库 —— `character_presets_v2.json`
+（creator_v2，15 个分类，覆盖全部字段）给 QI2；`character_tags.json`
+（legacy，6 个分类只有 hair/eyes/face）给 SDXL 老 UI。官方是 `mode === 'qi2'`
+时强制 creator_v2（`:4000`），我们既然只留 QI2 就用前者。
+
+照搬的两个细节：写入的是 tag 的**空格形式**、已选项按 **tag/label/synonyms
+三种别名**匹配且**保留用户自定义文本**（否则手写的描述会被"选一次标签"清掉）。
+
+后端 `race_features` 本来就吃这套格式（按逗号拆 + 处理权重），所以**多选做混血**
+（官方 UI 上的 "Combine species for hybrids"）直接能用。字段入口是 8 个
+（FIELD_CATEGORIES 7 个 + `breast_size` 是官方调用处的特例）。
+
+---
+
 ## 现状
 
 **底模只有 Qwen-Image-2.1**——SD 的代码与权重都已移除（见「底模」章节）。

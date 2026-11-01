@@ -1401,3 +1401,48 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
 .sprite-nav button:hover { border-color: var(--green); color: var(--green); }
 .sprite-count { font-family: var(--mono); font-size: 11px; color: var(--muted); }
 .sprite-err { font-size: 10.5px; color: var(--pink); }
+
+/* ---- 属性标签选择器（官方 Character Creator 的 Choose Presets）---- */
+.chars-field-row { display: flex; align-items: center; gap: 5px; }
+.chars-field-row input { flex: 1; min-width: 0; }
+.tag-mask {
+  position: fixed; inset: 0; z-index: 600;
+  background: rgba(0, 0, 0, 0.62);
+  display: flex; align-items: center; justify-content: center;
+}
+.tag-modal {
+  display: flex; flex-direction: column; gap: 8px;
+  width: min(96vw, 620px); max-height: 86vh;
+}
+.tag-grid {
+  display: flex; flex-direction: column; gap: 8px;
+  overflow: auto; padding: 2px;
+}
+.tag-group { display: flex; flex-wrap: wrap; gap: 4px; }
+.tag-group-head {
+  width: 100%; font-family: var(--mono); font-size: 10px;
+  color: var(--cyan); border-bottom: 1px solid var(--line); padding-bottom: 2px;
+}
+.tag-chip {
+  background: var(--bg-3); color: var(--white);
+  border: 1px solid var(--line-strong); border-radius: 2px;
+  padding: 3px 8px; font-size: 11px; cursor: pointer;
+}
+.tag-chip:hover { border-color: var(--green); }
+/* 选中的要一眼看得出，不然多选会变成"我到底点过哪几个" */
+.tag-chip.on {
+  border-color: var(--green); color: var(--green);
+  background: rgba(0, 255, 136, 0.12);
+}
+.tag-empty { font-size: 11.5px; color: var(--muted); line-height: 1.7; margin: 0; }
+.tag-foot {
+  display: flex; align-items: flex-end; gap: 8px;
+  border-top: 1px solid var(--line); padding-top: 7px;
+}
+.tag-result { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.tag-result input {
+  width: 100%; background: var(--bg-3); color: var(--white);
+  border: 1px solid var(--line-strong); border-radius: 2px;
+  padding: 3px 6px; font: inherit; font-size: 11px;
+}
+.tag-act { display: flex; gap: 5px; }

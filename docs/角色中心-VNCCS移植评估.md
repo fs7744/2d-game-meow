@@ -313,6 +313,34 @@ QWEN_VL_MODEL_REVISION  = "e966ccab6d3f3c91e94d858b4a01c921a5d7ef53"
   非法路径 400、官方大写目录可读、素材走 `/files/` 能真取到字节），
   前端冒烟一组 12 条。
 
+## 5c. 已搬完的：属性标签选择器（`characterTags.ts` + `TagPicker.tsx`）
+
+对应官方 Character Creator 里那排「Choose Presets」弹窗，**纯数据 + 两个纯函数**，
+零模型依赖。移植自 `web/character_presets.mjs`（全文 60 行）与
+`vnccs_character_creator_v2.js:4000-4060`。
+
+**用的是哪份数据**：官方有两套标签库
+
+| 文件 | 分类数 | 给谁用 |
+|---|---|---|
+| `character_presets_v2.json`（creator_v2） | **15 个**，覆盖全部属性字段 | **QI2**（`mode === 'qi2'` 时强制它，:4000） |
+| `character_tags.json`（legacy） | 6 个，只有 hair/eyes/face | SDXL / Illustrious 老 UI |
+
+我们只移植 QI2，所以用前者。legacy 那份也没白留着，注释里写清了为什么不用。
+
+必须照搬的两个细节：
+
+1. `toggle` 写进字段的是 `tag` 的**空格形式**（`blue_eyes` → `blue eyes`），
+   多个 trait 用 `", "` 拼起来；
+2. 已选项按 **tag / label / synonyms 三种别名**匹配，且**保留用户自定义文本**——
+   否则手写的描述会被"选一次标签"整段清掉。
+
+后端 `race_features` 早就支持这套格式（按逗号拆 + 处理 `(权重)`），所以
+**多选做混血**（官方 UI 上写的 "Combine species for hybrids"）是通的。
+
+`FIELD_CATEGORIES` 有 7 个字段，`breast_size` 是调用处开的**第 8 个入口**
+（:4018：body 弹窗只给体型，胸围单独一个弹窗）——照搬了这个不对称。
+
 ## 5. 可以直接搬的纯代码 / 数据（无模型依赖）
 
 ### 5.1 `utils.py`（根目录，980 行）—— **零 ComfyUI 依赖，最值得整文件搬**

@@ -21,10 +21,11 @@ import {
   createCharacter, deleteCharacter, deleteCostume, fetchCharacter,
   fetchCharacters, renameCharacter, saveCostume, updateCharacterInfo,
   fetchStyleCatalog, fetchEmotionCatalog, stylePreviewUrl, emotionIconUrl,
-  fetchCharacterPrompt, generateForCharacter, fetchJob,
-  type CharacterPrompt,
+  fetchCharacterPrompt, generateForCharacter, fetchJob, fetchCharacterTags,
+  type CharacterPrompt, type TagCatalog,
 } from '../api'
 import SpritePreview from './SpritePreview'
+import TagPicker from './TagPicker'
 
 /** 角色属性字段（官方 character_creator_v2.py:2138-2146 的字段清单） */
 const INFO_TEXT: Array<[key: string, label: string, hint?: string]> = [
@@ -40,6 +41,16 @@ const INFO_TEXT: Array<[key: string, label: string, hint?: string]> = [
   ['negative_prompt', '负向词', ''],
   ['lora_prompt', 'LoRA 触发词', ''],
 ]
+
+/**
+ * 能用官方标签库点选的字段（官方 `FIELD_CATEGORIES`，character_presets.mjs:1-9）。
+ *
+ * **画质词 / 负向词 / LoRA 触发词不在里面** —— 官方也不给这三个做标签选择：
+ * 它们是整段的提示词工程，不是一个一个 trait。
+ */
+const INFO_TAGS = new Set([
+  'race', 'skin_color', 'hair', 'eyes', 'face', 'body', 'breast_size', 'additional_details',
+])
 
 const INFO_NUM: Array<[key: string, label: string]> = [['age', '年龄']]
 
@@ -69,6 +80,10 @@ export default function CharactersPage({ onNotice }: Props) {
   const [enhance, setEnhance] = useState(true)
   /** 抠背景：官方 bg_remove 阶段，纯 torch 零模型 */
   const [matte, setMatte] = useState(true)
+  /** 官方属性标签库（creator_v2），随项目发行、按需拉一次 */
+  const [tagCat, setTagCat] = useState<TagCatalog | null>(null)
+  /** 正在用标签选择器编辑哪个字段 */
+  const [picking, setPicking] = useState<string | null>(null)
   /** 素材页当前在翻哪一组（服装 / 表情） */
   const [browseCostume, setBrowseCostume] = useState('Naked')
   const [browseEmotion, setBrowseEmotion] = useState('neutral')
@@ -96,6 +111,7 @@ export default function CharactersPage({ onNotice }: Props) {
     void reload()
     fetchStyleCatalog().then(setStyles).catch(() => setStyles(null))
     fetchEmotionCatalog().then(setEmotions).catch(() => setEmotions(null))
+    fetchCharacterTags().then(setTagCat).catch(() => setTagCat(null))
   }, [reload])
 
   useEffect(() => {
@@ -394,12 +410,25 @@ export default function CharactersPage({ onNotice }: Props) {
                 {INFO_TEXT.map(([k, label, hint]) => (
                   <label className="chars-field" key={k} title={hint || ''}>
                     {label}
-                    <input
-                      value={String(draft[k] ?? '')}
-                      placeholder={hint || ''}
-                      onChange={(e) => setDraft((d) => ({ ...d, [k]: e.target.value }))}
-                      onBlur={(e) => void saveInfo({ [k]: e.target.value })}
-                    />
+                    <span className="chars-field-row">
+                      <input
+                        value={String(draft[k] ?? '')}
+                        placeholder={hint || ''}
+                        onChange={(e) => setDraft((d) => ({ ...d, [k]: e.target.value }))}
+                        onBlur={(e) => void saveInfo({ [k]: e.target.value })}
+                      />
+                      {/* 官方 Character Creator 的「Choose Presets」：手填容易中带来
+                          一堆近义写法（"blue eyes" vs "blue_eyes"），点选能对齐官方措辞 */}
+                      {INFO_TAGS.has(k) && (
+                        <button
+                          type="button" className="mini"
+                          onClick={() => setPicking(k)}
+                          title="从官方标签库里选（可多选）"
+                        >
+                          选
+                        </button>
+                      )}
+                    </span>
                   </label>
                 ))}
 
@@ -628,6 +657,21 @@ export default function CharactersPage({ onNotice }: Props) {
             )}
           </>
         )}
+
+        <TagPicker
+          open={!!picking}
+          field={picking || ''}
+          label={INFO_TEXT.find(([k]) => k === picking)?.[1] || ''}
+          catalog={tagCat}
+          value={String(draft[picking ?? ''] ?? '')}
+          onClose={() => setPicking(null)}
+          onApply={(v) => {
+            const k = picking
+            if (!k) return
+            setDraft((d) => ({ ...d, [k]: v }))
+            void saveInfo({ [k]: v })
+          }}
+        />
       </div>
     </div>
   )

@@ -120,7 +120,11 @@ function makeFetch() {
         ok: true,
         json: async () => ({
           name,
-          config: { character_info: { name, sex: 'female', age: 18 },
+          config: { character_info: {
+            name, sex: 'female', age: 18,
+            // 官方写的是空格形式，但用户手填常写成下划线；两处都要能认
+            eyes: 'blue_eyes, my own trait',
+          },
             costumes: {}, costume_ids: {}, config_version: '2.0' },
           costumes: ['Naked'],
           // 有素材才会有可选表情：Neutral 3 张、angry 1 张
@@ -130,6 +134,14 @@ function makeFetch() {
           } },
           cover_url: '',
         }),
+      }
+    }
+    // 静态目录里的官方素材：**读磁盘上的真 json**，分类数量也是真的
+    if (String(url).includes('/vnccs/character_template/character_presets_v2.json')) {
+      return {
+        ok: true,
+        json: async () => JSON.parse(readFileSync(
+          resolve(here, 'public/vnccs/character_template/character_presets_v2.json'), 'utf8')),
       }
     }
     // ---- 用户资料库（提示词收藏 / 姿势库 / 偏好）----
@@ -3274,6 +3286,99 @@ function check(name, cond, extra = '') {
     (doc.querySelector('.chars-body')?.textContent || '').includes('只有这一帧'),
     (doc.querySelector('.chars-body')?.textContent || '').slice(-40))
   check('素材翻看场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 49) 属性标签选择器：官方 Character Creator 的「Choose Presets」
+//
+// 手填"blonde hair / blonde_hair / Blonde"三种写法混着用，出来的图会飘。
+// 官方的解法是给每个属性字段配一组标签，点选从动绑定 tag 里的标准写法
+// （移植自 character_presets.mjs 的 presetGroups / presetSelection）。
+{
+  const { dom, errors } = await boot('')
+  const doc = dom.window.document
+  const win = dom.window
+  await new Promise((r) => setTimeout(r, 400))
+
+  ;[...doc.querySelectorAll('.view-tab')][1]
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 250))
+  const setInput = (el, v) => {
+    Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value').set.call(el, v)
+    el.dispatchEvent(new win.Event('input', { bubbles: true }))
+  }
+  setInput(doc.querySelector('.chars-new input'), 'Alice')
+  await new Promise((r) => setTimeout(r, 80))
+  ;[...doc.querySelectorAll('.chars-new button')][0]
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 300))
+  ;[...doc.querySelectorAll('.chars-card')].find((c) =>
+    (c.textContent || '').includes('Alice'))
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 350))
+
+  // 取的是 **creator_v2 那份**（15 个分类），不是 SDXL 时代那份 legacy 的
+  check('取的是 creator_v2 标签库（不是 SDXL 的 legacy tags）',
+    calls.some((c) => c.url.includes('character_presets_v2.json')),
+    calls.map((c) => c.url).filter((u) => u.includes('.json')).join())
+
+  const pickBtns = [...doc.querySelectorAll('.chars-field')]
+    .filter((f) => f.querySelector('button'))
+  // 官方 FIELD_CATEGORIES 有 7 个字段，breast_size 是调用处开的**第 8 个入口**
+  // （character_creator_v2.js:4018：body 弹窗只给体型、胸围单独一个弹窗）
+  check('8 个字段入口有「选」按钮（FIELD_CATEGORIES 7 个 + 胸围特例）',
+    pickBtns.length === 8, pickBtns.map((f) => f.textContent.slice(0, 3)).join('/'))
+  check('画质词/负向词/LoRA 不给标签选择（官方同样是手填）',
+    ![...doc.querySelectorAll('.chars-field')].find((f) =>
+      (f.textContent || '').startsWith('画质词'))?.querySelector('button'))
+
+  // 头发：官方把 6 个分类合成一个弹窗（hair_color / pattern / length /
+  // texture / hairstyles / framing）
+  const hairBtn = [...doc.querySelectorAll('.chars-field')]
+    .find((f) => (f.textContent || '').includes('发型发色'))?.querySelector('button')
+  hairBtn?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 250))
+  check('点「选」弹出标签面板', !!doc.querySelector('.tag-modal'))
+  const heads = [...doc.querySelectorAll('.tag-group-head')].map((h) => h.textContent)
+  check('头发分成 6 组（颜色/挑染/长度/质感/发型/刘海）', heads.length === 6, heads.join('/'))
+  check('chip 显示官方 label', !!doc.querySelector('.tag-chip'))
+
+  // 眼睛：预置值是 'blue_eyes, my own trait' —— 验别名 + 保留自定义文本
+  ;[...doc.querySelectorAll('.tag-mask')][0]
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 200))
+  const eyeBtn = [...doc.querySelectorAll('.chars-field')]
+    .find((f) => (f.textContent || '').includes('眼睛'))?.querySelector('button')
+  eyeBtn?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 250))
+  const chips = [...doc.querySelectorAll('.tag-chip')]
+  const blueChip = chips.find((c) => (c.textContent || '').trim() === 'Blue')
+  check('下划线写法 blue_eyes 也能匹配到 Blue 这个 chip（别名）',
+    blueChip?.classList.contains('on'),
+    blueChip?.className || '（没找到 chip）')
+  const shown = doc.querySelector('.tag-result input')?.value || ''
+  check('打开时把现有值照原样带出来（不偷偷改写用户手写的描述）',
+    shown === 'blue_eyes, my own trait', shown)
+
+  // 点一个 chip：写入的是**空格形式**（官方 toggle 的写法）
+  const greenChip = chips.find((c) => (c.textContent || '').trim() === 'Green')
+  greenChip?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 150))
+  check('选一项后写入框更新（含新增的 green eyes）',
+    (doc.querySelector('.tag-result input')?.value || '').includes('green eyes'),
+    doc.querySelector('.tag-result input')?.value)
+
+  // 确定 → 写回角色属性
+  ;[...doc.querySelectorAll('.tag-act button')]
+    .find((b) => (b.textContent || '').includes('确定'))
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 400))
+  check('确定后关闭面板', !doc.querySelector('.tag-modal'))
+  const put = calls.filter((c) => c.url.includes('/characters/Alice/info')).pop()
+  check('把选好的内容写回服务端角色属性',
+    !!put && JSON.parse(put.body).eyes.includes('green eyes'),
+    put?.body)
+  check('标签选择场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 

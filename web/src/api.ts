@@ -653,6 +653,24 @@ export type CharacterPrompt = {
   defaults: { steps: number; cfg: number; sampler: string; scheduler: string }
 }
 
+/**
+ * 官方角色属性标签库（静态 json，随项目发行）。
+ *
+ * **这份是 QI2 用的 creator_v2 版本**（15 个分类，覆盖全部属性字段）。
+ * 另有一份 legacy 的 `character_tags.json` 是 SDXL 时代的老 UI 在用，不移植。
+ * 官方也是这个取舍：`vnccs_character_creator_v2.js:4000`，mode === 'qi2'
+ * 时强制取 creator_v2。
+ */
+export async function fetchCharacterTags(): Promise<TagCatalog> {
+  const r = await fetch('/vnccs/character_template/character_presets_v2.json')
+  if (!r.ok) throw new Error(`取标签库失败：HTTP ${r.status}`)
+  return r.json() as Promise<TagCatalog>
+}
+
+// 标签的形状只有一处定义（store/characterTags.ts），这里转出来给调用方用
+import type { TagCatalog, TagItem } from './store/characterTags'
+export type { TagCatalog, TagItem }
+
 /** 官方风格库（静态 json，随项目发行）。358 条，13 个分组。 */
 export async function fetchStyleCatalog(): Promise<StyleCatalog> {
   const r = await fetch('/vnccs/character_template/character_styles.json')
