@@ -3837,6 +3837,14 @@ function check(name, cond, extra = '') {
   check('导出后显示图集尺寸与单帧画布',
     body().includes('192×288') && body().includes('96×144'), body().slice(-160))
   check('导出后出现「现有图集」统计', body().includes('现有图集'))
+  // **必须给文件入口**：只显示一行路径的话，用户导出完拿不到东西
+  const atlasImg = doc.querySelector('.chars-atlas-link img')
+  check('图集有缩略图预览', !!atlasImg, atlasImg?.getAttribute('src'))
+  check('缩略图指向真实文件', (atlasImg?.getAttribute('src') || '').includes('atlas.png'),
+    atlasImg?.getAttribute('src'))
+  const jsonLink = [...doc.querySelectorAll('a')]
+    .find((a) => (a.textContent || '').includes('atlas.json'))
+  check('有 atlas.json 的入口', !!jsonLink, jsonLink?.getAttribute('href'))
 
   check('图集导出场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()

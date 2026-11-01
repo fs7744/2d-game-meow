@@ -1349,6 +1349,21 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
 }
 .chars-emo span { font-size: 9.5px; color: var(--muted); text-align: center; }
 
+/* 图集预览：缩略图 + 一行说明，点开在新标签看原图
+   （棋盘底看得出透明区域，pixelated 才不会被浏览器插值糊掉像素边缘） */
+.chars-atlas-link {
+  display: flex; flex-direction: column; gap: 4px; align-items: flex-start;
+  text-decoration: none; width: fit-content;
+}
+.chars-atlas-link img {
+  max-width: 320px; max-height: 200px; object-fit: contain;
+  border: 1px solid var(--line-strong);
+  background: repeating-conic-gradient(var(--bg-3) 0% 25%, var(--bg-2) 0% 50%) 50% / 12px 12px;
+  image-rendering: pixelated;
+}
+.chars-atlas-link span { font-size: 10px; color: var(--muted); }
+.chars-atlas-link:hover span { color: var(--cyan); }
+
 /* 多姿势批量：跟上面的翻看器分开，别把两块控件混在一起 */
 .chars-posegen {
   display: flex; flex-direction: column; gap: 8px;

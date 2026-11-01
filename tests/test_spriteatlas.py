@@ -280,3 +280,155 @@ def test_api_atlas_unknown_character(client):
     r = client.post("/characters/NoSuchAtlasChar/atlas", json={})
     assert r.status_code == 400
     assert "没有可导出" in r.json()["detail"] or "角色" in r.json()["detail"]
+
+
+# ---------------------------------------------------------------- 归档与临时目录
+#
+# 这两个是 review 时发现的**真 bug**（不是假想）：
+#   · `V1`/`V2` 是"重新生成"时旧图进的地方，一起打包会让图集混进上一版的帧；
+#   · `.sprites-*` 是原子发布的临时目录，名字带点，过不了 `ensure_safe_name`
+#     —— 整个导出**直接抛异常**，用户只看到"导出失败"。
+# 用户中断过一次生图就会留下这些，所以必须挡住。
+
+
+def test_collect_frames_skips_version_archive_dirs():
+    """**不能把 `V1`/`V2` 当成表情**。
+
+    不跳过的话：图集混进上一版的帧（引擎播动画时会闪一帧旧图），
+    动画组还会多出 `Naked/neutral/V1` 这种名字。
+    """
+    name = "AtlasArchive"
+    _character(name, ((32, 48), (32, 48)))
+    base = Path(ch.sprites_dir(name, "Naked", "neutral"))
+    for v in ("V1", "V2"):
+        d = base / v
+        d.mkdir(exist_ok=True)
+        Image.new("RGBA", (32, 48), (9, 9, 9, 255)).save(
+            d / "sprite_pose_0001.png")
+
+    frames = sa.collect_frames(name)
+    assert len(frames) == 2, [f.path for f in frames]
+    assert {f.emotion for f in frames} == {"neutral"}
+    ch.delete_character(name)
+
+
+def test_collect_frames_skips_dot_temp_dirs():
+    """`.sprites-xxxx`（原子发布的临时目录）不能让导出崩。
+
+    它的名字以点开头，`ensure_safe_name` 会拒绝（点不在白名单）——
+    修之前这里直接抛 ValueError，用户只看到一句"导出失败"。
+    """
+    name = "AtlasTemp"
+    _character(name, ((32, 48),))
+    temp = Path(ch.sprites_dir(name, "Naked", "neutral")).parent / ".sprites-deadbeef"
+    temp.mkdir(exist_ok=True)
+    Image.new("RGBA", (32, 48), (1, 1, 1, 255)).save(temp / "sprite_pose_0009.png")
+
+    frames = sa.collect_frames(name)          # 不抛就赢了一半
+    assert len(frames) == 1
+    ch.delete_character(name)
+
+
+def test_list_costumes_skips_archive_and_temp():
+    """`list_costumes` 也不该把归档/临时目录当服装。
+
+    修之前它会把 `.sprites-*` 塞进服装列表，调用方再一 `sprites_dir` 就抛。
+    """
+    name = "AtlasCostumes"
+    _character(name, ((32, 48),))
+    sprites = Path(ch.character_dir(name)) / "Sprites"
+    (sprites / "V1").mkdir(exist_ok=True)
+    (sprites / ".sprites-keepout").mkdir(exist_ok=True)
+
+    assert ch.list_costumes(name) == ["Naked"], ch.list_costumes(name)
+    ch.delete_character(name)
+
+
+def test_emotion_names_are_deduped_case_insensitively():
+    """`Neutral` 与 `neutral` 是同一个表情，不能收两遍。
+
+    官方写 `Neutral`（`utils.py:943`），我们写 `neutral`。Windows 上是一个目录
+    （只会列出一个），Linux 上是两个 —— 不去重就会多出一条同名动画。
+    """
+    name = "AtlasCase"
+    _character(name, ((32, 48),))
+    frames = sa.collect_frames(name)
+    groups = [(f.costume.casefold(), f.emotion.casefold()) for f in frames]
+    assert len(groups) == len(set(groups)), groups
+    ch.delete_character(name)
+
+
+# ---------------------------------------------------------------- 归档与临时目录
+#
+# 这两个是 review 时发现的**真 bug**（不是假想）：
+#   · `V1`/`V2` 是"重新生成"时旧图进的地方，一起打包会让图集混进上一版的帧；
+#   · `.sprites-*` 是原子发布的临时目录，名字带点，过不了 `ensure_safe_name`
+#     —— 整个导出**直接抛异常**，用户只看到"导出失败"。
+# 用户中断过一次生图就会留下这些，所以必须挡住。
+
+
+def test_collect_frames_skips_version_archive_dirs():
+    """**不能把 `V1`/`V2` 当成表情**。
+
+    不跳过的话：图集混进上一版的帧（引擎播动画时会闪一帧旧图），
+    动画组还会多出 `Naked/neutral/V1` 这种名字。
+    """
+    name = "AtlasArchive"
+    _character(name, ((32, 48), (32, 48)))
+    base = Path(ch.sprites_dir(name, "Naked", "neutral"))
+    for v in ("V1", "V2"):
+        d = base / v
+        d.mkdir(exist_ok=True)
+        Image.new("RGBA", (32, 48), (9, 9, 9, 255)).save(
+            d / "sprite_pose_0001.png")
+
+    frames = sa.collect_frames(name)
+    assert len(frames) == 2, [f.path for f in frames]
+    assert {f.emotion for f in frames} == {"neutral"}
+    ch.delete_character(name)
+
+
+def test_collect_frames_skips_dot_temp_dirs():
+    """`.sprites-xxxx`（原子发布的临时目录）不能让导出崩。
+
+    它的名字以点开头，`ensure_safe_name` 会拒绝（点不在白名单）——
+    修之前这里直接抛 ValueError，用户只看到一句"导出失败"。
+    """
+    name = "AtlasTemp"
+    _character(name, ((32, 48),))
+    temp = Path(ch.sprites_dir(name, "Naked", "neutral")).parent / ".sprites-deadbeef"
+    temp.mkdir(exist_ok=True)
+    Image.new("RGBA", (32, 48), (1, 1, 1, 255)).save(temp / "sprite_pose_0009.png")
+
+    frames = sa.collect_frames(name)          # 不抛就赢了一半
+    assert len(frames) == 1
+    ch.delete_character(name)
+
+
+def test_list_costumes_skips_archive_and_temp():
+    """`list_costumes` 也不该把归档/临时目录当服装。
+
+    修之前它会把 `.sprites-*` 塞进服装列表，调用方再一 `sprites_dir` 就抛。
+    """
+    name = "AtlasCostumes"
+    _character(name, ((32, 48),))
+    sprites = Path(ch.character_dir(name)) / "Sprites"
+    (sprites / "V1").mkdir(exist_ok=True)
+    (sprites / ".sprites-keepout").mkdir(exist_ok=True)
+
+    assert ch.list_costumes(name) == ["Naked"], ch.list_costumes(name)
+    ch.delete_character(name)
+
+
+def test_emotion_names_are_deduped_case_insensitively():
+    """`Neutral` 与 `neutral` 是同一个表情，不能收两遍。
+
+    官方写 `Neutral`（`utils.py:943`），我们写 `neutral`。Windows 上是一个目录
+    （只会列出一个），Linux 上是两个 —— 不去重就会多出一条同名动画。
+    """
+    name = "AtlasCase"
+    _character(name, ((32, 48),))
+    frames = sa.collect_frames(name)
+    groups = [(f.costume.casefold(), f.emotion.casefold()) for f in frames]
+    assert len(groups) == len(set(groups)), groups
+    ch.delete_character(name)

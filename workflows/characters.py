@@ -394,7 +394,15 @@ def list_costumes(name: str) -> List[str]:
     sp = safe_join_under(character_dir(name), "Sprites")
     if os.path.isdir(sp):
         for item in sorted(os.listdir(sp)):
-            if os.path.isdir(os.path.join(sp, item)) and item not in out:
+            if not os.path.isdir(os.path.join(sp, item)):
+                continue
+            # **跳过版本归档与临时目录**：`V1` 是重新生成时旧图搬进去的地方，
+            # `.sprites-xxxx` 是原子发布的临时目录（进程被杀会残留）。
+            # 它们不是服装 —— 而且点不在名字白名单里，喂给 `sprites_dir`
+            # 会直接抛 ValueError，把整个"列服装"拖崩（图集导出就这么挂过）。
+            if ARCHIVE_DIR_RE.match(item) or item.startswith("."):
+                continue
+            if item not in out:
                 out.append(item)
     return out
 

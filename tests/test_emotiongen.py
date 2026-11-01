@@ -639,7 +639,32 @@ def test_chroma_key_patch_survives_keyer_failure():
         raise RuntimeError("模型炸了")
 
     out = eg.chroma_key_patch(patch, boom, "Green")
-    assert out.size == (10, 10) and out.getpixel((1, 1)) == (1, 2, 3)
+    assert out.size == (10, 10)
+    assert out.convert("RGB").getpixel((1, 1)) == (1, 2, 3)
+
+
+def test_chroma_key_patch_flattens_transparency_onto_screen():
+    """**透明区必须先合成成幕布色**再送抠像。
+
+    这是真机上抓到的 bug：透明像素的 RGB 是 0（黑），直接送抠像的话，
+    抠像只认幕布色，**黑块被整块当成前景留下** —— 一张 52.5% 透明的源图，
+    生成完变成 100% 不透明（背景一片黑）。官方在
+    `_prepare_emotion_detailer_input:3651-3666` 里就是先 `rgb*a + screen*(1-a)`。
+    """
+    patch = Image.new("RGBA", (20, 20), (0, 0, 0, 0))       # 全透明
+    patch.putpixel((10, 10), (200, 30, 30, 255))            # 中间一个不透明点
+    seen = {}
+
+    def fake_key(canvas):
+        seen["center"] = canvas.getpixel((16 + 10, 16 + 10))   # border=16
+        seen["corner"] = canvas.getpixel((0, 0))
+        return Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+
+    eg.chroma_key_patch(patch, fake_key, "Green", context=16)
+    # 透明处应该是幕布绿，**不是黑**
+    assert seen["corner"] == (0, 255, 0), seen["corner"]
+    # 角色像素原样保留
+    assert seen["center"] == (200, 30, 30), seen["center"]
 
 
 def _transparent_source(size=(300, 260)) -> Image.Image:
@@ -752,3 +777,36 @@ def test_crop_generate_skips_refine_on_opaque_source():
         steps=8, cfg=1.0, feather=20, edit=fake_edit,
         refine_alpha=False)
     assert out["alpha_refine"]["touched"] is False
+
+
+def test_paste_back_does_not_touch_alpha_even_when_edit_returns_rgba():
+    """**贴回只混 RGB**，patch 是 RGBA 时也不能动源图的 alpha。
+
+    这是真机上抓到的 bug：`qwen_edit_image` 返回的是 RGBA
+    （`generate.py:455` 的 `convert("RGBA")`），`paste_crop_direct` 按 patch
+    的通道数决定混几个通道，于是 alpha 也被混进去了 —— 源图的透明背景被
+    patch 的 255 按羽化权重盖掉，900² 的图 52.5% 透明变成 alpha 61，
+    再走 refine 就彻底不透明（看起来像"透明功能失效"）。
+
+    官方 patch 恒为 3 通道，所以那边没这个问题；我们必须在贴回前转 RGB。
+    """
+    src = _transparent_source()
+
+    def fake_edit_rgba(image, prompt, negative, seed, steps, cfg):
+        # 故意返回 **RGBA**（模拟真实的 qwen_edit_image）
+        return Image.new("RGBA", image.size, (0, 0, 0, 255))
+
+    out = eg.crop_generate(
+        src, box=(100, 60, 200, 200), prompt="P", negative="N", seed=1,
+        steps=8, cfg=1.0, feather=20, edit=fake_edit_rgba,
+        refine_alpha=False)
+
+    before = np.asarray(src, dtype=np.uint8)
+    after = np.asarray(out["image"].convert("RGBA"), dtype=np.uint8)
+    # 框外（含大片透明背景）的 alpha 必须逐像素不变
+    outside = np.ones(before.shape[:2], dtype=bool)
+    outside[60:200, 100:200] = False
+    assert np.array_equal(before[..., 3][outside], after[..., 3][outside]), (
+        "框外 alpha 被改了 —— patch 的 alpha 混进来了")
+    # 透明背景仍然是 0
+    assert after[5, 5, 3] == 0, after[5, 5]

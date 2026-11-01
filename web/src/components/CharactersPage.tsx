@@ -1261,11 +1261,33 @@ export default function CharactersPage({ onNotice }: Props) {
                     </button>
                   </div>
                   {atlasInfo?.exists && (
-                    <p className="chars-sub">
-                      现有图集：{atlasInfo.frames} 帧 / {atlasInfo.animations} 组 ·{' '}
-                      {atlasInfo.size?.[0]}×{atlasInfo.size?.[1]} ·{' '}
-                      {Math.max(1, Math.round((atlasInfo.bytes || 0) / 1024))} KB
-                    </p>
+                    <>
+                      <p className="chars-sub">
+                        现有图集：{atlasInfo.frames} 帧 / {atlasInfo.animations} 组 ·{' '}
+                        {atlasInfo.size?.[0]}×{atlasInfo.size?.[1]} ·{' '}
+                        {Math.max(1, Math.round((atlasInfo.bytes || 0) / 1024))} KB
+                      </p>
+                      {/* **必须给入口**：只显示一行路径的话，用户导出完既看不到
+                          图在哪、也没法把文件拿走（浏览器里打开 /files/ 才行）。 */}
+                      {atlasInfo.image && (
+                        <a className="chars-atlas-link" href={atlasInfo.image}
+                          target="_blank" rel="noreferrer">
+                          <img src={atlasInfo.image} alt="atlas" loading="lazy" />
+                          <span>打开图集图（新标签页 · 右键可另存）</span>
+                        </a>
+                      )}
+                      <div className="chars-row">
+                        <a className="mini"
+                          href={atlasInfo.image?.replace(/\.png$/i, '.json')}
+                          target="_blank" rel="noreferrer" download>
+                          看 atlas.json（坐标表）
+                        </a>
+                        <span className="chars-sub">
+                          同目录还有 <code>atlas.json</code>；整个{' '}
+                          <code>Atlas/</code> 文件夹可以直接拷进工程。
+                        </span>
+                      </div>
+                    </>
                   )}
                   {atlasMsg && <p className="chars-sub">{atlasMsg}</p>}
                 </div>

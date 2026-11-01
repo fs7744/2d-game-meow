@@ -178,6 +178,10 @@ def paste_crop_direct(
     **通道数只到 patch 的通道数**（官方 `patch[:, :, :, :result.shape[-1]]`）：
     patch 是 RGB 时不动 base 的 alpha——这正是"复用原 alpha"快路径成立的前提，
     否则贴一块 alpha=255 的方形补丁回去，透明背景上就多一个方块。
+
+    ⚠️ **调用方必须保证 patch 是 3 通道**。传 RGBA 的话 alpha 会被一起混，
+    透明背景就被盖掉了（官方那条路径的 patch 恒为 3 通道，所以没这个问题；
+    我们的 `qwen_edit_image` 返回 RGBA，`crop_generate` 里已显式 `convert("RGB")`）。
     """
     x1, y1, x2, y2 = [int(v) for v in region]
     if x2 <= x1 or y2 <= y1:
@@ -316,25 +320,35 @@ def chroma_key_patch(
 ) -> Image.Image:
     """把一块 patch 贴到幕布色画布上再抠像，最后切回来（官方 `:3846-3896`）。
 
-    **为什么要垫一圈**：`matte_screen` 是按"图边框的颜色"估幕布色的。patch 本身
-    四周都是角色像素时，边框色估出来是肤色/发色，抠像会把整块当背景吃掉。
-    官方垫的是 `_background_rgb(...)`（纯幕布色）加 `border = max(4, context)` 宽，
-    这样边框一定是幕布色。
+    **两件事都必须做**：
+
+    1. **先把透明区合成到幕布色上**（官方 `_prepare_emotion_detailer_input:3651-3666`：
+       `rgb * alpha + screen * (1 - alpha)`）。不合成的话透明处 RGB 是 **0（黑）**，
+       抠像只认幕布色，黑块会被整块当"前景"留下来 —— 真机实测：52.5% 的透明背景
+       原样变成不透明黑，整张图失去透明。
+    2. **四周垫一圈幕布色**：`matte_screen` 按"图边框颜色"估幕布色，patch 四周
+       全是角色像素时估出来是肤色/发色，抠像会把整块吃掉。官方垫
+       `border = max(4, context)` 宽，边框就一定是幕布色。
 
     `chroma_key` 失败（抛异常）时返回原 patch —— 抠像失败不该丢图。
     """
-    rgb = patch.convert("RGB")
-    w, h = rgb.size
-    border = max(4, int(context))
     screen = solid_rgb(background)
+    if patch.mode == "RGBA":
+        flat = Image.alpha_composite(Image.new("RGBA", patch.size, screen + (255,)),
+                                     patch).convert("RGB")
+    else:
+        flat = patch.convert("RGB")
+    w, h = flat.size
+    border = max(4, int(context))
     canvas = Image.new("RGB", (w + border * 2, h + border * 2), screen)
-    canvas.paste(rgb, (border, border))
+    canvas.paste(flat, (border, border))
     try:
         keyed = chroma_key(canvas)
     except Exception:                                  # noqa: BLE001
-        return rgb
+        # 抠像失败就把**原 patch** 还回去（保留原来的 alpha），不是压平后的
+        return patch.convert("RGBA")
     if keyed is None:
-        return rgb
+        return patch.convert("RGBA")
     keyed = keyed.convert("RGBA")
     return keyed.crop((border, border, border + w, border + h))
 
@@ -430,7 +444,9 @@ def refine_alpha_edges(
     cx0 = max(0, int(xs.min()) - context)
     cx1 = min(w, int(xs.max()) + 1 + context)
 
-    patch = out.crop((cx0, cy0, cx1, cy1)).convert("RGB")
+    # **保留 RGBA**：透明区在送抠像前要合成成幕布色（见 chroma_key_patch）。
+    # 先 convert("RGB") 会把透明压成黑，黑块抠不掉，整张图就失去透明了。
+    patch = out.crop((cx0, cy0, cx1, cy1))
     keyed = chroma_key_patch(patch, chroma_key, background, context=context)
     merged = merge_emotion_rgba(
         src.crop((cx0, cy0, cx1, cy1)), keyed,
@@ -757,6 +773,14 @@ def crop_generate(
     # 官方 `:1668-1675`：生成图缩回 aligned 尺寸，再把 pad 切掉
     back = generated.resize(aligned.size, Image.LANCZOS)
     patch = cut_padding(back, padding)
+    # **贴回用的块必须转 3 通道**。`paste_crop_direct` 按 patch 的通道数决定混几个
+    # 通道（官方 `patch[:, :, :, :result.shape[-1]]`），而我们的 `qwen_edit_image`
+    # 返回的是 **RGBA**（`generate.py:455` 的 `convert("RGBA")`）——
+    # 不转的话 alpha 会跟着一起混进去：源图的透明背景被 patch 的 255 按羽化权重
+    # 盖掉。真机实测：900² 源图 52.5% 透明，贴回后背景 alpha 变成 61，
+    # 再走 refine 就彻底不透明了（看起来像"透明功能失效"）。
+    # 官方 patch 恒为 3 通道，alpha 由原图复用 —— 这才是"只混 RGB"的前提。
+    patch = patch.convert("RGB")
     crop_h = region[3] - region[1]
     crop_w = region[2] - region[0]
     mask = paste_mask(crop_h, crop_w, feather)

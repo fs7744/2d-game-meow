@@ -68,6 +68,21 @@ class AtlasResult:
     notes: List[str] = field(default_factory=list)
 
 
+def _skip_entry(name: str) -> bool:
+    """这个目录名要不要跳过（版本归档 / 中断残留）。
+
+    两类都必须跳过：
+
+      · **`V1` / `V2`…**：`staged_image_batch` 重新生成时把旧图搬进去的地方。
+        不跳过的话图集会混进上一版的帧，动画组还多出 `Naked/neutral/V1` 这种东西
+        —— 引擎按组播动画时会突然闪一帧旧图。
+      · **`.` 开头**：原子发布用的临时目录（`.sprites-xxxx`，`tempfile.mkdtemp`
+        建的）。进程被杀时会残留。它们不但不该打包，名字也过不了
+        `ensure_safe_name`（点不在白名单里）—— **整个导出会直接抛异常**。
+    """
+    return bool(characters.ARCHIVE_DIR_RE.match(name)) or name.startswith(".")
+
+
 def _frame_index(path: str) -> int:
     """从 `sprite_<表情>_0007.png` 里取 7；取不出来就按 0（排最后）。"""
     stem = Path(path).stem
@@ -94,19 +109,29 @@ def collect_frames(
     want_e = {e.casefold() for e in emotions} if emotions else None
 
     out: List[Frame] = []
+    seen_emo: set = set()
     for costume in sorted(characters.list_costumes(name)):
+        if _skip_entry(costume):
+            continue
         if want_c is not None and costume.casefold() not in want_c:
             continue
         # 目录里可能有任意表情子目录，不能写死 neutral/smile
         base = os.path.dirname(characters.sprites_dir(name, costume, "neutral"))
         if not os.path.isdir(base):
             continue
+        seen_emo.clear()
         for emotion in sorted(os.listdir(base)):
             sub = os.path.join(base, emotion)
-            if not os.path.isdir(sub):
+            if not os.path.isdir(sub) or _skip_entry(emotion):
                 continue
             if want_e is not None and emotion.casefold() not in want_e:
                 continue
+            # **大小写去重**：官方写 `Neutral`（`utils.py:943`），我们自己写 `neutral`。
+            # Windows 上是同一个目录（只会列出一个），Linux 上是两个 —— 不去重就会
+            # 把同一套帧收两遍、图集里出现两条同名动画。
+            if emotion.casefold() in seen_emo:
+                continue
+            seen_emo.add(emotion.casefold())
             paths = characters.list_sprite_images(name, costume, emotion)
             for path in paths:
                 try:
@@ -245,6 +270,22 @@ def export_character_atlas(
             "sourceSize": {"w": canvas[0], "h": canvas[1]},
         }
         groups.setdefault(f"{frame.costume}/{frame.emotion}", []).append(key)
+
+    # **图集过大要提醒**：一个角色几十帧时，一张图可能到 4096×8000，
+    # 引擎上传纹理时会卡在显卡上限（多数是 4096 或 8192），PNG 也动辄几十 MB。
+    # 这里不替用户决定怎么切，只把事实说出来（分组导出可以按服装分批）。
+    if len(frames) > 48 or max(atlas.size) > 4096:
+        notes.append(
+            f"图集偏大（{len(frames)} 帧 / {atlas.width}×{atlas.height}）："
+            "部分引擎的纹理上限是 4096，可以按服装分批导出（costumes 参数）")
+
+    # **图集过大要提醒**：一个角色几十帧时，一张图可能到 4096×8000，
+    # 引擎上传纹理时会卡在显卡上限（多数是 4096 或 8192），PNG 也动辄几十 MB。
+    # 这里不替用户决定怎么切，只把事实说出来（分组导出可以按服装分批）。
+    if len(frames) > 48 or max(atlas.size) > 4096:
+        notes.append(
+            f"图集偏大（{len(frames)} 帧 / {atlas.width}×{atlas.height}）："
+            "部分引擎的纹理上限是 4096，可以按服装分批导出（costumes 参数）")
 
     animations: Dict[str, Any] = {}
     for group, keys in groups.items():
