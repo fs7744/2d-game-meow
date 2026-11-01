@@ -84,6 +84,9 @@ export default function CharactersPage({ onNotice }: Props) {
   const [detail, setDetail] = useState<CharacterDetail | null>(null)
   const [styles, setStyles] = useState<StyleCatalog | null>(null)
   const [emotions, setEmotions] = useState<EmotionCatalog | null>(null)
+  /** 画风库搜索 + 分类筛选（对齐官方 Style Library） */
+  const [styleQuery, setStyleQuery] = useState('')
+  const [styleGroup, setStyleGroup] = useState('')
   const [tab, setTab] = useState<'info' | 'gen' | 'clothes' | 'emotions' | 'assets'>('info')
   /** 最近一次生成操作的完成反馈：成功后显示显眼绿条 + 一键跳去素材页看结果。
    *  之前每个操作完成只有一行小字 setXxxMsg + 一闪而过的 toast，用户常看不到。 */
@@ -228,6 +231,24 @@ export default function CharactersPage({ onNotice }: Props) {
     }
     return out
   }, [styles])
+
+  /** 画风库按搜索词 + 分类过滤（官方 Style Library：搜索 + 分类筛选） */
+  const filteredStyles = useMemo(() => {
+    const q = styleQuery.trim().toLowerCase()
+    return flatStyles.filter((s) => {
+      if (styleGroup && s.group !== styleGroup) return false
+      if (!q) return true
+      return s.label.toLowerCase().includes(q)
+        || s.zhLabel.toLowerCase().includes(q)
+        || s.group.toLowerCase().includes(q)
+        || s.zhGroup.toLowerCase().includes(q)
+    })
+  }, [flatStyles, styleQuery, styleGroup])
+
+  /** 画风库的全部分类（去重，保持官方 groups 顺序） */
+  const styleGroups = useMemo(
+    () => styles?.groups.map((g) => g.label || g.name || '') ?? [],
+    [styles])
 
   const flatEmotions = useMemo(() => {
     const out: Array<EmotionEntry & { category: string }> = []
@@ -1095,8 +1116,28 @@ export default function CharactersPage({ onNotice }: Props) {
                       当前：{currentStyleLabel || '（无）'}
                     </span>
                   </div>
+                  <div className="chars-style-toolbar">
+                    <input
+                      className="chars-style-search"
+                      type="search"
+                      placeholder="搜索画风（名称 / 分类）…"
+                      value={styleQuery}
+                      onChange={(e) => setStyleQuery(e.target.value)}
+                    />
+                    <select
+                      value={styleGroup}
+                      onChange={(e) => setStyleGroup(e.target.value)}
+                      title="按分类筛选"
+                    >
+                      <option value="">全部分类</option>
+                      {styleGroups.map((g) => (
+                        <option key={g} value={g}>{zh(STYLE_GROUP_LABEL, g)}</option>
+                      ))}
+                    </select>
+                    <span className="chars-sub">{filteredStyles.length} 条</span>
+                  </div>
                   <div className="chars-style-grid">
-                    {flatStyles.slice(0, 60).map((s) => (
+                    {filteredStyles.map((s) => (
                       <button
                         type="button" key={s.id}
                         className={`chars-style-card${currentStyle === s.id ? ' on' : ''}`}
@@ -1111,12 +1152,12 @@ export default function CharactersPage({ onNotice }: Props) {
                       </button>
                     ))}
                   </div>
-                  {flatStyles.length > 60 && (
-                    <p className="chars-sub">
-                      先显示前 60 条（共 {flatStyles.length}）。
-                      风格预览图是压缩过的 192px webp，原图在源仓库。
-                    </p>
+                  {filteredStyles.length === 0 && (
+                    <p className="chars-sub">没有匹配的画风，换个搜索词或清掉分类筛选。</p>
                   )}
+                  <p className="chars-sub">
+                    风格预览图是压缩过的 192px webp，原图在源仓库。
+                  </p>
                 </div>
               </div>
             )}
