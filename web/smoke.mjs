@@ -34,6 +34,8 @@ function makeFetch() {
   let serverSeq = 0
   // 表情批量任务的模拟进度（null = 没有在跑）
   let emotionJob = null
+  // 看图反推是否失败（模拟缺权重 / 装错 fork）
+  let analyzeFails = false
   // 保存时是否报冲突（模拟别的窗口改了同一个项目）
   let saveConflictMode = false
   const fetchFn = async (url, init = {}) => {
@@ -57,6 +59,26 @@ function makeFetch() {
         }),
       }
     }
+    // ---- 看图反推属性（官方 Cloner 旁路）----
+    if (String(url).includes('/characters/') && String(url).endsWith('/analyze')) {
+      if (analyzeFails) {
+        // 后端把官方错误码塞在 detail 里，前端按码给不同话术
+        return { ok: false, status: 503,
+          json: async () => ({ detail: { error: 'MMPROJ_MISSING',
+            message: '缺视觉投影器：models/llm/Qwen3.5-4B/mmproj-F16.gguf' } }) }
+      }
+      return {
+        ok: true,
+        json: async () => ({
+          character: 'Alice',
+          image: '/files/characters/Alice/Sprites/Naked/neutral/sprite_pose_0001.png',
+          fields: { sex: 'female', age: 21, race: 'human',
+            hair: 'silver hair, long hair', eyes: 'red eyes', body: 'slim' },
+          seconds: 22.4, raw: '```json {...} ```',
+        }),
+      }
+    }
+
     // ---- 表情批量生成（官方 Emotion Studio：只改脸）----
     //
     // **必须排在角色出图那条前面**：`/emotions/generate` 也以 `/generate` 结尾，
@@ -548,6 +570,7 @@ function makeFetch() {
   fetchFn.setServerCurrent = (v) => { serverCurrent = v }
   fetchFn.setJobsFail = (v) => { jobsFailMode = v }
   fetchFn.setSaveConflict = (v) => { saveConflictMode = v }
+  fetchFn.setAnalyzeFail = (v) => { analyzeFails = v }
   return fetchFn
 }
 
@@ -3274,6 +3297,78 @@ function check(name, cond, extra = '') {
     [...doc.querySelectorAll('.chars-tab')].some(
       (t) => t.classList.contains('on') && (t.textContent || '').includes('素材')))
   check('出图场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 46b) 看图反推属性：官方 Cloner 旁路（本地 4B 模型）
+//
+// 它跟「手填属性」是两条路：模型读图给出 11 个字段，**先摆给用户看**，
+// 用户点「用这些属性」才写进 config。属性错了会一路影响后面所有出图
+// （prompt 是它拼的），所以绝不能拿到就自动保存。
+{
+  const { dom, errors, fetch: f } = await boot('')
+  const doc = dom.window.document
+  const win = dom.window
+  await new Promise((r) => setTimeout(r, 400))
+  const click = (el) => el.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  const setInput = (el, v) => {
+    Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value').set.call(el, v)
+    el.dispatchEvent(new win.Event('input', { bubbles: true }))
+  }
+
+  ;[...doc.querySelectorAll('.view-tab')][1]?.dispatchEvent(
+    new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 250))
+  setInput(doc.querySelector('.chars-new input'), 'Alice')
+  await new Promise((r) => setTimeout(r, 80))
+  click([...doc.querySelectorAll('.chars-new button')][0])
+  await new Promise((r) => setTimeout(r, 300))
+
+  const body = () => doc.querySelector('.chars-body')?.textContent || ''
+  const btn = () => [...doc.querySelectorAll('.chars-body button')]
+    .find((b) => (b.textContent || '').includes('反推'))
+
+  check('属性页有「从图片反推属性」按钮', !!btn())
+  click(btn())
+  await new Promise((r) => setTimeout(r, 500))
+  check('调用了 /characters/Alice/analyze',
+    calls.some((c) => c.url.includes('/characters/Alice/analyze')))
+  check('结果先摆出来给人看（不是直接保存）',
+    !!doc.querySelector('.chars-analyze'), '没有 .chars-analyze')
+  check('结果里有模型读出的字段',
+    (doc.querySelector('.chars-analyze')?.textContent || '').includes('silver hair'),
+    (doc.querySelector('.chars-analyze')?.textContent || '').slice(0, 80))
+  check('结果里有「用这些属性」按钮',
+    [...doc.querySelectorAll('.chars-analyze button')]
+      .some((b) => (b.textContent || '').includes('用这些属性')))
+
+  // 点「用这些属性」→ 才写进 config
+  const applyBtn = [...doc.querySelectorAll('.chars-analyze button')]
+    .find((b) => (b.textContent || '').includes('用这些属性'))
+  click(applyBtn)
+  await new Promise((r) => setTimeout(r, 400))
+  const put = calls.filter((c) => c.method === 'PUT'
+    && c.url.includes('/characters/Alice/info')).pop()
+  check('确认后才保存属性', !!put, put?.url)
+  if (put) {
+    const b = JSON.parse(put.body)
+    check('保存的内容是模型读出来的字段',
+      JSON.stringify(b).includes('silver hair'), JSON.stringify(b).slice(0, 90))
+  }
+  check('应用后结果面板收起', !doc.querySelector('.chars-analyze'))
+
+  // ---- 失败路径：缺权重时要说清是缺什么，而不是"未知错误" ----
+  f.setAnalyzeFail(true)
+  click(btn())
+  await new Promise((r) => setTimeout(r, 500))
+  const txt = body()
+  check('反推失败时把错误码/原因显示出来',
+    txt.includes('MMPROJ_MISSING') || txt.includes('投影器'), txt.slice(-120))
+  check('失败不影响手填（属性字段还在）',
+    !!doc.querySelector('.chars-body select'))
+  f.setAnalyzeFail(false)
+
+  check('看图反推场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 

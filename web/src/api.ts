@@ -563,7 +563,20 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     let msg = `HTTP ${r.status}`
     try {
       const j = await r.json()
-      if (j?.detail) msg = String(j.detail)
+      const d = j?.detail
+      if (typeof d === 'string') {
+        msg = d
+      } else if (d && typeof d === 'object') {
+        // 有些端点把「错误码 + 说明」打包成对象（LLM 那套官方码：
+        // DEPENDENCY_MISSING / MODEL_MISSING / PARSE_ERROR …）。直接 String()
+        // 会变成 "[object Object]"，用户和日志都看不出是什么错。
+        const code = (d as { error?: unknown }).error
+        const text = (d as { message?: unknown }).message
+        msg = [code, text].filter((x) => typeof x === 'string' && x).join('：')
+          || JSON.stringify(d)
+      } else if (d) {
+        msg = String(d)
+      }
     } catch { /* 不是 JSON，用状态码兜底 */ }
     throw new Error(msg)
   }
@@ -698,6 +711,33 @@ export function generateEmotions(
   sources: number; emotions: string[]; position: number
 }> {
   return req(`/characters/${encodeURIComponent(name)}/emotions/generate`,
+    { method: 'POST', body: JSON.stringify(body) })
+}
+
+// ---------------- 看图反推属性（官方 Cloner，要本地 LLM） ----------------
+
+export type AnalyzeResult = {
+  character: string
+  /** 分析用的那张图（`/files/...`） */
+  image: string
+  /** 模型读出来的属性（官方 11 个 key 的白名单过滤后） */
+  fields: Record<string, string | number | boolean>
+  seconds: number
+  /** 模型原文，PARSE_ERROR 时用来看它到底说了什么 */
+  raw: string
+}
+
+/**
+ * 从一张图反推角色属性（官方 `character_cloner.py:219-412`）。
+ *
+ * **不写 config**：拿到字段后要让用户确认再保存——属性错了会一路影响后面所有出图。
+ * 失败时会抛错，`message` 里带官方错误码（DEPENDENCY_MISSING / MODEL_MISSING /
+ * MMPROJ_MISSING / TIMEOUT / PARSE_ERROR …），界面按码给不同话术。
+ */
+export async function analyzeCharacter(
+  name: string, body: { image?: string; background_color?: string; timeout?: number },
+): Promise<AnalyzeResult> {
+  return req(`/characters/${encodeURIComponent(name)}/analyze`,
     { method: 'POST', body: JSON.stringify(body) })
 }
 

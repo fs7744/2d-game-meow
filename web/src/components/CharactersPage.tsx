@@ -23,7 +23,7 @@ import {
   fetchStyleCatalog, fetchEmotionCatalog, stylePreviewUrl, emotionIconUrl,
   fetchCharacterPrompt, generateForCharacter, fetchJob, fetchCharacterTags,
   detectEmotionFaces, generateEmotions, type EmotionFrame,
-  type CharacterPrompt, type TagCatalog,
+  analyzeCharacter, type CharacterPrompt, type TagCatalog,
 } from '../api'
 import SpritePreview from './SpritePreview'
 import TagPicker from './TagPicker'
@@ -102,6 +102,10 @@ export default function CharactersPage({ onNotice }: Props) {
   const [emoProg, setEmoProg] = useState<{ done: number; total: number } | null>(null)
   /** 表情生成参数（官方默认值；target_size 是「总像素档位」不是边长） */
   const [emoParams, setEmoParams] = useState({ target_size: 2048, steps: 25, matte: true })
+  /** 看图反推属性（官方 Cloner）：结果先给用户看，确认了才写进 config */
+  const [anaBusy, setAnaBusy] = useState(false)
+  const [anaMsg, setAnaMsg] = useState('')
+  const [anaResult, setAnaResult] = useState<Record<string, unknown> | null>(null)
 
   const reload = useCallback(async () => {
     try {
@@ -209,6 +213,38 @@ export default function CharactersPage({ onNotice }: Props) {
       setErr(`保存失败：${e instanceof Error ? e.message : e}`)
     }
   }, [sel, onNotice])
+
+  /**
+   * 从一张图反推属性（官方 Cloner 旁路，要本地 LLM）。
+   *
+   * **只拿结果，不落盘**：拿到后摆在下面让用户逐条看一眼，点「用这些属性」
+   * 才写进 config。属性错了会一路影响后面所有出图（prompt 是它拼的），
+   * 不能替用户决定。
+   */
+  const doAnalyze = useCallback(async () => {
+    if (!sel || anaBusy) return
+    setAnaBusy(true)
+    setAnaMsg('正在看图（本地 4B 模型，约 20~40 秒）…')
+    setAnaResult(null)
+    try {
+      const r = await analyzeCharacter(sel, {
+        background_color: String(draft.background_color ?? ''),
+      })
+      setAnaResult(r.fields)
+      setAnaMsg(`读完了（${r.seconds}s）——下面是它看到的，确认无误再点「用这些属性」`)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      // 后端的 detail 是 {error: CODE, message}；按码给不同的下一步建议
+      let hint = ''
+      if (msg.includes('DEPENDENCY_MISSING')) hint = '（llama-cpp-python 装错了 fork，需要 JamePeng 版）'
+      else if (msg.includes('MODEL_MISSING') || msg.includes('MMPROJ_MISSING')) hint = '（models/llm/Qwen3.5-4B 下的 gguf 没装齐）'
+      else if (msg.includes('TIMEOUT')) hint = '（超时了，模型还占着，等半分钟再试）'
+      else if (msg.includes('PARSE_ERROR') || msg.includes('INVALID_RESPONSE')) hint = '（模型没答成 JSON，重试一次通常就好）'
+      setAnaMsg(`反推失败：${msg}${hint}`)
+    } finally {
+      setAnaBusy(false)
+    }
+  }, [sel, anaBusy, draft])
 
   /** 出图：提交 → 轮询 → 完成后后端已经把图收进角色目录了，刷新即可 */
   const doGenerate = useCallback(async (workflow: 'w1' | 'w2') => {
@@ -453,6 +489,52 @@ export default function CharactersPage({ onNotice }: Props) {
 
             {tab === 'info' && (
               <div className="chars-body">
+                <div className="chars-row">
+                  <button type="button" className="mini" onClick={() => void doAnalyze()}
+                    disabled={anaBusy}
+                    title="用本地 4B 模型看一张图，读出身高体型/发色瞳色这些可见特征">
+                    {anaBusy ? '看图反推中…' : '从图片反推属性'}
+                  </button>
+                  <span className="chars-sub">
+                    官方 Cloner 的做法：拿一张图读<b>看得见的身体特征</b>
+                    （不含服装 / 姿势 / 表情），读完先给你看，确认了才写进角色。
+                  </span>
+                </div>
+                {anaMsg && <p className="chars-sub">{anaMsg}</p>}
+                {anaResult && (
+                  <div className="chars-analyze">
+                    <table>
+                      <tbody>
+                        {Object.entries(anaResult).map(([k, v]) => (
+                          <tr key={k}>
+                            <th>{k}</th>
+                            <td>{String(v)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    <div className="chars-row">
+                      <button type="button" className="mini wide" onClick={() => {
+                        const patch: Record<string, unknown> = {}
+                        for (const [k, v] of Object.entries(anaResult)) {
+                          if (v === '' || v === null || v === undefined) continue
+                          patch[k] = v
+                        }
+                        setDraft((d) => ({ ...d, ...patch }))
+                        setAnaResult(null)
+                        setAnaMsg('')
+                        void saveInfo(patch)
+                      }}>
+                        用这些属性（覆盖同名项）
+                      </button>
+                      <button type="button" className="mini" onClick={() => {
+                        setAnaResult(null); setAnaMsg('')
+                      }}>
+                        放弃
+                      </button>
+                    </div>
+                  </div>
+                )}
                 <div className="chars-row">
                   <label>
                     性别

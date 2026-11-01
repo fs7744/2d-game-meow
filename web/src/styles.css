@@ -1349,6 +1349,21 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
 }
 .chars-emo span { font-size: 9.5px; color: var(--muted); text-align: center; }
 
+/* 看图反推的结果表：一行一个属性，让用户逐条核对再决定要不要 */
+.chars-analyze {
+  border: 1px solid var(--line); background: var(--bg-2); padding: 8px;
+  display: flex; flex-direction: column; gap: 8px; max-width: 640px;
+}
+.chars-analyze table { width: 100%; border-collapse: collapse; }
+.chars-analyze th {
+  text-align: left; font-family: var(--mono); font-size: 10px; font-weight: 400;
+  color: var(--cyan); padding: 2px 8px 2px 0; width: 130px; vertical-align: top;
+}
+.chars-analyze td {
+  font-size: 10.5px; color: var(--white); padding: 2px 0; line-height: 1.5;
+  word-break: break-word;
+}
+
 /* 批量生成的进度条：一批几十张要跑几分钟，没有进度只能干等 */
 .chars-prog {
   position: relative; height: 16px; border: 1px solid var(--line);

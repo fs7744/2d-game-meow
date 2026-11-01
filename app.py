@@ -59,6 +59,7 @@ from workflows import assetdb
 from workflows import characters
 from workflows import charactergen
 from workflows import emotiongen
+from workflows import qwen_llm
 from workflows import library
 from workflows import matte_screen
 from workflows import paths
@@ -991,6 +992,18 @@ class CharacterGenerateReq(BaseModel):
     matte: Optional[bool] = None
 
 
+class CharacterAnalyzeReq(BaseModel):
+    """「看图反推属性」的请求（官方 Cloner 旁路，要本地 LLM）。
+
+    `image` 可以是 assets 内的路径，也可以是 `/files/...` 的展示 URL
+    （前端手里两个都有，让它传最方便的那个）。
+    `background_color`：透明图送模型前要压到某个背景色上（green/blue/#RRGGBB）。
+    """
+    image: str = ""
+    background_color: str = ""
+    timeout: float = 300.0
+
+
 class EmotionDetectReq(BaseModel):
     """表情生成的「先看脸框」请求（**不跑模型**，纯 YOLO，CPU 上百毫秒）。
 
@@ -1025,6 +1038,69 @@ class EmotionGenerateReq(BaseModel):
     transparent: bool = False
     #: 贴回后再走一遍官方的纯色幕抠像（bg_remove）
     matte: bool = True
+
+
+@app.post("/characters/{name}/analyze")
+def character_analyze_api(name: str, req: CharacterAnalyzeReq) -> Dict[str, Any]:
+    """一张角色图 → 11 个属性字段（官方 `character_cloner.py:219-412`）。
+
+    **只返回字段，不写 config**：属性错了会一路影响后面所有出图，必须让用户
+    在界面上看一眼、确认后再存（官方的 Cloner UI 也是这个顺序）。
+
+    这个端点是**旁路**：模型没装 / 依赖缺 / 超时，一律回带 error code 的 5xx，
+    前端提示"手填就行"，不能因此让角色中心不可用。
+    """
+    try:
+        safe = characters.ensure_safe_name(name, "角色名")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not characters.character_exists(safe):
+        raise HTTPException(404, f"没有这个角色：{safe}")
+
+    raw_path = str(req.image or "").strip()
+    if not raw_path:
+        # 没指定就取这个角色最新的一张精灵帧（常见用法：看自己刚出的图）
+        for costume in characters.list_costumes(safe):
+            images = characters.list_pose_preview_files(safe, costume, None)
+            if images:
+                raw_path = images[-1]
+                break
+        if not raw_path:
+            raise HTTPException(400, "这个角色还没有图可分析：先在「出图」页生成一张")
+    if raw_path.startswith("/files/"):
+        raw_path = raw_path[len("/files/"):]
+    target = _readable_asset_path(raw_path)
+    if target is None:
+        raise HTTPException(400, "图片路径不在 assets 内（或不是图片文件）")
+
+    try:
+        result = qwen_llm.analyze_character_image(
+            str(target), background_color=req.background_color,
+            timeout=float(req.timeout or 300.0))
+    except qwen_llm.LlmError as exc:
+        # 码值照官方（`character_cloner.py:224-402`），前端按码决定话术：
+        #   DEPENDENCY_MISSING / MODEL_MISSING / MMPROJ_MISSING → "去装环境"
+        #   TIMEOUT / INFERENCE_ERROR → "再试一次"
+        #   PARSE_ERROR / INVALID_RESPONSE → "模型没答对，重试或手填"
+        status = {
+            "DEPENDENCY_MISSING": 503, "MODEL_MISSING": 503,
+            "MODEL_INVALID": 503, "MMPROJ_MISSING": 503,
+            "IMAGE_MISSING": 404, "TIMEOUT": 504,
+            "INVALID_RESPONSE": 502, "PARSE_ERROR": 502,
+        }.get(exc.code, 500)
+        raise HTTPException(status, {"error": exc.code, "message": exc.message,
+                                     "raw": exc.raw})
+    except OSError as exc:
+        raise HTTPException(500, f"读图失败：{exc}") from exc
+    # **显式挑字段**：`result["image"]` 是磁盘路径，直接展开会把展示 URL 覆盖掉
+    # （前端拿它当 <img src>，塞绝对路径就是一张裂图）
+    return {
+        "character": safe,
+        "image": _asset_url(str(target)),
+        "fields": result.get("fields") or {},
+        "seconds": result.get("seconds", 0),
+        "raw": result.get("raw", ""),
+    }
 
 
 @app.post("/characters/{name}/prompt")

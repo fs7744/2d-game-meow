@@ -22,6 +22,57 @@
 
 ---
 
+## 2026-11-01 · 角色中心 T2：看图反推属性（本地 4B 模型）
+
+官方 Cloner 的旁路（`character_cloner.py:219-412`）搬进 `workflows/qwen_llm.py`。
+
+**它是旁路，不是依赖**：出图链路一次都不碰它。模型没装 / fork 装错 / 推理卡住，
+都必须退成"手填"，而不是把界面卡死。
+
+### 链路
+
+图片 → 压到背景色上（透明图不压会变黑，模型从"黑边"读出不存在的特征）
+→ 缩到 512 → JPEG q85 → base64 data URL 塞进 `image_url` 内容块
+→ Qwen3.5-4B（mmproj 多模态，`n_ctx=4096`）→ `max_tokens=1024, temperature=0.2`
+→ `parse_wizard_json` 三级降级 → 白名单过滤 → 11 个字段。
+
+### 跟官方的两处必要差异
+
+| 项 | 官方 | 我们 | 为什么 |
+|---|---|---|---|
+| 超时 | **没有**（`preview_runtime.py:25-52` 只有串行锁） | 默认 300s，超时回 `TIMEOUT` | 阻塞调用卡住时官方只能重启进程，完全查不出原因 |
+| 显存 | 模型常驻 | **用完就卸**（`MEOW_LLM_KEEP=1` 可留驻） | 4.5GB 常驻跟 Qwen 图像管线抢 24GB，切回去出图就可能 OOM。代价是每次多 3~5s 加载，而推理本身 20~40s |
+
+### 解析为什么要有三级降级
+
+模型输出**经常不是合法 JSON**：包一层 json 代码块、包成数组、写尾逗号、掺一段自然语言。
+官方 `qwen_vl.py:89-118` 的办法是：
+
+1. `json_repair.loads`（修坏 JSON；官方 requirements 里有，我们也加进 `requirements.txt`）
+2. 结果是 list → 取 `[0]`
+3. 剥代码块 → 正则捞 `{...}`
+4. 还不行 → `PARSE_ERROR`，**把模型原话放进 `raw`** 返回（不然用户只看到"失败了"）
+
+### 白名单是防注入
+
+官方 `:374-388` 只留 11 个 key。模型偶尔会多吐 `positive_prompt` / `config` 这类键，
+直接塞进角色 config 就能改到别处去。测试里钉了一条（多吐的键必须被丢掉）。
+
+### 实测
+
+人偶图（768²）：加载 4s + 推理 19s ≈ **23s**，输出 `skin_color: gray skin` /
+`aesthetics: 3d render, silhouette` 这种看图说话的结果——**质量归真图看，单测不管**。
+
+### 接口
+
+`POST /characters/<名>/analyze`（`image` 可空 = 取这个角色最新一张精灵帧）。
+**只返回字段，不写 config**——属性错了会一路影响后面所有出图（prompt 由它拼），
+必须让用户确认。错误码照官方：`DEPENDENCY_MISSING` / `MODEL_MISSING` /
+`MODEL_INVALID` / `MMPROJ_MISSING` → 503，`TIMEOUT` → 504，
+`PARSE_ERROR` / `INVALID_RESPONSE` → 502，前端按码给不同话术。
+
+---
+
 ## 2026-11-01 · 角色中心 T1：表情批量生成（只改脸）
 
 官方 Emotion Studio 的 QI2 分支（`character_generator.py:1591-1708` 单张 +
@@ -2010,6 +2061,7 @@ MEOW_SLOW=1 pytest tests -m slow                  # 真跑 Qwen 的端到端组�
 | `workflows/projectio.py` / `paths.py` | test_projects | 5s |
 | `workflows/projectstore.py`（项目落盘） | test_project_store | 3s |
 | `workflows/emotiongen.py`（表情批量） | test_emotiongen（含一条真 YOLO） | 6s |
+| `workflows/qwen_llm.py`（本地 LLM） | test_qwen_llm（真推理那条要 `MEOW_SLOW=1`） | 5s |
 | `workflows/characters.py` / `charactergen.py` | test_characters test_char_poses | 9s |
 | `tools/*` `docs/*` `README` | 不跑（工具靠自身输出验证） | — |
 | 合并 / 发版前 | 全量 | 150s |
@@ -2028,6 +2080,7 @@ test_stability 的 free 与泄漏、test_matte 的缓存素材）需要 GPU。
 | `tests/test_qwen_workflows.py` | **十个工作流的能力表与「近似」标记**、**局部重绘选区外逐点不变**、**output_resolution 真的对齐**、**逐帧尺度归一**、**透明底 alpha 不被白底吃掉**、**Qwen 路径不许碰已删的 SD 管线**、**非人形主体不补提**、**两阶段每帧调两次模型** | 37 |
 | `tests/test_gate.py` | 公共闸门组件（候选怎么跑、同分取第一个、非人形不补提） | 6 |
 | `tests/test_e2e_qwen.py` | **十个工作流各真跑一次模型**（`-m slow`，约 80s） | 10 |
+| `tests/test_qwen_llm.py` | **解析三级降级**（纯 JSON / 代码块 / 数组 / 带解说 / 尾逗号 / 废话）、**属性收敛**（list→逗号、sex/age clamp）、**白名单挡注入**、**透明图压背景色**、**送模型的图缩到 512**、**GGUF magic 校验**、**装错 fork 报 DEPENDENCY_MISSING**、**推理超时**、**错误码 → HTTP 状态**、**不写 config** | 30 |
 | `tests/test_emotiongen.py` | **pad 到 32 倍数用 replicate**、**羽化蒙版是斜坡+模糊（不是硬边）**、**贴回只动框内、alpha 不被贴出方块**、**推理尺寸按官方总像素公式**、**prompt 模板逐字**、**dilation 用了两次**、**产物序号跟源帧对齐**、**没源帧要说清原因**、**单张失败不丢整批**、**队列里的 progress** | 34 |
 | `tests/test_matte.py` | 背景估计、连通域不误抠内部同色区、去白边、alpha 二值、**u2net 抠空自动回退**、**已有 alpha 复用（IoU 1.000）**、**雾状 alpha 仍重抠**、**补内部洞但不动通到边界的缺口** | 18 |
 | `tests/test_api.py` | 各工作流队列往返、**未知 workflow 报错**、蒙版端点、上传端点、真删（连带 sidecar/raw、路径穿越）、资产按项目过滤、**参数按签名过滤并记 params_ignored** | 33 |

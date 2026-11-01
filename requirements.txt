@@ -39,3 +39,6 @@ python-multipart
 diskcache
 # 表情批量生成的人脸检测（配 models/bbox/face_yolov8m.pt）
 ultralytics
+# 模型输出修 JSON 用（官方 `qwen_vl.py:89` 的 `json_repair.loads`，纯 Python）
+# 不装也能跑——`parse_wizard_json` 会降级成"剥代码块 + 正则捞 {}"。
+json_repair
