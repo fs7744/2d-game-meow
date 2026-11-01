@@ -4237,8 +4237,11 @@ function check(name, cond, extra = '') {
   ;[...doc.querySelectorAll('.tag-mask')][0]
     ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
   await new Promise((r) => setTimeout(r, 200))
-  const eyeBtn = [...doc.querySelectorAll('.chars-field')]
-    .find((f) => (f.textContent || '').includes('眼睛'))?.querySelector('button')
+  // 眼睛字段现在是 chips 展示：找「眼睛」那一行里的「改」按钮（打开标签库）
+  const eyeField = [...doc.querySelectorAll('.chars-field')]
+    .find((f) => (f.textContent || '').includes('眼睛'))
+  const eyeBtn = [...(eyeField?.querySelectorAll('button') || [])]
+    .find((b) => ['改', '选'].includes((b.textContent || '').trim()))
   eyeBtn?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
   await new Promise((r) => setTimeout(r, 250))
   const chips = [...doc.querySelectorAll('.tag-chip')]

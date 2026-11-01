@@ -1349,9 +1349,31 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
 .chars-field { display: flex; flex-direction: column; gap: 3px; }
 .chars-field > span, .chars-field { font-size: 10.5px; color: var(--muted); }
 .chars-field input { width: 100%; }
+.chars-field-label { font-size: 10px; color: var(--muted); font-weight: 600; }
+.chars-tags {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px;
+  min-height: 24px;
+}
+.chars-tags-empty { font-size: 10px; color: var(--muted-2); font-style: italic; }
+.chars-tag {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 10px; color: var(--white);
+  background: var(--bg-3); border: 1px solid var(--line-strong);
+  border-radius: 10px; padding: 1px 4px 1px 8px;
+}
+.chars-tag-x {
+  background: transparent; border: none; color: var(--muted-2);
+  font-size: 9px; cursor: pointer; padding: 0 2px; line-height: 1;
+}
+.chars-tag-x:hover { color: var(--pink); }
 
 .chars-style { display: flex; flex-direction: column; gap: 6px; }
 .chars-style-head { display: flex; align-items: center; gap: 8px; }
+.chars-style-current {
+  font-size: 10px; color: var(--green); padding: 2px 8px;
+  border: 1px solid rgba(0, 255, 136, 0.4); border-radius: 2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px;
+}
 .chars-style-toolbar {
   display: flex; align-items: center; gap: 8px;
 }

@@ -87,6 +87,8 @@ export default function CharactersPage({ onNotice }: Props) {
   /** 画风库搜索 + 分类筛选（对齐官方 Style Library） */
   const [styleQuery, setStyleQuery] = useState('')
   const [styleGroup, setStyleGroup] = useState('')
+  /** 画风网格是否展开（默认收起，避免 358 个卡片把属性页撑爆） */
+  const [styleOpen, setStyleOpen] = useState(false)
   const [tab, setTab] = useState<'info' | 'gen' | 'clothes' | 'emotions' | 'assets'>('info')
   /** 最近一次生成操作的完成反馈：成功后显示显眼绿条 + 一键跳去素材页看结果。
    *  之前每个操作完成只有一行小字 setXxxMsg + 一闪而过的 toast，用户常看不到。 */
@@ -1076,30 +1078,59 @@ export default function CharactersPage({ onNotice }: Props) {
                   </label>
                 </div>
 
-                {INFO_TEXT.map(([k, label, hint]) => (
-                  <label className="chars-field" key={k} title={hint || ''}>
-                    {label}
-                    <span className="chars-field-row">
-                      <input
-                        value={String(draft[k] ?? '')}
-                        placeholder={hint || ''}
-                        onChange={(e) => setDraft((d) => ({ ...d, [k]: e.target.value }))}
-                        onBlur={(e) => void saveInfo({ [k]: e.target.value })}
-                      />
-                      {/* 官方 Character Creator 的「Choose Presets」：手填容易中带来
-                          一堆近义写法（"blue eyes" vs "blue_eyes"），点选能对齐官方措辞 */}
-                      {INFO_TAGS.has(k) && (
-                        <button
-                          type="button" className="mini"
-                          onClick={() => setPicking(k)}
-                          title="从官方标签库里选（可多选）"
-                        >
-                          选
-                        </button>
+                {INFO_TEXT.map(([k, label, hint]) => {
+                  const raw = String(draft[k] ?? '')
+                  const isTags = INFO_TAGS.has(k)
+                  // 标签字段：按逗号拆成 chips，可逐个删；点「选」开官方标签库
+                  const chips = isTags
+                    ? raw.split(',').map((s) => s.trim()).filter(Boolean)
+                    : []
+                  const removeChip = (chip: string) => {
+                    const next = chips.filter((c) => c !== chip).join(', ')
+                    setDraft((d) => ({ ...d, [k]: next }))
+                    void saveInfo({ [k]: next })
+                  }
+                  return (
+                    <div className="chars-field" key={k} title={hint || ''}>
+                      <div className="chars-field-label">{label}</div>
+                      {isTags ? (
+                        <div className="chars-tags">
+                          {chips.length === 0 && (
+                            <span className="chars-tags-empty">未设置</span>
+                          )}
+                          {chips.map((c) => (
+                            <span className="chars-tag" key={c}>
+                              {c}
+                              <button
+                                type="button"
+                                className="chars-tag-x"
+                                title={`删除「${c}」`}
+                                onClick={() => removeChip(c)}
+                              >
+                                ✕
+                              </button>
+                            </span>
+                          ))}
+                          <button
+                            type="button"
+                            className="mini"
+                            onClick={() => setPicking(k)}
+                            title="从官方标签库里选（可多选）"
+                          >
+                            {chips.length ? '改' : '选'}
+                          </button>
+                        </div>
+                      ) : (
+                        <input
+                          value={raw}
+                          placeholder={hint || ''}
+                          onChange={(e) => setDraft((d) => ({ ...d, [k]: e.target.value }))}
+                          onBlur={(e) => void saveInfo({ [k]: e.target.value })}
+                        />
                       )}
-                    </span>
-                  </label>
-                ))}
+                    </div>
+                  )
+                })}
 
                 <div className="chars-style">
                   <div className="chars-style-head">
@@ -1108,52 +1139,66 @@ export default function CharactersPage({ onNotice }: Props) {
                       {flatStyles.length} 条 · 官方 character_styles.json
                     </span>
                     <span className="spacer" />
-                    <span className="chars-sub">
-                      当前：{currentStyleLabel || '（无）'}
-                    </span>
-                  </div>
-                  <div className="chars-style-toolbar">
-                    <input
-                      className="chars-style-search"
-                      type="search"
-                      placeholder="搜索画风（名称 / 分类）…"
-                      value={styleQuery}
-                      onChange={(e) => setStyleQuery(e.target.value)}
-                    />
-                    <select
-                      value={styleGroup}
-                      onChange={(e) => setStyleGroup(e.target.value)}
-                      title="按分类筛选"
+                    {currentStyle && (
+                      <span className="chars-style-current">
+                        当前：{currentStyleLabel || currentStyle}
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      className="mini"
+                      onClick={() => setStyleOpen((v) => !v)}
                     >
-                      <option value="">全部分类</option>
-                      {styleGroups.map((g) => (
-                        <option key={g} value={g}>{zh(STYLE_GROUP_LABEL, g)}</option>
-                      ))}
-                    </select>
-                    <span className="chars-sub">{filteredStyles.length} 条</span>
+                      {styleOpen ? '收起' : '浏览画风'}
+                    </button>
                   </div>
-                  <div className="chars-style-grid">
-                    {filteredStyles.map((s) => (
-                      <button
-                        type="button" key={s.id}
-                        className={`chars-style-card${currentStyle === s.id ? ' on' : ''}`}
-                        title={`${s.zhGroup} · ${s.description || s.prompt.slice(0, 60)}`}
-                        onClick={() => {
-                          setDraft((d) => ({ ...d, style: s.id }))
-                          void saveInfo({ style: s.id })
-                        }}
-                      >
-                        <img src={stylePreviewUrl(s.id)} alt={s.zhLabel} loading="lazy" />
-                        <span>{s.zhLabel}</span>
-                      </button>
-                    ))}
-                  </div>
-                  {filteredStyles.length === 0 && (
-                    <p className="chars-sub">没有匹配的画风，换个搜索词或清掉分类筛选。</p>
+
+                  {styleOpen && (
+                    <>
+                      <div className="chars-style-toolbar">
+                        <input
+                          className="chars-style-search"
+                          type="search"
+                          placeholder="搜索画风（名称 / 分类）…"
+                          value={styleQuery}
+                          onChange={(e) => setStyleQuery(e.target.value)}
+                        />
+                        <select
+                          value={styleGroup}
+                          onChange={(e) => setStyleGroup(e.target.value)}
+                          title="按分类筛选"
+                        >
+                          <option value="">全部分类</option>
+                          {styleGroups.map((g) => (
+                            <option key={g} value={g}>{zh(STYLE_GROUP_LABEL, g)}</option>
+                          ))}
+                        </select>
+                        <span className="chars-sub">{filteredStyles.length} 条</span>
+                      </div>
+                      <div className="chars-style-grid">
+                        {filteredStyles.map((s) => (
+                          <button
+                            type="button" key={s.id}
+                            className={`chars-style-card${currentStyle === s.id ? ' on' : ''}`}
+                            title={`${s.zhGroup} · ${s.description || s.prompt.slice(0, 60)}`}
+                            onClick={() => {
+                              setDraft((d) => ({ ...d, style: s.id }))
+                              void saveInfo({ style: s.id })
+                            }}
+                          >
+                            <img src={stylePreviewUrl(s.id)} alt={s.zhLabel} loading="lazy" />
+                            <span>{s.zhLabel}</span>
+                          </button>
+                        ))}
+                      </div>
+                      {filteredStyles.length === 0 && (
+                        <p className="chars-sub">没有匹配的画风，换个搜索词或清掉分类筛选。</p>
+                      )}
+                      <p className="chars-sub">
+                        风格预览图是压缩过的 192px webp，原图在源仓库。
+                      </p>
+                    </>
                   )}
-                  <p className="chars-sub">
-                    风格预览图是压缩过的 192px webp，原图在源仓库。
-                  </p>
                 </div>
               </div>
             )}
