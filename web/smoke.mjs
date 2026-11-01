@@ -38,6 +38,10 @@ function makeFetch() {
   let analyzeFails = false
   // 多姿势批量的模拟进度
   let poseJob = null
+  // 内衣底图任务的模拟进度
+  let underwearJob = null
+  // 图集导出了没有（GET /atlas 用）
+  let atlasState = { exists: false }
   // 多姿势批量的模拟进度
   // 保存时是否报冲突（模拟别的窗口改了同一个项目）
   let saveConflictMode = false
@@ -71,6 +75,108 @@ function makeFetch() {
         json: async () => ({
           job_id: `job-${jobSeq}`, status: 'queued', costume: 'Naked',
           total: 4, position: 1, defaults: { steps: 20, cfg: 1, target_size: 1024 },
+        }),
+      }
+    }
+
+    // ---- 内衣底图（官方 remove_clothes）----
+    if (String(url).includes('/characters/') && String(url).endsWith('/clothes/underwear')) {
+      jobSeq += 1
+      underwearJob = { polls: 0 }
+      return {
+        ok: true,
+        json: async () => ({
+          job_id: `job-${jobSeq}`, status: 'queued', costume: 'Underwear',
+          position: 1,
+          prompt: 'Dress character: White underwear',
+          defaults: { target_size: 1024, steps: 20, cfg: 1, costume: 'Underwear' },
+        }),
+      }
+    }
+
+    // ---- 精灵图集导出 ----
+    // GET 查状态、POST 导出，**按 method 分开**：不然前端一进页面就把导出跑了
+    if (String(url).includes('/characters/') && String(url).endsWith('/atlas')) {
+      const method = (init.method || 'GET')
+      if (method === 'GET') {
+        if (!atlasState.exists) {
+          return { ok: true, json: async () => ({ character: 'Alice', exists: false }) }
+        }
+        return {
+          ok: true,
+          json: async () => ({
+            character: 'Alice', exists: true,
+            image: '/files/characters/Alice/Atlas/atlas.png',
+            frames: atlasState.frames, animations: atlasState.animations,
+            size: atlasState.size, canvas: atlasState.canvas,
+            bytes: atlasState.bytes, modified: 1,
+          }),
+        }
+      }
+      atlasState = {
+        exists: true, frames: 4, animations: 2,
+        size: [192, 288], canvas: [96, 144], bytes: 24 * 1024,
+      }
+      return {
+        ok: true,
+        json: async () => ({
+          character: 'Alice',
+          image: '/files/characters/Alice/Atlas/atlas.png',
+          image_path: 'assets/characters/Alice/Atlas/atlas.png',
+          meta_path: 'assets/characters/Alice/Atlas/atlas.json',
+          frames: 4, animations: 2, size: [192, 288], canvas: [96, 144],
+          bytes: 24 * 1024, notes: [],
+        }),
+      }
+    }
+
+    // ---- 内衣底图（官方 remove_clothes）----
+    if (String(url).includes('/characters/') && String(url).endsWith('/clothes/underwear')) {
+      jobSeq += 1
+      underwearJob = { polls: 0 }
+      return {
+        ok: true,
+        json: async () => ({
+          job_id: `job-${jobSeq}`, status: 'queued', costume: 'Underwear',
+          position: 1,
+          prompt: 'Dress character: White underwear',
+          defaults: { target_size: 1024, steps: 20, cfg: 1, costume: 'Underwear' },
+        }),
+      }
+    }
+
+    // ---- 精灵图集导出 ----
+    // GET 查状态、POST 导出，**按 method 分开**：不然前端一进页面就把导出跑了
+    if (String(url).includes('/characters/') && String(url).endsWith('/atlas')) {
+      const method = (init.method || 'GET')
+      if (method === 'GET') {
+        if (!atlasState.exists) {
+          return { ok: true, json: async () => ({ character: 'Alice', exists: false }) }
+        }
+        return {
+          ok: true,
+          json: async () => ({
+            character: 'Alice', exists: true,
+            image: '/files/characters/Alice/Atlas/atlas.png',
+            frames: atlasState.frames, animations: atlasState.animations,
+            size: atlasState.size, canvas: atlasState.canvas,
+            bytes: atlasState.bytes, modified: 1,
+          }),
+        }
+      }
+      atlasState = {
+        exists: true, frames: 4, animations: 2,
+        size: [192, 288], canvas: [96, 144], bytes: 24 * 1024,
+      }
+      return {
+        ok: true,
+        json: async () => ({
+          character: 'Alice',
+          image: '/files/characters/Alice/Atlas/atlas.png',
+          image_path: 'assets/characters/Alice/Atlas/atlas.png',
+          meta_path: 'assets/characters/Alice/Atlas/atlas.json',
+          frames: 4, animations: 2, size: [192, 288], canvas: [96, 144],
+          bytes: 24 * 1024, notes: [],
         }),
       }
     }
@@ -371,6 +477,26 @@ function makeFetch() {
     if (String(url).includes('/jobs/')) {
       // 表情批量：第一次查询返回「跑到一半」，第二次返回完成。
       // 进度是这一批任务的**唯一**可见信号，必须能在界面上看到。
+      if (underwearJob) {
+        underwearJob.polls += 1
+        if (underwearJob.polls < 2) {
+          return {
+            ok: true,
+            json: async () => ({
+              job_id: 'job-uw', status: 'running',
+              progress: { done: 0, total: 1, current: '换内衣底图中' },
+            }),
+          }
+        }
+        return {
+          ok: true,
+          json: async () => ({
+            job_id: 'job-uw', status: 'done',
+            progress: { done: 1, total: 1, current: '' },
+            result: { costume: 'Underwear', sprite: 'x' },
+          }),
+        }
+      }
       if (poseJob) {
         poseJob.polls += 1
         if (poseJob.polls < 2) {
@@ -3653,6 +3779,234 @@ function check(name, cond, extra = '') {
 
   await new Promise((r) => setTimeout(r, 1600))
   check('多姿势场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 46f) 导出图集：帧 → 引擎能直接读的 atlas + 坐标表
+//
+// 这一层**不是官方功能**，但它是"接进引擎"的关键一步。要钉住三件事：
+//   1. 进页面只**查状态**（GET），不会顺手把导出跑一遍；
+//   2. 导出后统计（帧数/组数/尺寸）要摆给用户看；
+//   3. 对齐规则要在界面上写清楚（底边对齐 —— 不然动画里角色上下抖）。
+{
+  const { dom, errors } = await boot('')
+  const doc = dom.window.document
+  const win = dom.window
+  await new Promise((r) => setTimeout(r, 400))
+  const click = (el) => el.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  const setInput = (el, v) => {
+    Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value').set.call(el, v)
+    el.dispatchEvent(new win.Event('input', { bubbles: true }))
+  }
+
+  ;[...doc.querySelectorAll('.view-tab')][1]?.dispatchEvent(
+    new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 250))
+  setInput(doc.querySelector('.chars-new input'), 'Alice')
+  await new Promise((r) => setTimeout(r, 80))
+  click([...doc.querySelectorAll('.chars-new button')][0])
+  await new Promise((r) => setTimeout(r, 300))
+
+  const tab = [...doc.querySelectorAll('.chars-tab')]
+    .find((t) => (t.textContent || '').includes('素材'))
+  click(tab)
+  await new Promise((r) => setTimeout(r, 600))
+
+  const body = () => doc.querySelector('.chars-body')?.textContent || ''
+  const exportBtn = () => [...doc.querySelectorAll('.chars-body button')]
+    .find((b) => (b.textContent || '').includes('导出图集'))
+
+  check('素材页有「导出图集」按钮', !!exportBtn())
+  check('说明里写清了底边对齐（不然动画会抖）', body().includes('底边对齐'))
+  check('说明里写清了输出位置（Atlas/）', body().includes('Atlas'))
+  // `calls` 是全局累积的（前面用例的请求都在里面），只统计**本用例开始后**的
+  const mark = calls.length
+  const atlasCalls = () => calls.slice(mark)
+    .filter((c) => c.url.endsWith('/atlas'))
+  check('进页面只 GET 查状态，没有自动导出',
+    atlasCalls().every((c) => (c.method || 'GET') === 'GET'),
+    JSON.stringify(atlasCalls().map((c) => `${c.method} ${c.url}`)))
+
+  click(exportBtn())
+  await new Promise((r) => setTimeout(r, 700))
+  const post = atlasCalls().filter((c) => c.method === 'POST')
+  check('点按钮才 POST 导出', post.length === 1,
+    JSON.stringify(atlasCalls().map((c) => `${c.method} ${c.url}`)))
+  check('导出后显示帧数与组数', body().includes('4 帧') && body().includes('2 组动画'),
+    body().slice(-160))
+  check('导出后显示图集尺寸与单帧画布',
+    body().includes('192×288') && body().includes('96×144'), body().slice(-160))
+  check('导出后出现「现有图集」统计', body().includes('现有图集'))
+
+  check('图集导出场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 46g) 换白内衣底图（官方 remove_clothes）
+//
+// 官方的预处理一步：把角色换成白色内衣，得到一张干净底图给后续每套服装当起点。
+// **它是一条换装指令 + Clothes LoRA，不是"去掉衣服变裸体"** —— 界面上也要这么说，
+// 否则用户会以为点下去会得到一张裸图。
+{
+  const { dom, errors } = await boot('')
+  const doc = dom.window.document
+  const win = dom.window
+  await new Promise((r) => setTimeout(r, 400))
+  const click = (el) => el.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  const setInput = (el, v) => {
+    Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value').set.call(el, v)
+    el.dispatchEvent(new win.Event('input', { bubbles: true }))
+  }
+
+  ;[...doc.querySelectorAll('.view-tab')][1]?.dispatchEvent(
+    new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 250))
+  setInput(doc.querySelector('.chars-new input'), 'Alice')
+  await new Promise((r) => setTimeout(r, 80))
+  click([...doc.querySelectorAll('.chars-new button')][0])
+  await new Promise((r) => setTimeout(r, 300))
+
+  const tab = [...doc.querySelectorAll('.chars-tab')]
+    .find((t) => (t.textContent || '').includes('服装'))
+  click(tab)
+  await new Promise((r) => setTimeout(r, 400))
+
+  const body = () => doc.querySelector('.chars-body')?.textContent || ''
+  const uwBtn = () => [...doc.querySelectorAll('.chars-body button')]
+    .find((b) => (b.textContent || '').includes('换白内衣'))
+
+  check('服装页有「换白内衣底图」按钮', !!uwBtn())
+  check('说明里写清了官方指令原文', body().includes('Dress character: White underwear'))
+  check('说明里写清了产物是「干净底图」而不是裸体', body().includes('干净底图'))
+
+  click(uwBtn())
+  await new Promise((r) => setTimeout(r, 500))
+  const call = calls.find((c) => c.url.includes('/clothes/underwear'))
+  check('提交到 /clothes/underwear', !!call, call?.url)
+  if (call) {
+    const b = JSON.parse(call.body || '{}')
+    // 默认参数走官方：20 步 / cfg 1.0
+    check('默认不带覆盖参数（用官方 20 步 / cfg 1.0）',
+      b.steps === undefined && b.cfg === undefined, JSON.stringify(b))
+  }
+
+  await new Promise((r) => setTimeout(r, 1500))
+  check('完成后提示存成了哪套服装', body().includes('Underwear'), body().slice(-140))
+  check('内衣场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 46f) 导出图集：帧 → 引擎能直接读的 atlas + 坐标表
+//
+// 这一层**不是官方功能**，但它是"接进引擎"的关键一步。要钉住三件事：
+//   1. 进页面只**查状态**（GET），不会顺手把导出跑一遍；
+//   2. 导出后统计（帧数/组数/尺寸）要摆给用户看；
+//   3. 对齐规则要在界面上写清楚（底边对齐 —— 不然动画里角色上下抖）。
+{
+  const { dom, errors } = await boot('')
+  const doc = dom.window.document
+  const win = dom.window
+  await new Promise((r) => setTimeout(r, 400))
+  const click = (el) => el.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  const setInput = (el, v) => {
+    Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value').set.call(el, v)
+    el.dispatchEvent(new win.Event('input', { bubbles: true }))
+  }
+
+  ;[...doc.querySelectorAll('.view-tab')][1]?.dispatchEvent(
+    new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 250))
+  setInput(doc.querySelector('.chars-new input'), 'Alice')
+  await new Promise((r) => setTimeout(r, 80))
+  click([...doc.querySelectorAll('.chars-new button')][0])
+  await new Promise((r) => setTimeout(r, 300))
+
+  const tab = [...doc.querySelectorAll('.chars-tab')]
+    .find((t) => (t.textContent || '').includes('素材'))
+  click(tab)
+  await new Promise((r) => setTimeout(r, 600))
+
+  const body = () => doc.querySelector('.chars-body')?.textContent || ''
+  const exportBtn = () => [...doc.querySelectorAll('.chars-body button')]
+    .find((b) => (b.textContent || '').includes('导出图集'))
+
+  check('素材页有「导出图集」按钮', !!exportBtn())
+  check('说明里写清了底边对齐（不然动画会抖）', body().includes('底边对齐'))
+  check('说明里写清了输出位置（Atlas/）', body().includes('Atlas'))
+  // `calls` 是全局累积的（前面用例的请求都在里面），只统计**本用例开始后**的
+  const mark = calls.length
+  const atlasCalls = () => calls.slice(mark)
+    .filter((c) => c.url.endsWith('/atlas'))
+  check('进页面只 GET 查状态，没有自动导出',
+    atlasCalls().every((c) => (c.method || 'GET') === 'GET'),
+    JSON.stringify(atlasCalls().map((c) => `${c.method} ${c.url}`)))
+
+  click(exportBtn())
+  await new Promise((r) => setTimeout(r, 700))
+  const post = atlasCalls().filter((c) => c.method === 'POST')
+  check('点按钮才 POST 导出', post.length === 1,
+    JSON.stringify(atlasCalls().map((c) => `${c.method} ${c.url}`)))
+  check('导出后显示帧数与组数', body().includes('4 帧') && body().includes('2 组动画'),
+    body().slice(-160))
+  check('导出后显示图集尺寸与单帧画布',
+    body().includes('192×288') && body().includes('96×144'), body().slice(-160))
+  check('导出后出现「现有图集」统计', body().includes('现有图集'))
+
+  check('图集导出场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 46g) 换白内衣底图（官方 remove_clothes）
+//
+// 官方的预处理一步：把角色换成白色内衣，得到一张干净底图给后续每套服装当起点。
+// **它是一条换装指令 + Clothes LoRA，不是"去掉衣服变裸体"** —— 界面上也要这么说，
+// 否则用户会以为点下去会得到一张裸图。
+{
+  const { dom, errors } = await boot('')
+  const doc = dom.window.document
+  const win = dom.window
+  await new Promise((r) => setTimeout(r, 400))
+  const click = (el) => el.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  const setInput = (el, v) => {
+    Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value').set.call(el, v)
+    el.dispatchEvent(new win.Event('input', { bubbles: true }))
+  }
+
+  ;[...doc.querySelectorAll('.view-tab')][1]?.dispatchEvent(
+    new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 250))
+  setInput(doc.querySelector('.chars-new input'), 'Alice')
+  await new Promise((r) => setTimeout(r, 80))
+  click([...doc.querySelectorAll('.chars-new button')][0])
+  await new Promise((r) => setTimeout(r, 300))
+
+  const tab = [...doc.querySelectorAll('.chars-tab')]
+    .find((t) => (t.textContent || '').includes('服装'))
+  click(tab)
+  await new Promise((r) => setTimeout(r, 400))
+
+  const body = () => doc.querySelector('.chars-body')?.textContent || ''
+  const uwBtn = () => [...doc.querySelectorAll('.chars-body button')]
+    .find((b) => (b.textContent || '').includes('换白内衣'))
+
+  check('服装页有「换白内衣底图」按钮', !!uwBtn())
+  check('说明里写清了官方指令原文', body().includes('Dress character: White underwear'))
+  check('说明里写清了产物是「干净底图」而不是裸体', body().includes('干净底图'))
+
+  click(uwBtn())
+  await new Promise((r) => setTimeout(r, 500))
+  const call = calls.find((c) => c.url.includes('/clothes/underwear'))
+  check('提交到 /clothes/underwear', !!call, call?.url)
+  if (call) {
+    const b = JSON.parse(call.body || '{}')
+    // 默认参数走官方：20 步 / cfg 1.0
+    check('默认不带覆盖参数（用官方 20 步 / cfg 1.0）',
+      b.steps === undefined && b.cfg === undefined, JSON.stringify(b))
+  }
+
+  await new Promise((r) => setTimeout(r, 1500))
+  check('完成后提示存成了哪套服装', body().includes('Underwear'), body().slice(-140))
+  check('内衣场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 

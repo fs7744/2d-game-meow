@@ -306,3 +306,155 @@ def test_api_clothes_wizard(client, monkeypatch):
     cfg = ch.load_config(name) or {}
     assert not (cfg.get("costumes") or {}).get("Nurse")
     ch.delete_character(name)
+
+
+# ---------------------------------------------------------------- 内衣底图（remove_clothes）
+#
+# 官方 `character_generator.py:878-900` + `_run_remove_clothes:2282-2340`。
+#
+# **这是一套具体服装（白色内衣），不是"去掉衣服"**：实现就是一条换装指令加
+# Clothes LoRA，跟换护士服走同一条代码路径。区别只有三处：prompt 一句话、
+# 采样 20 步 / cfg 1.0（换装是 25 / 3.0）、输入要先压到白底（encode 不吃 alpha）。
+
+
+def test_underwear_prompt_is_official_verbatim():
+    """官方 `:879` 就这一句，**不带背景段**（换装那条才有背景段）。"""
+    assert clothesgen.UNDERWEAR_PROMPT == "Dress character: White underwear"
+    assert "background" not in clothesgen.UNDERWEAR_PROMPT.lower()
+
+
+def test_underwear_defaults_are_official():
+    """官方 `:880-900`：target_size 1024、背景 White、20 步 / cfg 1.0。"""
+    d = clothesgen.UNDERWEAR_DEFAULTS
+    assert d["target_size"] == 1024
+    assert d["background_color"] == "White"
+    assert d["steps"] == 20 and d["cfg"] == 1.0
+    assert d["costume"] == "Underwear"
+
+
+def test_flatten_alpha_puts_color_behind_transparency():
+    """透明区域要压到纯色上：不压的话 encode 收到的是预乘黑，
+    模型看到"角色周围一圈黑边"，经常照着画一圈黑轮廓出来。"""
+    img = Image.new("RGBA", (8, 8), (0, 0, 0, 0))
+    img.putpixel((2, 2), (200, 10, 10, 255))
+    flat = clothesgen.flatten_alpha(img, "White")
+    assert flat.mode == "RGB"
+    assert flat.getpixel((0, 0)) == (255, 255, 255)      # 透明处 → 白底
+    assert flat.getpixel((2, 2)) == (200, 10, 10)        # 角色像素不动
+    assert clothesgen.flatten_alpha(img, "green").getpixel((0, 0)) == (0, 255, 0)
+
+
+def test_remove_clothes_writes_underwear_sprite():
+    name = "ClothUnderwear"
+    _make_character(name, naked=1)
+    calls = {}
+
+    def fake_edit(image, prompt, negative, seed, steps, cfg):
+        calls.update(prompt=prompt, negative=negative, steps=steps, cfg=cfg,
+                     mode=image.mode, corner=image.getpixel((0, 0)))
+        return Image.new("RGB", image.size, (250, 250, 250))
+
+    res = clothesgen.remove_clothes(
+        None, {"character": name, "matte": False}, edit=fake_edit, matte_fn=None)
+
+    assert res["costume"] == "Underwear"
+    sprite = Path(res["sprite"])
+    assert sprite.name == "sprite_pose_0001.png", sprite.name
+    assert sprite.parent.parent.name == "Underwear"
+    # prompt / 采样照官方
+    assert calls["prompt"] == "Dress character: White underwear"
+    assert calls["negative"] == ""
+    assert calls["steps"] == 20 and calls["cfg"] == 1.0
+    # 送到 encode 的必须是 RGB（QI2 encode 不吃 alpha）。
+    # 这张底图本来就不透明，所以压平后角落仍是原色；透明底会变白底，
+    # 那条逻辑在 test_flatten_alpha_puts_color_behind_transparency 里单独验。
+    assert calls["mode"] == "RGB"
+    assert calls["corner"] == (200, 180, 160)
+    ch.delete_character(name)
+
+
+def test_remove_clothes_custom_costume_name():
+    """服装名可以换（比如想保留多套内衣），产物跟着换目录。"""
+    name = "ClothUnderwearName"
+    _make_character(name, naked=1)
+
+    def fake_edit(image, prompt, negative, seed, steps, cfg):
+        return Image.new("RGB", image.size, (1, 1, 1))
+
+    res = clothesgen.remove_clothes(
+        None, {"character": name, "costume": "Inner", "matte": False},
+        edit=fake_edit, matte_fn=None)
+    assert res["costume"] == "Inner"
+    assert Path(res["sprite"]).parent.parent.name == "Inner"
+    ch.delete_character(name)
+
+
+def test_remove_clothes_requires_base_sprite():
+    name = "ClothUnderwearNoBase"
+    _make_character(name)
+    with pytest.raises(clothesgen.ClothesError) as exc:
+        clothesgen.remove_clothes(None, {"character": name}, edit=lambda *a: None)
+    assert "底图" in str(exc.value)
+    ch.delete_character(name)
+
+
+def test_remove_clothes_reports_progress():
+    name = "ClothUnderwearProg"
+    _make_character(name, naked=1)
+    job = {}
+    seen = []
+
+    def fake_edit(image, prompt, negative, seed, steps, cfg):
+        seen.append(dict(job.get("progress") or {}))
+        return Image.new("RGB", image.size, (9, 9, 9))
+
+    clothesgen.remove_clothes(None, {"character": name, "matte": False},
+                              job=job, edit=fake_edit, matte_fn=None)
+    assert seen and seen[0]["total"] == 1
+    assert job["progress"]["done"] == 1
+    ch.delete_character(name)
+
+
+def test_api_underwear_enqueues(client, monkeypatch):
+    """接口只负责入队 + 回显官方 prompt（真出图在 worker 里）。
+
+    **必须把 `remove_clothes` 换掉**：worker 线程是真跑的，不换的话这条测试会
+    去加载 Qwen 管线、占住单卡队列好几分钟，后面的用例全被拖垮（表现为
+    `test_api` 里几条互不相干的断言莫名失败 —— 实测踩过）。
+    """
+    name = "ClothUnderwearApi"
+    _make_character(name, naked=1)
+
+    def fake_remove(engine, params, job=None, **kwargs):
+        if job is not None:
+            job["progress"] = {"done": 1, "total": 1, "current": ""}
+        return {"character": params.get("character"), "costume": "Underwear",
+                "sprite": "x.png", "preview": "p.png"}
+
+    monkeypatch.setattr(clothesgen, "remove_clothes", fake_remove)
+    r = client.post(f"/characters/{name}/clothes/underwear", json={})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["costume"] == "Underwear"
+    assert body["prompt"] == "Dress character: White underwear"
+    assert body["defaults"]["steps"] == 20
+
+    # 等任务收尾，别把它挂给下一个用例
+    job_id = body["job_id"]
+    for _ in range(80):
+        job = client.get(f"/jobs/{job_id}").json()
+        if job.get("status") in ("done", "failed"):
+            break
+        import time as _t
+        _t.sleep(0.05)
+    assert job["status"] == "done", job
+    ch.delete_character(name)
+
+
+def test_api_underwear_without_base_is_400(client):
+    name = "ClothUnderwearApiNoBase"
+    _make_character(name)
+    r = client.post(f"/characters/{name}/clothes/underwear", json={})
+    assert r.status_code == 400
+    assert "底图" in r.json()["detail"]
+    ch.delete_character(name)

@@ -24,7 +24,8 @@ import {
   fetchCharacterPrompt, generateForCharacter, fetchJob, fetchCharacterTags,
   detectEmotionFaces, generateEmotions, type EmotionFrame,
   analyzeCharacter, wizardCharacter, designClothes, clothesWizard,
-  generatePoses, fetchPoseDirs, type PoseDir,
+  generatePoses, fetchPoseDirs, exportAtlas, fetchAtlasInfo, designUnderwear,
+  type PoseDir, type AtlasInfo,
   type CharacterPrompt, type TagCatalog,
 } from '../api'
 import SpritePreview from './SpritePreview'
@@ -124,6 +125,13 @@ export default function CharactersPage({ onNotice }: Props) {
   const [poseBusy, setPoseBusy] = useState(false)
   const [poseMsg, setPoseMsg] = useState('')
   const [poseProg, setPoseProg] = useState<{ done: number; total: number } | null>(null)
+  /** 图集：导出中 / 上次导出的统计 / 已有图集的信息 */
+  const [atlasBusy, setAtlasBusy] = useState(false)
+  const [atlasMsg, setAtlasMsg] = useState('')
+  const [atlasInfo, setAtlasInfo] = useState<AtlasInfo | null>(null)
+  /** 内衣底图：出图中 / 提示 */
+  const [uwBusy, setUwBusy] = useState(false)
+  const [uwMsg, setUwMsg] = useState('')
 
   const reload = useCallback(async () => {
     try {
@@ -152,6 +160,18 @@ export default function CharactersPage({ onNotice }: Props) {
       setPoseDir((cur) => cur || (list[0]?.path ?? ''))
     }).catch(() => setPoseDirs([]))
   }, [])
+
+  // 切角色时顺手查一下图集导出了没有（只拿统计，不拉整份 JSON）
+  useEffect(() => {
+    setAtlasInfo(null)
+    setAtlasMsg('')
+    if (!sel) return
+    let alive = true
+    fetchAtlasInfo(sel).then((info) => {
+      if (alive) setAtlasInfo(info)
+    }).catch(() => { /* 没导出过就是 exists:false */ })
+    return () => { alive = false }
+  }, [sel])
 
   useEffect(() => {
     if (!sel) { setDetail(null); return }
@@ -399,6 +419,70 @@ export default function CharactersPage({ onNotice }: Props) {
       setPoseBusy(false)
     }
   }, [sel, poseBusy, poseDir, poseText, browseCostume, onNotice])
+
+  /**
+   * 导出精灵图集（`atlas.png` + `atlas.json`）。
+   *
+   * 这是**接引擎那一步**：官方只管把帧出到 `Sprites/<服装>/<表情>/`，
+   * 引擎要的是"一张大图 + 坐标表"。对齐规则是统一画布 + 底边对齐，
+   * 否则动画里角色会上下抖。
+   */
+  const doExportAtlas = useCallback(async () => {
+    if (!sel || atlasBusy) return
+    setAtlasBusy(true)
+    setAtlasMsg('打包中…')
+    try {
+      const r = await exportAtlas(sel)
+      const kb = Math.max(1, Math.round(r.bytes / 1024))
+      setAtlasMsg(
+        `完成：${r.frames} 帧 / ${r.animations} 组动画，`
+        + `图集 ${r.size[0]}×${r.size[1]}，单帧画布 ${r.canvas[0]}×${r.canvas[1]}，${kb} KB`)
+      setAtlasInfo(await fetchAtlasInfo(sel))
+      onNotice('图集已导出')
+    } catch (e) {
+      setAtlasMsg(`导出失败：${e instanceof Error ? e.message : e}`)
+    } finally {
+      setAtlasBusy(false)
+    }
+  }, [sel, atlasBusy, onNotice])
+
+  /**
+   * 换白色内衣底图（官方 `remove_clothes`）。
+   *
+   * **是一套具体服装，不是"去掉衣服"**：官方就是一条换装指令加 Clothes LoRA，
+   * 产物给后续每套服装当统一起点（这样新衣服不会带着上一套的袖子残留）。
+   */
+  const doUnderwear = useCallback(async () => {
+    if (!sel || uwBusy) return
+    setUwBusy(true)
+    setUwMsg('已提交，排队中…（20 步，约 40 秒）')
+    try {
+      const r = await designUnderwear(sel, {})
+      for (let i = 0; i < 600; i++) {
+        const j = await fetchJob(r.job_id)
+        if (j.status === 'done') {
+          const d = await fetchCharacter(sel)
+          setDetail(d)
+          setBrowseCostume(r.costume)
+          setBrowseEmotion('neutral')
+          setUwMsg(`完成：已存成「${r.costume}」底图（素材页可看）`)
+          onNotice(`内衣底图已生成`)
+          return
+        }
+        if (j.status === 'failed') {
+          setUwMsg(`失败：${j.error || '未知错误'}`)
+          return
+        }
+        setUwMsg(j.progress?.current ? `生成中：${j.progress.current}` : '生成中…')
+        await new Promise((res) => setTimeout(res, 1200))
+      }
+      setUwMsg('等太久了：任务还在跑，去画布那边看任务状态')
+    } catch (e) {
+      setUwMsg(`失败：${e instanceof Error ? e.message : e}`)
+    } finally {
+      setUwBusy(false)
+    }
+  }, [sel, uwBusy, onNotice])
 
   /** 出图：提交 → 轮询 → 完成后后端已经把图收进角色目录了，刷新即可 */
   const doGenerate = useCallback(async (workflow: 'w1' | 'w2') => {
@@ -947,6 +1031,21 @@ export default function CharactersPage({ onNotice }: Props) {
                   onSave={(data) => void saveCostumeFields(data)}
                 />
                 <div className="chars-row">
+                  <button type="button" className="mini"
+                    onClick={() => void doUnderwear()}
+                    disabled={uwBusy}
+                    title="官方 remove_clothes：换成白色内衣，得到一张干净底图（后续每套服装都从它出发）">
+                    {uwBusy ? '处理中…' : '换白内衣底图'}
+                  </button>
+                  <span className="chars-sub">
+                    <b>换白内衣</b>是官方的预处理一步：把角色换成
+                    <code>Dress character: White underwear</code>，
+                    得到一张干净底图（默认存成 <code>Underwear</code> 服装）。
+                    后面每套衣服都从它出发，新衣服就不会带着上一套的袖子残留。
+                  </span>
+                </div>
+                {uwMsg && <p className="chars-sub">{uwMsg}</p>}
+                <div className="chars-row">
                   <button type="button" className="mini wide"
                     onClick={() => void doDesignClothes()}
                     disabled={clothBusy || costume === 'Naked' || costume === 'Original'}
@@ -1140,6 +1239,35 @@ export default function CharactersPage({ onNotice }: Props) {
                     </div>
                   )}
                   {poseMsg && <p className="chars-sub">{poseMsg}</p>}
+                </div>
+
+                <div className="chars-posegen">
+                  <b>导出图集</b>
+                  <p className="chars-sub">
+                    把这个角色的所有帧打成 <code>atlas.png</code> + <code>atlas.json</code>，
+                    输出在角色目录的 <code>Atlas/</code> 下。
+                    <br />
+                    JSON 是 TexturePacker Hash（Aseprite 能直接导入），另有一层
+                    <code>animations</code>：按「服装/表情」分好组，引擎侧不用自己归类。
+                    <br />
+                    <b>对齐规则</b>：所有帧统一到最大宽高的画布，<b>水平居中 + 底边对齐</b>
+                    —— 脚底固定在底部，动画里角色才不会上下抖。
+                  </p>
+                  <div className="chars-row">
+                    <button type="button" className="mini wide"
+                      onClick={() => void doExportAtlas()}
+                      disabled={atlasBusy}>
+                      {atlasBusy ? '打包中…' : '导出图集'}
+                    </button>
+                  </div>
+                  {atlasInfo?.exists && (
+                    <p className="chars-sub">
+                      现有图集：{atlasInfo.frames} 帧 / {atlasInfo.animations} 组 ·{' '}
+                      {atlasInfo.size?.[0]}×{atlasInfo.size?.[1]} ·{' '}
+                      {Math.max(1, Math.round((atlasInfo.bytes || 0) / 1024))} KB
+                    </p>
+                  )}
+                  {atlasMsg && <p className="chars-sub">{atlasMsg}</p>}
                 </div>
                 {browseFiles.length > 0 && (
                   <div className="chars-asset-row">

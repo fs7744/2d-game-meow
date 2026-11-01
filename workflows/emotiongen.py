@@ -78,6 +78,17 @@ EMOTION_DEFAULTS: Dict[str, Any] = {
 #: 裁切推理边长上限（见模块注释第 1 条）
 MAX_CROP_SIDE = 1024
 
+#: 官方 `character_generator.py:3370-3371`：贴边重抠区域的**膨胀**与**羽化**半径。
+#:
+#: 这两个数不是随手定的：膨胀 8px 是为了把"生成图里改了但差异蒙版没涵盖到"的那
+#: 一圈（生成模型在边界处会轻微抖动）包进来；羽化 4 是让重抠和原 alpha 之间过渡。
+#: 调大会把不该动的头发/肩膀也重抠一遍（那里的幕布色估计会偏）。
+DETAILER_MATTE_EXPAND_RADIUS = 8
+DETAILER_MATTE_FEATHER_RADIUS = 4
+
+#: 官方 `:3837`：贴边 patch 外面要垫一圈幕布色，抠像才估得准背景色。
+DETAILER_CHROMA_CONTEXT = 16
+
 #: 官方 `:2265` 的 latent 对齐步长；`_pad_image_to_square_multiple` 也用它
 CROP_MULTIPLE = 32
 
@@ -191,6 +202,246 @@ def paste_crop_direct(
         base_arr[y1:y2, x1:x2, :channels] = (1.0 - m) * sub + m * patch_arr[..., :channels]
     out = np.clip(base_arr, 0.0, 255.0).round().astype(np.uint8)
     return Image.fromarray(out, mode=base.mode)
+
+
+#: 官方 `:3643-3647` 的三种幕布色
+CHROMA_SCREENS: Dict[str, Tuple[int, int, int]] = {
+    "green": (0, 255, 0),
+    "blue": (0, 0, 255),
+    "red": (255, 0, 0),
+}
+
+
+def chroma_background_name(background: str) -> str:
+    """背景名 → 抠像用的幕布色名（官方 `_emotion_chroma_background:3634-3640`）。
+
+    **白/黑/透明一律当 green** —— 官方注释写得很直白：`A saturated screen is
+    substantially more reliable than white/black`。白底抠像会把白毛白甲一起判成背景，
+    而表情重抠只处理脸框那一小片，猜错的代价是脸上出现一个洞。
+    """
+    name = str(background or "").strip().lower()
+    return name if name in CHROMA_SCREENS else "green"
+
+
+def solid_rgb(background: str) -> Tuple[int, int, int]:
+    """背景名 → RGB 三元组（官方 `_background_rgb:3642-3649`）。"""
+    return CHROMA_SCREENS[chroma_background_name(background)]
+
+
+def detailer_region_mask(
+    delta: np.ndarray,
+    expand_radius: int = DETAILER_MATTE_EXPAND_RADIUS,
+    feather_radius: int = DETAILER_MATTE_FEATHER_RADIUS,
+) -> np.ndarray:
+    """差异图 → 要重做的区域蒙版（官方 `_expanded_detailer_region:3683-3706`）。
+
+    官方拿 FaceDetailer 返回的细化蒙版当输入；**我们没有 FaceDetailer**，所以用
+    同一文件里 `_detailer_mask_from_result:3667-3681` 的 fallback 分支：
+    「生成结果与原图的逐像素差异 > 1e-5」。那本来就是官方为"拿不到蒙版"准备的
+    等价物，语义一样——都是"这块被改过了"。
+
+    然后两步（数值照官方）：
+      · `max_pool2d(kernel=2r+1, padding=r)` → **膨胀** r 像素；
+      · `avg_pool2d(kernel=2r+1, padding=r)` → 平滑，再与原蒙版取 **max**。
+
+    取 max 而不是直接替换成平滑结果，是官方刻意的：单纯平均会让蒙版边缘
+    （值 1）被拉低到 0.5 以下，重抠不到边，接缝还在。
+
+    > 膨胀用 PIL 的 `MaxFilter`（C 实现）。它与 `max_pool2d` 的唯一差别是边界：
+    > torch 补 -inf、PIL 复制边缘。对蒙版（边缘必为 0 或整片为 1）两者结果相同。
+    """
+    arr = np.clip(np.asarray(delta, dtype=np.float32), 0.0, 1.0)
+    if arr.ndim != 2 or arr.size == 0:
+        return arr
+    mask_img = Image.fromarray((arr * 255.0).round().astype(np.uint8), mode="L")
+    expand = max(0, int(expand_radius))
+    if expand:
+        mask_img = mask_img.filter(ImageFilter.MaxFilter(expand * 2 + 1))
+    mask = np.asarray(mask_img, dtype=np.float32) / 255.0
+    feather = max(0, int(feather_radius))
+    if feather:
+        softened = np.asarray(
+            mask_img.filter(ImageFilter.BoxBlur(feather)), dtype=np.float32) / 255.0
+        mask = np.maximum(mask, softened)
+    return np.clip(mask, 0.0, 1.0)
+
+
+def merge_emotion_rgba(
+    original: Image.Image, keyed: Image.Image, region: np.ndarray,
+) -> Image.Image:
+    """按权重把新图混进原图，**在预乘空间里混**（官方 `_merge_emotion_rgba:3707-3748`）。
+
+    直接对 straight-alpha 的 RGB 做 lerp 是错的：那块原来的 alpha 可能是 0.3
+    （半透明发梢），新图是全不透明，混完颜色会偏亮。官方先乘回 alpha 再插值，
+    之后 un-premultiply 还原，所以半透明区域的过渡是物理正确的。
+
+    三个细节照抄：
+      · `alpha = lerp(old_a, new_a, w)`；
+      · `premult = lerp(rgb*old_a, rgb*new_a, w)`；
+      · `alpha <= 1e-6` 时退回 straight 空间的 lerp（否则除零）；
+      · `w <= 1e-6` 的像素**直接保留原图**（不是"混 0 权重"，避免舍入误差啃边）。
+    """
+    base = np.asarray(original.convert("RGBA"), dtype=np.float32) / 255.0
+    h, w = base.shape[:2]
+    patch = keyed.convert("RGBA")
+    if patch.size != (w, h):
+        patch = patch.resize((w, h), Image.LANCZOS)
+    new = np.asarray(patch, dtype=np.float32) / 255.0
+
+    weight = np.asarray(region, dtype=np.float32)
+    if weight.shape != (h, w):
+        weight = np.asarray(
+            Image.fromarray((np.clip(weight, 0, 1) * 255).astype(np.uint8), mode="L")
+            .resize((w, h), Image.BILINEAR), dtype=np.float32) / 255.0
+    weight = np.clip(weight, 0.0, 1.0)[:, :, None]
+
+    old_a = np.clip(base[..., 3:4], 0.0, 1.0)
+    new_a = np.clip(new[..., 3:4], 0.0, 1.0)
+    alpha = old_a + (new_a - old_a) * weight
+    premult = (base[..., :3] * old_a) + ((new[..., :3] * new_a) - (base[..., :3] * old_a)) * weight
+    straight = np.where(
+        alpha > 1e-6,
+        premult / np.maximum(alpha, 1e-6),
+        (base[..., :3] + (new[..., :3] - base[..., :3]) * weight),
+    )
+    merged = np.concatenate([np.clip(straight, 0.0, 1.0), np.clip(alpha, 0.0, 1.0)], axis=-1)
+    out = np.where(weight <= 1e-6, base, merged)
+    return Image.fromarray(
+        (np.clip(out, 0.0, 1.0) * 255.0).round().astype(np.uint8), mode="RGBA")
+
+
+def chroma_key_patch(
+    patch: Image.Image, chroma_key: Callable[[Image.Image], Image.Image],
+    background: str = "Green", context: int = DETAILER_CHROMA_CONTEXT,
+) -> Image.Image:
+    """把一块 patch 贴到幕布色画布上再抠像，最后切回来（官方 `:3846-3896`）。
+
+    **为什么要垫一圈**：`matte_screen` 是按"图边框的颜色"估幕布色的。patch 本身
+    四周都是角色像素时，边框色估出来是肤色/发色，抠像会把整块当背景吃掉。
+    官方垫的是 `_background_rgb(...)`（纯幕布色）加 `border = max(4, context)` 宽，
+    这样边框一定是幕布色。
+
+    `chroma_key` 失败（抛异常）时返回原 patch —— 抠像失败不该丢图。
+    """
+    rgb = patch.convert("RGB")
+    w, h = rgb.size
+    border = max(4, int(context))
+    screen = solid_rgb(background)
+    canvas = Image.new("RGB", (w + border * 2, h + border * 2), screen)
+    canvas.paste(rgb, (border, border))
+    try:
+        keyed = chroma_key(canvas)
+    except Exception:                                  # noqa: BLE001
+        return rgb
+    if keyed is None:
+        return rgb
+    keyed = keyed.convert("RGBA")
+    return keyed.crop((border, border, border + w, border + h))
+
+
+def has_transparency(image: Image.Image, threshold: int = 250) -> bool:
+    """这张图有没有真正的透明像素（决定走哪条抠像路）。
+
+    阈值 250 而不是 255：JPEG 往返、PNG 重采样之后 alpha 常留下 252~254 的
+    \"几乎不透明\"值，按 255 判会把这些图当成有透明，然后对着一条几乎看不见的边
+    做重抠 —— 判据是官方 `source_alpha < 0.999`（≈ 254.7），这里取整到 250。
+    """
+    if image.mode not in ("RGBA", "LA", "PA", "P"):
+        return False
+    try:
+        alpha = image.convert("RGBA").getchannel("A")
+    except (ValueError, OSError):
+        return False
+    return alpha.getextrema()[0] < threshold
+
+
+def refine_alpha_edges(
+    *,
+    full: Image.Image,
+    source: Image.Image,
+    region: Tuple[int, int, int, int],
+    chroma_key: Optional[Callable[[Image.Image], Image.Image]] = None,
+    background: str = "Green",
+    expand_radius: int = DETAILER_MATTE_EXPAND_RADIUS,
+    feather_radius: int = DETAILER_MATTE_FEATHER_RADIUS,
+    context: int = DETAILER_CHROMA_CONTEXT,
+) -> Tuple[Image.Image, Dict[str, Any]]:
+    """贴回之后的 **alpha 精修**（官方 `_run_emotion_bg_remove:3750-3901` 的单帧版）。
+
+    ## 这一步在修什么
+
+    贴回只混 RGB、不动 alpha（`paste_crop_direct` 只取 patch 的通道数）。所以
+    "生成图里那片应该是透明的"（比如一缕头发飘出轮廓、耳朵后面露出背景）在整图上
+    还是**不透明**的 —— 结果是脸上贴着一块幕布色的脏斑。这一步就是把那片重抠。
+
+    ## 官方的判据：贴边才重抠
+
+    脸框**碰到原图的透明边**才需要重抠；完全落在不透明区域里的（`interior_only`）
+    直接复用原 alpha —— 省掉一次抠像，而且避免在纯肤色区域误判幕布色。
+
+    ## 为什么 `interior_only` 在这可以直接跳过
+
+    官方那两个分支的净效果不同：
+
+      · `interior_only`：`keyed` 就是**贴回后的整图**本身，`weight=1` 处取它、
+        `weight=0` 处取原图 —— 而贴回时框外一个像素都没动，所以**结果 == 输入**。
+        官方走一遍 `_merge_emotion_rgba` 只是为了让代码不分支。
+      · 贴边：`keyed` 是**抠过像**的，RGB 去了溢色、alpha 变了，才是真正的改动。
+
+    所以这里只在贴边时动手，等价于官方，少一次无意义的整块插值。
+
+    ## 坐标
+
+    官方在**整图尺寸**上算 region（`detailer_mask` 就是框矩形，见 `:1692-1698`，
+    QI2 分支没有 FaceDetailer）。这里同样在整图上算，然后只把「真正需要重抠的
+    那一小块 + context」裁出来处理 —— 抠像按边框估幕布色，块越小越准。
+    """
+    src = source.convert("RGBA")
+    w, h = src.size
+    out = full.convert("RGBA")
+    if out.size != (w, h):
+        out = out.resize((w, h), Image.LANCZOS)
+
+    # ---- detailer mask = 裁切框（官方 :1692-1698 那个 zeros + 框内填 1） ----
+    raw_mask = np.zeros((h, w), dtype=np.float32)
+    x1, y1, x2, y2 = [int(v) for v in region]
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(w, x2), min(h, y2)
+    if x2 <= x1 or y2 <= y1:
+        return out, {"touched": False, "reason": "空框"}
+    raw_mask[y1:y2, x1:x2] = 1.0
+    weight = detailer_region_mask(raw_mask, expand_radius, feather_radius)
+
+    src_alpha = np.asarray(src, dtype=np.float32)[..., 3] / 255.0
+    # 官方 `:3812`：region 里有像素落在半透明/透明处 → 贴边
+    touches = bool(np.any((weight > 1e-4) & (src_alpha < 0.999)))
+    if not touches:
+        return out, {"touched": False, "reason": "整块都在不透明区域内"}
+
+    if chroma_key is None:
+        # 没有抠像后端：只能保留原 alpha（= 现状），但要说清楚，别让调用方以为修过了
+        return out, {"touched": True, "keyed": False,
+                     "reason": "没有抠像后端，贴边区域未重抠"}
+
+    # ---- 只处理需要重抠的那一块（官方 `:3823-3826` 的 bbox + context） ----
+    ys, xs = np.nonzero(weight > 1e-4)
+    cy0 = max(0, int(ys.min()) - context)
+    cy1 = min(h, int(ys.max()) + 1 + context)
+    cx0 = max(0, int(xs.min()) - context)
+    cx1 = min(w, int(xs.max()) + 1 + context)
+
+    patch = out.crop((cx0, cy0, cx1, cy1)).convert("RGB")
+    keyed = chroma_key_patch(patch, chroma_key, background, context=context)
+    merged = merge_emotion_rgba(
+        src.crop((cx0, cy0, cx1, cy1)), keyed,
+        weight[cy0:cy1, cx0:cx1])
+    result = out.copy()
+    result.paste(merged, (cx0, cy0))
+    return result, {
+        "touched": True, "keyed": True,
+        "region": [cx0, cy0, cx1, cy1],
+        "screen": chroma_background_name(background),
+    }
 
 
 def cut_padding(
@@ -470,12 +721,23 @@ def crop_generate(
     max_side: int = MAX_CROP_SIDE,
     feather: int = EMOTION_DEFAULTS["feather"],
     edit: Callable[..., Image.Image],
+    # ---- 第二段：官方 `_run_emotion_bg_remove` 的 alpha 精修 ----
+    refine_alpha: bool = True,
+    chroma_key: Optional[Callable[[Image.Image], Image.Image]] = None,
+    background: str = "Green",
+    matte_expand_radius: int = DETAILER_MATTE_EXPAND_RADIUS,
+    matte_feather_radius: int = DETAILER_MATTE_FEATHER_RADIUS,
+    chroma_context: int = DETAILER_CHROMA_CONTEXT,
 ) -> Dict[str, Any]:
     """一张源图 → 换好表情的整图（**纯几何 + 一次 `edit` 调用**）。
 
     `edit(image, prompt, negative, seed, steps, cfg) -> PIL.Image`。
     单拎出来是为了能在没有 GPU 的测试里用一个假的 `edit` 跑通整条几何链路
     （pad 对齐、贴回坐标、羽化无接缝都能验）。
+
+    `refine_alpha`：贴回之后再走官方的第二段（`_run_emotion_bg_remove`），
+    **只在脸框碰到原图透明边时**才重抠那一小片。源图不透明时这一步什么都不做
+    （见 `refine_alpha_edges` 的说明）。
     """
     src = source.convert("RGBA")
     w, h = src.size
@@ -499,6 +761,15 @@ def crop_generate(
     crop_w = region[2] - region[0]
     mask = paste_mask(crop_h, crop_w, feather)
     full = paste_crop_direct(src, patch, region, mask)
+    refine_info: Dict[str, Any] = {"touched": False, "reason": "未启用"}
+    if refine_alpha:
+        full, refine_info = refine_alpha_edges(
+            full=full, source=src, region=region,
+            chroma_key=chroma_key, background=background,
+            expand_radius=matte_expand_radius,
+            feather_radius=matte_feather_radius,
+            context=chroma_context,
+        )
     return {
         "image": full,            # 贴回后的整图（存 Sprites/）
         "face": generated,        # 生成的裁切块原图（存 Faces/，官方 `:4638`）
@@ -508,6 +779,7 @@ def crop_generate(
         "work_size": [tw, th],
         "padding": list(padding),
         "detected": box is not None,
+        "alpha_refine": refine_info,
     }
 
 
@@ -562,6 +834,8 @@ def run_batch(
     feather = int(params.get("feather") if params.get("feather") is not None
                   else EMOTION_DEFAULTS["feather"])
     do_matte = bool(params.get("matte"))
+    background = str(params.get("background_color")
+                     or info.get("background_color") or "Green")
 
     sources = characters.source_sprite_paths(name, costume)
     if not sources:
@@ -608,12 +882,21 @@ def run_batch(
                 with Image.open(src_path) as opened:
                     source = opened.convert("RGBA")
                 box = detector(source)
+                # **源图有没有 alpha 决定走哪条抠像路**：
+                #   · 已经是透明底 → 官方这条路：贴回后只在「脸框碰到透明边」处
+                #     重抠那一小片（`refine_alpha_edges`），整图不再动；
+                #   · 还是纯色幕布（全不透明）→ 没有 alpha 可复用，只能整图抠。
+                # 以前不分情况一律整图抠，透明源图会被再抠一遍，容易啃掉半透明发梢。
+                source_alpha = has_transparency(source)
                 out = crop_generate(
                     source, box=box, prompt=prompt, negative=negative,
                     seed=seed, steps=steps, cfg=cfg_scale, target_size=target_size,
-                    max_side=max_side, feather=feather, edit=edit)
+                    max_side=max_side, feather=feather, edit=edit,
+                    refine_alpha=source_alpha,
+                    chroma_key=matte_fn if source_alpha else None,
+                    background=background)
                 image = out["image"]
-                if do_matte and matte_fn is not None:
+                if do_matte and not source_alpha and matte_fn is not None:
                     try:
                         image = matte_fn(image)
                     except Exception as exc:          # noqa: BLE001
@@ -626,6 +909,7 @@ def run_batch(
                     "source": src_path, "sprite": sprite_path, "face": face_path,
                     "box": list(out["box"]), "detected": out["detected"],
                     "work_size": out["work_size"],
+                    "alpha_refine": out.get("alpha_refine"),
                     "seconds": round(time.time() - t0, 2),
                 })
                 if job is not None:

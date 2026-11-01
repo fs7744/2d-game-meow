@@ -524,3 +524,231 @@ def test_api_generate_enqueues_job(client, monkeypatch):
     assert job["status"] == "done", job
     assert job["workflow"] == "wemo"
     ch.delete_character(name)
+
+
+# ---------------------------------------------------------------- 第二段：alpha 精修
+#
+# 官方表情链路是**两段**：贴回整图（第一段，上面那些测试）+ bg_remove（第二段）。
+# 第二段以前没做，表现是"生成图里本该透明的地方贴着一块幕布色的脏斑"——
+# 因为贴回只混 RGB、不动 alpha。这一组把第二段钉死。
+
+
+def test_detailer_region_mask_expands_then_feathers_outward():
+    """官方 `_expanded_detailer_region:3683-3706`。
+
+    膨胀 r 之后再 `max(mask, avg_pool(mask))`：内侧仍是 1（重抠得到边），
+    **外侧**被抬起来一圈渐变（否则就是一条硬边）。
+    """
+    delta = np.zeros((60, 60), dtype=np.float32)
+    delta[20:40, 20:40] = 1.0
+    m = eg.detailer_region_mask(delta, expand_radius=8, feather_radius=4)
+
+    assert m.shape == (60, 60)
+    assert m[30, 30] == pytest.approx(1.0)             # 中心
+    assert m[20, 30] == pytest.approx(1.0)             # 原边界（膨胀后内侧还是 1）
+    assert m[14, 30] == pytest.approx(1.0)             # 膨胀到 12（20-8）
+    assert m[0, 30] == pytest.approx(0.0, abs=1e-6)    # 够远
+    # 膨胀边界外面是渐变，不是硬跳变
+    outside = m[8:13, 30]
+    assert outside.min() < 0.9 and outside.max() > outside.min(), outside.tolist()
+    # 单调：越靠近原图越高
+    assert m[12, 30] >= m[10, 30] >= m[8, 30]
+
+
+def test_merge_emotion_rgba_blends_in_premultiplied_space():
+    """官方 `_merge_emotion_rgba:3707-3748`：预乘空间插值。
+
+    半透明底（alpha 0.25、灰 100）混进不透明新图（蓝）时，直接对 straight RGB
+    做 lerp 会让那块**偏亮**（红通道停在 50 左右）；预乘后应该是 20 上下。
+    这个差别在发梢、半透明边缘上肉眼可见。
+    """
+    base = Image.new("RGBA", (8, 8), (100, 100, 100, 64))
+    new = Image.new("RGBA", (8, 8), (0, 0, 255, 255))
+    w = np.full((8, 8), 0.5, dtype=np.float32)
+    out = eg.merge_emotion_rgba(base, new, w)
+    r, _g, b, a = out.getpixel((4, 4))
+    assert 15 <= r <= 30, f"红通道 {r}：预乘插值应落在 20 附近，50 说明没预乘"
+    assert b > 100, b
+    assert a == pytest.approx(round((0.251 + (1 - 0.251) * 0.5) * 255), abs=3), a
+
+
+def test_merge_emotion_rgba_zero_weight_keeps_original_exactly():
+    """`weight <= 1e-6` 的像素**原样保留**（官方最后的 where，不是混 0 权重）。"""
+    base = Image.new("RGBA", (8, 8), (12, 34, 56, 78))
+    new = Image.new("RGBA", (8, 8), (200, 200, 200, 255))
+    out = eg.merge_emotion_rgba(base, new, np.zeros((8, 8), dtype=np.float32))
+    assert out.getpixel((3, 3)) == (12, 34, 56, 78)
+
+
+def test_merge_emotion_rgba_full_weight_takes_new():
+    base = Image.new("RGBA", (8, 8), (12, 34, 56, 255))
+    new = Image.new("RGBA", (8, 8), (200, 100, 50, 255))
+    out = eg.merge_emotion_rgba(base, new, np.ones((8, 8), dtype=np.float32))
+    assert out.getpixel((3, 3)) == (200, 100, 50, 255)
+
+
+def test_has_transparency_threshold():
+    assert eg.has_transparency(Image.new("RGBA", (4, 4), (1, 2, 3, 100))) is True
+    assert eg.has_transparency(Image.new("RGBA", (4, 4), (1, 2, 3, 255))) is False
+    # 252 这种"几乎不透明"不算（官方判据是 < 0.999 ≈ 254.7，取整到 250）
+    assert eg.has_transparency(Image.new("RGBA", (4, 4), (1, 2, 3, 252))) is False
+    assert eg.has_transparency(Image.new("RGB", (4, 4), (1, 2, 3))) is False
+
+
+def test_chroma_background_is_always_saturated():
+    """官方 `_emotion_chroma_background:3634-3640`：白/黑/透明一律当 green。
+
+    注释原文 `A saturated screen is substantially more reliable than white/black`。
+    表情重抠只处理脸框那一小片，猜错幕布色的代价是脸上出现一个洞。
+    """
+    assert eg.chroma_background_name("Green") == "green"
+    assert eg.chroma_background_name("BLUE") == "blue"
+    assert eg.chroma_background_name("White") == "green"
+    assert eg.chroma_background_name("Transparent") == "green"
+    assert eg.chroma_background_name("") == "green"
+    assert eg.solid_rgb("White") == (0, 255, 0)
+    assert eg.solid_rgb("blue") == (0, 0, 255)
+
+
+def test_chroma_key_patch_pads_with_screen_and_crops_back():
+    """抠像前要垫一圈幕布色（官方 `:3846-3856`），切回后尺寸必须还原。
+
+    patch 四周全是角色像素时，直接抠会把整块当背景吃掉。
+    """
+    patch = Image.new("RGB", (30, 20), (180, 150, 140))
+    seen = {}
+
+    def fake_key(canvas):
+        seen["size"] = canvas.size
+        seen["corner"] = canvas.getpixel((0, 0))
+        # 假装把一切都抠成透明
+        return Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+
+    out = eg.chroma_key_patch(patch, fake_key, "Green", context=16)
+    assert out.size == (30, 20)
+    assert seen["size"] == (30 + 32, 20 + 32)          # 四周各垫 max(4, 16)
+    assert seen["corner"] == (0, 255, 0)               # 垫的是幕布色
+    assert out.getpixel((5, 5))[3] == 0
+
+
+def test_chroma_key_patch_survives_keyer_failure():
+    """抠像抛异常时返回原 patch —— 失败不该丢图。"""
+    patch = Image.new("RGB", (10, 10), (1, 2, 3))
+
+    def boom(_):
+        raise RuntimeError("模型炸了")
+
+    out = eg.chroma_key_patch(patch, boom, "Green")
+    assert out.size == (10, 10) and out.getpixel((1, 1)) == (1, 2, 3)
+
+
+def _transparent_source(size=(300, 260)) -> Image.Image:
+    """透明底的源图：背景全透明，中间一块不透明的「立绘」。"""
+    img = Image.new("RGBA", size, (0, 0, 0, 0))
+    arr = np.asarray(img).copy()
+    arr[60:200, 100:200] = (230, 200, 180, 255)        # 身体
+    return Image.fromarray(arr)
+
+
+def test_refine_alpha_skips_when_box_is_fully_opaque():
+    """脸框整块都在不透明区域里 → 官方 `interior_only`，复用原 alpha。
+
+    这时重抠没有任何收益（那块本来就该不透明），跳过还能避免在纯肤色区域
+    把肤色误判成幕布色。
+    """
+    src = _source()                                     # 全不透明
+    full = src.copy()
+    out, info = eg.refine_alpha_edges(
+        full=full, source=src, region=(110, 80, 190, 150),
+        chroma_key=lambda im: im.convert("RGBA"))
+    assert info["touched"] is False
+    assert np.array_equal(np.asarray(out), np.asarray(full))
+
+
+def test_refine_alpha_keys_when_box_touches_transparency():
+    """脸框碰到透明边 → 真的重抠那一小片（绿幕被抠成透明）。"""
+    src = _transparent_source()
+    # 生成图把**脸框上半**画成了绿幕色（模拟模型在脸周围画出了背景）
+    full = src.copy()
+    arr = np.asarray(full).copy()
+    arr[55:100, 95:205] = (0, 255, 0, 255)
+    full = Image.fromarray(arr)
+
+    calls = []
+
+    def keyer(canvas):
+        calls.append(canvas.size)
+        # 把纯绿抠成透明
+        c = np.asarray(canvas.convert("RGB"), dtype=np.int16)
+        alpha = np.where((c[..., 1] > 200) & (c[..., 0] < 60) & (c[..., 2] < 60), 0, 255)
+        rgba = np.dstack([np.asarray(canvas.convert("RGB")), alpha.astype(np.uint8)])
+        return Image.fromarray(rgba, mode="RGBA")
+
+    out, info = eg.refine_alpha_edges(
+        full=full, source=src, region=(100, 60, 200, 200), chroma_key=keyer)
+    assert info["touched"] is True and info["keyed"] is True
+    assert calls, "没有调用抠像后端"
+    # 那块绿被抠掉了
+    assert out.getpixel((150, 75))[3] < 40, out.getpixel((150, 75))
+    # 身体下半（框内、原来不透明、没被涂绿）保持不透明
+    assert out.getpixel((150, 150))[3] > 200, out.getpixel((150, 150))
+
+
+def test_refine_alpha_without_keyer_leaves_image():
+    """没有抠像后端时**不能假装修过**：原图返回，但要把原因说清楚。"""
+    src = _transparent_source()
+    full = src.copy()
+    out, info = eg.refine_alpha_edges(
+        full=full, source=src, region=(100, 60, 200, 200), chroma_key=None)
+    assert info["touched"] is True and info["keyed"] is False
+    assert "没有抠像后端" in info["reason"]
+    assert np.array_equal(np.asarray(out), np.asarray(full))
+
+
+def test_refine_alpha_empty_region_is_noop():
+    src = _source()
+    out, info = eg.refine_alpha_edges(
+        full=src.copy(), source=src, region=(10, 10, 10, 10),
+        chroma_key=lambda im: im.convert("RGBA"))
+    assert info["touched"] is False
+
+
+def test_crop_generate_refines_transparent_source():
+    """整条链：透明源图 → 贴回 → 贴边重抠（alpha 真的被修了）。"""
+    src = _transparent_source()
+
+    def fake_edit(image, prompt, negative, seed, steps, cfg):
+        # 生成图整块绿幕色（最坏情况：模型把背景画成了绿）
+        return Image.new("RGB", image.size, (0, 255, 0))
+
+    def keyer(canvas):
+        c = np.asarray(canvas.convert("RGB"), dtype=np.int16)
+        alpha = np.where((c[..., 1] > 200) & (c[..., 0] < 60) & (c[..., 2] < 60), 0, 255)
+        return Image.fromarray(
+            np.dstack([np.asarray(canvas.convert("RGB")), alpha.astype(np.uint8)]),
+            mode="RGBA")
+
+    out = eg.crop_generate(
+        src, box=(100, 60, 200, 200), prompt="P", negative="N", seed=1,
+        steps=8, cfg=1.0, feather=20, edit=fake_edit,
+        refine_alpha=True, chroma_key=keyer)
+    assert out["alpha_refine"]["touched"] is True
+    assert out["alpha_refine"]["keyed"] is True
+    # 框中心：生成图是绿、被抠掉 → 透明
+    assert out["image"].getpixel((150, 130))[3] < 40, out["image"].getpixel((150, 130))
+    # 框外：一个像素都不该动（原 alpha 是 0）
+    assert out["image"].getpixel((50, 40))[3] == 0
+
+
+def test_crop_generate_skips_refine_on_opaque_source():
+    """不透明源图（纯色幕布）不做第二段 —— 它没有 alpha 可复用，交给整图抠。"""
+    src = _source()
+
+    def fake_edit(image, prompt, negative, seed, steps, cfg):
+        return Image.new("RGB", image.size, (0, 0, 255))
+
+    out = eg.crop_generate(
+        src, box=(110, 80, 190, 150), prompt="P", negative="N", seed=1,
+        steps=8, cfg=1.0, feather=20, edit=fake_edit,
+        refine_alpha=False)
+    assert out["alpha_refine"]["touched"] is False

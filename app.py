@@ -60,6 +60,7 @@ from workflows import characters
 from workflows import charactergen
 from workflows import clothesgen
 from workflows import posegen
+from workflows import spriteatlas
 from workflows import emotiongen
 from workflows import qwen_llm
 from workflows import library
@@ -133,6 +134,15 @@ def _run(job_id: str, workflow: str, params: Dict[str, Any]) -> None:
             from workflows import posegen as _posegen
             with _gpu_lock:                # 单卡不并发
                 job["result"] = _posegen.run_batch(engine, params, job=job)
+            job["status"] = "done"
+            return
+        if workflow == "wunderwear":
+            # **内衣底图**：官方 `_run_remove_clothes` 那一步 —— 把自己的角色图
+            # 换成白色内衣，得到一张干净底图（后续每套服装都从它出发）。
+            # 20 步 / cfg 1.0，比换装短（官方 `:894-900`）。
+            from workflows import clothesgen as _clothes
+            with _gpu_lock:
+                job["result"] = _clothes.remove_clothes(engine, params, job=job)
             job["status"] = "done"
             return
         if workflow == "wcloth":
@@ -1070,6 +1080,25 @@ class PoseGenReq(BaseModel):
     lora: str = ""
 
 
+class UnderwearReq(BaseModel):
+    """内衣底图请求（官方 `remove_clothes`，`character_generator.py:878-900`）。
+
+    **这是一套具体服装（白色内衣），不是"脱光"**：官方实现就是一条换装指令
+    `Dress character: White underwear` 加 Clothes LoRA，产物是穿内衣的底图，
+    用来给后续每套服装提供统一的干净起点。
+
+    采样比换装短：**20 步 / cfg 1.0**（换装是 25 / 3.0）。
+    """
+    #: 这套内衣存成哪个服装名（默认 Underwear，可以覆盖）
+    costume: str = "Underwear"
+    steps: int = int(clothesgen.UNDERWEAR_DEFAULTS["steps"])
+    cfg: float = float(clothesgen.UNDERWEAR_DEFAULTS["cfg"])
+    seed: int = -1
+    lora_scale: float = 1.0
+    #: 出完顺带抠掉背景
+    matte: bool = True
+
+
 class ClothesWizardReq(BaseModel):
     """服装 AI 向导：一句话 → top/bottom/shoes/head/face 五个字段。"""
     description: str = ""
@@ -1386,6 +1415,138 @@ def clothes_wizard_api(name: str, req: ClothesWizardReq) -> Dict[str, Any]:
         "raw": result.get("raw", ""),
         "description": result.get("description", ""),
     }
+
+
+class AtlasReq(BaseModel):
+    """精灵图集导出请求（**不是官方功能**，是我们补的工程环节）。
+
+    官方只负责把帧出到 `Sprites/<服装>/<表情>/`；打成图集是接引擎的那一步。
+    """
+    costumes: List[str] = Field(default_factory=list, description="空 = 全部")
+    emotions: List[str] = Field(default_factory=list, description="空 = 全部")
+    #: 帧间距。**必须留缝**：贴边的话引擎线性过滤会把邻居像素吸进来
+    padding: int = 2
+    max_width: int = 4096
+    frame_rate: float = 8.0
+
+
+@app.post("/characters/{name}/atlas")
+def character_atlas_export(name: str, req: AtlasReq) -> Dict[str, Any]:
+    """把这个角色的精灵帧打成 `atlas.png` + `atlas.json`。
+
+    输出在 `<角色目录>/Atlas/`。JSON 是 TexturePacker Hash（Aseprite 能直接导入），
+    另外多一层 `animations`：把「服装/表情」映射成帧序列，引擎侧不用再自己分组。
+
+    **对齐规则**：所有帧统一到「最大宽高」的画布，**水平居中 + 底边对齐**。
+    不同姿势的包围盒不一样，按左上角拼会让角色在动画里上下抖。
+    """
+    try:
+        safe = characters.ensure_safe_name(name, "角色名")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    try:
+        result = spriteatlas.export_character_atlas(
+            safe,
+            costumes=req.costumes or None,
+            emotions=req.emotions or None,
+            padding=max(0, int(req.padding)),
+            max_width=max(64, int(req.max_width)),
+            frame_rate=float(req.frame_rate or 8.0),
+        )
+    except spriteatlas.AtlasError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(500, f"写图集失败：{exc}") from exc
+    return {
+        "character": safe,
+        "image": _asset_url(result.image_path),
+        "image_path": result.image_path,
+        "meta_path": result.meta_path,
+        "frames": result.frames,
+        "animations": result.animations,
+        "size": list(result.size),
+        "canvas": list(result.canvas),
+        "bytes": result.bytes,
+        "notes": result.notes,
+    }
+
+
+@app.get("/characters/{name}/atlas")
+def character_atlas_info(name: str) -> Dict[str, Any]:
+    """图集导出了没有 / 多大 / 多少帧。
+
+    **不返回整份 JSON**：`frames` 可能有上千条，前端只用得上统计。
+    """
+    try:
+        safe = characters.ensure_safe_name(name, "角色名")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not characters.character_exists(safe):
+        raise HTTPException(404, f"没有这个角色：{safe}")
+    folder = Path(characters.character_dir(safe)) / "Atlas"
+    image = folder / "atlas.png"
+    meta_file = folder / "atlas.json"
+    if not image.is_file() or not meta_file.is_file():
+        return {"character": safe, "exists": False}
+    try:
+        meta = json.loads(meta_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"character": safe, "exists": False, "broken": True}
+    frames = meta.get("frames") or {}
+    animations = meta.get("animations") or {}
+    info = meta.get("meta") or {}
+    return {
+        "character": safe,
+        "exists": True,
+        "image": _asset_url(str(image)),
+        "frames": len(frames),
+        "animations": len(animations),
+        "size": [info.get("size", {}).get("w", 0), info.get("size", {}).get("h", 0)],
+        "canvas": [info.get("canvas", {}).get("w", 0), info.get("canvas", {}).get("h", 0)],
+        "bytes": image.stat().st_size,
+        "modified": image.stat().st_mtime,
+    }
+
+
+@app.post("/characters/{name}/clothes/underwear")
+def clothes_underwear_api(name: str, req: UnderwearReq) -> Dict[str, Any]:
+    """角色 → 白色内衣底图（官方 `_run_remove_clothes:2282-2340`）。
+
+    这是官方的**预处理一步**：给自己的角色图换成白色内衣，得到一张干净底图，
+    后面每套服装都从它出发 —— 这样新衣服不会带着上一套的袖子/配饰残留。
+
+    产物落到 `Sprites/<服装>/neutral/sprite_pose_0001.png`（默认服装名
+    `Underwear`），之后出姿势、出表情都从它走。
+    """
+    try:
+        safe = characters.ensure_safe_name(name, "角色名")
+        costume = characters.ensure_safe_name(
+            req.costume or clothesgen.UNDERWEAR_DEFAULTS["costume"], "服装名")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not characters.character_exists(safe):
+        raise HTTPException(404, f"没有这个角色：{safe}")
+    if not clothesgen.base_sprite(safe):
+        raise HTTPException(
+            400,
+            f"「{safe}」还没有裸装/原始底图：先选一张角色图当起点，"
+            "在「出图」页生成一张（Naked 或 Original 服装）")
+
+    params: Dict[str, Any] = {
+        "character": safe, "costume": costume,
+        "steps": int(req.steps), "cfg": float(req.cfg), "seed": int(req.seed),
+        "lora_scale": float(req.lora_scale), "matte": bool(req.matte),
+    }
+    job_id = uuid.uuid4().hex[:12]
+    _jobs[job_id] = {"job_id": job_id, "workflow": "wunderwear", "params": params,
+                     "status": "queued", "created": time.time(),
+                     "progress": {"done": 0, "total": 1, "current": ""}}
+    _q.put((job_id, "wunderwear", params))
+    _prune(_jobs, JOB_KEEP)
+    return {"job_id": job_id, "status": "queued", "costume": costume,
+            "position": _q.qsize(),
+            "prompt": clothesgen.UNDERWEAR_PROMPT,
+            "defaults": dict(clothesgen.UNDERWEAR_DEFAULTS)}
 
 
 @app.post("/characters/{name}/clothes/design")

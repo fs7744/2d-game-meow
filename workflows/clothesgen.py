@@ -74,6 +74,152 @@ def _write_temp_png(image: Image.Image) -> str:
     return path
 
 
+# ---------------------------------------------------------------- 内衣底图（remove_clothes）
+#
+# 官方 `character_generator.py:878-886` 把它当**预处理的一步**：把自己的角色图换成
+# **白色内衣**，得到一张"干净底图"（代码里叫 `naked_character`），后面所有服装
+# 都从它出发——这样每套衣服都是在同一个干净底子上画的，不会把上一套的袖子
+# 残留在下一套里。
+#
+# **它是一套具体服装（白内衣），不是"去掉衣服变裸体"**。官方的实现就是一条
+# 换装指令加 Clothes LoRA，跟换护士服走的是同一套代码路径。
+
+#: 官方 `:879`（**逐字**，整条指令就这一句，没有背景段）
+UNDERWEAR_PROMPT = "Dress character: White underwear"
+
+#: 官方 `:880-893`：target_size 1024、背景 White、采样 20 步 / cfg 1.0
+UNDERWEAR_DEFAULTS: Dict[str, Any] = {
+    "target_size": 1024,
+    "steps": 20,
+    "cfg": 1.0,
+    "background_color": "White",
+    "costume": "Underwear",
+}
+
+
+def flatten_alpha(image: Image.Image, color: str = "White") -> Image.Image:
+    """把透明区域压到纯色上（官方 `VNCCS_MaskExtractor.fill_alpha_with_color`）。
+
+    remove_clothes 的输入是**一张 RGB 图**（QI2 encode 不吃 alpha）。不压平的话，
+    透明处会以预乘黑的形式送进去，模型看到"角色周围一圈黑边"，经常会照着画一圈
+    黑轮廓出来。
+    """
+    rgba = image.convert("RGBA")
+    rgb = {"white": (255, 255, 255), "green": (0, 255, 0),
+           "blue": (0, 0, 255), "black": (0, 0, 0)}.get(
+               str(color or "White").strip().lower(), (255, 255, 255))
+    canvas = Image.new("RGBA", rgba.size, rgb + (255,))
+    return Image.alpha_composite(canvas, rgba).convert("RGB")
+
+
+def remove_clothes(
+    engine: Any,
+    params: Dict[str, Any],
+    *,
+    job: Optional[Dict[str, Any]] = None,
+    edit: Optional[Callable[..., Image.Image]] = None,
+    matte_fn: Optional[Callable[[Image.Image], Image.Image]] = None,
+) -> Dict[str, Any]:
+    """角色 → 白色内衣底图（官方 `_run_remove_clothes:2282-2340`）。
+
+    跟 `run_design` 的区别只在三处，其余完全一样（同一个 LoRA、同一条出图链路）：
+
+    | 项 | `run_design`（换装） | 这里 |
+    |---|---|---|
+    | prompt | `Dress the character:` + 五个字段 + 背景段 | `Dress character: White underwear` |
+    | 采样 | 25 步 / cfg 3.0 | **20 步 / cfg 1.0**（`:894-900`） |
+    | 输入 | 裸装底图，RGBA 直接送 | 先压到白底（encode 不吃 alpha） |
+
+    产物落到 `Sprites/<costume>/neutral/sprite_pose_0001.png`，默认 `costume`
+    是 `Underwear`。之后出姿势/表情都从这张图走。
+    """
+    name = characters.ensure_safe_name(str(params.get("character") or ""), "角色名")
+    costume = characters.ensure_safe_name(
+        str(params.get("costume") or UNDERWEAR_DEFAULTS["costume"]), "服装名")
+    if not characters.character_exists(name):
+        raise ClothesError(f"没有这个角色：{name}")
+
+    source = base_sprite(name)
+    if not source:
+        raise ClothesError(
+            f"「{name}」还没有裸装/原始底图：先把衣服换成内衣也是从底图改的，"
+            "先在「出图」页生成一张（Naked 或 Original 服装）")
+
+    if costume.casefold() not in {c.casefold() for c in characters.list_costumes(name)}:
+        characters.save_costume_info(name, costume, {})
+
+    steps = int(params.get("steps") or UNDERWEAR_DEFAULTS["steps"])
+    cfg = float(params.get("cfg") or UNDERWEAR_DEFAULTS["cfg"])
+    seed = params.get("seed")
+    seed = int(seed) if seed is not None and int(seed) >= 0 else int.from_bytes(
+        os.urandom(3), "big")
+    lora_scale = float(params.get("lora_scale") or 1.0)
+    background = str(params.get("background_color")
+                     or UNDERWEAR_DEFAULTS["background_color"])
+
+    lora_name = ""
+    if edit is None:
+        from workflows import generate as gen
+        from workflows.engine import Engine
+
+        lora_name = Engine.CLOTHES_LORA
+
+        def _edit(image: Image.Image, p: str, n: str, sd: int, st: int, cf: float):
+            return gen.qwen_edit_image(
+                engine, image=image, prompt=p, negative=n, seed=sd, steps=st,
+                cfg=cf, label="wunderwear",
+                lora=Engine.CLOTHES_LORA, lora_scale=lora_scale)
+
+        edit = _edit
+
+    if job is not None:
+        job["progress"] = {"done": 0, "total": 1, "current": "换内衣底图中"}
+    started = time.time()
+    with Image.open(source) as opened:
+        base_rgba = opened.convert("RGBA")
+    base = flatten_alpha(base_rgba, background)
+    image = edit(base, UNDERWEAR_PROMPT, "", seed, steps, cfg)
+    if image is None:
+        raise ClothesError("出图没有返回图像")
+    if image.size != base.size:
+        image = image.resize(base.size, Image.LANCZOS)
+
+    matte_error = ""
+    if params.get("matte"):
+        try:
+            from workflows import matte_screen
+            matte_fn = matte_fn or matte_screen.matte_pil
+            out = matte_fn(image)
+            if out is not None:
+                image = out
+        except Exception as exc:                      # noqa: BLE001
+            matte_error = str(exc)
+
+    preview = _save_preview(name, costume, image)
+    tmp = _write_temp_png(image)
+    try:
+        published = characters.publish_image(
+            name, tmp, costume=costume, emotion="neutral", set_cover=False)
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+    if job is not None:
+        job["progress"] = {"done": 1, "total": 1, "current": ""}
+    return {
+        "character": name, "costume": costume,
+        "prompt": UNDERWEAR_PROMPT, "negative": "",
+        "background": background, "transparent": False,
+        "source": source, "sprite": published["path"], "preview": preview,
+        "seed": seed, "steps": steps, "cfg": cfg,
+        "lora": lora_name,
+        "matte_error": matte_error,
+        "seconds": round(time.time() - started, 2),
+    }
+
+
 def run_design(
     engine: Any,
     params: Dict[str, Any],

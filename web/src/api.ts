@@ -824,6 +824,79 @@ export function generatePoses(
     { method: 'POST', body: JSON.stringify(body) })
 }
 
+// ---------------- 内衣底图（官方 remove_clothes） ----------------
+//
+// **是一套具体服装（白色内衣），不是"去掉衣服"**：官方实现就是一条换装指令
+// `Dress character: White underwear` 加 Clothes LoRA，产物是穿内衣的底图，
+// 给后续每套服装提供统一的干净起点。采样比换装短（20 步 / cfg 1.0）。
+
+export type UnderwearBody = {
+  /** 这套内衣存成哪个服装名，默认 Underwear */
+  costume?: string
+  steps?: number
+  cfg?: number
+  seed?: number
+  lora_scale?: number
+  matte?: boolean
+}
+
+export function designUnderwear(
+  name: string, body: UnderwearBody = {},
+): Promise<{
+  job_id: string; status: string; costume: string; position: number
+  prompt: string
+  defaults: { target_size: number; steps: number; cfg: number; costume: string }
+}> {
+  return req(`/characters/${encodeURIComponent(name)}/clothes/underwear`,
+    { method: 'POST', body: JSON.stringify(body) })
+}
+
+// ---------------- 精灵图集导出 ----------------
+//
+// 不是官方功能：官方只管把帧出到 Sprites/<服装>/<表情>/；打成图集是接引擎那一步。
+
+export type AtlasResult = {
+  character: string
+  /** `/files/...` 的 atlas 地址 */
+  image: string
+  image_path: string
+  meta_path: string
+  frames: number
+  animations: number
+  size: [number, number]
+  canvas: [number, number]
+  bytes: number
+  notes: string[]
+}
+
+export type AtlasInfo = {
+  character: string
+  exists: boolean
+  broken?: boolean
+  image?: string
+  frames?: number
+  animations?: number
+  size?: [number, number]
+  canvas?: [number, number]
+  bytes?: number
+  modified?: number
+}
+
+/** 导出图集（覆盖上一次）。 */
+export function exportAtlas(
+  name: string,
+  body: { costumes?: string[]; emotions?: string[]; padding?: number
+    max_width?: number; frame_rate?: number } = {},
+): Promise<AtlasResult> {
+  return req(`/characters/${encodeURIComponent(name)}/atlas`,
+    { method: 'POST', body: JSON.stringify(body) })
+}
+
+/** 图集导出了没有（只统计，不拉整份 JSON）。 */
+export function fetchAtlasInfo(name: string): Promise<AtlasInfo> {
+  return req(`/characters/${encodeURIComponent(name)}/atlas`)
+}
+
 export type CharacterPrompt = {
   name: string
   style: string

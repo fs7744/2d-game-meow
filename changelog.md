@@ -22,6 +22,97 @@
 
 ---
 
+## 2026-11-01 · 表情贴边重抠补完 + 内衣底图 + 精灵图集导出
+
+三件事，前两件是照官方补的，第三件是我们自己的工程环节。
+
+### 1. 表情的 alpha 精修（官方第二段）
+
+官方表情链路是**两段**：贴回整图（第一段）+ `bg_remove`（第二段）。之前只做了
+第一段，表现是"生成图里本该透明的地方贴着一块幕布色的脏斑"——因为贴回只混
+RGB、不动 alpha。
+
+补的三个函数（都在 `workflows/emotiongen.py`）：
+
+| 这里 | 官方 |
+|---|---|
+| `detailer_region_mask` | `_expanded_detailer_region:3683-3706` |
+| `merge_emotion_rgba` | `_merge_emotion_rgba:3707-3748` |
+| `refine_alpha_edges` | `_run_emotion_bg_remove:3750-3901`（单帧版） |
+
+三个要点：
+
+- **`detailer_mask` 就是裁切框矩形**（`:1692-1698`，QI2 分支没有 FaceDetailer）。
+  "贴边"指框膨胀 8px 后碰到原图 `alpha < 0.999` 的地方 —— 碰上才重抠那一小块。
+- **混合必须在预乘空间**。半透明发梢（alpha 0.25）混进不透明新图时，直接对
+  straight RGB 做 lerp 会让那块偏亮；预乘后按 `lerp(rgb*a)` 再 un-premultiply
+  才是物理正确的。
+- **羽化取 `max(mask, avg_pool(mask))`** 而不是直接替换成平滑结果：单纯平均会把
+  蒙版边缘（值 1）拉到 0.5 以下，重抠不到边，接缝照旧。
+
+`run_batch` 顺带改成按源图分两条路：透明底 → 局部重抠；不透明纯色幕布 → 整图抠。
+以前一律整图抠，透明源图会被再抠一遍，容易啃掉半透明发梢。
+
+### 2. 内衣底图（官方 `remove_clothes`）
+
+`character_generator.py:878-900` + `_run_remove_clothes:2282-2340`。
+
+**它是一套具体服装（白色内衣），不是"去掉衣服"**：官方实现就是一条换装指令
+`Dress character: White underwear` 加 Clothes LoRA，产物给后续每套服装当统一起点
+（这样新衣服不会带着上一套的袖子残留）。
+
+跟换装的区别只有三处：prompt 一句话（**没有背景段**）、采样 **20 步 / cfg 1.0**
+（换装是 25 / 3.0）、输入要先**压到白底**（QI2 encode 不吃 alpha；不压的话
+模型看到"角色周围一圈黑边"，经常照着画一圈黑轮廓）。
+
+`POST /characters/<名>/clothes/underwear`，产物落 `Sprites/<服装>/neutral/`，
+默认服装名 `Underwear`。实测 39.3s。
+
+**`instruction` 那个字段不用管**：`DEFAULT_WIDGET_DATA` 里给了
+`GENERATOR_QWEN_INSTRUCTION`，但 QI2 分支的 `_qi2_encode` 只吃 prompt 和
+target_size（`:1430-1435`），那句长指令根本没进模型。
+
+### 3. 精灵图集导出（**不是官方功能**）
+
+`workflows/spriteatlas.py`。官方只管把帧出到 `Sprites/<服装>/<表情>/`，
+引擎要的是"一张大图 + 坐标表"——中间这步没人做的话，每个接这套资产的人都要
+自己写一遍打包脚本，而且十有八九会把脚底对齐搞错。
+
+**对齐规则**（最容易错的地方）：
+
+```
+统一画布 = 所有帧里最大的 (w, h)
+每帧在画布内：水平居中 + 底边对齐
+```
+
+底边对齐是因为精灵帧要站在地面上——脚底是唯一在所有姿势里都该固定的位置。
+按左上角拼的话，高一点的帧会让角色在动画里"跳"一下。
+
+另外三条经验：
+
+- **帧与帧之间必须留缝**（默认 2px）。贴边的话引擎线性过滤会把邻居的像素吸进来，
+  表现为边缘一圈杂色。
+- **绝不 resize**：尺寸不同的帧是"放进统一画布"（透明底 + 偏移），不是拉伸——
+  这一套管线出来的图是像素化的，重采样直接毁掉网格。
+- 输出是 TexturePacker JSON Hash（Aseprite 能直接导入），另加一层 `animations`：
+  按「服装/表情」分好组，引擎侧不用自己归类。
+
+**与引擎对接**：`meta.canvas` 是建 sprite 用的尺寸（**别按 `frame.w/h` 猜**），
+`meta.pivot = (0.5, 1.0)` 是底边中点——地面站位就是帧的底边。
+单帧动画会在 `notes` 里标出来（引擎照 loop 播会"卡住不动"）。
+
+`POST /characters/<名>/atlas` 导出、`GET` 查统计。实测 2 帧 → 1540×768 / 85KB。
+
+### 顺带修的一个测试卫生问题
+
+`test_api_underwear_enqueues` 一开始没 mock `remove_clothes`，worker 线程真的去
+加载 Qwen 管线跑了一遍——单跑没事，跑全量时把单卡队列占了好几分钟，
+`test_api` 里几条互不相干的断言跟着失败（看起来像功能坏了）。
+现在测试里显式 `monkeypatch.setattr(clothesgen, "remove_clothes", ...)` 并等任务收尾。
+全量相关测试从 85s 降到 25s。
+
+---
+
 ## 2026-11-01 · 角色中心 T5：多姿势批量生成（pose_generation）
 
 官方 `character_generator.py:2108-2223` 的 QI2 分支，落在 `workflows/posegen.py`
@@ -2240,6 +2331,7 @@ MEOW_SLOW=1 pytest tests -m slow                  # 真跑 Qwen 的端到端组�
 | `workflows/qwen_llm.py`（本地 LLM：反推 + 向导） | test_qwen_llm（真推理那条要 `MEOW_SLOW=1`） | 5s |
 | `workflows/clothesgen.py`（换装） | test_clothes | 5s |
 | `workflows/posegen.py`（多姿势） | test_posegen | 5s |
+| `workflows/spriteatlas.py`（图集导出） | test_spriteatlas | 4s |
 | `workflows/characters.py` / `charactergen.py` | test_characters test_char_poses | 9s |
 | `tools/*` `docs/*` `README` | 不跑（工具靠自身输出验证） | — |
 | 合并 / 发版前 | 全量 | 150s |
@@ -2258,6 +2350,7 @@ test_stability 的 free 与泄漏、test_matte 的缓存素材）需要 GPU。
 | `tests/test_qwen_workflows.py` | **十个工作流的能力表与「近似」标记**、**局部重绘选区外逐点不变**、**output_resolution 真的对齐**、**逐帧尺度归一**、**透明底 alpha 不被白底吃掉**、**Qwen 路径不许碰已删的 SD 管线**、**非人形主体不补提**、**两阶段每帧调两次模型** | 37 |
 | `tests/test_gate.py` | 公共闸门组件（候选怎么跑、同分取第一个、非人形不补提） | 6 |
 | `tests/test_e2e_qwen.py` | **十个工作流各真跑一次模型**（`-m slow`，约 80s） | 10 |
+| `tests/test_spriteatlas.py` | **底边对齐 + 水平居中**、尺寸不同的帧不拉伸、货架打包换行与留缝、**TexturePacker 结构**（frames/meta/animations）、帧名与动画分组、单帧动画给 note、原子写不留 .tmp、API 导出 + 统计 | 15 |
 | `tests/test_posegen.py` | **指令逐字**（图序 / 同行接 prompt）、**整批共用种子**、**整批替换（旧帧进 V1）**、每张一句/一句话通吃、单张失败不丢整批、姿势来源（路径 /files / 目录展开 / 去重）、接口 enqueue + progress | 14 |
 | `tests/test_clothes.py` | **换装 prompt 逐字**（指令句 / 字段顺序 / 背景 RGB+hex / 权重负向词）、clone 模式、蓝底负向词、**底图优先级 Naked→Original**、**跳过 V1 归档**、出图落盘命名、进度、**接口只返回不落盘** | 21 |
 | `tests/test_qwen_llm.py` | **解析三级降级**（纯 JSON / 代码块 / 数组 / 带解说 / 尾逗号 / 废话）、**属性收敛**（list→逗号、sex/age clamp）、**白名单挡注入**、**透明图压背景色**、**送模型的图缩到 512**、**GGUF magic 校验**、**装错 fork 报 DEPENDENCY_MISSING**、**推理超时**、**错误码 → HTTP 状态**、**不写 config** | 30 |

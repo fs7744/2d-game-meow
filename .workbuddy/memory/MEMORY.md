@@ -38,8 +38,9 @@
 | qwen_llm.py（本地 LLM） | test_qwen_llm（真推理要 MEOW_SLOW=1） | 5s |
 | clothesgen.py（换装） | test_clothes | 5s |
 | posegen.py（多姿势批量） | test_posegen | 5s |
+| spriteatlas.py（图集导出） | test_spriteatlas | 4s |
 | projectio.py / paths.py | test_projects | 5s |
-| 前端 web/src | `cd web && npm run smoke`（536 条，纯 mock，不用 GPU） | 60s |
+| 前端 web/src | `cd web && npm run smoke`（568 条，纯 mock，不用 GPU） | 60s |
 | workflows/library.py / poselib.py | test_library | 1s |
 | app.py 加了端点 | test_api（含 library 相关时加 test_library） | 75s |
 | tools/ docs/ README | 不跑 | — |
