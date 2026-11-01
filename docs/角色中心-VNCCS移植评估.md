@@ -283,6 +283,22 @@ QWEN_VL_MODEL_REVISION  = "e966ccab6d3f3c91e94d858b4a01c921a5d7ef53"
 
 ---
 
+## 5a. 已搬完的：纯色幕抠像（`workflows/chroma_screen_matte.py`）
+
+官方 `nodes/chroma_screen_matte.py` **整文件搬运，只改了一处**——`_processing_device()`
+原来会去问 ComfyUI 的 `model_management.get_torch_device()`，改成按 torch 自己的可用性
+挑设备（语义一致）。其余算法逐行未动。
+
+- **纯 torch，零模型依赖**，CPU 能跑；官方自己也当独立模块用
+  （源仓库 `scripts/benchmark_chroma.py` 直接 `sys.path.insert` 后 import）。
+- `workflows/matte_screen.py` 是我们加的一层胶水：PNG → tensor → 抠 → RGBA PNG。
+- 接在角色出图的收编步骤里（官方的 `bg_remove` 阶段），抠完**另存 `_matte.png`，
+  原图保留**；抠失败只记原因，不判任务失败。
+- **白底/灰底不自动抠**（`should_auto_matte`）：幕布色是按边框取样的，
+  白毛白甲会被一起判成背景——这条我们项目里踩过。
+- 验证：合成"绿幕 + 灰人偶"跑真值断言（幕布 alpha<8、主体 alpha>247、RGB 不偏色），
+  蓝幕/品红幕同样过。`tests/test_matte_screen.py` 7 条。
+
 ## 5. 可以直接搬的纯代码 / 数据（无模型依赖）
 
 ### 5.1 `utils.py`（根目录，980 行）—— **零 ComfyUI 依赖，最值得整文件搬**

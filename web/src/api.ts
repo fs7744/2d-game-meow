@@ -633,6 +633,7 @@ export function generateForCharacter(
     negative?: string
     params?: Record<string, unknown>
     enhance?: boolean
+    matte?: boolean
   },
 ): Promise<{ job_id: string; status: string; prompt: string; resolution: number[] }> {
   return req(`/characters/${encodeURIComponent(name)}/generate`,

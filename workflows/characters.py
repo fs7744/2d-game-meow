@@ -486,6 +486,7 @@ def sprite_filename(emotion: str, index: int) -> str:
 def publish_image(
     name: str, src: str, costume: str = "Naked",
     emotion: str = "neutral", set_cover: bool = True,
+    matte: bool = False,
 ) -> Dict[str, Any]:
     """把一张生成出来的图**追加**进角色目录（不覆盖已有素材）。
 
@@ -507,6 +508,16 @@ def publish_image(
     if ext.lower() != ".png":
         fname = os.path.splitext(fname)[0] + ext
     out = os.path.join(target, fname)
+    # 抠像（可选）：官方 `bg_remove` 阶段干的事。抠完存成另一份 `_matte.png`，
+    # **不覆盖原图**——抠错了还能用原图重来。
+    matte_path, matte_err = None, None
+    if matte:
+        try:
+            from workflows import matte_screen
+            matte_path, matte_err = matte_screen.matte_image_file(src, out=os.path.join(
+                target, os.path.splitext(fname)[0] + "_matte.png"))
+        except Exception as exc:                   # noqa: BLE001
+            matte_err = str(exc)
     shutil.copy2(src, out)
     cover = ""
     if set_cover:
@@ -520,6 +531,7 @@ def publish_image(
     return {
         "character": n, "costume": c, "emotion": e,
         "path": out, "file": fname, "index": index, "cover": cover,
+        "matte": matte_path or "", "matte_error": matte_err or "",
     }
 
 

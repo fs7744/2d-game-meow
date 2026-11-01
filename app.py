@@ -58,6 +58,7 @@ from workflows import assetdb
 from workflows import characters
 from workflows import charactergen
 from workflows import library
+from workflows import matte_screen
 from workflows import paths
 from workflows import poselib
 from workflows import projectio
@@ -161,6 +162,7 @@ def _run(job_id: str, workflow: str, params: Dict[str, Any]) -> None:
                     name=str(pub.get("character") or ""), src=str(src),
                     costume=str(pub.get("costume") or "Naked"),
                     emotion=str(pub.get("emotion") or "neutral"),
+                    matte=bool(pub.get("matte")),
                 )
             except Exception as pexc:                     # noqa: BLE001
                 # 落盘失败**不能**把整个任务判失败：图已经生成出来了，
@@ -974,6 +976,8 @@ class CharacterGenerateReq(BaseModel):
     init_image: str = ""
     #: 跑 Prompt Enhancement（用图像模型自己的 Qwen3-VL）。失败自动退回未扩写。
     enhance: bool = True
+    #: 收进角色目录前先抠掉纯色幕布（官方 bg_remove 阶段）。抠失败保留原图。
+    matte: Optional[bool] = None
 
 
 @app.post("/characters/{name}/prompt")
@@ -1063,7 +1067,11 @@ def character_generate_api(name: str, req: CharacterGenerateReq) -> Dict[str, An
         "cfg": charactergen.QI2_DEFAULTS["cfg"],
         "transparent": str(info.get("background_color") or "").lower()
         == "transparent",
-        "publish": {"character": safe, "costume": costume, "emotion": emotion},
+        "publish": {"character": safe, "costume": costume, "emotion": emotion,
+                    # 没给就按幕布色决定：绿/蓝/品红自动抠，白/灰不动
+                    # （白底会把白毛白甲一起判成背景，这条我们踩过）
+                    "matte": matte_screen.should_auto_matte(
+                        str(info.get("background_color") or ""), req.matte)},
     }
     if req.workflow == "w2":
         # 换装：底图取当前这套服装里已有的最新一张（没有就退回 Naked）

@@ -66,6 +66,8 @@ export default function CharactersPage({ onNotice }: Props) {
   const [cPrompt, setCPrompt] = useState<CharacterPrompt | null>(null)
   /** Prompt Enhancement：用图像模型自己的 Qwen3-VL 改写 prompt（官方默认开） */
   const [enhance, setEnhance] = useState(true)
+  /** 抠背景：官方 bg_remove 阶段，纯 torch 零模型 */
+  const [matte, setMatte] = useState(true)
   const [genBusy, setGenBusy] = useState(false)
   const [genMsg, setGenMsg] = useState('')
 
@@ -186,6 +188,7 @@ export default function CharactersPage({ onNotice }: Props) {
         prompt: cPrompt?.prompt || '',
         negative: cPrompt?.negative || '',
         enhance,
+        matte,
       })
       for (let i = 0; i < 400; i++) {
         const j = await fetchJob(r.job_id)
@@ -492,6 +495,28 @@ export default function CharactersPage({ onNotice }: Props) {
                     重拼 prompt
                   </button>
                 </div>
+                <label className="chars-check">
+                  <input type="checkbox" checked={matte}
+                    onChange={(e) => setMatte(e.target.checked)} />
+                  抠掉纯色幕布（官方 bg_remove）
+                  <span className="chars-sub">
+                    用官方那套纯 torch 抠像（边框估幕布色 → 去溢色 → 边缘净化），
+                    <b>不加载任何模型</b>。抠完另存一份 <code>_matte.png</code>，
+                    原图保留。白底/浅色角色慎用——幕布色是按边框取的，
+                    白毛白甲会被一起判成背景。
+                  </span>
+                </label>
+                <label className="chars-check">
+                  <input type="checkbox" checked={matte}
+                    onChange={(e) => setMatte(e.target.checked)} />
+                  抠掉纯色幕布（官方 bg_remove）
+                  <span className="chars-sub">
+                    用官方那套纯 torch 抠像（边框估幕布色 → 去溢色 → 边缘净化），
+                    <b>不加载任何模型</b>。抠完另存一份 <code>_matte.png</code>，
+                    原图保留。白底/浅色角色慎用——幕布色是按边框取的，
+                    白毛白甲会被一起判成背景。
+                  </span>
+                </label>
                 {genMsg && <p className="chars-sub">{genMsg}</p>}
               </div>
             )}
