@@ -22,6 +22,62 @@
 
 ---
 
+## 2026-11-01 · 角色中心 T3：AI 向导（一句话造角色）
+
+官方 `character_creator_v2.py:1740-1869`，纯文本入口（**不需要 mmproj**），
+跟 T2 共用 `workflows/qwen_llm.py` 的加载/超时/解析。采样
+`max_tokens=900 / temperature=0.3`。
+
+### 真正值钱的不是 prompt，是**后端后处理**
+
+官方 `:588-604` 那层纠错比 prompt 更管用——模型的默认审美会把三个字段填错，
+每个都有专门的规则：
+
+| 字段 | 模型爱怎么错 | 官方的纠法 |
+|---|---|---|
+| `race` | 写成 `afro_student` / `black student` / `asian girl` | 只留 `RACE_OPTION_TAGS` 或预设库里的物种；全空且原话有人类线索才回落 `human` |
+| `skin_color` | 几乎总填 `fair/pale skin` | **用正则从用户原话反推并覆盖**；原话没提肤色就直接置空（不许猜默认值） |
+| `body` | 只写个 `body` / `unknown` | 剔占位词；没写 build 就从原话补；**女性没提胸围强制加 `small_breasts`** |
+
+`small_breasts` 那条不是审美：QI2 的结构化 prompt 里有一行 `Breast size:`，
+空着模型会自己乱猜，官方宁可给个保守默认值。
+（顺带注意：官方在"body 已经带 build 词"时会**提前返回**，那时不补胸围。）
+
+### 注入标签白名单
+
+user prompt 里用 `json.dumps` 塞进 7 组标签（race / skin_color / hair / eyes /
+face / body / additional_details）与 20 条 `skin_color` 可选值。来源是
+`character_presets_v2.json`（前端也读同一份，不复制第二份）。
+
+不注入的话模型会自己编 `silver_hair_ponytail_v2` 这种没人认识的 tag，
+而 QI2 的风格 LoRA 只认官方那套写法。
+
+### 中文本地化（**官方没有，我们补的**）
+
+官方那三组正则只认英文。中文描述（"一个黑人女学生"）会命中"没有肤色线索"
+分支，把模型读对的 `dark skin` **清空**，`race` 也变空串——而中文是我们这边
+的主流输入。补了一组中文关键词，**优先级与官方完全一致**（黑皮 → 棕皮 →
+古铜 → 橄榄 → 苍白 → 白皙），只加词不改判断顺序。代码里 `_CN_*` 那段有说明。
+
+### 实测
+
+"一个苍白的精灵女剑士，银发红瞳，身材纤细，脸上有疤" → **40.8s**：
+
+```
+race elf / skin_color pale skin / hair silver hair, shoulder-length hair…
+eyes red eyes, luminous irises / face …, scar across one cheek
+body slim build, small_breasts / sex female / age 25
+```
+
+`small_breasts` 是后处理补的，其余都是模型读出来的——说明规则和模型配合得对。
+
+### 接口
+
+`POST /characters/wizard`（body: `{description, timeout}`）。跟看图反推一样
+**不落盘**，前端把字段摆成表格，用户点「用这些属性」才写进 config。
+
+---
+
 ## 2026-11-01 · 角色中心 T2：看图反推属性（本地 4B 模型）
 
 官方 Cloner 的旁路（`character_cloner.py:219-412`）搬进 `workflows/qwen_llm.py`。
@@ -2061,7 +2117,7 @@ MEOW_SLOW=1 pytest tests -m slow                  # 真跑 Qwen 的端到端组�
 | `workflows/projectio.py` / `paths.py` | test_projects | 5s |
 | `workflows/projectstore.py`（项目落盘） | test_project_store | 3s |
 | `workflows/emotiongen.py`（表情批量） | test_emotiongen（含一条真 YOLO） | 6s |
-| `workflows/qwen_llm.py`（本地 LLM） | test_qwen_llm（真推理那条要 `MEOW_SLOW=1`） | 5s |
+| `workflows/qwen_llm.py`（本地 LLM：反推 + 向导） | test_qwen_llm（真推理那条要 `MEOW_SLOW=1`） | 5s |
 | `workflows/characters.py` / `charactergen.py` | test_characters test_char_poses | 9s |
 | `tools/*` `docs/*` `README` | 不跑（工具靠自身输出验证） | — |
 | 合并 / 发版前 | 全量 | 150s |

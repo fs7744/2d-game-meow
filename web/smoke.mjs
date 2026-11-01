@@ -59,6 +59,20 @@ function makeFetch() {
         }),
       }
     }
+    // ---- AI 向导：一句话造角色（纯文本，不需要 mmproj）----
+    if (String(url).endsWith('/characters/wizard')) {
+      const b = JSON.parse(init.body || '{}')
+      return {
+        ok: true,
+        json: async () => ({
+          fields: { sex: 'female', age: 25, race: 'elf', skin_color: 'pale skin',
+            hair: 'silver hair', eyes: 'red eyes', body: 'slim build, small_breasts' },
+          seconds: 40.8, raw: '```json {...} ```',
+          description: b.description || '',
+        }),
+      }
+    }
+
     // ---- 看图反推属性（官方 Cloner 旁路）----
     if (String(url).includes('/characters/') && String(url).endsWith('/analyze')) {
       if (analyzeFails) {
@@ -3369,6 +3383,67 @@ function check(name, cond, extra = '') {
   f.setAnalyzeFail(false)
 
   check('看图反推场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 46c) AI 向导：一句话造角色（纯文本，官方 character_creator_v2.py:1740）
+//
+// 跟「看图反推」是一对：一个从图读、一个从话推。都是**生成完给用户看**，
+// 确认才写进 config——属性错了会一路影响后面所有出图。
+{
+  const { dom, errors } = await boot('')
+  const doc = dom.window.document
+  const win = dom.window
+  await new Promise((r) => setTimeout(r, 400))
+  const click = (el) => el.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  const setInput = (el, v) => {
+    Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value').set.call(el, v)
+    el.dispatchEvent(new win.Event('input', { bubbles: true }))
+  }
+
+  ;[...doc.querySelectorAll('.view-tab')][1]?.dispatchEvent(
+    new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 250))
+  setInput(doc.querySelector('.chars-new input'), 'Alice')
+  await new Promise((r) => setTimeout(r, 80))
+  click([...doc.querySelectorAll('.chars-new button')][0])
+  await new Promise((r) => setTimeout(r, 300))
+
+  const input = doc.querySelector('.chars-wizard-input')
+  check('属性页有一句话输入框', !!input)
+  const btn = [...doc.querySelectorAll('.chars-body button')]
+    .find((b) => (b.textContent || '').includes('用一句话生成'))
+  check('有「用一句话生成」按钮', !!btn)
+  check('没输入时按钮是禁用的（避免空提交）', btn?.disabled === true)
+
+  setInput(input, '一个苍白的精灵女剑士，银发红瞳，身材纤细')
+  await new Promise((r) => setTimeout(r, 80))
+  check('输入后按钮可用', btn.disabled === false)
+  click(btn)
+  await new Promise((r) => setTimeout(r, 500))
+
+  const call = calls.find((c) => c.url.endsWith('/characters/wizard'))
+  check('提交到 /characters/wizard', !!call, call?.url)
+  if (call) {
+    const b = JSON.parse(call.body)
+    check('带上了用户那句话', String(b.description || '').includes('精灵'), b.description)
+  }
+  check('结果摆出来给人看', !!doc.querySelector('.chars-analyze'))
+  check('结果里有模型推出来的字段',
+    (doc.querySelector('.chars-analyze')?.textContent || '').includes('silver hair'),
+    (doc.querySelector('.chars-analyze')?.textContent || '').slice(0, 80))
+  check('跟官方一样补上了 breast 标签',
+    (doc.querySelector('.chars-analyze')?.textContent || '').includes('small_breasts'))
+
+  const applyBtn = [...doc.querySelectorAll('.chars-analyze button')]
+    .find((b) => (b.textContent || '').includes('用这些属性'))
+  click(applyBtn)
+  await new Promise((r) => setTimeout(r, 400))
+  const put = calls.filter((c) => c.method === 'PUT'
+    && c.url.includes('/characters/Alice/info')).pop()
+  check('确认后才保存（向导也不落盘）', !!put, put?.url)
+
+  check('AI 向导场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 

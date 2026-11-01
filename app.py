@@ -992,6 +992,34 @@ class CharacterGenerateReq(BaseModel):
     matte: Optional[bool] = None
 
 
+#: 本地 LLM 的错误码 → HTTP 状态（码值照官方 `character_cloner.py:224-402`）。
+#: 前端按码决定话术：装环境 / 重试 / 手填。
+_LLM_STATUS = {
+    "DEPENDENCY_MISSING": 503, "MODEL_MISSING": 503,
+    "MODEL_INVALID": 503, "MMPROJ_MISSING": 503,
+    "IMAGE_MISSING": 404, "TIMEOUT": 504,
+    "INVALID_RESPONSE": 502, "PARSE_ERROR": 502,
+    "BAD_REQUEST": 400,
+}
+
+
+def _raise_llm_error(exc: "qwen_llm.LlmError") -> None:
+    """把 LLM 的带码异常转成 HTTP（两个 LLM 端点共用）。"""
+    raise HTTPException(
+        _LLM_STATUS.get(exc.code, 500),
+        {"error": exc.code, "message": exc.message, "raw": exc.raw},
+    )
+
+
+class CharacterWizardReq(BaseModel):
+    """AI 向导：一句话 → 9 个属性字段（官方 `character_creator_v2.py:1740`）。
+
+    **不落盘**：生成结果给用户在界面上改，确认后才写进角色。
+    """
+    description: str = ""
+    timeout: float = 300.0
+
+
 class CharacterAnalyzeReq(BaseModel):
     """「看图反推属性」的请求（官方 Cloner 旁路，要本地 LLM）。
 
@@ -1040,6 +1068,29 @@ class EmotionGenerateReq(BaseModel):
     matte: bool = True
 
 
+@app.post("/characters/wizard")
+def character_wizard_api(req: CharacterWizardReq) -> Dict[str, Any]:
+    """一句话造角色（官方 `character_creator_v2.py:1740-1869`）。
+
+    纯文本，不需要视觉投影器。生成完还有一层**后端后处理**（`:588-604`）：
+    race 只留物种、肤色按用户原话反推、女性没提胸围就补 `small_breasts`。
+    那层不是可选项——模型的默认审美会把这些字段填错。
+
+    **不落盘**：跟看图反推一样，先给用户看。
+    """
+    try:
+        result = qwen_llm.wizard_character(
+            req.description, timeout=float(req.timeout or 300.0))
+    except qwen_llm.LlmError as exc:
+        _raise_llm_error(exc)
+    return {
+        "fields": result.get("fields") or {},
+        "seconds": result.get("seconds", 0),
+        "raw": result.get("raw", ""),
+        "description": result.get("description", ""),
+    }
+
+
 @app.post("/characters/{name}/analyze")
 def character_analyze_api(name: str, req: CharacterAnalyzeReq) -> Dict[str, Any]:
     """一张角色图 → 11 个属性字段（官方 `character_cloner.py:219-412`）。
@@ -1078,18 +1129,7 @@ def character_analyze_api(name: str, req: CharacterAnalyzeReq) -> Dict[str, Any]
             str(target), background_color=req.background_color,
             timeout=float(req.timeout or 300.0))
     except qwen_llm.LlmError as exc:
-        # 码值照官方（`character_cloner.py:224-402`），前端按码决定话术：
-        #   DEPENDENCY_MISSING / MODEL_MISSING / MMPROJ_MISSING → "去装环境"
-        #   TIMEOUT / INFERENCE_ERROR → "再试一次"
-        #   PARSE_ERROR / INVALID_RESPONSE → "模型没答对，重试或手填"
-        status = {
-            "DEPENDENCY_MISSING": 503, "MODEL_MISSING": 503,
-            "MODEL_INVALID": 503, "MMPROJ_MISSING": 503,
-            "IMAGE_MISSING": 404, "TIMEOUT": 504,
-            "INVALID_RESPONSE": 502, "PARSE_ERROR": 502,
-        }.get(exc.code, 500)
-        raise HTTPException(status, {"error": exc.code, "message": exc.message,
-                                     "raw": exc.raw})
+        _raise_llm_error(exc)
     except OSError as exc:
         raise HTTPException(500, f"读图失败：{exc}") from exc
     # **显式挑字段**：`result["image"]` 是磁盘路径，直接展开会把展示 URL 覆盖掉

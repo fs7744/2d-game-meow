@@ -374,3 +374,133 @@ def test_api_analyze_rejects_path_outside_assets(client, monkeypatch):
                     json={"image": "C:/Windows/System32/drivers/etc/hosts"})
     assert r.status_code == 400
     ch.delete_character(name)
+
+
+# ---------------------------------------------------------------- AI 向导
+
+
+def test_wizard_prompt_injects_tag_whitelist():
+    """官方 `:1780-1829`：user prompt 里要**注入标签白名单**，不然模型自己乱编 tag。"""
+    p = ql.wizard_user_prompt("银发精灵")
+    head = "Create a character from this abstract idea:"
+    assert p.lstrip().startswith(head) and "银发精灵" in p
+    assert "curated presets" in p and '"race": [' in p
+    assert "Use one of these skin_color values only when" in p
+    # 示例里的花括号要是真 JSON（f-string 转义没漏）
+    assert '"sex": "female"' in p and '"hair": "white hair' in p
+
+
+def test_normalize_wizard_race_drops_ethnicity():
+    """官方 `:544-559`：族裔/职业不许进 race（`afro_student` 是它给的坏例子）。"""
+    assert ql.normalize_wizard_race("afro_student", "") == ""
+    assert ql.normalize_wizard_race("black student, cat_girl", "") == "cat_girl"
+    # 全空 + 原话暗示人类 → 回落 human
+    assert ql.normalize_wizard_race("black student", "a black student") == "human"
+
+
+def test_normalize_wizard_race_keeps_species():
+    assert "elf" in ql.normalize_wizard_race("elf, human", "")
+    assert ql.normalize_wizard_race("demon_girl", "") == "demon_girl"
+
+
+def test_infer_skin_color_priority():
+    """先是"黑皮"一族，再逐级细化（官方顺序不能换）。"""
+    assert ql.infer_skin_color("a black-skinned warrior") == "dark skin"
+    assert ql.infer_skin_color("an African-American girl") == "dark skin"
+    assert ql.infer_skin_color("tan skin, athletic") == "tan skin"
+    assert ql.infer_skin_color("pale skin") == "pale skin"
+    assert ql.infer_skin_color("fair complexion") == "fair skin"
+    assert ql.infer_skin_color("blue hair") == ""
+
+
+def test_wizard_postprocess_overrides_model_skin_color():
+    """肤色**按用户原话**覆盖模型输出（模型几乎总填 fair/pale）。"""
+    out = ql.postprocess_wizard_result(
+        {"race": "human", "skin_color": "pale skin", "body": "", "sex": "female"},
+        "一个黑人女学生")
+    assert out["skin_color"] == "dark skin"
+    # 原话完全没提肤色 → 清空（不许猜默认值）
+    out2 = ql.postprocess_wizard_result(
+        {"race": "human", "skin_color": "pale skin", "body": "", "sex": "male"},
+        "a blue-haired hacker")
+    assert out2["skin_color"] == ""
+
+
+def test_wizard_postprocess_adds_breast_tag_for_female():
+    """官方 `:562-585`：女性没提胸围就补 `small_breasts`（QI2 prompt 那行不能空）。"""
+    # 注意：官方在"body 已经带 build 词"时会**提前返回**（不补胸围），
+    # 所以这里要给空 body，让补全逻辑走完
+    out = ql.postprocess_wizard_result(
+        {"race": "human", "skin_color": "", "body": "", "sex": "female"}, "a slim girl")
+    assert out["body"] == "slim build, small_breasts"
+    # 已经写了胸围就不重复加
+    out2 = ql.postprocess_wizard_result(
+        {"race": "human", "skin_color": "", "body": "large_breasts", "sex": "female"},
+        "")
+    assert out2["body"].count("breasts") == 1
+    # 男性不加
+    out3 = ql.postprocess_wizard_result(
+        {"race": "human", "skin_color": "", "body": "slim build", "sex": "male"}, "")
+    assert "small_breasts" not in out3["body"]
+
+
+def test_wizard_postprocess_body_fallback_from_description():
+    assert ql.postprocess_wizard_result(
+        {"body": "body", "sex": "male"}, "a slim assassin")["body"] == "slim build"
+    assert ql.postprocess_wizard_result(
+        {"body": "", "sex": "male"}, "a muscular boxer")["body"] == "athletic build"
+
+
+def test_wizard_chinese_description_is_understood():
+    """**官方正则只认英文**，中文描述会走到"没线索"分支把肤色清空。
+    我们补了中文关键词（见模块里 `_CN_*` 的说明），这里钉住它有效。"""
+    out = ql.postprocess_wizard_result(
+        {"race": "afro_student", "skin_color": "fair skin", "body": "body",
+         "sex": "female", "age": 22}, "一个黑人女学生")
+    assert out["skin_color"] == "dark skin"
+    assert out["race"] == "human"
+
+
+def test_wizard_character_calls_text_model(monkeypatch):
+    fake = _FakeLlama("```json\n" + json.dumps({
+        "sex": "female", "age": 25, "race": "afro_student",
+        "skin_color": "pale skin", "hair": "silver hair",
+        "body": "body", "eyes": "red eyes",
+    }) + "\n```")
+    monkeypatch.setattr(ql, "load_llm", lambda vision=True: fake)
+    out = ql.wizard_character("一个苍白的精灵女剑士，银发红瞳")
+    assert out["fields"]["hair"] == "silver hair"
+    assert out["fields"]["skin_color"] == "pale skin"     # 原话里有"苍白"
+    assert out["fields"]["body"].endswith("small_breasts")
+    call = fake.calls[0]
+    # 采样参数照官方：900 / 0.3
+    assert call["max_tokens"] == 900 and call["temperature"] == 0.3
+    # 纯文本入口，不要 image_url
+    assert isinstance(call["messages"][1]["content"], str)
+
+
+def test_wizard_character_requires_description():
+    with pytest.raises(ql.LlmError) as exc:
+        ql.wizard_character("   ")
+    assert exc.value.code == "BAD_REQUEST"
+
+
+def test_api_wizard_returns_fields(client, monkeypatch):
+    monkeypatch.setattr(ql, "wizard_character", lambda *a, **k: {
+        "fields": {"sex": "female", "age": 25, "race": "elf"},
+        "seconds": 40.8, "raw": "{}", "description": "精灵女剑士"})
+    r = client.post("/characters/wizard", json={"description": "精灵女剑士"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["fields"]["race"] == "elf"
+    assert body["seconds"] == 40.8
+
+
+def test_api_wizard_maps_errors(client, monkeypatch):
+    def boom(*a, **k):
+        raise ql.LlmError("DEPENDENCY_MISSING", "没装 llama-cpp-python")
+
+    monkeypatch.setattr(ql, "wizard_character", boom)
+    r = client.post("/characters/wizard", json={"description": "x"})
+    assert r.status_code == 503
+    assert r.json()["detail"]["error"] == "DEPENDENCY_MISSING"

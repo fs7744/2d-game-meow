@@ -520,3 +520,352 @@ def analyze_character_image(
         "raw": str(content)[:2000],
         "image": image_path,
     }
+
+
+# ---------------------------------------------------------------- AI 向导（一句话造角色）
+#
+# 官方 `character_creator_v2.py:1740-1869`。纯文本，**不需要 mmproj**
+# （`_ensure_character_wizard_model` 传的是 `require_mmproj=False`）。
+#
+# 它比 Cloner 多一层后端后处理（`:588-604`），而且那一层**很值得照搬**：
+# 模型很爱把"非洲裔学生"塞进 race，把肤色猜成默认值，体型只写个 "body"。
+# 这三个字段各有专门的正则/白名单去纠，纠完质量明显不一样。
+
+#: 官方 `:1775-1779`
+WIZARD_SYSTEM_PROMPT = (
+    "You are a professional anime/game character designer. "
+    "Convert broad character ideas into concise structured character fields. "
+    "Output valid JSON only."
+)
+
+#: 官方 `:445-457`：算 race 时**只认这些**（其余一律不算物种特征）
+RACE_OPTION_TAGS = {
+    "animal_ears", "cat_girl", "fox_girl", "rabbit_girl", "horse_girl", "kemonomimi",
+    "furry", "furry_female", "demon_girl", "demon_horns", "dragon_girl", "dragon_horns",
+    "wings", "feathered_wings", "pointy_ears", "vampire", "mermaid", "naga",
+    "rabbit_ears", "horse_tail", "tail",
+}
+
+#: 官方 `:436-439`：出现这些词说明"这是个人类"，race 可以回落 human
+HUMAN_HINT_RE = re.compile(
+    r"\b(human|person|student|schoolboy|schoolgirl|man|woman|boy|girl|guy|"
+    r"afro|african|african[- ]american|black)\b",
+    re.IGNORECASE,
+)
+#: 官方 `:459-462`：用户原话里的体型线索（模型没写 build 时用它补）
+YOUNG_BODY_HINT_RE = re.compile(
+    r"\b(young|student|teen|teenage|schoolboy|schoolgirl|college)\b", re.IGNORECASE)
+SLIM_BODY_HINT_RE = re.compile(
+    r"\b(slim|slender|thin|skinny|lean|petite)\b", re.IGNORECASE)
+ATHLETIC_BODY_HINT_RE = re.compile(
+    r"\b(athletic|fit|sporty|muscular)\b", re.IGNORECASE)
+#: 官方 `:441-444`：原话里提到肤色才允许模型填 skin_color
+SKIN_COLOR_HINT_RE = re.compile(r"\b(skin|complexion|[a-z]+[- ]skinned)\b", re.IGNORECASE)
+
+# ---- 中文本地化（**官方没有、我们补的**，理由见下面 `_cn_*` 的注释） ----
+#
+# 官方这三组正则**只认英文**。中文描述（"一个黑人女学生"）会走到"没有肤色线索"
+# 分支，把模型好不容易读对的 `dark skin` **清空**，`race` 也会变成空串。
+# 用中文写提示词是本项目的主流用法，所以补一组中文关键词，**优先级与官方完全一致**
+# （黑皮 → 棕皮 → 古铜 → 橄榄 → 苍白 → 白皙）。只加词，不改判断顺序。
+_CN_HUMAN_RE = re.compile(r"(人类|男人|女人|男孩|女孩|男生|女生|学生|少女|少年|人物)")
+_CN_SKIN_HINT_RE = re.compile(r"(皮肤|肤色|肤|皮)")
+_CN_SKIN_COLORS = (
+    ("dark skin", re.compile(r"(黑皮|黑肤|黑色皮肤|黝黑|深色皮肤|黑人)")),
+    ("brown skin", re.compile(r"(褐色皮肤|棕色皮肤|棕皮|棕肤)")),
+    ("tan skin", re.compile(r"(古铜|小麦色|晒黑|蜜色|日晒)")),
+    ("olive skin", re.compile(r"(橄榄色皮肤|橄榄皮)")),
+    ("pale skin", re.compile(r"(苍白|惨白)")),
+    ("fair skin", re.compile(r"(白皙|白皮|白肤|浅色皮肤)")),
+)
+_CN_SLIM_RE = re.compile(r"(苗条|纤细|瘦|娇小)")
+_CN_ATHLETIC_RE = re.compile(r"(健壮|结实|肌肉|运动型)")
+_CN_YOUNG_RE = re.compile(r"(年轻|学生|少女|少年)")
+
+
+def _preset_key(value: str) -> str:
+    """官方 `character_presets.py:16`：`Cat_Girl` / `cat girl` / `CAT GIRL` 视作同一个。"""
+    return " ".join(str(value or "").replace("_", " ").lower().split())
+
+
+def _split_tokens(value: str) -> list:
+    return [part.strip() for part in str(value or "").split(",") if part.strip()]
+
+
+def _join_tokens(tokens: list) -> str:
+    """官方 `_join_prompt_tokens:470`：去空、按小写去重、逗号连。"""
+    seen = set()
+    out = []
+    for token in tokens:
+        normalized = str(token or "").strip()
+        if not normalized:
+            continue
+        key = normalized.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(normalized)
+    return ", ".join(out)
+
+
+def skin_color_options() -> list:
+    """官方 `:441`：`CHARACTER_PRESETS["tags"]["skin_color"]` 的 tag 列表。
+
+    从 `charactergen.preset_catalog()` 取（**同一份** `character_presets_v2.json`，
+    前端也读它），不复制第二份。
+    """
+    from workflows import charactergen
+
+    tags = (charactergen.preset_catalog().get("tags") or {})
+    return [str(item.get("tag")) for item in (tags.get("skin_color") or [])
+            if isinstance(item, dict) and item.get("tag")]
+
+
+def race_presets() -> Dict[str, Any]:
+    """官方 `character_presets.py:20-23`：种族预设，按 tag/label/synonyms 建索引。"""
+    from workflows import charactergen
+
+    tags = (charactergen.preset_catalog().get("tags") or {})
+    out: Dict[str, Any] = {}
+    for preset in tags.get("races") or []:
+        if not isinstance(preset, dict):
+            continue
+        for alias in [preset.get("tag"), preset.get("label"), *(preset.get("synonyms") or [])]:
+            if alias:
+                out[_preset_key(str(alias))] = preset
+    return out
+
+
+def character_tag_options() -> Dict[str, list]:
+    """官方 `:412-435`：从标签库里抽给向导看的那几组（注入 prompt 用）。"""
+    from workflows import charactergen
+
+    tags = (charactergen.preset_catalog().get("tags") or {})
+
+    def collect(value: Any) -> list:
+        items: list = []
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict) and item.get("tag"):
+                    items.append(str(item["tag"]))
+        elif isinstance(value, dict):
+            for sub in value.values():
+                items.extend(collect(sub))
+        return items
+
+    return {
+        "race": collect(tags.get("races", [])),
+        "skin_color": collect(tags.get("skin_color", [])),
+        "hair": [item for key in ("hair_color", "hair_pattern", "hair_length",
+                                  "hair_texture", "hairstyles", "hair_framing")
+                 for item in collect(tags.get(key, []))],
+        "eyes": collect(tags.get("eye_color", [])) + collect(tags.get("eye_features", [])),
+        "face": collect(tags.get("face_shape", [])) + collect(tags.get("face_details", [])),
+        "body": collect(tags.get("body_type", [])) + collect(tags.get("breast_size", [])),
+        "additional_details": collect(tags.get("details", [])),
+    }
+
+
+def infer_skin_color(description: str) -> str:
+    """官方 `_infer_skin_color_from_description:527-541`：从**用户原话**反推肤色。
+
+    顺序有讲究：先判"黑皮"（一个词能同时命中 african/black 一族），再逐级细化。
+    **从原话推而不是信模型**，是因为模型有很强的"白人默认"倾向，
+    用户写 "黑人学生" 它也会填 fair skin。
+    """
+    text = str(description or "").lower()
+    if re.search(
+            r"\b(black[- ]skinned|black (?:skin|complexion)|(?:afro|african(?:[- ]american)?"
+            r"|black)[- _]+(?:student|man|woman|boy|girl|person|character))\b", text):
+        return "dark skin"
+    if re.search(r"\b(brown[- ]skinned|brown skin)\b", text):
+        return "brown skin"
+    if re.search(r"\b(tan[- ]skinned|(?:tan|tanned) (?:skin|complexion))\b", text):
+        return "tan skin"
+    if re.search(r"\bolive (?:skin|complexion)\b", text):
+        return "olive skin"
+    if re.search(r"\bpale (?:skin|complexion)\b", text):
+        return "pale skin"
+    if re.search(r"\b(light[- ]skinned|(?:fair|light) (?:skin|complexion))\b", text):
+        return "fair skin"
+    # 中文按同一顺序判（见 `_CN_SKIN_COLORS` 上面的说明）
+    for tag, pattern in _CN_SKIN_COLORS:
+        if pattern.search(str(description or "")):
+            return tag
+    return ""
+
+
+def normalize_wizard_race(race: str, description: str) -> str:
+    """官方 `:544-559`：race 里**只留物种**。
+
+    模型最爱把 `afro_student` / `black student` / `asian girl` 当种族——那是种族
+    歧视性的写法，也会污染 LoRA 触发词。这里踢掉人类词与族裔词，只留
+    `RACE_OPTION_TAGS` 或预设库里的物种；全空且原话有人类线索就回落 `human`。
+    """
+    tokens = _split_tokens(race)
+    kept = []
+    for token in tokens:
+        key = token.strip().lower()
+        if key in {"human", "person", "man", "woman", "boy", "girl"}:
+            continue
+        if key in {"afro", "afro_student", "african", "african_student",
+                   "black", "black_student", "student"}:
+            continue
+        if key in RACE_OPTION_TAGS or _preset_key(key) in race_presets():
+            kept.append(token)
+    if kept:
+        return _join_tokens(kept)
+    if (any(_preset_key(t) == "human" for t in tokens)
+            or HUMAN_HINT_RE.search(description or "")
+            or _CN_HUMAN_RE.search(description or "")):
+        return "human"
+    return ""
+
+
+def normalize_wizard_body(body: str, description: str, sex: str) -> str:
+    """官方 `:562-585`：体型字段的清理 + 补全。
+
+    三件事：剔掉 `body/unknown/none/n/a` 这种占位；模型没写 build 时从原话补；
+    **女性且没提胸围时强制加 `small_breasts`**——官方这么做是为了让 QI2 的
+    结构化 prompt 里 `Breast size:` 那行永远有值（空着模型会自己乱猜）。
+    """
+    tokens = _split_tokens(body)
+    kept = [t for t in tokens if t.lower() not in {"body", "unknown", "none", "n/a"}]
+    if any(re.search(r"\b(slim|slender|thin|skinny|lean|petite|athletic|fit|muscular"
+                     r"|average build|normal build)\b", t, re.I) for t in kept):
+        return _join_tokens(kept)
+    text = str(description or "")
+    if SLIM_BODY_HINT_RE.search(text) or _CN_SLIM_RE.search(text):
+        kept.append("slim build")
+    elif ATHLETIC_BODY_HINT_RE.search(text) or _CN_ATHLETIC_RE.search(text):
+        kept.append("athletic build")
+    elif YOUNG_BODY_HINT_RE.search(text) or _CN_YOUNG_RE.search(text):
+        kept.append("average build")
+    if str(sex or "").lower() == "female" and not any(
+            "breast" in t.lower() or "chest" in t.lower() for t in kept):
+        kept.append("small_breasts")
+    return _join_tokens(kept)
+
+
+def postprocess_wizard_result(parsed: Dict[str, Any], user_description: str) -> Dict[str, Any]:
+    """官方 `:588-604`：把模型输出按"用户原话"纠一遍。
+
+    `skin_color` 这一条是**覆盖**不是补充：原话里有肤色线索就用正则推出来的，
+    没有就置空——**不信模型自己猜的默认值**（它几乎总会填 fair/pale skin）。
+    """
+    result = dict(parsed or {})
+    description = str(user_description or "")
+    result["race"] = normalize_wizard_race(result.get("race", ""), description)
+    inferred = infer_skin_color(description)
+    if inferred:
+        result["skin_color"] = inferred
+    elif not (SKIN_COLOR_HINT_RE.search(description)
+              or _CN_SKIN_HINT_RE.search(description)):
+        result["skin_color"] = ""
+    result["body"] = normalize_wizard_body(
+        result.get("body", ""), description, result.get("sex", "female"))
+    return result
+
+
+def wizard_user_prompt(user_description: str) -> str:
+    """官方 `:1780-1829` 的 user prompt（**逐字**，含注入的标签白名单与示例）。"""
+    tag_options = character_tag_options()
+    skin_options = skin_color_options()
+    return f"""
+Create a character from this abstract idea:
+{user_description}
+
+Use these curated presets when they fit. Free-form descriptions are also supported; keep breast/chest size tags exactly as listed:
+{json.dumps(tag_options, ensure_ascii=False)}
+
+Use one of these skin_color values only when the user's idea explicitly mentions skin tone or complexion:
+{json.dumps(skin_options, ensure_ascii=False)}
+
+Return a raw JSON object with exactly these keys:
+- sex: "male" or "female"
+- age: integer from 1 to 100
+- race
+- skin_color
+- body
+- face
+- hair
+- eyes
+- additional_details
+
+Rules:
+- Use comma-separated prompt fragments for text fields.
+- The race field is for species/fantasy traits only. For normal humans set race to "human".
+- Never put ethnicity, nationality, profession, role, clothing, or archetype in race. Examples of invalid race values: "afro_student", "black student", "asian girl", "teacher".
+- Put skin tone in skin_color, not race. "afro", "African", "African-American", "black", or similar means skin_color should be "dark skin" unless another skin tone is explicit.
+- For body, always provide a visible body/build descriptor. Use listed breast/chest tags when relevant, and add concise build phrases like "slim build", "average build", "athletic build" when useful.
+- For race, use a listed species name when it fits; its visual features are added automatically.
+- For other fields, prefer concise natural-language descriptions from the presets when they fit.
+- For skin_color, do not guess a default. Use an empty string unless the user's idea explicitly mentions skin tone, complexion, or non-human skin color.
+- Do not use "pale skin" as a fallback.
+- Do not describe clothing or outfit items.
+- Do not add background, camera, pose, quality tags, style tags, nsfw, nudity, sex acts, or negative prompts.
+- Keep fields practical for the existing character form.
+- If a field is not needed, use an empty string.
+- Set sex and age explicitly based on the user's description. If unspecified, infer a reasonable adult character.
+
+Example:
+{{
+  "sex": "female",
+  "age": 24,
+  "race": "demon",
+  "skin_color": "",
+  "body": "medium_breasts, slim waist",
+  "face": "beauty mark below one eye, high cheekbones",
+  "hair": "white hair, waist-length hair, blunt bangs",
+  "eyes": "red eyes, luminous irises",
+  "additional_details": "geometric body tattoos, black fingernails"
+}}
+"""
+
+
+def wizard_character(
+    description: str, *, timeout: float = DEFAULT_TIMEOUT,
+    keep_loaded: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """一句话 → 9 个属性字段（官方 `character_creator_v2.py:1740-1869`）。
+
+    纯文本入口（`vision=False`），采样 `max_tokens=900 / temperature=0.3`。
+    **只返回字段**，不落盘——官方的向导 UI 也是"生成 → 用户改 → 保存"。
+    """
+    text = str(description or "").strip()
+    if not text:
+        raise LlmError("BAD_REQUEST", "没有输入角色描述")
+    llm = load_llm(vision=False)
+    messages = [
+        {"role": "system", "content": WIZARD_SYSTEM_PROMPT},
+        {"role": "user", "content": wizard_user_prompt(text)},
+    ]
+
+    def call() -> Any:
+        return llm.create_chat_completion(
+            messages=messages, max_tokens=900, temperature=0.3)
+
+    started = time.time()
+    try:
+        response = _infer(call, timeout)
+    finally:
+        if not (KEEP_LOADED if keep_loaded is None else keep_loaded):
+            unload_llm()
+    seconds = round(time.time() - started, 2)
+    try:
+        content = response["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise LlmError("INFERENCE_ERROR", f"模型返回结构不对：{exc}") from exc
+    data = parse_wizard_json(str(content or ""))
+    if data is None:
+        raise LlmError("PARSE_ERROR", "向导没返回 JSON（原文见 raw）",
+                       raw=str(content or "")[:2000])
+    parsed = normalize_character_wizard_traits(data)
+    parsed = postprocess_wizard_result(parsed, text)
+    traits = filter_traits(parsed)
+    return {
+        "fields": traits,
+        "seconds": seconds,
+        "raw": str(content or "")[:2000],
+        "description": text,
+    }

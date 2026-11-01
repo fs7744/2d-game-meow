@@ -741,6 +741,20 @@ export async function analyzeCharacter(
     { method: 'POST', body: JSON.stringify(body) })
 }
 
+/**
+ * 一句话造角色（官方 `character_creator_v2.py:1740-1869`）。
+ *
+ * 纯文本，不需要视觉投影器。后端会做一层后处理：race 只留物种、
+ * 肤色按原话反推、女性没提胸围就补 `small_breasts`。
+ * **同样不落盘**，返回字段给用户确认。
+ */
+export async function wizardCharacter(
+  description: string, timeout = 300,
+): Promise<AnalyzeResult & { description: string }> {
+  return req('/characters/wizard',
+    { method: 'POST', body: JSON.stringify({ description, timeout }) })
+}
+
 export type CharacterPrompt = {
   name: string
   style: string

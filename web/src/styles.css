@@ -1349,6 +1349,22 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
 }
 .chars-emo span { font-size: 9.5px; color: var(--muted); text-align: center; }
 
+/* AI 向导的一句话输入：够长才放得下一句中文描述 */
+.chars-wizard-input {
+  flex: 1 1 340px; max-width: 520px;
+  background: var(--bg-3); color: var(--white);
+  border: 1px solid var(--line-strong); border-radius: 2px;
+  padding: 4px 6px; font-family: var(--mono); font-size: 10.5px;
+}
+
+/* AI 向导的一句话输入：够长才放得下一句中文描述 */
+.chars-wizard-input {
+  flex: 1 1 340px; max-width: 520px;
+  background: var(--bg-3); color: var(--white);
+  border: 1px solid var(--line-strong); border-radius: 2px;
+  padding: 4px 6px; font-family: var(--mono); font-size: 10.5px;
+}
+
 /* 看图反推的结果表：一行一个属性，让用户逐条核对再决定要不要 */
 .chars-analyze {
   border: 1px solid var(--line); background: var(--bg-2); padding: 8px;

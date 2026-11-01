@@ -23,7 +23,7 @@ import {
   fetchStyleCatalog, fetchEmotionCatalog, stylePreviewUrl, emotionIconUrl,
   fetchCharacterPrompt, generateForCharacter, fetchJob, fetchCharacterTags,
   detectEmotionFaces, generateEmotions, type EmotionFrame,
-  analyzeCharacter, type CharacterPrompt, type TagCatalog,
+  analyzeCharacter, wizardCharacter, type CharacterPrompt, type TagCatalog,
 } from '../api'
 import SpritePreview from './SpritePreview'
 import TagPicker from './TagPicker'
@@ -106,6 +106,9 @@ export default function CharactersPage({ onNotice }: Props) {
   const [anaBusy, setAnaBusy] = useState(false)
   const [anaMsg, setAnaMsg] = useState('')
   const [anaResult, setAnaResult] = useState<Record<string, unknown> | null>(null)
+  /** AI 向导：一句话造角色（同一块结果面板） */
+  const [wizText, setWizText] = useState('')
+  const [wizBusy, setWizBusy] = useState(false)
 
   const reload = useCallback(async () => {
     try {
@@ -245,6 +248,29 @@ export default function CharactersPage({ onNotice }: Props) {
       setAnaBusy(false)
     }
   }, [sel, anaBusy, draft])
+
+  /**
+   * 一句话造角色（官方 AI 向导，纯文本）。
+   *
+   * 跟看图反推共用一块结果面板：生成 → 用户逐条看 → 确认才保存。
+   */
+  const doWizard = useCallback(async () => {
+    const text = wizText.trim()
+    if (!sel || wizBusy || !text) return
+    setWizBusy(true)
+    setAnaMsg('正在生成（本地 4B 模型，约 30~60 秒）…')
+    setAnaResult(null)
+    try {
+      const r = await wizardCharacter(text)
+      setAnaResult(r.fields)
+      setAnaMsg(`生成好了（${r.seconds}s）——不满意可以改描述再来一次，或直接手改下面字段`)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      setAnaMsg(`生成失败：${msg}`)
+    } finally {
+      setWizBusy(false)
+    }
+  }, [sel, wizBusy, wizText])
 
   /** 出图：提交 → 轮询 → 完成后后端已经把图收进角色目录了，刷新即可 */
   const doGenerate = useCallback(async (workflow: 'w1' | 'w2') => {
@@ -499,6 +525,20 @@ export default function CharactersPage({ onNotice }: Props) {
                     官方 Cloner 的做法：拿一张图读<b>看得见的身体特征</b>
                     （不含服装 / 姿势 / 表情），读完先给你看，确认了才写进角色。
                   </span>
+                </div>
+                <div className="chars-row">
+                  <input
+                    className="chars-wizard-input"
+                    placeholder="一句话造角色，例：一个苍白的精灵女剑士，银发红瞳，身材纤细"
+                    value={wizText}
+                    onChange={(e) => setWizText(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') void doWizard() }}
+                  />
+                  <button type="button" className="mini" onClick={() => void doWizard()}
+                    disabled={wizBusy || !wizText.trim()}
+                    title="官方 AI 向导：把一句话拆成 9 个结构化属性（不落盘，先给你看）">
+                    {wizBusy ? '生成中…' : '用一句话生成'}
+                  </button>
                 </div>
                 {anaMsg && <p className="chars-sub">{anaMsg}</p>}
                 {anaResult && (
