@@ -5,8 +5,8 @@
 - `docs/角色中心-VNCCS移植评估.md` —— 功能全表、模型清单、已拍板的取舍（"为什么"）
 - **`docs/角色中心-剩余工作与做法.md` —— 剩余待办的开工手册（"怎么做"）**，
   每项带源仓库 `file:line`、参数默认值、prompt 原文、落点文件、验证方式。
-  **T1（表情）/ T2（看图反推）/ T3（一句话造角色）/ T4（换装+服装向导）已完成**，
-  只剩 §7 的 T5（多姿势生成）。LLM 那层（`workflows/qwen_llm.py`）已齐。
+  **T1~T5 全部完成**（表情 / 看图反推 / 一句话造角色 / 换装+服装向导 / 多姿势批量）。
+  手册 §3~§7 都标了"已完成"，一节节写了实现依据与取舍，改之前先读那节。
 
 移植总规矩：**以 `D:\code\gen\others\ComfyUI_VNCCS-main` 为准，不自己写自己猜。**
 明确不做：Control Center、8 方向帧（官方没有这功能）、SeedVR2 放大（官方支持
@@ -37,8 +37,9 @@
 | emotiongen.py（表情批量） | test_emotiongen（含一条真 YOLO） | 6s |
 | qwen_llm.py（本地 LLM） | test_qwen_llm（真推理要 MEOW_SLOW=1） | 5s |
 | clothesgen.py（换装） | test_clothes | 5s |
+| posegen.py（多姿势批量） | test_posegen | 5s |
 | projectio.py / paths.py | test_projects | 5s |
-| 前端 web/src | `cd web && npm run smoke`（523 条，纯 mock，不用 GPU） | 60s |
+| 前端 web/src | `cd web && npm run smoke`（536 条，纯 mock，不用 GPU） | 60s |
 | workflows/library.py / poselib.py | test_library | 1s |
 | app.py 加了端点 | test_api（含 library 相关时加 test_library） | 75s |
 | tools/ docs/ README | 不跑 | — |

@@ -36,6 +36,9 @@ function makeFetch() {
   let emotionJob = null
   // 看图反推是否失败（模拟缺权重 / 装错 fork）
   let analyzeFails = false
+  // 多姿势批量的模拟进度
+  let poseJob = null
+  // 多姿势批量的模拟进度
   // 保存时是否报冲突（模拟别的窗口改了同一个项目）
   let saveConflictMode = false
   const fetchFn = async (url, init = {}) => {
@@ -59,6 +62,19 @@ function makeFetch() {
         }),
       }
     }
+    // ---- 多姿势批量（官方 pose_generation）----
+    if (String(url).includes('/characters/') && String(url).endsWith('/poses/generate')) {
+      jobSeq += 1
+      poseJob = { polls: 0 }
+      return {
+        ok: true,
+        json: async () => ({
+          job_id: `job-${jobSeq}`, status: 'queued', costume: 'Naked',
+          total: 4, position: 1, defaults: { steps: 20, cfg: 1, target_size: 1024 },
+        }),
+      }
+    }
+
     // ---- 换装（官方 Clothes Designer）----
     if (String(url).includes('/characters/') && String(url).endsWith('/clothes/wizard')) {
       return {
@@ -355,6 +371,26 @@ function makeFetch() {
     if (String(url).includes('/jobs/')) {
       // 表情批量：第一次查询返回「跑到一半」，第二次返回完成。
       // 进度是这一批任务的**唯一**可见信号，必须能在界面上看到。
+      if (poseJob) {
+        poseJob.polls += 1
+        if (poseJob.polls < 2) {
+          return {
+            ok: true,
+            json: async () => ({
+              job_id: 'job-pose', status: 'running',
+              progress: { done: 1, total: 4, current: '第 2/4 张姿势' },
+            }),
+          }
+        }
+        return {
+          ok: true,
+          json: async () => ({
+            job_id: 'job-pose', status: 'done',
+            progress: { done: 4, total: 4, current: '' },
+            result: { count: 4, sprites: ['a', 'b', 'c', 'd'], failed: [] },
+          }),
+        }
+      }
       if (emotionJob) {
         emotionJob.polls += 1
         if (emotionJob.polls < 2) {
@@ -3556,6 +3592,70 @@ function check(name, cond, extra = '') {
   dom.window.close()
 }
 
+// 46e) 多姿势批量：一个骨架帧目录 → 一整批精灵帧（官方 pose_generation）
+//
+// 三件事要钉住：整批**共用一个种子**（不是每张随机）、发布是**整批替换**
+// （旧帧进 V1，跟表情那条逐张追加不一样）、**有进度条**（一批几十张要跑很久）。
+{
+  const { dom, errors } = await boot('')
+  const doc = dom.window.document
+  const win = dom.window
+  await new Promise((r) => setTimeout(r, 400))
+  const click = (el) => el.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  const setInput = (el, v) => {
+    Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value').set.call(el, v)
+    el.dispatchEvent(new win.Event('input', { bubbles: true }))
+  }
+
+  ;[...doc.querySelectorAll('.view-tab')][1]?.dispatchEvent(
+    new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 250))
+  setInput(doc.querySelector('.chars-new input'), 'Alice')
+  await new Promise((r) => setTimeout(r, 80))
+  click([...doc.querySelectorAll('.chars-new button')][0])
+  await new Promise((r) => setTimeout(r, 300))
+
+  // 进「素材」页（多姿势生成放在这里，产出就是这一套帧）
+  const tab = [...doc.querySelectorAll('.chars-tab')]
+    .find((t) => (t.textContent || '').includes('素材'))
+  check('详情有「素材」页', !!tab)
+  click(tab)
+  await new Promise((r) => setTimeout(r, 500))
+
+  const body = () => doc.querySelector('.chars-body')?.textContent || ''
+  check('素材页有多姿势批量区', !!doc.querySelector('.chars-posegen'))
+  check('说明里写清了会整批替换（旧帧进 V1）',
+    body().includes('整批替换') && body().includes('V1'), body().slice(-200))
+  check('说明里写清了整批共用一个种子', body().includes('共用一个种子'))
+
+  const sel = doc.querySelector('.chars-posegen select')
+  check('骨架帧目录下拉有内容（来自 /pose_dirs）',
+    (sel?.options.length || 0) >= 1, String(sel?.options.length))
+
+  const btn = [...doc.querySelectorAll('.chars-posegen button')]
+    .find((b) => (b.textContent || '').includes('按这批姿势生成'))
+  check('有「按这批姿势生成」按钮', !!btn)
+  check('有目录时按钮可用', btn?.disabled === false)
+  click(btn)
+  await new Promise((r) => setTimeout(r, 500))
+
+  const call = calls.find((c) => c.url.includes('/characters/Alice/poses/generate'))
+  check('提交到 /poses/generate', !!call, call?.url)
+  if (call) {
+    const b = JSON.parse(call.body)
+    check('带上了骨架帧目录（不是逐张路径）', !!b.pose_dir, JSON.stringify(b).slice(0, 80))
+    check('带上了服装', b.costume === 'Naked', b.costume)
+  }
+  check('批量任务有进度条', !!doc.querySelector('.chars-prog'))
+  check('进度里带当前第几张',
+    (doc.querySelector('.chars-prog')?.parentElement?.textContent || '').includes('张姿势'),
+    (doc.querySelector('.chars-prog')?.parentElement?.textContent || '').slice(-80))
+
+  await new Promise((r) => setTimeout(r, 1600))
+  check('多姿势场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
 // 47b) 表情批量生成：官方 Emotion Studio 的「只改脸」
 //
 // 表情不是"再出一张整图"——官方把脸框裁出来放大重画，再按羽化蒙版贴回原图，
@@ -3692,7 +3792,9 @@ function check(name, cond, extra = '') {
   assetsTab?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
   await new Promise((r) => setTimeout(r, 400))
 
-  check('素材页有服装/表情两个下拉', doc.querySelectorAll('.chars-body select').length === 2,
+  // 服装 / 表情 两个下拉是翻看器的；第三个是「多姿势批量」的骨架帧目录
+  check('素材页有服装/表情两个下拉（外加多姿势的目录选择）',
+    doc.querySelectorAll('.chars-body select').length === 3,
     String(doc.querySelectorAll('.chars-body select').length))
   check('先去问这个序列有多少帧（不是一次性把图拉回来）',
     calls.some((c) => c.url.includes('/characters/Alice/poses/meta')),

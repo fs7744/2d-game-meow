@@ -1349,6 +1349,13 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
 }
 .chars-emo span { font-size: 9.5px; color: var(--muted); text-align: center; }
 
+/* 多姿势批量：跟上面的翻看器分开，别把两块控件混在一起 */
+.chars-posegen {
+  display: flex; flex-direction: column; gap: 8px;
+  border-top: 1px solid var(--line); padding-top: 10px; margin-top: 4px;
+}
+.chars-posegen b { font-size: 11px; color: var(--cyan); }
+
 /* AI 向导的一句话输入：够长才放得下一句中文描述 */
 .chars-wizard-input {
   flex: 1 1 340px; max-width: 520px;

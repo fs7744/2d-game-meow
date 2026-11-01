@@ -1730,6 +1730,64 @@ def pose_clone(eng: Engine, *, pose_image: str | Path,
         scope=scope, tag=tag)
 
 
+# ---------------- 多姿势批量（官方 pose_generation 的单张原子操作） ----------------
+
+#: 官方 `character_generator.py:2208-2213` 的指令（**逐字**）。
+#:
+#: 两个细节不能改：
+#:   · `image 1` 是**姿势**、`image 2` 是**角色**（顺序反了就变成"把角色的姿势
+#:     套到骨架上"，出来是一张骨架）；
+#:   · 官方是 `+ prompt` **直接接在同一行**（不是换行），跟 `_VNCCS_TEMPLATE`
+#:     那条（换行拼）不同——两条产线各自照自己的官方原文走。
+POSE_INSTRUCTION = ("Replace the pose of <image 2> with the pose of <image 1>. "
+                    "Keep the character of <image 2>. ")
+
+
+def qwen_pose_image(eng: Engine, *, pose: Image.Image, char: Image.Image,
+                    prompt: str = "", seed: int = 0,
+                    steps: int = 20, cfg: float = 1.0,
+                    width: int = 0, height: int = 0,
+                    transparent: bool = False, lora: Optional[str] = None,
+                    lora_scale: float = 1.0, label: str = "wpose") -> Image.Image:
+    """一张姿势 → 一张换好姿势的图（**返回 PIL，不落盘**）。
+
+    这是官方 `_run_pose_generation` 的 QI2 分支里循环体那一小段：指令 + 双图
+    （姿势、角色）+ 挂 Pose LoRA + 采样。批量编排在 `workflows/posegen.py`。
+
+    **不传负向词**：官方这条路径 encode 时 `negative_prompt` 是默认空串
+    （`:2208` 只给 positive），QI2 在 cfg=1.0 下本来也不做无条件前向。
+    """
+    pose_img = _vnccs_skeleton(pose.convert("RGB"))
+    char_img = char.convert("RGB")
+    w, h = _vnccs_canvas_size(pose_img, width, height)
+    instr = f"{POSE_INSTRUCTION}{str(prompt or '').strip()}".strip()
+
+    pipe = eng.txt2img_pipe(DEFAULT_MODEL)
+    name = lora or eng.VNCCS_LORA
+    lora_file = eng.lora_dir() / f"{name}.safetensors"
+    if not lora_file.is_file():
+        raise FileNotFoundError(
+            f"缺姿态 LoRA：{lora_file}\n"
+            f"下载 MIUProject/VNCCS_PoseStudio_QI2.1，用 tools/convert_lora.py "
+            f"转成 diffusers 格式后放到 models/lora/")
+
+    if seed < 0:
+        seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
+    eng.apply_loras(pipe, [{"name": name, "scale": float(lora_scale)}], scope="temp")
+    try:
+        return _qwen_call(
+            eng, prompt=instr, negative="",
+            # **顺序：姿势在前、角色在后**（官方 image 1 / image 2）
+            ref_image=[_vnccs_fit(pose_img, w, h), _vnccs_fit(char_img, w, h)],
+            width=w, height=h, steps=steps, cfg=cfg, seed=seed,
+            model=DEFAULT_MODEL, label=label, transparent=transparent,
+            output_resolution=max(w, h),
+            fast_lora=False,          # LoRA 槽位归姿态
+        )
+    finally:
+        eng.unload_loras(pipe, scope="temp")
+
+
 # ---------------- WVNC 姿态迁移（VNCCS PoseStudio LoRA 路线） ----------------
 
 #: VNCCS 官方工作流里的固定指令（逐字）。

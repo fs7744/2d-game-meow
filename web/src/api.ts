@@ -792,6 +792,38 @@ export function clothesWizard(
     { method: 'POST', body: JSON.stringify({ description, timeout }) })
 }
 
+// ---------------- 多姿势批量（官方 pose_generation） ----------------
+
+export type PoseGenBody = {
+  costume?: string
+  /** 姿势图路径；或者只给 pose_dir */
+  poses?: string[]
+  pose_dir?: string
+  /** 一句话；也可以给"每张一句"的数组 */
+  prompts?: string | string[]
+  steps?: number
+  cfg?: number
+  /** **整批共用一个种子**，-1 = 现场随机 */
+  seed?: number
+  transparent?: boolean
+  matte?: boolean
+}
+
+/**
+ * 一批姿势 → 一批精灵帧。
+ *
+ * ⚠️ 这是**整批替换**（旧图进 `V1/`），跟表情那条（逐张追加）不是一回事。
+ */
+export function generatePoses(
+  name: string, body: PoseGenBody,
+): Promise<{
+  job_id: string; status: string; costume: string; total: number
+  position: number; defaults: { steps: number; cfg: number; target_size: number }
+}> {
+  return req(`/characters/${encodeURIComponent(name)}/poses/generate`,
+    { method: 'POST', body: JSON.stringify(body) })
+}
+
 export type CharacterPrompt = {
   name: string
   style: string

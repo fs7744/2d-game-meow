@@ -22,6 +22,46 @@
 
 ---
 
+## 2026-11-01 · 角色中心 T5：多姿势批量生成（pose_generation）
+
+官方 `character_generator.py:2108-2223` 的 QI2 分支，落在 `workflows/posegen.py`
++ `generate.qwen_pose_image`。角色中心的 T1~T5 到这里**全部做完**。
+
+### 三处不能改的
+
+| 项 | 官方 | 为什么 |
+|---|---|---|
+| 指令 | `Replace the pose of <image 2> with the pose of <image 1>. Keep the character of <image 2>. {prompt}` | `image 1` 是**姿势**、`image 2` 是**角色**；顺序反了就是"把角色的姿势套到骨架上"，出来是一张骨架 |
+| 种子 | 整批共用一个（`pose_sampler.inherit_pipe=True`） | 每张随机会让同一套动作的衣服/发型/画风互相飘 |
+| 采样 | `steps 20 / cfg 1.0 / denoise 1.0`（`:825-833`） | 20 步是这套 LoRA 的训练点；cfg=1 是单次前向 |
+
+另外 official 是 `+ prompt` **直接接在同一行**（不是换行）——跟画布那个「角色迁移」
+节点用的 `_VNCCS_TEMPLATE`（换行拼）不是同一条，两条产线各照自己的原文走。
+
+### 发布是**整批替换**，不是逐张追加
+
+`staged_image_batch`（旧帧进 `V1`），这叫"一次出一整批"。而表情那条是**逐张追加**
+（`publish_image`）。搞混的后果是把先出的帧挤进 V1 —— 这个坑项目里踩过一次，
+所以两条路的函数分开、注释里互相指明。
+
+### 串行而不是 batch
+
+QI2 是逐张 encode→sample→decode（`:2205`），每张的 latent 尺寸可能都不一样，
+batch 只会把显存顶爆。
+
+### 接口与界面
+
+`POST /characters/<名>/poses/generate`（`poses` 或 `pose_dir` 二选一）。
+素材页底部加「多姿势批量」：选骨架帧目录 → （可选）一句追加描述 → 生成，
+带进度条（一批几十张，没进度只能干等）。
+
+### 顺带修的一个测试卫生问题
+
+`test_create_conflict_and_bad_name` 不清残留：上一次跑到一半中断就会留下 `Dup`
+目录，下次在**第一句**就撞"角色已存在"，看起来像功能坏了。现在用例自己先清理。
+
+---
+
 ## 2026-11-01 · 角色中心 T4：换装（Clothes Designer）+ T6 服装向导
 
 官方 `clothes_designer.py:413-448`（prompt）+ `:493-790`（QI2 出图分支），
@@ -2185,6 +2225,7 @@ MEOW_SLOW=1 pytest tests -m slow                  # 真跑 Qwen 的端到端组�
 | `workflows/emotiongen.py`（表情批量） | test_emotiongen（含一条真 YOLO） | 6s |
 | `workflows/qwen_llm.py`（本地 LLM：反推 + 向导） | test_qwen_llm（真推理那条要 `MEOW_SLOW=1`） | 5s |
 | `workflows/clothesgen.py`（换装） | test_clothes | 5s |
+| `workflows/posegen.py`（多姿势） | test_posegen | 5s |
 | `workflows/characters.py` / `charactergen.py` | test_characters test_char_poses | 9s |
 | `tools/*` `docs/*` `README` | 不跑（工具靠自身输出验证） | — |
 | 合并 / 发版前 | 全量 | 150s |
@@ -2203,6 +2244,7 @@ test_stability 的 free 与泄漏、test_matte 的缓存素材）需要 GPU。
 | `tests/test_qwen_workflows.py` | **十个工作流的能力表与「近似」标记**、**局部重绘选区外逐点不变**、**output_resolution 真的对齐**、**逐帧尺度归一**、**透明底 alpha 不被白底吃掉**、**Qwen 路径不许碰已删的 SD 管线**、**非人形主体不补提**、**两阶段每帧调两次模型** | 37 |
 | `tests/test_gate.py` | 公共闸门组件（候选怎么跑、同分取第一个、非人形不补提） | 6 |
 | `tests/test_e2e_qwen.py` | **十个工作流各真跑一次模型**（`-m slow`，约 80s） | 10 |
+| `tests/test_posegen.py` | **指令逐字**（图序 / 同行接 prompt）、**整批共用种子**、**整批替换（旧帧进 V1）**、每张一句/一句话通吃、单张失败不丢整批、姿势来源（路径 /files / 目录展开 / 去重）、接口 enqueue + progress | 14 |
 | `tests/test_clothes.py` | **换装 prompt 逐字**（指令句 / 字段顺序 / 背景 RGB+hex / 权重负向词）、clone 模式、蓝底负向词、**底图优先级 Naked→Original**、**跳过 V1 归档**、出图落盘命名、进度、**接口只返回不落盘** | 21 |
 | `tests/test_qwen_llm.py` | **解析三级降级**（纯 JSON / 代码块 / 数组 / 带解说 / 尾逗号 / 废话）、**属性收敛**（list→逗号、sex/age clamp）、**白名单挡注入**、**透明图压背景色**、**送模型的图缩到 512**、**GGUF magic 校验**、**装错 fork 报 DEPENDENCY_MISSING**、**推理超时**、**错误码 → HTTP 状态**、**不写 config** | 30 |
 | `tests/test_emotiongen.py` | **pad 到 32 倍数用 replicate**、**羽化蒙版是斜坡+模糊（不是硬边）**、**贴回只动框内、alpha 不被贴出方块**、**推理尺寸按官方总像素公式**、**prompt 模板逐字**、**dilation 用了两次**、**产物序号跟源帧对齐**、**没源帧要说清原因**、**单张失败不丢整批**、**队列里的 progress** | 34 |

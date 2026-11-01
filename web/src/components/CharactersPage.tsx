@@ -24,6 +24,7 @@ import {
   fetchCharacterPrompt, generateForCharacter, fetchJob, fetchCharacterTags,
   detectEmotionFaces, generateEmotions, type EmotionFrame,
   analyzeCharacter, wizardCharacter, designClothes, clothesWizard,
+  generatePoses, fetchPoseDirs, type PoseDir,
   type CharacterPrompt, type TagCatalog,
 } from '../api'
 import SpritePreview from './SpritePreview'
@@ -116,6 +117,13 @@ export default function CharactersPage({ onNotice }: Props) {
   const [clothMsg, setClothMsg] = useState('')
   /** 服装表单的草稿（CostumeForm 受控时会回填，这里只用来喂换装 prompt） */
   const [costumeDraft, setCostumeDraft] = useState<Record<string, string>>({})
+  /** 多姿势批量：骨架帧目录 / 一句话 / 进度 */
+  const [poseDirs, setPoseDirs] = useState<PoseDir[]>([])
+  const [poseDir, setPoseDir] = useState('')
+  const [poseText, setPoseText] = useState('')
+  const [poseBusy, setPoseBusy] = useState(false)
+  const [poseMsg, setPoseMsg] = useState('')
+  const [poseProg, setPoseProg] = useState<{ done: number; total: number } | null>(null)
 
   const reload = useCallback(async () => {
     try {
@@ -136,6 +144,14 @@ export default function CharactersPage({ onNotice }: Props) {
     fetchEmotionCatalog().then(setEmotions).catch(() => setEmotions(null))
     fetchCharacterTags().then(setTagCat).catch(() => setTagCat(null))
   }, [reload])
+
+  useEffect(() => {
+    // 多姿势生成要用骨架帧目录清单（后端扫 assets 下两层）
+    fetchPoseDirs().then((list) => {
+      setPoseDirs(list)
+      setPoseDir((cur) => cur || (list[0]?.path ?? ''))
+    }).catch(() => setPoseDirs([]))
+  }, [])
 
   useEffect(() => {
     if (!sel) { setDetail(null); return }
@@ -336,6 +352,53 @@ export default function CharactersPage({ onNotice }: Props) {
       setClothBusy(false)
     }
   }, [sel, clothBusy, clothText])
+
+  /**
+   * 多姿势批量：一个骨架帧目录 → 一整批精灵帧（官方 pose_generation）。
+   *
+   * ⚠️ **整批替换**：这套服装现有的 Neutral 帧会被推进 `V1/`（能找回）。
+   * 跟表情那条（逐张追加）不是一回事，界面上要说清。
+   */
+  const doGeneratePoses = useCallback(async () => {
+    if (!sel || poseBusy || !poseDir) return
+    setPoseBusy(true)
+    setPoseProg(null)
+    setPoseMsg('已提交，排队中…（每张 20 步，约 20~30 秒/张）')
+    try {
+      const r = await generatePoses(sel, {
+        costume: browseCostume,
+        pose_dir: poseDir,
+        prompts: poseText.trim(),
+        matte: true,
+      })
+      setPoseProg({ done: 0, total: r.total })
+      for (let i = 0; i < 1800; i++) {
+        const j = await fetchJob(r.job_id)
+        if (j.status === 'done') {
+          const d = await fetchCharacter(sel)
+          setDetail(d)
+          setBrowseEmotion('neutral')
+          setPoseMsg(`完成 ${r.total} 张：旧帧已进 V1，素材页可看`)
+          onNotice('多姿势生成完成')
+          return
+        }
+        if (j.status === 'failed') {
+          setPoseMsg(`生成失败：${j.error || '未知错误'}`)
+          return
+        }
+        if (j.progress) {
+          setPoseProg({ done: j.progress.done, total: j.progress.total })
+          setPoseMsg(j.progress.current || '生成中…')
+        }
+        await new Promise((res) => setTimeout(res, 1200))
+      }
+      setPoseMsg('等太久了：任务还在跑，去画布那边看任务状态')
+    } catch (e) {
+      setPoseMsg(`生成失败：${e instanceof Error ? e.message : e}`)
+    } finally {
+      setPoseBusy(false)
+    }
+  }, [sel, poseBusy, poseDir, poseText, browseCostume, onNotice])
 
   /** 出图：提交 → 轮询 → 完成后后端已经把图收进角色目录了，刷新即可 */
   const doGenerate = useCallback(async (workflow: 'w1' | 'w2') => {
@@ -1033,6 +1096,51 @@ export default function CharactersPage({ onNotice }: Props) {
                   emotion={browseEmotion}
                   onMeta={setBrowseMeta}
                 />
+                <div className="chars-posegen">
+                  <b>多姿势批量</b>
+                  <p className="chars-sub">
+                    一个骨架帧目录 → 一整批 <code>sprite_pose_0001..N</code>。
+                    整批<b>共用一个种子</b>（官方做法：每张随机会让衣服/发型飘）。
+                    <br />
+                    ⚠️ 这是<b>整批替换</b>：这套服装现有的 Neutral 帧会被推进
+                    <code>V1/</code>（能找回）。表情那条是逐张追加，两者不一样。
+                  </p>
+                  <div className="chars-row">
+                    <label>
+                      骨架帧目录
+                      <select value={poseDir} onChange={(e) => setPoseDir(e.target.value)}>
+                        {poseDirs.length === 0 && <option value="">（没有可用目录）</option>}
+                        {poseDirs.map((d) => (
+                          <option key={d.path} value={d.path}>{d.name}（{d.count} 张）</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      追加描述
+                      <input
+                        className="chars-wizard-input"
+                        placeholder="可空；会接在官方指令后面"
+                        value={poseText}
+                        onChange={(e) => setPoseText(e.target.value)}
+                      />
+                    </label>
+                  </div>
+                  <div className="chars-row">
+                    <button type="button" className="mini wide"
+                      onClick={() => void doGeneratePoses()}
+                      disabled={poseBusy || !poseDir}>
+                      {poseBusy ? '生成中…' : '按这批姿势生成'}
+                    </button>
+                  </div>
+                  {poseProg && poseProg.total > 0 && (
+                    <div className="chars-prog">
+                      <div className="chars-prog-bar"
+                        style={{ width: `${Math.round((poseProg.done / poseProg.total) * 100)}%` }} />
+                      <span>{poseProg.done}/{poseProg.total}</span>
+                    </div>
+                  )}
+                  {poseMsg && <p className="chars-sub">{poseMsg}</p>}
+                </div>
                 {browseFiles.length > 0 && (
                   <div className="chars-asset-row">
                     <span className="chars-asset-label">全部 {browseFiles.length}</span>

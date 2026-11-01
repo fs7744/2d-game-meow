@@ -58,6 +58,11 @@ def test_config_fields_match_official():
 
 
 def test_create_conflict_and_bad_name():
+    # **先清掉残留**：这个用例以前不清，上一次跑到一半中断就会留下 Dup 目录，
+    # 下一次直接在第一句就撞"角色已存在"（看起来像功能坏了，其实是测试不干净）。
+    for leftover in ("Dup", "Alice"):
+        if ch.character_exists(leftover):
+            ch.delete_character(leftover)
     ch.create_character("Dup")
     try:
         ch.create_character("Dup")

@@ -59,6 +59,7 @@ from workflows import assetdb
 from workflows import characters
 from workflows import charactergen
 from workflows import clothesgen
+from workflows import posegen
 from workflows import emotiongen
 from workflows import qwen_llm
 from workflows import library
@@ -127,6 +128,13 @@ def _run(job_id: str, workflow: str, params: Dict[str, Any]) -> None:
     job = _jobs[job_id]
     job.update(status="running", started=time.time())
     try:
+        if workflow == "wposegen":
+            # **多姿势批量**：N 张姿势串行出 N 张帧，最后整批替换（旧图进 V1）。
+            from workflows import posegen as _posegen
+            with _gpu_lock:                # 单卡不并发
+                job["result"] = _posegen.run_batch(engine, params, job=job)
+            job["status"] = "done"
+            return
         if workflow == "wcloth":
             # **换装**：一次一张（25 步、cfg 3.0、挂 Clothes Core LoRA），
             # 出完落两处：官方的 cache 预览 + 这套服装的第一张底图。
@@ -1038,6 +1046,26 @@ class ClothesDesignReq(BaseModel):
     matte: bool = True
 
 
+class PoseGenReq(BaseModel):
+    """多姿势批量生成请求（官方 `character_generator.py:2108-2223`）。
+
+    `poses` 给几张姿势图的路径；或者给 `pose_dir`（我们 `/pose_dirs` 扫出来的
+    骨架帧目录）。两条都空就报错——**不猜用户想用哪张**。
+    """
+    costume: str = "Naked"
+    poses: List[str] = Field(default_factory=list)
+    pose_dir: str = ""
+    #: 一句话；也可以给"每张一句"的列表（官方 `_pose_prompts` 支持）
+    prompts: Any = ""
+    steps: int = int(posegen.POSE_DEFAULTS["steps"])
+    cfg: float = float(posegen.POSE_DEFAULTS["cfg"])
+    #: **整批共用一个种子**（官方 `inherit_pipe=True`），-1 = 现场随机一个
+    seed: int = -1
+    transparent: bool = False
+    matte: bool = True
+    lora: str = ""
+
+
 class ClothesWizardReq(BaseModel):
     """服装 AI 向导：一句话 → top/bottom/shoes/head/face 五个字段。"""
     description: str = ""
@@ -1286,6 +1314,47 @@ def character_generate_api(name: str, req: CharacterGenerateReq) -> Dict[str, An
     _prune(_jobs, JOB_KEEP)
     return {"job_id": job_id, "status": "queued", "position": _q.qsize(),
             "prompt": prompt, "resolution": [w, h]}
+
+
+@app.post("/characters/{name}/poses/generate")
+def pose_generate_api(name: str, req: PoseGenReq) -> Dict[str, Any]:
+    """多姿势批量生成（官方 `character_generator.py:2108-2223`）。
+
+    一张姿势出一张帧，**整批共用一个种子**（官方 `inherit_pipe=True`），
+    出完走 `staged_image_batch` **整批替换**这套服装的 Neutral 帧（旧图进 V1）。
+
+    ⚠️ **这一步会替换掉现有的 Neutral 帧**（旧的在 `V1/` 里能找回）。
+    跟「表情」那条（逐张追加）不是一回事：那个是往同一组帧上叠表情。
+    """
+    try:
+        safe = characters.ensure_safe_name(name, "角色名")
+        costume = characters.ensure_safe_name(req.costume or "Naked", "服装名")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not characters.character_exists(safe):
+        raise HTTPException(404, f"没有这个角色：{safe}")
+
+    poses = posegen._resolve_pose_paths(req.poses or [], req.pose_dir or "")
+    if not poses:
+        raise HTTPException(
+            400, "没有可用的姿势图：给几张姿势图，或指定一个骨架帧目录")
+
+    params: Dict[str, Any] = {
+        "character": safe, "costume": costume,
+        "poses": poses, "prompts": req.prompts,
+        "steps": int(req.steps), "cfg": float(req.cfg), "seed": int(req.seed),
+        "transparent": bool(req.transparent), "matte": bool(req.matte),
+        "lora": req.lora,
+    }
+    job_id = uuid.uuid4().hex[:12]
+    _jobs[job_id] = {"job_id": job_id, "workflow": "wposegen", "params": params,
+                     "status": "queued", "created": time.time(),
+                     "progress": {"done": 0, "total": len(poses), "current": ""}}
+    _q.put((job_id, "wposegen", params))
+    _prune(_jobs, JOB_KEEP)
+    return {"job_id": job_id, "status": "queued", "costume": costume,
+            "total": len(poses), "position": _q.qsize(),
+            "defaults": dict(posegen.POSE_DEFAULTS)}
 
 
 @app.post("/characters/{name}/clothes/wizard")
