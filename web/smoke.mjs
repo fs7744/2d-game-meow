@@ -2955,8 +2955,11 @@ function check(name, cond, extra = '') {
   const studioHtml = readFileSync(resolve(dist, 'vnccs-pose/studio.html'), 'utf8')
   check('iframe 页会按 ?embed=1 打上 embed 标记',
     studioHtml.includes("classList.add('embed')"), 'studio.html 少了加 class 的脚本')
-  check('embed 模式下隐藏 iframe 自带的工具条',
-    studioHtml.includes('html.embed #bar'), 'studio.html 少了隐藏规则')
+  // 工具条从 DOM 里删掉（只保留宿主一份），不是靠 CSS 藏——藏起来的按钮
+  // 仍然能被点、仍然会把人绕进"点了没反应"的死路。
+  check('iframe 里不再有自带的工具条（按钮只有宿主一份）',
+    !studioHtml.includes('id="bar"') && !studioHtml.includes('id="hint"'),
+    'studio.html 里还留着 #bar / #hint')
 
   // 宿主控制条：四个动作按钮文案要完整（以前写成"视角/站立/从图"，
   // 加上 .mini 只有 28px 宽，两字被挤成竖排）

@@ -42,7 +42,6 @@ const statusEl = document.getElementById('status')
 const outEl = document.getElementById('out')
 const canvas = document.getElementById('stage')
 const stageWrap = document.getElementById('stagewrap')
-const yawSel = document.getElementById('yaw')
 
 /** COCO-18 顺序，与后端 /pose/extract 返回的 points 完全一致 */
 const COCO_NAMES = [
@@ -61,12 +60,6 @@ const STAND = [
   [0.58, 0.180], [0.61, 0.339], [0.62, 0.497], [0.46, 0.520], [0.45, 0.720],
   [0.44, 0.930], [0.54, 0.520], [0.55, 0.720], [0.56, 0.930], [0.47, 0.069],
   [0.53, 0.069], [0.45, 0.075], [0.55, 0.075],
-]
-
-/** 朝向（相机机位绕 Y 的角度，度）。0 正面 / 90 右侧面 / 180 背面 / 270 左侧面 */
-const YAW_LABELS = [
-  [0, '正面'], [45, '右前 3/4'], [90, '右侧面'], [135, '右后 3/4'],
-  [180, '背面'], [225, '左后 3/4'], [270, '左侧面'], [315, '左前 3/4'],
 ]
 
 let viewerPromise = null
@@ -275,7 +268,6 @@ function setStatus(text, isError = false) {
 
 function setYaw(deg) {
   currentYaw = ((Math.round(Number(deg) || 0) % 360) + 360) % 360
-  if (yawSel) yawSel.value = String(currentYaw)
   // 「朝向」是**快捷对齐**：把导航相机摆到标准角度，摆完用户还能右键继续微调。
   // 导出始终以导航相机为准（renderOut 用 viewport:true），所以这里只是摆相机。
   if (viewer) snapCamera(viewer)
@@ -306,24 +298,11 @@ function resetCamera() {
   viewer.requestRender()
 }
 
-// ---- 朝向下拉 ----
-if (yawSel) {
-  for (const [deg, label] of YAW_LABELS) {
-    const opt = document.createElement('option')
-    opt.value = String(deg)
-    opt.textContent = `${deg}° ${label}`
-    yawSel.appendChild(opt)
-  }
-  yawSel.value = '0'
-  yawSel.addEventListener('change', () => setYaw(yawSel.value))
-}
-
-// ---- 工具栏按钮（独立页模式）----
-document.getElementById('btn-export')?.addEventListener('click', () => {
-  const url = renderOut(768, currentYaw)
-  if (url) post({ type: 'result', dataURL: url })
-})
-document.getElementById('btn-reset')?.addEventListener('click', resetCamera)
+// ---- 这里**不再有**朝向下拉和工具栏按钮 ----
+// 它们只在宿主（PoseStudio.tsx）那一份：朝向、机位滑块、重置视角/姿势、
+// 从图片提姿势、导出人偶图。iframe 这一侧只认 postMessage：setYaw / resetView /
+// resetPose / export / getPose。以前这里也有一套，用户在卡片里看到的就是
+// "相同的东西里面又外面都有"。
 
 // ---- 父页消息 ----
 window.addEventListener('message', async (e) => {
@@ -420,7 +399,8 @@ if (new URLSearchParams(location.search).get('selftest') === '1') {
     window.postMessage({ type: 'init', joints: STAND.map(([x, y]) => ({ x, y })),
       yaw: 90 }, '*')
     await new Promise((r) => setTimeout(r, 400))
-    // 模拟用户点「导出人偶图」
-    document.getElementById('btn-export')?.click()
+    // 模拟宿主索要导出图（**走和宿主按钮同一条消息**）。
+    // 以前这里是 `#btn-export.click()`，但那个按钮已经删掉了——工具条只在宿主一份。
+    window.postMessage({ type: 'export', size: 768 }, '*')
   })()
 }

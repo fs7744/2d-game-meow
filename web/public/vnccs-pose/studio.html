@@ -22,9 +22,12 @@
     #out { display: flex; gap: 12px; flex-wrap: wrap; }
     #out img { background: #fff; }
 
-    /* ---- 嵌入模式（?embed=1）：只留画布，控制条交给宿主 ----
-       宿主要把编辑器塞进节点卡片里，自己的状态栏/工具栏会抢地方，
-       所以这里整块隐藏，只让画布填满 iframe。 */
+    /* ---- 嵌入模式（?embed=1）：只留画布，控制条全部交给宿主 ----
+       宿主要把编辑器塞进节点卡片里，自己的状态栏/工具栏会抢地方，所以这里
+       只让画布填满 iframe。
+       `#bar` / `#hint` 已经从 DOM 里**删掉**了（按钮只保留宿主那一份），
+       这两条选择器留着当兜底：万一以后又把控件加回来，嵌入模式下也不会再
+       出现"里面外面各一套"。 */
     html.embed, html.embed body { height: 100%; overflow: hidden; }
     html.embed #wrap { padding: 0; gap: 0; height: 100%; align-items: stretch; }
     html.embed #stagewrap { flex: 1; min-height: 0; }
@@ -39,12 +42,10 @@
   <div id="wrap">
     <div id="status">正在加载…</div>
     <div id="stagewrap"><canvas id="stage" width="768" height="768"></canvas></div>
-    <div id="bar">
-      <label>朝向 <select id="yaw"></select></label>
-      <button id="btn-reset" type="button">重置视角</button>
-      <button id="btn-export" type="button">导出人偶图</button>
-    </div>
-    <div id="hint">拖橙色关节点摆姿势 · 右键拖动转视角 · 中键平移 · 滚轮缩放</div>
+    <!-- **这里不再有工具条**：朝向 / 重置视角 / 导出 / 提示行全部搬到宿主
+         （PoseStudio.tsx）。以前这里和宿主各有一套一模一样的按钮，
+         用户看到的就是"相同的东西里面又外面都有"，而且这一套的导出把结果写进
+         #out，嵌入时根本看不到 → "点了没反应"。按钮只有一份，就在这里以外。 -->
     <div id="out"></div>
   </div>
   <script>
