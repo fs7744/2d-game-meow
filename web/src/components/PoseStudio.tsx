@@ -20,6 +20,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { PosePreset } from '../types'
 import { BUILTIN_POSES, uniquePoseName } from '../store/poses'
+import { clipLabel } from '../fileName'
 import {
   applyFilters, diffStats, hashDiff, loopSeam, type SampledFrame,
 } from '../store/animFrames'
@@ -229,7 +230,12 @@ export default function PoseStudio({
           rig: rig ? { familyLabel: String(rig.familyLabel || ''), mapped: Number(rig.mapped) || 0 } : undefined,
         })
         setAnimT(0)
-        setStatus(`动作已载入：${clips[0].name}（${d.boneCount} 根骨，${d.format}`
+        // **换文件/换轨道都把帧墙清掉**：那一摞帧属于上一段动作，留在屏幕上
+        // 会被当成新动作的帧存进姿势集（而名字取的是新动作的）。宁可让用户
+        // 重点一次「抽帧看看」，也不要存出一套张冠李戴的姿势。
+        setSampled(null)
+        setPicks([])
+        setStatus(`动作已载入：${clipLabel(clips[0].name, 0)}（${d.boneCount} 根骨，${d.format}`
           + `${rig?.familyLabel ? `，${rig.familyLabel} 骨架` : ''}）——拖滑块选帧`)
         post({ type: 'animTime', t: 0 })
       } else if (d.type === 'animTick') {
@@ -508,17 +514,22 @@ export default function PoseStudio({
         {anim && anim.clips.length > 1 && (
           <select
             className="pose-lib-sel"
+            title={`这个文件里有 ${anim.clips.length} 个动作：`
+              + anim.clips.map((c, i) => clipLabel(c.name, i)).join(' / ')}
             value={anim.index}
             onChange={(e) => {
               const i = Number(e.target.value)
               setAnim({ ...anim, index: i })
               setAnimT(0)
+              setSampled(null)          // 换轨道 = 换动作，旧帧墙作废
+              setPicks([])
               post({ type: 'animClip', index: i })
             }}
-            title="这个文件里有多个动作（Idle / Walk / Run…）"
           >
+            {/* 轨道名常是导出工具的垃圾（Mixamo 就叫 `mixamo.com`），
+                显示层洗一遍；但**送回去的仍是 index**，不动数据 */}
             {anim.clips.map((c, i) => (
-              <option key={i} value={i}>{c.name}</option>
+              <option key={i} value={i}>{clipLabel(c.name, i)}</option>
             ))}
           </select>
         )}
@@ -700,8 +711,7 @@ export default function PoseStudio({
                 <input
                   className="pose-set-name"
                   value={setName}
-                  placeholder={anim.clips[anim.index]?.name
-                    ? `姿势集名（默认 ${anim.clips[anim.index].name}）` : '姿势集名'}
+                  placeholder={`姿势集名（默认 ${clipLabel(anim.clips[anim.index]?.name, anim.index)}）`}
                   disabled={savingSet}
                   onChange={(e) => setSetName(e.target.value)}
                   title="存到本项目的 poses/<这个名字>/ 下。**同名会被拒绝**（不会覆盖上一次的）"
@@ -711,7 +721,8 @@ export default function PoseStudio({
                   disabled={!projectId || !onSavePoseSet || savingSet || !pickedFrames.length}
                   onClick={() => {
                     setErr('')
-                    const name = (setName.trim() || anim.clips[anim.index]?.name || '动作').trim()
+                    const name = (setName.trim()
+                      || clipLabel(anim.clips[anim.index]?.name, anim.index)).trim()
                     if (!projectId) { setErr('没有项目 id，存不了（先保存项目）'); return }
                     const items: PoseSetFrameIn[] = pickedFrames.map((p) => ({
                       t: p.frame.t, yaw: yawRef.current, pose: p.frame.pose, png: p.frame.png,

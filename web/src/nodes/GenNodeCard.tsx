@@ -247,8 +247,10 @@ type Props = {
   favorited: boolean
   onToggleFavorite: () => void
   model: string
-  /** 全局抠图后端（批量面板出图时透传，和单张生成保持一致） */
+  /** 全局抠图后端（姿态批量出图时透传，和单张生成保持一致） */
   matteBackend?: string
+  /** 按节点 id 取角色图（磁盘路径）。`charSource` 只存 nodeId，路径得现算 */
+  charPathsOf?: (nodeId?: string) => string[]
   /** 切底模：产出风格档位可能要求特定底模（如「像素精灵·Illustrious」要 sdxl-anime）。
    *  keepNodes=true 表示参数由档位负责，别套推荐值（否则会覆盖刚 patch 的 LoRA/尺寸）。 */
   onModel?: (m: string, opts?: { keepNodes?: boolean }) => void
@@ -336,6 +338,7 @@ const WORKFLOW_OF: Record<string, string> = {
   pixelify: 'pixelify',
   poseswap: 'poseswap',
   poseclone: 'pose_clone',
+  posebatch: 'pose_clone',
   spriteswap: 'sprite_swap',
   topixel: 'topixel',
   // 这三个是 2026-10-30/31 加的，漏了会让它们的 `wf` 为空 →
@@ -372,6 +375,7 @@ export default function GenNodeCard({
   onToggleFavorite,
   model,
   matteBackend,
+  charPathsOf,
   onModel,
   maxCandidates,
   poseDirs,
@@ -423,6 +427,7 @@ export default function GenNodeCard({
   const isPoseClone = node.kind === 'poseclone'
   const isSpriteSwap = node.kind === 'spriteswap'
   const isPoseSwap = node.kind === 'poseswap'
+  const isPoseBatch = node.kind === 'posebatch'
   const isPoseEdit = node.kind === 'poseedit'
   const isOutpaint = node.kind === 'outpaint'
   const isOutfit = node.kind === 'outfit'
@@ -826,7 +831,9 @@ export default function GenNodeCard({
             isBg ? ' bg' : ''
           }${isInpaint ? ' inpaint' : ''}${isAiRepaint ? ' airepaint' : ''}${
             isPixelify ? ' pixelify' : ''
-          }${isPoseClone ? ' poseclone' : ''}${isSpriteSwap ? ' spriteswap' : ''}${
+          }${isPoseClone ? ' poseclone' : ''}${isPoseBatch ? ' posebatch' : ''}${
+            isSpriteSwap ? ' spriteswap' : ''
+          }${
             isPoseSwap ? ' poseswap' : ''
           }${isToPixel ? ' topixel' : ''}`}
         >
@@ -834,6 +841,7 @@ export default function GenNodeCard({
             : isPoseEdit ? '人偶姿势' : isImg ? '图片' : isBg ? '抠图' : isPixelify ? '像素转换'
             : isToPixel ? '转像素'
             : isPoseClone ? '角色迁移'
+              : isPoseBatch ? '姿态批量'
               : isPoseSwap ? '姿态序列'
               : isSpriteSwap ? '序列帧替换'
                 : isAiRepaint ? '局部AI重绘'
@@ -1741,23 +1749,6 @@ export default function GenNodeCard({
             {busy ? '迁移中…' : '迁移角色'}
           </button>
 
-          {/* 批量：一个姿势集一次出整套。默认收起 —— 单张那条路是主用法，
-              批量是多出来的，不该把卡片顶长。 */}
-          <details className="adv pose-batch-box">
-            <summary>批量：用姿势集出整套</summary>
-            {projectId ? (
-              <PoseBatchPanel
-                projectId={projectId}
-                node={node}
-                onPatch={onPatch}
-                model={model}
-                matteBackend={matteBackend}
-              />
-            ) : (
-              <div className="src-note">批量要项目 id：先把项目保存一次</div>
-            )}
-          </details>
-
           {hasImage && (
             <button
               className="mini wide"
@@ -1770,6 +1761,105 @@ export default function GenNodeCard({
               ↳ 图生图
             </button>
           )}
+        </div>
+      ) : isPoseBatch ? (
+        /* 姿态批量：一个姿势集 → 一整套帧。
+           **单张和批量是两种模式**，所以独立成节点（塞在角色迁移的折叠区里
+           会让人分不清现在在批还是在单张，还出现过"选了姿势集却没接角色图"
+           的错位状态）。 */
+        <div className="node-body posebatch-body">
+          <div className="src-box char-box">
+            <span
+              className="conn in char"
+              data-port="char"
+              title="角色图（身份来源）：把上游节点的输出点拖到这里"
+            />
+            <div className="src-thumb" title="角色图（身份来源）">
+              {charThumb ? (
+                <img src={charThumb} alt="角色" draggable={false} />
+              ) : (
+                <span>无角色</span>
+              )}
+            </div>
+            <div className="src-side">
+              <select
+                value={node.charSource?.nodeId ?? ''}
+                onChange={(e) =>
+                  onPatch({
+                    charSource: e.target.value
+                      ? { nodeId: e.target.value }
+                      : undefined,
+                  })
+                }
+              >
+                <option value="">（选角色图）</option>
+                {sourceOptions.map((o) => (
+                  <option key={o.id} value={o.id}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+              <div className="src-note">
+                {charThumb ? '第一张角色图（身份来源）' : '缺角色图'}
+              </div>
+            </div>
+          </div>
+
+          {extraRefBox}
+
+          <div className="prompt-wrap">
+            <textarea
+              className="prompt"
+              rows={2}
+              placeholder="可选：补充描述（外观已由角色图决定）"
+              value={p.prompt}
+              onChange={(e) => setParam('prompt', e.target.value)}
+            />
+            <PromptZoom value={p.prompt} onChange={(v) => setParam('prompt', v)} label="正向提示词" />
+          </div>
+
+          <PoseBatchPanel
+            projectId={projectId || ''}
+            node={node}
+            onPatch={onPatch}
+            model={model}
+            matteBackend={matteBackend}
+            charPaths={charPathsOf?.(node.charSource?.nodeId) || []}
+            hasChar={!!charThumb}
+            onPreview={onPreview}
+          />
+
+          <details className="adv">
+            <summary>更多设置</summary>
+            <label className="bg-mode" title={hint('参考')}>
+              参考
+              <select
+                value={p.pcRefMode}
+                onChange={(e) => setParam('pcRefMode', e.target.value as typeof p.pcRefMode)}
+              >
+                <option value="auto">自动（骨架→轮廓）</option>
+                <option value="pose">骨架（真人照片）</option>
+                <option value="outline">轮廓（游戏素材）</option>
+                <option value="skeleton">已画好的骨架图（骨骼编辑节点）</option>
+              </select>
+            </label>
+            <label className="bg-mode" title={'生成时的底色。\n'
+              + '角色偏白（白毛、白甲）时白底会让抠图分不清主体与背景，'
+              + '选「深色底」靠对比度抠更干净。'}>
+              底色
+              <select
+                value={p.bgTone}
+                onChange={(e) => setParam('bgTone', e.target.value as typeof p.bgTone)}
+              >
+                <option value="white">白底（默认）</option>
+                <option value="dark">深色底（白毛角色）</option>
+              </select>
+            </label>
+            <div className="src-note">
+              每条姿势集帧都走「角色迁移」同一条管线（DWPose 条件图 + 双图条件），
+              所以批量出来的效果和逐张点「迁移角色」一致。
+            </div>
+          </details>
         </div>
       ) : isToPixel ? (
         <div className="node-body animepixel-body">

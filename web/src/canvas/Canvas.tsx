@@ -12,8 +12,10 @@ type Props = {
   model: string
   /** 当前底模的候选数上限（后端按总显存算），透传给每个节点卡 */
   maxCandidates?: number
-  /** 全局抠图后端（auto/…），角色迁移的批量面板也要按它出图 */
+  /** 全局抠图后端（auto/…），姿态批量也要按它出图 */
   matteBackend?: string
+  /** 按节点 id 取角色图（磁盘路径）。`charSource` 只存 nodeId，路径得现算 */
+  charPathsOf?: (nodeId?: string) => string[]
   /** W4 可用的骨架帧目录 */
   poseDirs?: PoseDir[]
   /** 本机是否装了 SDXL refiner 权重 */
@@ -74,6 +76,7 @@ export default function Canvas({
   model,
   maxCandidates,
   matteBackend,
+  charPathsOf,
   poseDirs,
   canTransparent,
   models,
@@ -500,6 +503,7 @@ export default function Canvas({
             onToggleFavorite={() => onToggleFavorite(n.id)}
             model={n.params.model || model}
             matteBackend={matteBackend}
+            charPathsOf={charPathsOf}
             onModel={(m, opts) => onNodeModel?.(n.id, m, opts?.keepNodes)}
             nodesModels={models}
             modelCaps={modelCaps}

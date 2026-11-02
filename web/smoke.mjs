@@ -3051,6 +3051,104 @@ function check(name, cond, extra = '') {
   check('没导入动作时不摆「存为姿势集」（避免点了必然失败）',
     !node?.querySelector('.pose-frames'))
 
+  // **单张和批量是两条独立的路**：角色迁移只管一张，「姿态批量」是另一个节点。
+  // 以前批量塞在角色迁移的折叠区里，出现过"选了姿势集却没接角色图"的错位状态。
+  check('角色迁移节点里不再有批量区（模式互斥）',
+    !node?.querySelector('.pose-batch-box'),
+    node?.querySelector('.pose-batch-box') ? '还留着批量折叠块' : '')
+
+  const batchAdd = [...doc.querySelectorAll('.rail-add')].find((b) =>
+    (b.closest('.rail-item')?.textContent || '').includes('姿态批量'))
+  check('侧栏有「姿态批量」入口', !!batchAdd)
+  batchAdd?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 250))
+  const batchNode = [...doc.querySelectorAll('.node')].find((n) =>
+    (n.querySelector('.node-kind')?.textContent || '').includes('姿态批量'))
+  check('能创建姿态批量节点', !!batchNode)
+  check('姿态批量节点有姿势集下拉', !!batchNode?.querySelector('.pose-batch select'))
+  check('姿态批量节点有输出文件夹名输入',
+    !!batchNode?.querySelector('.pose-batch-out'))
+  check('姿态批量节点有「全部生成」按钮',
+    [...(batchNode?.querySelectorAll('button') || [])]
+      .some((b) => (b.textContent || '').includes('全部生成')))
+  check('姿态批量节点接了角色图端口（0/1 未接时给提示）',
+    !!batchNode?.querySelector('.conn.in.char'),
+    batchNode?.querySelector('.conn.in')?.className || '（没有端口）')
+
+  // 宿主控制条：四个动作按钮文案要完整（以前写成"视角/站立/从图"，
+  // 加上 .mini 只有 28px 宽，两字被挤成竖排）
+  const actBtns = [...(node?.querySelectorAll('.pose-actions .mini') || [])]
+    .map((b) => (b.textContent || '').trim())
+  check('动作按钮文案完整（重置视角/重置姿势/从图片提姿势/导出人偶图）',
+    actBtns.includes('重置视角') && actBtns.includes('重置姿势')
+    && actBtns.includes('从图片提姿势') && actBtns.includes('导出人偶图'),
+    actBtns.join(' | '))
+  check('导出按钮在最后（独占一行）',
+    actBtns[actBtns.length - 1] === '导出人偶图', actBtns.join(' | '))
+  check('加载中给出提示（37MB 人偶模型要等）',
+    (node?.querySelector('.pose-status')?.textContent || '').includes('人偶模型'),
+    node?.querySelector('.pose-status')?.textContent || '（无）')
+
+  // 朝向 = 导出机位。8 个精灵常用方向，正面是默认。
+  const yawSel = node?.querySelector('.pose-row select')
+  check('朝向有 8 个方向', yawSel?.options.length === 8, String(yawSel?.options.length))
+  check('朝向默认正面', yawSel?.value === '0', yawSel?.value)
+  const setSel = (el, v) => {
+    Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value')
+      .set.call(el, v)
+    el.dispatchEvent(new win.Event('change', { bubbles: true }))
+  }
+  setSel(yawSel, '90')
+  await new Promise((r) => setTimeout(r, 120))
+  check('朝向切到 90° 后回显', yawSel?.value === '90', yawSel?.value)
+
+  // 导出按钮：**没就绪时必须是禁用的**（不然点了没反应，也没人告诉用户为什么）
+  const buttons = [...(node?.querySelectorAll('button') || [])]
+  check('有「导出人偶图」按钮',
+    buttons.some((b) => (b.textContent || '').includes('导出人偶图')))
+  const exportBtn = buttons.find((b) => (b.textContent || '').includes('导出人偶图'))
+  check('渲染器没就绪时导出按钮禁用（不给无声的失败）', exportBtn?.disabled === true,
+    String(exportBtn?.disabled))
+  check('有「从图片」提姿势的入口', !!node?.querySelector('input[type=file]'))
+  check('说明提到导出的是 3D 人偶',
+    (node?.querySelector('.src-note')?.textContent || '').includes('3D 人偶'),
+    (node?.querySelector('.src-note')?.textContent || '').slice(0, 40))
+  check('人偶节点场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 38) 人偶姿势：从图片自动提姿势（DWPose 由后端 mock，2D 点交给官方转换器）
+//
+// 断言的是**投递**：提取到的 18 个点要进 `node.poseImport`，节点里的编辑器
+// 收到后走官方 convertOpenPoseToPose 解成 3D 骨骼。3D 反解必须在渲染器里做
+// （要用官方骨骼的静止长度），所以前端这里只负责把点送进去。
+{
+  const { dom, errors } = await boot('?demo=1')
+  const doc = dom.window.document
+  const win = dom.window
+  await new Promise((r) => setTimeout(r, 500))
+  const add = [...doc.querySelectorAll('.rail-add')].find((b) =>
+    (b.closest('.rail-item')?.textContent || '').includes('人偶姿势'))
+  add?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 250))
+  const node = [...doc.querySelectorAll('.node')].find((n) =>
+    (n.querySelector('.node-kind')?.textContent || '').includes('人偶姿势'))
+
+  // **按 accept 精确选**：节点里现在有两个 file input（从图片提姿势 / 导入动作），
+  // 只按 `input[type=file]` 会抓到先出现的那个（导入动作），用例就测错东西了。
+  const input = node?.querySelector('input[type=file][accept*="image"]')
+  check('编辑器有「从图片」的文件入口', !!input)
+  // 导入动作的入口（glb/gltf/fbx）
+  check('编辑器有「导入动作」的文件入口',
+    !!node?.querySelector('input[type=file][accept*=".glb"]'))
+  check('有「导入动作」按钮',
+    [...(node?.querySelectorAll('button') || [])]
+      .some((b) => (b.textContent || '').includes('导入动作')))
+  // 抽帧那行**只在载入动作之后**才该出现：没见过文件就摆「存为姿势集」，
+  // 用户点了只会得到"还没载入动作"。
+  check('没导入动作时不摆「存为姿势集」（避免点了必然失败）',
+    !node?.querySelector('.pose-frames'))
+
   // 角色迁移节点的**批量面板**：默认收在 <details> 里（单张是主用法），
   // 但必须能打开 —— 它是"姿势集 → 一整套成片"的唯一入口。
   const cloneAdd = [...doc.querySelectorAll('.rail-add')].find((b) =>
@@ -3061,19 +3159,12 @@ function check(name, cond, extra = '') {
   const cloneNode = [...doc.querySelectorAll('.node')].find((n) =>
     (n.querySelector('.node-kind')?.textContent || '').includes('角色迁移'))
   check('能创建角色迁移节点', !!cloneNode)
-  const batchBox = cloneNode?.querySelector('details.pose-batch-box')
-  check('角色迁移节点里有「批量：用姿势集出整套」', !!batchBox,
-    cloneNode?.querySelector('.node-body')?.className || '（没有正文）')
-  check('批量面板默认收起（不把卡片顶长）', batchBox?.open === false,
-    String(batchBox?.open))
-  // 面板里的三件套：选姿势集的框、输出文件夹名、生成按钮
-  check('批量面板有姿势集下拉', !!batchBox?.querySelector('select'))
-  check('批量面板有输出文件夹名输入', !!batchBox?.querySelector('.pose-batch-out'))
-  check('批量面板有「全部生成」按钮',
-    [...(batchBox?.querySelectorAll('button') || [])]
-      .some((b) => (b.textContent || '').includes('全部生成')),
-    [...(batchBox?.querySelectorAll('button') || [])]
-      .map((b) => b.textContent).join('|'))
+  // **批量不在这个节点里**：单张 / 批量是两种模式，批量已经独立成
+  // 「姿态批量」节点。角色迁移里再留一个折叠的批量区，就会出现
+  // "选了姿势集却没接角色图"这种半截状态（实测踩过）。
+  check('角色迁移节点里没有批量区（模式互斥）',
+    !cloneNode?.querySelector('.pose-batch-box'),
+    cloneNode?.querySelector('.pose-batch-box') ? '还留着批量折叠块' : '')
   const file = new win.File([new Uint8Array([1, 2, 3])], 'pose.png', { type: 'image/png' })
   Object.defineProperty(input, 'files', { value: [file], configurable: true })
   input.dispatchEvent(new win.Event('change', { bubbles: true }))

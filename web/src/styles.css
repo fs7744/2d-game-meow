@@ -1138,7 +1138,8 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
   font-size: 10px; color: var(--muted); flex: 0 0 auto;
 }
 .pose-batch-n input {
-  width: 30px; flex: 0 0 30px; height: 22px; text-align: center;
+  /* 40px：两位数的「帧率 12」在 30px 里会被截成「1」（实测截图发现） */
+  width: 40px; flex: 0 0 40px; height: 22px; text-align: center;
   background: var(--bg-3); color: var(--white);
   border: 1px solid var(--line-strong); border-radius: 2px;
   font: inherit; font-size: 11px; font-family: var(--mono);
@@ -1187,7 +1188,62 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
   font-size: 10px; color: var(--muted);
 }
 .pose-batch-cands-head span { flex: 1; }
-.pose-batch-box summary { cursor: pointer; }
+/* 源帧区（选完姿势集立刻能看到"这套动作长什么样"） */
+.pose-batch-source { display: flex; flex-direction: column; gap: 3px; }
+.pose-batch-toggle {
+  display: inline-flex; align-items: center; gap: 3px;
+  font-size: 9px; color: var(--muted); cursor: pointer; flex: 0 0 auto;
+}
+/* 对照：左原始 / 右结果。两栏等宽，图按 contain 放进固定高的小框 ——
+   高度锁死才不会因为两张图比例不同而一高一矮、看着像错位。 */
+.pose-batch-pair {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 4px;
+  margin-top: 2px;
+}
+.pose-batch-pair.single { grid-template-columns: 1fr; }
+.pose-batch-pair figure {
+  margin: 0; border: 1px solid var(--line); background: #12141c;
+  display: flex; flex-direction: column; min-width: 0;
+}
+.pose-batch-pair img {
+  width: 100%; height: 168px; object-fit: contain; display: block; cursor: zoom-in;
+}
+.pose-batch-pair figcaption {
+  font-size: 9px; color: var(--muted-2); font-family: var(--mono);
+  padding: 1px 4px; border-top: 1px solid var(--line); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.pose-batch-pair .pose-batch-empty {
+  height: 168px; display: flex; align-items: center; justify-content: center;
+}
+/* 姿态批量节点的正文：比单张宽松一点，别把对照图挤扁 */
+.posebatch-body { gap: 6px; }
+/* 导出行：GIF / Godot 两个按钮 + 帧率 */
+.pose-batch-export {
+  display: flex; align-items: center; gap: 5px; flex-wrap: wrap; margin-top: 4px;
+}
+/* 导出结果链接：文件名可能很长（.tres/.tscn），整行可换行不撑破卡片 */
+.pose-batch-gif {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  font-size: 9px; color: var(--muted-2); font-family: var(--mono);
+  padding: 2px 0; min-width: 0;
+}
+.pose-batch-gif a { color: var(--cyan); text-decoration: none; white-space: nowrap; }
+.pose-batch-gif a:hover { text-decoration: underline; }
+.pose-batch-gif span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* 导出行：GIF / Godot 两个按钮 + 帧率 */
+.pose-batch-export {
+  display: flex; align-items: center; gap: 5px; flex-wrap: wrap; margin-top: 4px;
+}
+/* 导出结果链接：文件名可能很长（.tres/.tscn），整行可换行不撑破卡片 */
+.pose-batch-gif {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  font-size: 9px; color: var(--muted-2); font-family: var(--mono);
+  padding: 2px 0; min-width: 0;
+}
+.pose-batch-gif a { color: var(--cyan); text-decoration: none; white-space: nowrap; }
+.pose-batch-gif a:hover { text-decoration: underline; }
+.pose-batch-gif span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
 /* ---- 抽帧后挑帧（照 pixelforge「拆解帧 · 挑帧」的版式） ---- */
 .pose-frames .pose-batch-btn { flex: 1; min-width: 0; }

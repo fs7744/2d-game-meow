@@ -4,6 +4,7 @@ export type Preset = 'sprite' | 'portrait' | 'wuxia' | 'pixel' | 'anime' | 'none
 export type NodeKind =
   | 'gen' | 'img2img' | 'image' | 'bg' | 'inpaint' | 'airepaint' | 'pixelify'
   | 'poseclone' | 'spriteswap' | 'poseswap' | 'topixel' | 'poseedit'
+  | 'posebatch'
   | 'outpaint' | 'outfit' | 'faceswap'
 
 /**

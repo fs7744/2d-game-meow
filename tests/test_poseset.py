@@ -45,6 +45,34 @@ def _frames(n: int = 3):
             for i in range(1, n + 1)]
 
 
+def _distinct_png(level: int, side: int = 8) -> str:
+    """一张**内容不同**的小图（base64）。
+
+    GIF 测试必须用不同的帧：Pillow 写 GIF 时会把连续的相同画面合并成一帧，
+    四张一样的 1×1 会变成一个单帧 GIF —— 那不是导出坏了，是优化。"""
+    from PIL import Image
+
+    import io
+
+    buf = io.BytesIO()
+    Image.new("RGB", (side, side), (level, level, level)).save(buf, "PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+def _distinct_png(level: int, side: int = 8) -> str:
+    """一张**内容不同**的小图（base64）。
+
+    GIF 测试必须用不同的帧：Pillow 写 GIF 时会把连续的相同画面合并成一帧，
+    四张一样的 1×1 会变成一个单帧 GIF —— 那不是导出坏了，是优化。"""
+    from PIL import Image
+
+    import io
+
+    buf = io.BytesIO()
+    Image.new("RGB", (side, side), (level, level, level)).save(buf, "PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
 def test_pose_set_lands_in_project_folder():
     one = poseset.save_pose_set(PROJECT, "走路", _frames(3),
                                 source={"clip": "Walk", "count": 3})
@@ -169,3 +197,48 @@ def test_list_renders_reports_progress_and_cover():
     assert len(items) == 1
     assert items[0]["done"] == 1 and items[0]["total"] == 2
     assert items[0]["cover"].endswith("f_001_c01.png")
+
+
+def test_gif_export_for_review():
+    """把一套帧合成 GIF（团队审核用）。"""
+    from PIL import Image
+
+    poseset.save_pose_set(PROJECT, "走路", [
+        {"t": i * 0.2, "yaw": 0, "pose": {}, "png": _distinct_png(40 * i)}
+        for i in range(1, 5)
+    ])
+    info = poseset.export_gif(PROJECT, poseset.POSES_DIR, "走路")
+    assert info["frames"] == 4 and info["skipped"] == 0
+    assert info["url"].startswith("/files/projects/")
+    out = paths.PROJECTS_DIR / PROJECT / poseset.POSES_DIR / "走路" / poseset.GIF_FILE
+    assert out.is_file() and out.read_bytes()[:4] in (b"GIF8", b"GIF9")
+    with Image.open(out) as im:
+        assert im.format == "GIF"
+        assert getattr(im, "n_frames", 1) == 4, "GIF 应该有 4 帧"
+        # 帧时长：Pillow 把它放在每帧的 info 里，seek 到第 0 帧再读
+        im.seek(0)
+        # **GIF 只有 10ms 精度**：要的是 125，文件里是 120，返回的也是 120
+        assert info["frame_ms"] == 120, info["frame_ms"]
+        assert im.info.get("duration") == info["frame_ms"], im.info
+        assert im.info.get("loop") == 0, "GIF 要循环播放（loop=0）"
+
+
+def test_gif_skips_unselected_render_frames():
+    """成片集只导**当前选中的候选**，没选中的帧跳过并报数。"""
+    poseset.save_pose_set(PROJECT, "跑", _frames(3))
+    poseset.create_render(PROJECT, "跑成片", "跑")
+    tmp = paths.PROJECTS_DIR / PROJECT
+    for i in range(3):
+        p = tmp / f"wpcb_g{i}.png"
+        p.write_bytes(base64.b64decode(PNG_B64))
+        if i < 2:                      # 只给前两帧出图，第三帧故意留空
+            poseset.add_candidate(PROJECT, "跑成片", i + 1, p)
+
+    info = poseset.export_gif(PROJECT, poseset.RENDERS_DIR, "跑成片")
+    assert info["frames"] == 2, "只有两帧有选中的候选"
+    assert info["skipped"] == 1, "没出图的帧要报出来，不能静默少帧"
+
+    # 一帧都没有 → 明确报错（不是给一个空 GIF）
+    poseset.create_render(PROJECT, "空成片", "跑")
+    with pytest.raises(poseset.PoseSetError):
+        poseset.export_gif(PROJECT, poseset.RENDERS_DIR, "空成片")

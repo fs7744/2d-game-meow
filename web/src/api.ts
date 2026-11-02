@@ -693,6 +693,79 @@ export function selectPoseCandidate(
   })
 }
 
+/** GIF 导出结果（团队审核用：动作连起来顺不顺，一眼能看） */
+export type PoseGif = {
+  name: string
+  kind: 'poses' | 'render'
+  url: string
+  frames: number
+  /** 因为没有"选中的候选"而被跳过的帧数（成片集才会出现） */
+  skipped: number
+  frame_ms: number
+  bytes: number
+  size: [number, number]
+}
+
+/** 把原始姿势集合成 GIF */
+export function exportPoseSetGif(
+  project: string, name: string, frameMs = 125, maxSide = 512,
+): Promise<{ gif: PoseGif }> {
+  const q = `?frame_ms=${frameMs}&max_side=${maxSide}`
+  return req(`/projects/${encodeURIComponent(project)}/pose_sets/${encodeURIComponent(name)}/gif${q}`,
+    { method: 'POST' })
+}
+
+/** 把成片集合成 GIF（每帧取**当前选中的**候选） */
+export function exportPoseRenderGif(
+  project: string, name: string, frameMs = 125, maxSide = 512,
+): Promise<{ gif: PoseGif }> {
+  const q = `?frame_ms=${frameMs}&max_side=${maxSide}`
+  return req(`/projects/${encodeURIComponent(project)}/pose_renders/${encodeURIComponent(name)}/gif${q}`,
+    { method: 'POST' })
+}
+
+/**
+ * Godot 4 工程包（照 pixelforge 的 godot2d 导出做的）。
+ *
+ * 产物是**逐帧 PNG + SpriteFrames(.tres) + AnimatedSprite2D(.tscn) + 说明 + zip**，
+ * 解到 Godot 工程根目录就能播 —— 不用在引擎里手工拼。
+ */
+export type GodotBundle = {
+  ok: boolean
+  stem: string
+  folder: string
+  frames: number
+  skipped: number
+  fps: number
+  loop: boolean
+  animName: string
+  size: [number, number]
+  origin: string
+  dir: string
+  files: { name: string; bytes: number; url: string }[]
+  zip: { name: string; bytes: number; url: string }
+  resPaths: { tres: string; scene: string }
+  checks: { pathsMatch: boolean; missing: string[]; refsChecked: number }
+  warnings: string[]
+}
+
+export function exportPoseRenderGodot(
+  project: string, name: string,
+  opts: { stem?: string; anim?: string; fps?: number; loop?: boolean
+    folder?: string; origin?: string } = {},
+): Promise<{ bundle: GodotBundle }> {
+  const q = new URLSearchParams()
+  if (opts.stem) q.set('stem', opts.stem)
+  if (opts.anim) q.set('anim', opts.anim)
+  if (opts.fps != null) q.set('fps', String(opts.fps))
+  if (opts.loop != null) q.set('loop', String(opts.loop))
+  if (opts.folder) q.set('folder', opts.folder)
+  if (opts.origin) q.set('origin', opts.origin)
+  const qs = q.toString()
+  return req(`/projects/${encodeURIComponent(project)}/pose_renders/${encodeURIComponent(name)}/godot${qs ? `?${qs}` : ''}`,
+    { method: 'POST' })
+}
+
 /** 跑成片集（`frames` 为空 = 整个姿势集；给一帧就是单独重生成那一帧） */
 export function runPoseRender(
   project: string, name: string,

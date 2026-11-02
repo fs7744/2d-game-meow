@@ -668,6 +668,37 @@ def test_project_pose_sets_and_renders_endpoints(client):
                      json={"frame": 1, "candidate": 1})
     assert r5.status_code == 400 and "候选" in r5.json()["detail"]
 
+    # GIF：源帧能导（帧表里有人偶图，哪怕都是同一张）
+    r6 = client.post(f"/projects/{proj}/pose_sets/走路/gif")
+    assert r6.status_code == 200, r6.text
+    assert r6.json()["gif"]["url"].endswith("preview.gif")
+
+    # 成片集一帧都没出图 → GIF 与 Godot 都要明确报错，不是给空包
+    r7 = client.post(f"/projects/{proj}/pose_renders/走路成片/gif")
+    assert r7.status_code == 400 and "可导出" in r7.json()["detail"]
+    r8 = client.post(f"/projects/{proj}/pose_renders/走路成片/godot")
+    assert r8.status_code == 400 and "选中的帧" in r8.json()["detail"]
+
+    # 出一张候选并选中 → 两个导出都能用
+    import base64
+    from pathlib import Path as _P
+    from workflows import poseset as _ps
+    tmp = _P(paths.PROJECTS_DIR) / proj / "cast.png"
+    tmp.write_bytes(base64.b64decode(PNG_1PX))
+    _ps.add_candidate(proj, "走路成片", 1, tmp)
+
+    r9 = client.post(f"/projects/{proj}/pose_renders/走路成片/gif")
+    assert r9.status_code == 200, r9.text
+    assert r9.json()["gif"]["skipped"] == 2, "另外两帧没出图，要报出来"
+
+    r10 = client.post(f"/projects/{proj}/pose_renders/走路成片/godot?stem=walk&fps=8")
+    assert r10.status_code == 200, r10.text
+    bundle = r10.json()["bundle"]
+    assert bundle["frames"] == 1 and bundle["skipped"] == 2
+    assert bundle["resPaths"]["scene"] == "res://sprites/walk.tscn"
+    assert bundle["checks"]["pathsMatch"] is True, bundle["checks"]
+    assert bundle["zip"]["url"].endswith(".zip")
+
 
 def test_generate_topixel_roundtrip(client, tmp_path):
     """图像转像素（topixel）走同一条队列。用「给源图」的模式：不跑模型，秒回。"""

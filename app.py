@@ -27,6 +27,9 @@
   GET  /projects/{id}/pose_renders/{name}  每帧的候选 + 当前选中
   POST /projects/{id}/pose_renders/{name}/select     选某一帧的第几个候选
   POST /projects/{id}/pose_renders/{name}/run        生成/补生成（候选追加）
+  POST /projects/{id}/pose_sets/{name}/gif           原始帧 → GIF（审核用）
+  POST /projects/{id}/pose_renders/{name}/gif        成片 → GIF（取当前选中的候选）
+  POST /projects/{id}/pose_renders/{name}/godot      成片 → Godot 4 工程包（zip）
   GET  /pose_library       随项目发行的 VNCCS 官方姿势库清单（191 个）
   POST /pose/extract       一张图 → OpenPose-18 归一化关节点
   GET  /pose_dirs          可以当 W4 输入的骨架帧目录
@@ -2343,6 +2346,58 @@ def project_pose_render_select(scope: str, name: str,
         return {"render": poseset.select_candidate(scope, name, req.frame,
                                                    req.candidate)}
     except poseset.PoseSetError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/projects/{scope}/pose_sets/{name}/gif")
+def project_pose_set_gif(scope: str, name: str,
+                         frame_ms: int = 125, max_side: int = 512) -> Dict[str, Any]:
+    """把姿势集合成 GIF（给团队看"这套动作连起来顺不顺"）。"""
+    try:
+        return {"gif": poseset.export_gif(scope, poseset.POSES_DIR, name,
+                                          frame_ms=frame_ms, max_side=max_side)}
+    except poseset.PoseSetError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/projects/{scope}/pose_renders/{name}/gif")
+def project_pose_render_gif(scope: str, name: str,
+                            frame_ms: int = 125, max_side: int = 512
+                            ) -> Dict[str, Any]:
+    """把成片集合成 GIF：每帧取**当前选中的那张候选**。
+
+    审核场景要的就是"我挑完之后的成片连起来什么样"，把全部候选都塞进去没意义。
+    """
+    try:
+        return {"gif": poseset.export_gif(scope, poseset.RENDERS_DIR, name,
+                                          frame_ms=frame_ms, max_side=max_side)}
+    except poseset.PoseSetError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/projects/{scope}/pose_renders/{name}/godot")
+def project_pose_render_godot(
+    scope: str, name: str,
+    stem: str = "", anim: str = "", fps: float = 12.0, loop: bool = True,
+    folder: str = "sprites", origin: str = "bottom",
+    texture_filter: str = "nearest",
+) -> Dict[str, Any]:
+    """成片集 → Godot 4 工程包（逐帧 PNG + SpriteFrames + AnimatedSprite2D + zip）。
+
+    每帧取**当前选中的候选**：用户挑过的就是他要交付的版本。
+    """
+    from workflows import godotexport
+    try:
+        return {"bundle": godotexport.export_bundle(
+            scope, name, stem=stem, anim_name=anim, fps=fps, loop=loop,
+            folder=folder, origin=origin, texture_filter=texture_filter)}
+    except godotexport.GodotExportError as exc:
         raise HTTPException(400, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc

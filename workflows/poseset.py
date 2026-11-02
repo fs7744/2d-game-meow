@@ -267,6 +267,119 @@ def load_pose_set(project: str, name: str) -> Dict[str, Any]:
     return out
 
 
+# ---------------------------------------------------------------- GIF 预览
+
+
+#: GIF 写在哪（派生数据，可以随时重算覆盖）
+GIF_FILE = "preview.gif"
+#: 每帧停留毫秒的默认值。和前端挑帧播放的 8fps 对齐（125ms → GIF 里是 120ms，
+#: 因为 GIF 的时间精度只有 10ms）
+DEFAULT_FRAME_MS = 125
+#: GIF 最长边的默认值。GIF 是 256 色，尺寸大只会让文件变大、颜色更脏
+DEFAULT_GIF_SIDE = 512
+#: 单次合成的帧数上限
+MAX_GIF_FRAMES = 240
+
+
+def _gif_frames(paths: List[Path], max_side: int) -> List[Any]:
+    """读一组 PNG → GIF 用的 RGB 帧。
+
+    **必须合成到白底**：GIF 没有 alpha 通道，透明区会变成黑块（人偶图和
+    成片都可能是透明底）。缩略到统一尺寸也是必须的 —— GIF 的各帧尺寸不同时
+    Pillow 会直接报错，而不同的候选图长宽可能确实不一样。
+    """
+    from PIL import Image
+
+    out: List[Any] = []
+    size = None
+    for p in paths:
+        try:
+            with Image.open(p) as opened:
+                img = opened.convert("RGBA")
+                bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
+                img = Image.alpha_composite(bg, img).convert("RGB")
+                if max(img.size) > max_side:
+                    img.thumbnail((max_side, max_side), Image.LANCZOS)
+                if size is None:
+                    size = img.size
+                elif img.size != size:
+                    img = img.resize(size, Image.LANCZOS)
+                out.append(img)
+        except (OSError, ValueError):
+            continue
+    return out
+
+
+def export_gif(project: str, kind: str, name: str,
+               frame_ms: int = DEFAULT_FRAME_MS,
+               max_side: int = DEFAULT_GIF_SIDE) -> Dict[str, Any]:
+    """把一个姿势集 / 成片集合成 GIF，写给团队审核用。
+
+    `kind`：`"poses"`（原始姿势集）或 `"renders"`（成片）。成片只取**每帧当前
+    选中的那张候选** —— 用户已经挑过的就是他要的版本，把全部候选都塞进 GIF 没意义。
+
+    写成 `<集目录>/preview.gif` 并返回 `/files/...` 地址：团队里其他人拿到链接
+    （或直接拷这个文件）就能看动作连起来顺不顺，不用开这个工具。
+    """
+    from PIL import Image
+
+    if kind not in (POSES_DIR, RENDERS_DIR):
+        raise PoseSetError(f"不认识的类型：{kind}")
+    folder = _sub(project, kind, name)
+    doc = _read_json(folder / (SET_FILE if kind == POSES_DIR else RENDER_FILE))
+    if not doc:
+        raise PoseSetError(f"没有这个{'姿势集' if kind == POSES_DIR else '成片集'}：{name}")
+
+    paths: List[Path] = []
+    skipped = 0
+    for f in doc.get("frames") or []:
+        if kind == POSES_DIR:
+            p = folder / str(f.get("file") or "")
+            if p.is_file():
+                paths.append(p)
+            else:
+                skipped += 1
+            continue
+        cands = f.get("candidates") or []
+        sel = int(f.get("selected") if f.get("selected") is not None else -1)
+        p = folder / str(cands[sel].get("file") or "") if 0 <= sel < len(cands) else None
+        if p and p.is_file():
+            paths.append(p)
+        else:
+            skipped += 1
+
+    if not paths:
+        raise PoseSetError(
+            "这一套还没有可导出的图" if kind == RENDERS_DIR else "这个姿势集没有帧文件")
+    if len(paths) > MAX_GIF_FRAMES:
+        paths = paths[:MAX_GIF_FRAMES]
+
+    frames = _gif_frames(paths, max(64, min(2048, int(max_side or DEFAULT_GIF_SIDE))))
+    if not frames:
+        raise PoseSetError("帧文件都读不出来（可能被删了）")
+
+    # **GIF 的帧时长只有 10ms 精度**（格式里按厘秒存）：125ms 会落成 120ms。
+    # 这里先自己对齐到 10 的倍数，再返回实际值 —— 不然界面上写"125ms"、
+    # 文件里是 120ms，对不上账。
+    # **GIF 的帧时长只有 10ms 精度**（格式里按厘秒存）：125ms 会落成 120ms。
+    # 这里先自己对齐到 10 的倍数，再返回实际值 —— 不然界面上写"125ms"、
+    # 文件里是 120ms，对不上账。
+    ms = max(20, min(2000, int(frame_ms or DEFAULT_FRAME_MS)))
+    ms = max(20, int(round(ms / 10.0) * 10))
+    ms = max(20, int(round(ms / 10.0) * 10))
+    out = folder / GIF_FILE
+    try:
+        frames[0].save(str(out), save_all=True, append_images=frames[1:],
+                       duration=ms, loop=0, optimize=True)
+    except OSError as exc:
+        raise PoseSetError(f"合成 GIF 失败：{exc}") from exc
+    return {
+        "name": name, "kind": "poses" if kind == POSES_DIR else "render",
+        "url": _url(out), "frames": len(frames), "skipped": skipped,
+        "frame_ms": ms, "bytes": out.stat().st_size, "size": list(frames[0].size),
+    }
+
+
 # ---------------------------------------------------------------- 成片集
 
 

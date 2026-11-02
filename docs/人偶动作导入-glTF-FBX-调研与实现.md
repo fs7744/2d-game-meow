@@ -139,6 +139,8 @@ glb 与 fbx 都符合。**非 Mixamo 骨架（如 Quaternius / KayKit 的 CC0 �
 | `web/src/store/animFrames.ts` | **新增**。挑帧的两把筛子 + 剪影差异口径 |
 | `tools/verify_anim_import.mjs` | **新增**。动作导入真机验证（§5.6） |
 | `tools/verify_frame_pick.mjs` | **新增**。抽帧→挑帧的真浏览器交互验证 |
+| `workflows/godotexport.py` | **新增**。成片集 → Godot 4 工程包（§5.7） |
+| `tools/verify_pose_batch.mjs` | **新增**。姿态批量节点的真浏览器交互验证 |
 
 ### 5.2 消息协议（父 ↔ 子）
 
@@ -263,7 +265,15 @@ buildMixamoWorldKeypoints(sb, viewer)     // 官方原样调用
 
 接口见 `workflows/poseset.py`（模块注释里有完整目录结构）。
 
-### 5.5b 角色迁移批量出片（`workflows/posebatch.py`）
+### 5.5b「姿态批量」节点（`workflows/posebatch.py`）
+
+**独立节点 `posebatch`，不在角色迁移里**。单张和批量是两种模式，塞在一张卡片
+里会让人分不清当前在批还是在单张，还出现过"选了姿势集却没接角色图"的错位
+状态 —— 而真因是 `charSource` 只存 `nodeId`、路径要按节点现算（面板当初直接
+读 `charSource.path`，永远空）。现在由 App 把 `charPathsOf(id)` 透传下来。
+
+节点做三件事：**先看清**（源帧缩略条 + 播放）、**能对比**（左原始 / 右结果
+并排，逐帧重生成）、**能交付**（GIF + Godot 4 工程包，见 §5.7）。
 
 选一个姿势集 →「全部生成」→ 逐帧生成到 `pose_frames/<用户取的名字>/`：
 
@@ -277,6 +287,26 @@ buildMixamoWorldKeypoints(sb, viewer)     // 官方原样调用
   就有进度条（复用现有的任务轮询 + 30 分钟看门狗）。
 - 同名输出文件夹：当成"接着往里加候选"；但如果里面是**另一套姿势集**的成片，
   直接报错让用户改名（帧表对不上会张冠李戴）。
+
+### 5.7 导出：GIF 与 Godot 4 工程包
+
+| 产物 | 落点 | 用途 |
+|---|---|---|
+| `preview.gif` | `poses/<集>/`、`pose_frames/<集>/` | 发给团队看动作连不连贯 |
+| `exports/<stem>/` + `.zip` | 项目目录下 | 直接丢进 Godot 4 工程 |
+
+- **GIF**（`poseset.export_gif`）：PIL 合成，**透明区合成到白底**（GIF 没有 alpha，
+  不合成会变黑块）；成片只取**当前选中的候选**，没选的跳过并报数。
+  帧时长只有 **10ms 精度**：要 125ms 落成 120ms，所以先对齐再返回实际值。
+- **Godot 4 工程包**（`godotexport.py`，照 pixelforge 的 `godot2d.py`）：
+  逐帧 PNG + `SpriteFrames(.tres)` + `AnimatedSprite2D(.tscn)` + 中文 README + zip。
+  - 只用**逐帧模式**，不做图集：我们的帧本来就是单文件，拍平要多一层拼板和
+    坐标，参数对不上就会导出「能播但错位」的包；逐帧没这个风险。
+  - **zip 条目带 `<folder>/` 前缀** —— 解到工程根目录后 `res://` 路径恰好成立，
+    这是唯一能让"路径正确"由结构保证的办法。
+  - 写完自检（`verify_bundle`）：`.tres/.tscn` 里每个 `res://` 引用都要在包内
+    找到，不通过就在结果里报出来。
+  - 默认 `texture_filter = 1`（最近邻）+ 脚底对齐原点，像素角色不会糊、不会埋地。
 
 ### 5.6 验证（真机，2026-11-02）
 

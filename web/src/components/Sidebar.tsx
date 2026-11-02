@@ -28,6 +28,7 @@ type Props = {
   onAddNode: (
     kind?: 'gen' | 'img2img' | 'image' | 'bg' | 'inpaint' | 'airepaint' | 'pixelify'
     | 'poseclone' | 'spriteswap' | 'topixel' | 'poseswap' | 'poseedit'
+    | 'posebatch'
     | 'outpaint' | 'outfit' | 'faceswap',
   ) => void
   canApply: boolean
@@ -357,6 +358,22 @@ export default function Sidebar({
               <em>参考动作 · 换角色</em>
             </span>
             <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('poseclone')}>+</button>
+          </div>
+          <div
+            className="rail-item"
+            draggable
+            onDragStart={(e) => {
+              e.dataTransfer.setData('application/x-node-type', 'posebatch')
+              e.dataTransfer.effectAllowed = 'copy'
+            }}
+            title="姿态批量：选一个姿势集（人偶编辑器抽帧存下来的整套），
+一次出完整套精灵帧；每帧保留所有候选，不满意单独重生成，旧的那张随时选回来"
+          >
+            <span className="rail-item-main">
+              <b>姿态批量</b>
+              <em>姿势集 · 整套换角色</em>
+            </span>
+            <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('posebatch')}>+</button>
           </div>
           <div
             className="rail-item"

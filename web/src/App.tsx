@@ -185,6 +185,8 @@ function makeNode(
     view: 'expanded',
     source,
     image,
+    // 姿态批量要放"左原始 / 右结果"的对照图 + 一整网格，300px 太窄
+    ...(kind === 'posebatch' ? { w: 400 } : {}),
     params: { ...DEFAULT_PARAMS, ...params },
     // 人偶编辑器节点：初始就是官方的站姿（0° 正面）。**不给 pose**——
     // 子窗起来时按自己的初始状态开始，`init` 时不套任何东西。
@@ -835,6 +837,7 @@ export default function App() {
                   : type === 'spriteswap' ? 'spriteswap'
                     : type === 'poseswap' ? 'poseswap'
                       : type === 'poseedit' ? 'poseedit'
+                        : type === 'posebatch' ? 'posebatch'
                         : type === 'outpaint' ? 'outpaint'
                           : type === 'outfit' ? 'outfit'
                             : type === 'faceswap' ? 'faceswap'
@@ -1774,6 +1777,12 @@ export default function App() {
           onSavePose={(name, pose, yaw, preview) =>
             void savePoseToLibrary(name, pose, yaw, preview)}
           onSavePoseSet={savePoseSet}
+          /* 姿态批量要的是**上游节点产物的磁盘路径**（`charSource` 只存 nodeId，
+             路径得按节点现算）—— 直接把解析函数传下去，别在卡片里猜 */
+          charPathsOf={(id) => {
+            const up = id ? nodesRef.current.find((x) => x.id === id) : undefined
+            return up ? charPathsOf(up) : []
+          }}
           onOpenPoseLibrary={() => openLibrary('pose')}
           onImportPose={(id, file) => importPoseFromImage(id, file)}
           onDropFiles={(files, world, targetId) => void handleFiles(files, world, targetId)}

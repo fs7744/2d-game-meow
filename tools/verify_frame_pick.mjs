@@ -30,6 +30,8 @@ const OUT = join(ROOT, 'tests', '_out', 'anim_import')
 const MESH = join(OUT, 'mesh')
 const EDGE = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe'
 const MODEL_URL = 'https://cdn.jsdelivr.net/gh/mrdoob/three.js@r160/examples/models/gltf/Soldier.glb'
+/** 这条的轨道名是 `mixamo.com` / `Take 001`（导出工具的残留），用来验显示名清洗 */
+const FBX_URL = 'https://cdn.jsdelivr.net/gh/mrdoob/three.js@r160/examples/models/fbx/Samba%20Dancing.fbx'
 
 const requireFromShot = createRequire(join(ROOT, 'tools', 'shot', 'package.json'))
 let puppeteer
@@ -102,6 +104,7 @@ async function main() {
   }
   mkdirSync(MESH, { recursive: true })
   await download(join(MESH, 'Soldier.glb'), MODEL_URL)
+  await download(join(MESH, 'SambaDancing.fbx'), FBX_URL)
 
   const port = 8161
   const srv = await serve(port)
@@ -306,6 +309,80 @@ async function main() {
     const shot = join(OUT, 'frame_pick.png')
     await page.screenshot({ path: shot, clip })
     console.log(`  → ${shot}`)
+
+    // ---- 轨道名的显示清洗（用户报的 "默认 mixamo.com 是啥鬼"） ----
+    // SambaDancing.fbx 的两条轨道就叫 `mixamo.com` / `Take 001`，那是导出
+    // 工具留在文件里的 take 名，对用户没有任何信息量。显示层必须洗成
+    // 「未命名动作」/「未命名动作 2」，否则默认姿势集就叫 `mixamo.com`。
+    const fed2 = await page.evaluate(async () => {
+      const f = document.querySelector('.pose-stage iframe')
+      const buf = await fetch('/__model/SambaDancing.fbx').then((r) => r.arrayBuffer())
+      return await new Promise((resolve) => {
+        const onMsg = (e) => {
+          if (e.source !== f.contentWindow) return
+          const d = e.data || {}
+          if (d.type === 'animLoaded' || d.type === 'error') {
+            window.removeEventListener('message', onMsg)
+            resolve(d.type === 'animLoaded' ? { clips: (d.clips || []).map((c) => c.name) } : { err: d.message })
+          }
+        }
+        window.addEventListener('message', onMsg)
+        f.contentWindow.postMessage({ type: 'animLoad', buffer: buf, name: 'SambaDancing.fbx' }, '*', [buf])
+        setTimeout(() => resolve({ err: '超时' }), 120000)
+      })
+    })
+    expect(fed2.clips?.length === 2, 'FBX 载入（两条轨道）', JSON.stringify(fed2))
+    expect(!!fed2.clips?.includes('mixamo.com'), '这条素材的轨道名确实是脏的（mixamo.com）',
+      JSON.stringify(fed2.clips))
+    await new Promise((r) => setTimeout(r, 600))
+
+    const label = await page.evaluate(() => {
+      const n = [...document.querySelectorAll('.node')]
+        .find((x) => (x.querySelector('.node-kind')?.textContent || '').includes('人偶姿势'))
+      const sel = n.querySelector('.pose-anim select')
+      const opts = sel ? [...sel.options].map((o) => o.textContent || '') : []
+      const nameInput = n.querySelector('.pose-set-name')
+      const status = n.querySelector('.pose-status')?.textContent || ''
+      return {
+        opts,
+        placeholder: nameInput?.getAttribute('placeholder') || '',
+        leaks: (n.textContent || '').includes('mixamo.com'),
+        wall: n.querySelectorAll('.anim-wall .anim-cell').length,
+        status,
+      }
+    })
+    expect(label.opts.length === 2, '轨道下拉有两条', JSON.stringify(label.opts))
+    expect(label.opts[0] === '未命名动作', '脏轨道名洗成「未命名动作」', label.opts[0])
+    expect(label.opts[1] === '未命名动作 2', '第二条加序号区分', label.opts[1])
+    // 姿势集默认名：抽一帧出来才有"存为姿势集"那一行（没抽就没得存，输入框不渲染）
+    await page.evaluate(() => {
+      const b = [...document.querySelectorAll('.pose-frames .pose-batch-btn')]
+        .find((x) => (x.textContent || '').includes('抽帧看看'))
+      b?.click()
+    })
+    await page.waitForFunction(() => document.querySelectorAll('.anim-wall .anim-cell').length > 0,
+      { timeout: 120000 })
+    const ph = await page.evaluate(() => {
+      const n = [...document.querySelectorAll('.node')]
+        .find((x) => (x.querySelector('.node-kind')?.textContent || '').includes('人偶姿势'))
+      return n.querySelector('.pose-set-name')?.getAttribute('placeholder') || ''
+    })
+    expect(ph.includes('未命名动作'), '姿势集默认名是「未命名动作」', ph)
+    expect(label.leaks === false, '界面上不该再出现 mixamo.com', '')
+    // 换文件后旧帧墙必须清掉，否则会被当成新动作的帧存出去
+    expect(label.wall === 0, '换动作后旧帧墙清空（避免张冠李戴）', String(label.wall))
+
+    // 留一张「脏名字被洗干净」的截图，方便肉眼复核
+    const clip2 = await page.evaluate(() => {
+      const n = [...document.querySelectorAll('.node')]
+        .find((x) => (x.querySelector('.node-kind')?.textContent || '').includes('人偶姿势'))
+      n.scrollIntoView({ block: 'center' })
+      const r = n.getBoundingClientRect()
+      return { x: Math.max(0, r.x - 8), y: Math.max(0, r.y - 8), width: r.width + 16, height: r.height + 16 }
+    })
+    const shot2 = join(OUT, 'clip_name_clean.png')
+    await page.screenshot({ path: shot2, clip: clip2 })
+    console.log(`  → ${shot2}`)
   } finally {
     await browser.close()
     srv.close()
