@@ -113,7 +113,14 @@
   `pose_frames/<名字>/`，每帧 `candidates[] + selected`。**候选只增不删**——
   重生成是追加，旧图必须还能选回来（用户原话：说不定他更喜欢之前的）。
   `add_candidate` 里**不许出现任何删除路径**。
-- 面板里的 `▶` 是"按顺序翻当前选中那张"（8fps），不是帧动画引擎。
+- 面板里的 `▶` 翻的是**舞台大图**（8fps）。舞台必须"有源帧就渲染"——写在
+  `render` 分支里的话，没出图时点播屏幕上什么都不动。
+- **「角色图」是上游节点的产物**（`image.path` / `job.path`），不是上游节点
+  自己的 `charSource`。取路径统一走 `imagePathOf(node)`（App.tsx）。
+  踩过：把上游节点整个丢进 `charPathsOf` → 取到空 → 接好了也报"先接角色图"。
+- **`onConnect` 的角色图白名单是硬编码的**（`['poseclone','spriteswap','posebatch']`）。
+  新增带角色图输入的节点类型必须加进去，否则拖线**静默忽略**（下拉却能选，
+  因为下拉走 `charSource` 字段、不经过白名单）。
 - **真机验证用 puppeteer**（`tools/verify_anim_import.mjs`，puppeteer-core 隔离
   装在 `tools/shot/node_modules`，已 gitignore）。**别用
   `--virtual-time-budget` + `--dump-dom`**：虚拟时钟会把等待瞬间走完，而解析是
