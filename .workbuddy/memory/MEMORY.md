@@ -186,9 +186,9 @@
 `alpha_reused=True`（alpha 结构可信）时 RGB 照样可能是白的 —— 复用 alpha
 时也要过 defringe。真机上出问题的图恰好就是这一支。
 
-## 「像素感」的三个来源：不只有 pixelate（2026-11-02）
+## 「像素感」的四个来源：不只有 pixelate（2026-11-02）
 
-用户报「没勾像素化还是有像素感」。三处都会造成，后两处更隐蔽：
+用户报「没勾像素化还是有像素感」。四处都会造成，后三处更隐蔽：
 
 1. **契约词**：`SPRITE_SUFFIX` 带 `16-bit pixel art, hard outline, flat colors`，
    负向词压 `anti-aliasing`。`pixel<=1` 时用 `presets.build(..., pixelate=False)`
@@ -197,9 +197,20 @@
    像素档要硬边，插画档只能 `sanitize_alpha`（<16 清零、>240 拉满、中间留着）。
 3. **形态学开运算**：`despeckle(denoise_iters>0)` 削掉 <3px 突起（发丝/挂饰）。
    只在像素档开。
+4. **色数量化**（2026-11-02 补，**白边的真凶**）：`quantize_palette` 里那句
+   `alpha.point(a > 127 ? 255 : 0)`。白底预乘的过渡带（RGB 220~240、α 中段）
+   被硬切成"不透明近白" → 深色背景上就是实心白边，发梢也被削成硬色块。
+   实测一张真产物：5708 个半透明像素全消失，其中 1556 个变成不透明（亮度 223）。
+   **量化默认不许动 alpha**；硬边由 `pixel > 1` 决定（`binary_alpha=True`）。
 
-判据：`hard_edge = pixel > 1 or palette > 0`。不像素化时这三条一律不生效。
-`tests/test_paint_path.py` 钉住这条。**别再用"看数值有没有 pixel"判断是否像素化了。**
+判据统一为 **`hard_edge = pixel > 1`**（2026-11-02 起去掉 `or palette > 0`）：
+只填色数不再构成像素化 —— 契约词、量化、开运算、硬切全部只看 pixel。
+`tests/test_paint_path.py::test_palette_alone_is_not_pixelation` 钉住这条。
+**别再用"看数值有没有 pixel"判断是否像素化了。**
+
+**UI 层面色数/像素块已经删掉**（用户要求学业界：Midjourney/即梦那类产品
+不让人填色数和像素块）。画风由「产出风格」一档决定，`custom` 只作旧存档
+只读回显（disable）。别再把手填入口加回来。
 
 ## 前端小部件踩过的坑（2026-11-02）
 
