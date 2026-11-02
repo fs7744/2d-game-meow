@@ -79,7 +79,7 @@ export default function PromptZoom({
               <b>{label}</b>
               <span className="pzoom-meta">{value.length} 字{lines > 1 ? ` · ${lines} 行` : ''}</span>
               <span className="spacer" />
-              <button type="button" className="mini primary" onClick={close}>完成</button>
+              <button type="button" className="pzoom-done" onClick={close}>完成</button>
             </div>
             <textarea
               ref={areaRef}
