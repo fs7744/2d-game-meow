@@ -65,6 +65,8 @@ type Props = {
    * 变化时推给子窗走官方 convertOpenPoseToPose。
    */
   importPoints?: (number[] | null)[] | null
+  /** 这组点是 3D 转正后重投影的（后端 MediaPipe 给的），见 applyPoints 的注释 */
+  importReprojected?: boolean
   /** 姿势库（App 持有，落在服务端磁盘） */
   poses: PosePreset[]
   /** 外部套过来的姿势（带 tick，变化才应用） */
@@ -77,7 +79,7 @@ type Props = {
 
 export default function PoseStudio({
   pose, yaw, onPose, onYaw, onExport, exporting,
-  onImportImage, importing, importPoints, poses,
+  onImportImage, importing, importPoints, importReprojected, poses,
   poseApply, onSavePose, onOpenPoseLibrary,
 }: Props) {
   const iframeRef = useRef<HTMLIFrameElement>(null)
@@ -187,8 +189,8 @@ export default function PoseStudio({
     if (!ready || !importPoints) return
     if (lastPointsRef.current === importPoints) return
     lastPointsRef.current = importPoints
-    post({ type: 'joints', points: importPoints })
-  }, [ready, importPoints, post])
+    post({ type: 'joints', points: importPoints, reprojected: !!importReprojected })
+  }, [ready, importPoints, importReprojected, post])
 
   // ---- 姿势库套过来的（外部请求） ----
   useEffect(() => {

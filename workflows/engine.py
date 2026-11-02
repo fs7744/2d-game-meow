@@ -179,6 +179,16 @@ class Engine:
     def _pose(self, v: Any) -> None:
         self._pool["pose"] = v
 
+    @property
+    def _pose3d(self) -> Any:
+        # `.get`：`_pool` 是外部传进来的字典，只有约定好的几个键预置在里面，
+        # 新加的键必须容错（第一次访问就是这里，KeyError 会让整个接口 500）。
+        return self._pool.get("pose3d")
+
+    @_pose3d.setter
+    def _pose3d(self, v: Any) -> None:
+        self._pool["pose3d"] = v
+
     def available_models(self) -> list[str]:
         """本机已经下好的底模（Qwen-only 下就是它一个）。"""
         if (self.root / "checkpoints" / DEFAULT_MODEL / "model_index.json").exists():
@@ -608,6 +618,34 @@ class Engine:
             log.warning("姿态提取器不可用，质量闸门关闭：%s", exc)
             self._pose = False
         return self._pose or None
+
+    def pose3d(self):
+        """MediaPipe 的 **3D** 姿态（「从图片提姿势」优先用这个）。
+
+        和上面的 `pose_extractor` 是两件事，别混：
+
+          · `pose_extractor`（DWPose）—— 2D 点，精度高，用于 ControlNet 骨架
+            和质量闸门；**没有深度**；
+          · `pose3d` —— 米制 3D 点，专门解决"侧身照片的髋线被投影压扁、
+            官方转换器据此把人偶转倒"的问题（见 workflows/pose3d.py 头注释）。
+
+        没装 `mediapipe` 包 / 没放 9MB 模型时返回 None，调用方回退 DWPose——
+        这是可选增强，不该把功能卡死。
+        """
+        if self._pose3d is not None:
+            return self._pose3d or None
+        try:
+            from .pose3d import Pose3D
+
+            p = Pose3D(self.root / "pose_keypoint" / "mediapipe" / "pose_landmarker_full.task")
+            if p.backend == "none":
+                raise RuntimeError(p.error or "不可用")
+            self._pose3d = p
+            log.info("3D 姿态提取器就绪（%s）", p.backend)
+        except Exception as exc:              # noqa: BLE001
+            log.warning("3D 姿态提取器不可用，提姿势回退 DWPose：%s", exc)
+            self._pose3d = False
+        return self._pose3d or None
 
     # ---------- 能力表 ----------
 

@@ -31,6 +31,9 @@ export type PoseImportRequest = {
   points: (number[] | null)[]
   /** 递增的时间戳，用来区分"又一次导入" */
   tick: number
+  /** 这组点是「3D 转正后重投影」来的：编辑器要把官方反推的 modelRotation 归零，
+   *  否则会用投影压缩过的髋线再判一次骨盆倾斜，人偶还是躺着 */
+  reprojected?: boolean
 }
 
 /** 角色迁移 / 序列帧替换：动作参考图的解释方式 */

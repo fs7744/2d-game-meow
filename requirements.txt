@@ -16,6 +16,12 @@ opencv-python
 pillow
 numpy
 onnxruntime
+# 「从图片提姿势」的 3D 增强（可选）。模型 9MB，放
+# models/pose_keypoint/mediapipe/pose_landmarker_full.task（Apache-2.0）：
+#   https://storage.googleapis.com/mediapipe-models/pose_landmarker/
+#   pose_landmarker_full/float16/latest/pose_landmarker_full.task
+# 不装也能用——会退回 DWPose 的 2D 点（侧身/悬空姿势会摆不准）。
+mediapipe>=1.0
 
 # LoRA：peft 是 diffusers 加载与训练 LoRA 的后端（缺了报 "PEFT backend is required"）
 peft>=0.13

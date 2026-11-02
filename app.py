@@ -479,17 +479,33 @@ def pose_extract(req: PoseExtractReq) -> Dict[str, Any]:
     ex = engine.pose_extractor()
     if ex is None:
         raise HTTPException(503, "姿态模型未安装（缺 dwpose onnx 或 onnxruntime）")
-    try:
-        pts = ex.normalized_points(img, thr=0.25, fill=0.8, min_points=8)
-    except ValueError as exc:
-        # 真人检测器认不出像素画 / 插画 / 版画——和 WPC 的 pose 模式同一个限制。
-        # 给能照做的下一步，别让用户对着 "0 boxes" 猜。
-        raise HTTPException(
-            422, f"没识别出人体：{exc}。骨架提取目前只对真人 / 写实人像有效；"
-                 "游戏像素素材、插画请用上面的姿势预设手动摆，或用角色迁移的"
-                 "「轮廓」参考模式。") from exc
-    except Exception as exc:                       # noqa: BLE001
-        raise HTTPException(500, f"姿态提取失败：{exc}") from exc
+    # **优先 3D**：MediaPipe 给米制 3D 点，能算出真实躯干朝向，把侧身照片
+    # 「转正」后重投影成 2D 再交给编辑器（见 workflows/pose3d.py 头注释）。
+    # 没有深度时，侧身照片的两髋投影只隔身高的 1.x%，官方转换器会判出 80°+
+    # 骨盆倾斜 → 人偶躺倒。没有 mediapipe 就退回 DWPose 的 2D 点（功能不变差）。
+    pts: Dict[int, Any] = {}
+    extra: Dict[str, Any] = {}
+    ex3 = engine.pose3d()
+    if ex3 is not None:
+        try:
+            pts, extra = ex3.points2d(img)
+        except ValueError:
+            pts = {}          # 3D 没检出人，交给 DWPose 再试一次
+        except Exception as exc:                       # noqa: BLE001
+            log.warning("3D 姿态提取失败，回退 DWPose：%s", exc)
+            pts = {}
+    if not pts:
+        try:
+            pts = ex.normalized_points(img, thr=0.25, fill=0.8, min_points=8)
+        except ValueError as exc:
+            # 真人检测器认不出像素画 / 插画 / 版画——和 WPC 的 pose 模式同一个限制。
+            # 给能照做的下一步，别让用户对着 "0 boxes" 猜。
+            raise HTTPException(
+                422, f"没识别出人体：{exc}。骨架提取目前只对真人 / 写实人像有效；"
+                     "游戏像素素材、插画请用上面的姿势预设手动摆，或用角色迁移的"
+                     "「轮廓」参考模式。") from exc
+        except Exception as exc:                       # noqa: BLE001
+            raise HTTPException(500, f"姿态提取失败：{exc}") from exc
 
     points: List[Any] = []
     for i in range(18):
@@ -498,11 +514,25 @@ def pose_extract(req: PoseExtractReq) -> Dict[str, Any]:
             points.append([round(float(x), 4), round(float(y), 4)])
         else:
             points.append(None)
+
+    # 朝向提示：3D 那条路能直接量出躯干相对相机的 yaw，比"肩膀宽度"猜得准
     guess = 0
-    if 2 in pts and 5 in pts and abs(pts[2][0] - pts[5][0]) < 0.07:
+    if extra.get("body_yaw") is not None:
+        guess = int(round((float(extra["body_yaw"]) % 360) / 45) % 8) * 45
+    elif 2 in pts and 5 in pts and abs(pts[2][0] - pts[5][0]) < 0.07:
         # 肩膀在画面上几乎重叠 → 原图接近侧面。鼻尖相对颈的方向决定朝左/朝右。
         guess = 90 if (0 in pts and 1 in pts and pts[0][0] >= pts[1][0]) else 270
-    return {"points": points, "joints": len(pts), "azimuth_guess": guess}
+    return {
+        "points": points,
+        "joints": len(pts),
+        "azimuth_guess": guess,
+        # `reprojected=True` 表示这组点是"3D 转正后投影"的，前端据此把官方
+        # 转换器从 2D 反推的 modelRotation 归零（否则会用投影压缩过的髋线
+        # 再判一次骨盆倾斜，人偶还是躺）。
+        "reprojected": bool(extra.get("backend") == "mediapipe"),
+        "body_yaw": extra.get("body_yaw"),
+        "backend": extra.get("backend", "dwpose"),
+    }
 
 
 @app.get("/library")

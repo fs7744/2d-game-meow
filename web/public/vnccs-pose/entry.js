@@ -183,7 +183,7 @@ function applyPose(v, pose) {
  * 父子段配躯干（含自动补 mid_hip），不是把 2D 点直接投影到骨头上。
  * 漏检的点用站立参考补，避免某条肢体角度算歪。
  */
-function applyPoints(v, points) {
+function applyPoints(v, points, opts = {}) {
   const joints = {}
   COCO_NAMES.forEach((name, i) => {
     const p = Array.isArray(points?.[i]) ? points[i] : null
@@ -193,6 +193,16 @@ function applyPoints(v, points) {
   const pose = convertOpenPoseToPose(
     { joints, canvasWidth: 512, canvasHeight: 512 }, v)
   if (pose) {
+    // **3D 转正后重投影的点，必须把官方反推的 modelRotation 归零。**
+    // 转换器会从 2D 点反推两件事：髋线角度 → 骨盆倾斜(Z)，肩宽比 → 躯干 Y 旋转。
+    // 侧身照片的两髋投影几乎重合（实测只隔身高 1.5%），它据此判出 81° 骨盆
+    // 倾斜，整个人偶绕 Z 转倒 —— 用户看到的是"躺着的麻花"。
+    // 后端已经用 MediaPipe 的真实 3D 把身体转到正面再投影，朝向信息是准的，
+    // 这里再让它按 2D 猜一次只会帮倒忙。实测归零后人偶才立得住。
+    if (opts.reprojected) {
+      pose.modelRotation = [0, 0, 0]
+      pose.cameraYRotation = 0
+    }
     v.setPose(pose, true)
     v.updateMarkers?.()
     v.jointMarkers?.forEach((m) => { m.visible = true })
@@ -316,7 +326,7 @@ window.addEventListener('message', async (e) => {
       if (typeof msg.yaw === 'number') setYaw(msg.yaw)
       if (msg.pose) applyPose(v, msg.pose)
       else if (Array.isArray(msg.joints) && msg.joints.length >= 18) {
-        applyPoints(v, msg.joints.map((p) => [p.x, p.y]))
+        applyPoints(v, msg.joints.map((p) => [p.x, p.y]), { reprojected: !!msg.reprojected })
       }
       post({ type: 'ready', yaw: currentYaw })
       return
@@ -327,7 +337,7 @@ window.addEventListener('message', async (e) => {
     if (msg.type === 'setPose') {
       applyPose(v, msg.pose)
     } else if (msg.type === 'joints') {
-      applyPoints(v, msg.points)
+      applyPoints(v, msg.points, { reprojected: !!msg.reprojected })
     } else if (msg.type === 'setYaw') {
       setYaw(msg.yaw)
       post({ type: 'pose', pose: v.getPose(), yaw: currentYaw })

@@ -944,7 +944,7 @@ export default function App() {
       const up = await uploadImage(file, currentId)
       const r = await extractPose(up.path)
       patchNode(id, {
-        poseImport: { points: r.points, tick: Date.now() },
+        poseImport: { points: r.points, tick: Date.now(), reprojected: r.reprojected },
       })
       const dir = r.azimuth_guess === 90 ? '右侧'
         : r.azimuth_guess === 270 ? '左侧' : '正面'

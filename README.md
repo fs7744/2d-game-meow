@@ -292,6 +292,7 @@ RTX 4090 上 768×768 / 16 步约 **10 秒**。第一次要加载模型（1~2 �
 │   ├── public/icon.png      应用图标
 │   └── smoke.mjs            无浏览器冒烟测试（569 项）
 ├── models/                  模型权重（不提交到 git）
+│   └── pose_keypoint/mediapipe/  「从图片提姿势」的 3D 模型（9MB，可选）
 ├── assets/                  你的项目和产物
 ├── templates/               项目模板（.mproj）
 ├── tests/                   Python 测试（608 条）

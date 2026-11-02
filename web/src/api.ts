@@ -430,6 +430,11 @@ export type PoseExtract = {
   joints: number
   /** 只用来提示：2D 图分不出正面/背面，只有肩宽很窄时才有把握说是侧面 */
   azimuth_guess: number
+  /** true = 这组点是 MediaPipe 3D 转正后重投影的（不是原图 2D 投影） */
+  reprojected?: boolean
+  /** 躯干相对相机的朝向（度）；只有 3D 那条路有 */
+  body_yaw?: number | null
+  backend?: string
 }
 
 /* ------------------------------------------------------------------ *

@@ -981,6 +981,7 @@ export default function GenNodeCard({
               try { await onImportPose?.(f) } finally { setPoseImporting(false) }
             }}
             importPoints={node.poseImport?.points ?? null}
+            importReprojected={node.poseImport?.reprojected}
             poses={poses ?? []}
             poseApply={poseApply?.nodeId === node.id ? poseApply : null}
             onSavePose={onSavePose}
