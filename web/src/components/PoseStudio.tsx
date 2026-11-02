@@ -17,9 +17,12 @@
  *
  * 协议见 web/public/vnccs-pose/entry.js 头注释。
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { PosePreset } from '../types'
 import { BUILTIN_POSES, uniquePoseName } from '../store/poses'
+import {
+  applyFilters, diffStats, hashDiff, loopSeam, type SampledFrame,
+} from '../store/animFrames'
 
 /** 8 个精灵素材常用的朝向（导出机位，绕 Y 的角度） */
 export const YAWS: Array<[number, string]> = [
@@ -77,6 +80,8 @@ type Props = {
   onOpenPoseLibrary?: () => void
   /** 当前项目 id：抽出来的帧要存进**这个项目**的 `poses/<名字>/` 下 */
   projectId?: string
+  /** 双击帧墙里的某一帧 → 全屏放大（灯箱在 App 那边） */
+  onPreview?: (url: string, name: string) => void
   /** 把一个动作抽出来的 N 帧存成项目里的姿势集（同名会被后端拒绝） */
   onSavePoseSet?: (name: string, frames: PoseSetFrameIn[]) => Promise<boolean> | boolean
 }
@@ -92,7 +97,7 @@ export type PoseSetFrameIn = {
 export default function PoseStudio({
   pose, yaw, onPose, onYaw, onExport, exporting,
   onImportImage, importing, importPoints, importReprojected, poses,
-  poseApply, onSavePose, onOpenPoseLibrary, projectId, onSavePoseSet,
+  poseApply, onSavePose, onOpenPoseLibrary, projectId, onSavePoseSet, onPreview,
 }: Props) {
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const [status, setStatus] = useState('正在加载人偶模型（37MB，首次约十几秒）…')
@@ -118,6 +123,20 @@ export default function PoseStudio({
   const [frameCount, setFrameCount] = useState(8)
   const [setName, setSetName] = useState('')
   const [sampling, setSampling] = useState(false)
+  const [savingSet, setSavingSet] = useState(false)
+  /**
+   * **抽出来但还没存的帧**（照 pixelforge「拆解帧 · 挑帧」的做法）：
+   * 先把整条动作抽成一摞缩略图给用户挑，而不是"点了就闷头存盘"。
+   * 关掉视图/切节点就丢 —— 它是过渡态，不写进 project.json（十几张
+   * 100KB 的 base64 会让自动保存变慢）。
+   */
+  const [sampled, setSampled] = useState<SampledFrame[] | null>(null)
+  /** 已勾选的帧（按 sampled 的**下标**，不是点击顺序 —— 存出去要帧序） */
+  const [picks, setPicks] = useState<number[]>([])
+  /** 两把筛子：跳帧步长 + 近似度（只改"显示哪些"，不动勾选） */
+  const [step, setStep] = useState(1)
+  const [simPct, setSimPct] = useState(0)
+  const [showAll, setShowAll] = useState(false)
   /** 正在播放（iframe 那边在推进时间轴） */
   const [playing, setPlaying] = useState(false)
   const animFileRef = useRef<HTMLInputElement>(null)
@@ -131,8 +150,6 @@ export default function PoseStudio({
   onPoseRef.current = onPose
   const onSavePoseSetRef = useRef(onSavePoseSet)
   onSavePoseSetRef.current = onSavePoseSet
-  /** 抽帧请求发出时记下"这批帧要存什么名字"，回包时直接取（不用闭包） */
-  const pendingSetRef = useRef<{ name: string; count: number } | null>(null)
   const yawRef = useRef(yaw)
   yawRef.current = yaw
   const poseRef = useRef<unknown>(pose)
@@ -221,27 +238,21 @@ export default function PoseStudio({
       } else if (d.type === 'animPlaying') {
         setPlaying(!!d.on)
       } else if (d.type === 'animFrames') {
-        // 抽帧回来了：直接存成**项目里的姿势集**（不进跨项目的资料库）
+        // 抽帧回来了：**先摆出来给用户挑**，点「存为姿势集」才落盘
         setSampling(false)
-        const pending = pendingSetRef.current
-        pendingSetRef.current = null
-        const frames = (d.frames || []) as { t: number; pose: unknown; png?: string }[]
+        const frames = (d.frames || []) as SampledFrame[]
         if (!frames.length) {
           setErr('抽帧没拿到内容')
           return
         }
-        const name = String(pending?.name || '').trim()
-        const items: PoseSetFrameIn[] = frames.map((f) => ({
-          t: Number(f.t) || 0,
-          yaw: yawRef.current,
-          pose: f.pose,
-          png: String(f.png || ''),
-        }))
-        Promise.resolve(onSavePoseSetRef.current?.(name, items))
-          .then((ok) => {
-            if (ok) setStatus(`已存成姿势集「${name}」（${items.length} 帧）`)
-          })
-          .catch(() => { /* App 那边已经提示过错误，这里不重复报 */ })
+        setSampled(frames)
+        // 默认全选：用户的预期是"我抽了 12 帧就存 12 帧"，
+        // 筛子是帮他去重的工具，不是默认就要他重挑一遍
+        setPicks(frames.map((_, i) => i))
+        setStep(1)
+        setSimPct(0)
+        setShowAll(false)
+        setStatus(`抽到 ${frames.length} 帧（还没存）：挑完点「存为姿势集」`)
       } else if (d.type === 'error') {
         setAnimBusy(false)
         setSampling(false)
@@ -390,6 +401,38 @@ export default function PoseStudio({
     setSaving(false)
   }, [askPreview, onSavePose, saveName])
 
+  /* ---- 挑帧：显示什么由筛子决定，存什么由勾选决定 ---- */
+  const allIdx = useMemo(
+    () => (sampled ? sampled.map((_, i) => i) : []),
+    [sampled],
+  )
+  const filtered = useMemo(
+    () => (sampled ? applyFilters(sampled, { step, simPct }) : []),
+    [sampled, step, simPct],
+  )
+  /** 筛选结果对应的下标（"应用筛选"要的是下标，不是帧本体） */
+  const filteredIdx = useMemo(() => {
+    if (!sampled) return []
+    const keep = new Set(filtered)
+    return sampled.map((f, i) => (keep.has(f) ? i : -1)).filter((i) => i >= 0)
+  }, [sampled, filtered])
+  /** 帧墙上要画的：带下标 + 与前一张**显示帧**的差异（tooltip 用） */
+  const shown = useMemo(() => {
+    const list = showAll ? (sampled || []) : filtered
+    return list.map((frame) => {
+      const i = sampled ? sampled.indexOf(frame) : 0
+      const prev = i > 0 && sampled ? sampled[i - 1] : null
+      return { frame, i, diff: prev ? hashDiff(prev.hash, frame.hash) : 0 }
+    })
+  }, [sampled, filtered, showAll])
+  /** 勾选的帧，**按帧序**（存出去要稳定顺序，不能按点击顺序） */
+  const pickedFrames = useMemo(
+    () => (sampled ? sampled.map((frame, i) => ({ frame, i })).filter((x) => picks.includes(x.i)) : []),
+    [sampled, picks],
+  )
+  const stats = useMemo(() => diffStats(pickedFrames.map((p) => p.frame)), [pickedFrames])
+  const seam = useMemo(() => loopSeam(pickedFrames.map((p) => p.frame)), [pickedFrames])
+
   return (
     <div className="pose-editor" onPointerDown={(e) => e.stopPropagation()}>
       <div className={`pose-stage${expanded ? ' expanded' : ''}`}>
@@ -509,9 +552,10 @@ export default function PoseStudio({
         )}
       </div>
 
-      {/* 抽帧存成**项目里的姿势集**（`assets/projects/<项目>/poses/<名字>/`）。
-          一条 walk 直接灌成一整套，比一帧一帧拖、一帧一帧存快得多。
-          帧数由用户自己填 —— 慢动作 30 帧、快动作 8 帧本来就该不一样。 */}
+      {/* ---- 抽帧 → 挑帧 → 存姿势集 ----
+          交互照 pixelforge 的「拆解帧 · 挑帧」：**先抽出来看**，再用两把筛子
+          （跳帧步长 / 近似度）压掉重复姿势，勾选是显式状态 —— 拖滑杆只改
+          "显示哪些"，不会把你已经挑好的帧悄悄换掉，点「应用筛选」才采纳。 */}
       {anim && (
         <>
           <div className="pose-lib pose-frames">
@@ -530,39 +574,168 @@ export default function PoseStudio({
               />
               帧
             </label>
-            <input
-              className="pose-set-name"
-              value={setName}
-              placeholder={anim.clips[anim.index]?.name ? `姿势集名（默认 ${anim.clips[anim.index].name}）` : '姿势集名'}
-              disabled={sampling}
-              onChange={(e) => setSetName(e.target.value)}
-              title="存到本项目的 poses/<这个名字>/ 下。**同名会被拒绝**（不会覆盖上一次的）"
-            />
             <button
-              type="button" className="mini"
-              disabled={!ready || sampling || !onSavePoseSet || !projectId}
+              type="button" className="pose-batch-btn"
+              disabled={!ready || sampling}
               onClick={() => {
                 setErr('')
-                const name = (setName.trim() || anim.clips[anim.index]?.name || '动作').trim()
-                if (!projectId) {
-                  setErr('没有项目 id，存不了（先保存项目）')
-                  return
-                }
-                pendingSetRef.current = { name, count: frameCount }
                 setSampling(true)
                 post({ type: 'animSample', count: frameCount })
               }}
-              title={projectId
-                ? '按当前机位把这条动作等分成 N 帧，存成项目里的一个姿势集文件夹'
-                : '还没有项目 id：先保存项目再抽帧'}
+              title={'按当前机位把这条动作等分成 N 帧，抽出来**先给你看**，'
+                + '挑完再存（不点存就不会落盘）'}
             >
-              {sampling ? '抽帧中…' : '存为姿势集'}
+              {sampling ? '抽帧中…' : (sampled ? '重新抽帧' : '抽帧看看')}
             </button>
+            {anim.rig && (
+              <span className="pose-frames-rig" title="骨骼是按名字 + 层级认出来的">
+                {anim.rig.familyLabel}
+              </span>
+            )}
           </div>
-          {anim.rig && (
-            <div className="pose-frames-rig" title="骨骼是按名字 + 层级认出来的">
-              {anim.rig.familyLabel} · {anim.rig.mapped} 锚点
-            </div>
+
+          {sampled && (
+            <>
+              {/* 两把筛子：即时生效，但只改「显示哪些」 */}
+              <div className="anim-filters">
+                <label className="anim-slider">
+                  <span>跳帧步长 <b>每 {step} 帧取 1</b></span>
+                  <input
+                    type="range" min={1} max={10} step={1} value={step}
+                    onChange={(e) => setStep(Number(e.target.value))}
+                  />
+                </label>
+                <label className="anim-slider">
+                  <span>
+                    近似度过滤 <b>{simPct.toFixed(0)}%</b>
+                    <em title="与上一张保留帧的差异低于这个值就当作重复帧">低于此视为重复</em>
+                  </span>
+                  {/* 上限 40：差异按「改动格数 / 两帧墨迹并集」算，走路的相邻帧
+                      正常在 10~30%，留到 40 才够用（0 = 不过滤） */}
+                  <input
+                    type="range" min={0} max={40} step={1} value={simPct}
+                    onChange={(e) => setSimPct(Number(e.target.value))}
+                  />
+                </label>
+              </div>
+
+              <div className="anim-toolbar">
+                <button
+                  type="button" className="pose-batch-btn"
+                  onClick={() => setPicks(filteredIdx)}
+                  title="把当前筛选结果设为已选（已选的会被替换，但可以随时点格子改回来）"
+                >应用筛选（{filtered.length}）</button>
+                <button
+                  type="button" className="pose-batch-btn"
+                  onClick={() => setPicks(allIdx.filter((i) => !picks.includes(i)))}
+                >反选</button>
+                <button
+                  type="button" className="pose-batch-btn"
+                  onClick={() => setPicks([])}
+                >清空</button>
+                <label className="anim-showall" title="显示被筛掉的帧（灰显），方便手动捞回来">
+                  <input
+                    type="checkbox" checked={showAll}
+                    onChange={(e) => setShowAll(e.target.checked)}
+                  />
+                  显示全部
+                </label>
+              </div>
+
+              <div className="anim-count">
+                已选 <b>{pickedFrames.length}</b> / 共 {sampled.length} 帧
+                {pickedFrames.length >= 2 && (
+                  <>
+                    <span className="anim-stat" title="相邻已选帧的差异中位数：太低说明还有重复姿势">
+                      间距中位 {stats.median.toFixed(1)}%
+                    </span>
+                    <span className={`anim-stat${seam < 1.5 ? ' warn' : ''}`}
+                      title="末帧与首帧的差异：太小的话循环播放会卡一下（末帧≈首帧）">
+                      首尾差 {seam.toFixed(1)}%
+                    </span>
+                    {stats.nearDup > 0 && (
+                      <span className="anim-stat warn"
+                        title="相邻两帧几乎一样，连着播会停一拍">
+                        近重复 {stats.nearDup} 对
+                      </span>
+                    )}
+                  </>
+                )}
+              </div>
+
+              {/* 帧墙：点一下勾选/取消，双击放大看细节 */}
+              <div className="anim-wall">
+                {shown.map((f) => {
+                  const on = picks.includes(f.i)
+                  return (
+                    <button
+                      key={f.i}
+                      type="button"
+                      className={`anim-cell${on ? ' on' : ''}`}
+                      title={`第 ${f.i + 1} 帧 · ${f.frame.t.toFixed(2)}s · 与前帧差 ${f.diff.toFixed(1)}%`
+                        + `\n点击${on ? '取消' : '选中'}；双击放大`}
+                      onClick={() => setPicks((cur) => (
+                        cur.includes(f.i) ? cur.filter((x) => x !== f.i) : [...cur, f.i].sort((a, b) => a - b)
+                      ))}
+                      onDoubleClick={() => onPreview?.(f.frame.png, `第 ${f.i + 1} 帧`)}
+                    >
+                      <img src={f.frame.png} alt={`第 ${f.i + 1} 帧`} draggable={false} />
+                      <span className="anim-idx">{f.i + 1}</span>
+                      {on && (
+                        <span className="anim-order">
+                          {pickedFrames.findIndex((x) => x.i === f.i) + 1}
+                        </span>
+                      )}
+                    </button>
+                  )
+                })}
+                {!shown.length && (
+                  <div className="src-note" style={{ padding: 6 }}>
+                    当前筛选把帧全滤掉了：把「近似度过滤」调低，或勾「显示全部」手动挑。
+                  </div>
+                )}
+              </div>
+
+              <div className="pose-lib pose-frames" style={{ marginTop: 4 }}>
+                <input
+                  className="pose-set-name"
+                  value={setName}
+                  placeholder={anim.clips[anim.index]?.name
+                    ? `姿势集名（默认 ${anim.clips[anim.index].name}）` : '姿势集名'}
+                  disabled={savingSet}
+                  onChange={(e) => setSetName(e.target.value)}
+                  title="存到本项目的 poses/<这个名字>/ 下。**同名会被拒绝**（不会覆盖上一次的）"
+                />
+                <button
+                  type="button" className="pose-batch-btn"
+                  disabled={!projectId || !onSavePoseSet || savingSet || !pickedFrames.length}
+                  onClick={() => {
+                    setErr('')
+                    const name = (setName.trim() || anim.clips[anim.index]?.name || '动作').trim()
+                    if (!projectId) { setErr('没有项目 id，存不了（先保存项目）'); return }
+                    const items: PoseSetFrameIn[] = pickedFrames.map((p) => ({
+                      t: p.frame.t, yaw: yawRef.current, pose: p.frame.pose, png: p.frame.png,
+                    }))
+                    setSavingSet(true)
+                    Promise.resolve(onSavePoseSetRef.current?.(name, items))
+                      .then((ok) => {
+                        if (ok) {
+                          setStatus(`已存成姿势集「${name}」（${items.length} 帧）`)
+                          setSampled(null)
+                          setPicks([])
+                        }
+                      })
+                      .catch(() => { /* App 已经提示过错误，这里不重复报 */ })
+                      .finally(() => setSavingSet(false))
+                  }}
+                  title={pickedFrames.length
+                    ? `只存勾选的这 ${pickedFrames.length} 帧`
+                    : '还没勾任何帧'}
+                >
+                  {savingSet ? '保存中…' : `存为姿势集（${pickedFrames.length}）`}
+                </button>
+              </div>
+            </>
           )}
         </>
       )}

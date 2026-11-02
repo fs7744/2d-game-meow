@@ -997,6 +997,7 @@ export default function GenNodeCard({
             onOpenPoseLibrary={onOpenPoseLibrary}
             projectId={projectId}
             onSavePoseSet={onSavePoseSet}
+            onPreview={onPreview}
           />
           {node.image?.url && (
             <div className="pose-preview">

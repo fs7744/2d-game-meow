@@ -1188,6 +1188,102 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
 }
 .pose-batch-cands-head span { flex: 1; }
 .pose-batch-box summary { cursor: pointer; }
+
+/* ---- 抽帧后挑帧（照 pixelforge「拆解帧 · 挑帧」的版式） ---- */
+.pose-frames .pose-batch-btn { flex: 1; min-width: 0; }
+.anim-filters { display: flex; flex-direction: column; gap: 5px; margin-top: 2px; }
+.anim-slider { display: block; font-size: 10px; color: var(--muted); }
+.anim-slider > span { display: flex; align-items: baseline; gap: 5px; flex-wrap: wrap; }
+.anim-slider b { color: var(--white); font-weight: 600; }
+.anim-slider em { font-style: normal; opacity: 0.65; font-size: 9px; }
+.anim-slider input[type='range'] { width: 100%; margin: 2px 0 0; height: 14px; }
+.anim-toolbar { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; margin-top: 4px; }
+.anim-showall {
+  margin-left: auto; display: inline-flex; align-items: center; gap: 3px;
+  font-size: 9px; color: var(--muted); cursor: pointer;
+}
+.anim-count {
+  margin-top: 4px; font-size: 10px; color: var(--muted);
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+}
+.anim-count b { color: var(--white); }
+.anim-stat { font-size: 9px; padding: 0 4px; line-height: 14px;
+  border: 1px solid var(--line); color: var(--muted); font-family: var(--mono); }
+.anim-stat.warn { color: #d98a2b; border-color: rgba(217, 138, 43, 0.5); }
+/* 帧墙：小格子 + 自滚动。max-height 是给节点卡片留地方 —— 24 帧铺开会把
+   「存为姿势集」挤出可视区，用户找不到保存按钮。 */
+.anim-wall {
+  margin-top: 4px; display: grid; gap: 3px;
+  grid-template-columns: repeat(auto-fill, minmax(48px, 1fr));
+  max-height: 260px; overflow-y: auto; padding: 3px;
+  border: 1px solid var(--line); background: rgba(0, 0, 0, 0.28);
+}
+.anim-cell {
+  position: relative; padding: 0; border: 1px solid transparent;
+  background: #16181f; cursor: pointer; overflow: hidden; line-height: 0;
+}
+.anim-cell img { width: 100%; aspect-ratio: 1 / 1; object-fit: contain; display: block; }
+.anim-cell:hover { border-color: var(--line); }
+.anim-cell.on { border-color: var(--green); box-shadow: inset 0 0 0 1px var(--green); }
+.anim-cell:not(.on) img { opacity: 0.45; }
+.anim-idx {
+  position: absolute; left: 1px; bottom: 0; font-size: 8px; line-height: 11px;
+  padding: 0 3px; color: #cfd3e0; background: rgba(0, 0, 0, 0.62);
+  font-family: var(--mono);
+}
+.anim-order {
+  position: absolute; right: 1px; top: 1px; font-size: 8px; line-height: 12px;
+  min-width: 12px; text-align: center; color: #04120a; background: var(--green);
+  font-weight: 700; font-family: var(--mono);
+}
+
+/* ---- 抽帧后挑帧（照 pixelforge「拆解帧 · 挑帧」的版式） ---- */
+.pose-frames .pose-batch-btn { flex: 1; min-width: 0; }
+.anim-filters { display: flex; flex-direction: column; gap: 5px; margin-top: 2px; }
+.anim-slider { display: block; font-size: 10px; color: var(--muted); }
+.anim-slider > span { display: flex; align-items: baseline; gap: 5px; flex-wrap: wrap; }
+.anim-slider b { color: var(--white); font-weight: 600; }
+.anim-slider em { font-style: normal; opacity: 0.65; font-size: 9px; }
+.anim-slider input[type='range'] { width: 100%; margin: 2px 0 0; height: 14px; }
+.anim-toolbar { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; margin-top: 4px; }
+.anim-showall {
+  margin-left: auto; display: inline-flex; align-items: center; gap: 3px;
+  font-size: 9px; color: var(--muted); cursor: pointer;
+}
+.anim-count {
+  margin-top: 4px; font-size: 10px; color: var(--muted);
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+}
+.anim-count b { color: var(--white); }
+.anim-stat { font-size: 9px; padding: 0 4px; line-height: 14px;
+  border: 1px solid var(--line); color: var(--muted); font-family: var(--mono); }
+.anim-stat.warn { color: #d98a2b; border-color: rgba(217, 138, 43, 0.5); }
+/* 帧墙：小格子 + 自滚动。max-height 是给节点卡片留地方 —— 24 帧铺开会把
+   「存为姿势集」挤出可视区，用户找不到保存按钮。 */
+.anim-wall {
+  margin-top: 4px; display: grid; gap: 3px;
+  grid-template-columns: repeat(auto-fill, minmax(48px, 1fr));
+  max-height: 260px; overflow-y: auto; padding: 3px;
+  border: 1px solid var(--line); background: rgba(0, 0, 0, 0.28);
+}
+.anim-cell {
+  position: relative; padding: 0; border: 1px solid transparent;
+  background: #16181f; cursor: pointer; overflow: hidden; line-height: 0;
+}
+.anim-cell img { width: 100%; aspect-ratio: 1 / 1; object-fit: contain; display: block; }
+.anim-cell:hover { border-color: var(--line); }
+.anim-cell.on { border-color: var(--green); box-shadow: inset 0 0 0 1px var(--green); }
+.anim-cell:not(.on) img { opacity: 0.45; }
+.anim-idx {
+  position: absolute; left: 1px; bottom: 0; font-size: 8px; line-height: 11px;
+  padding: 0 3px; color: #cfd3e0; background: rgba(0, 0, 0, 0.62);
+  font-family: var(--mono);
+}
+.anim-order {
+  position: absolute; right: 1px; top: 1px; font-size: 8px; line-height: 12px;
+  min-width: 12px; text-align: center; color: #04120a; background: var(--green);
+  font-weight: 700; font-family: var(--mono);
+}
 .pose-yaw-val { font-family: var(--mono); font-weight: 400; color: var(--cyan); min-width: 30px; text-align: right; }
 .pose-cam-hint-row { font-size: 9px; color: var(--muted-2); line-height: 1.4; }
 .pose-save input {

@@ -33,7 +33,7 @@
  *     { type:'animClip', index }            切动画轨道（一个文件里可能有多条）
  *     { type:'animTime', t }                采样 t 秒并套到人偶上 → 回 pose
  *     { type:'animSample', count }          等分抽 count 帧（入库用）
- *                                           → 回 { type:'animFrames', frames:[{t,pose,png}], clip, yaw }
+ *                                           → 回 { type:'animFrames', frames:[{t,pose,png,hash}], clip, yaw }
  *     { type:'animPlay', on, t? }           播放 / 停止（从头播到尾；t 缺省 = 当前滑块位置）
  *                                           → 过程中回 { type:'animTick', t }，播完回 pose
  *   子 → 父：
@@ -262,6 +262,96 @@ function renderOut(size) {
     }
     viewer.setDirectionalSkydomeVisible?.(prevSky)
   }
+}
+
+/**
+ * 一帧的**指纹**：主体裁切 → 16×16 **剪影**（0=墨迹 / 255=背景）→ 256 字节 base64。
+ *
+ * 宿主拿它算"这套动作里哪几张其实一样"，用来做近似度筛选（见
+ * `web/src/store/animFrames.ts`）。判据和 pixelforge 的 `diff_percent` 同口径：
+ * 两帧灰度的平均绝对差 / 255 × 100。
+ *
+ * **为什么是剪影而不是灰度**：人偶是白底上的一根细灰人形。灰度平均差会被
+ * 大片白底稀释 —— 实测两个完全不同的走路姿势只差 **0.2%**，近似度滑杆整个失效
+ * （8 帧全被判成"近重复"）。剪影只关心"这一格有没有人"，差异就落在 10~30%
+ * 这个能用的区间。宿主那边的差异口径是 `改动格数 / 两帧墨迹的并集`。
+ *
+ * **先裁到主体**：画面里人偶只占中间一块，留白多则同一姿势换个取景就"变了"。
+ * 在 32×32 上扫出非白包围盒、按**正方形**裁（保持长宽比），再缩到 16×16。
+ *
+ * **只看 RGB，不做 alpha 合成**：`viewer.capture` 出来的 PNG 可能整张 alpha=0
+ * （透明通道留白），内容全在 RGB 里。按"合成到白底"算会得到满屏 255。
+ */
+function frameHash(dataURL) {
+  return new Promise((resolve) => {
+    if (!dataURL) { resolve(''); return }
+    const img = new Image()
+    img.onload = () => {
+      try {
+        const lum = (d, o) => 0.299 * d[o] + 0.587 * d[o + 1] + 0.114 * d[o + 2]
+
+        // 1) 32×32 扫主体包围盒（白底灰人偶：亮度 < 246 算主体）
+        const S = 32
+        const probe = document.createElement('canvas')
+        probe.width = S
+        probe.height = S
+        const pg = probe.getContext('2d', { willReadFrequently: true })
+        pg.fillStyle = '#fff'
+        pg.fillRect(0, 0, S, S)
+        pg.drawImage(img, 0, 0, S, S)
+        const pd = pg.getImageData(0, 0, S, S).data
+        let x0 = S, y0 = S, x1 = -1, y1 = -1
+        for (let y = 0; y < S; y++) {
+          for (let x = 0; x < S; x++) {
+            if (lum(pd, (y * S + x) * 4) >= 246) continue
+            if (x < x0) x0 = x
+            if (x > x1) x1 = x
+            if (y < y0) y0 = y
+            if (y > y1) y1 = y
+          }
+        }
+
+        // 2) 裁一个**正方形**（保持长宽比，否则张臂/站立会被归一化成一样）
+        let sx = 0
+        let sy = 0
+        let sw = img.width
+        let sh = img.height
+        if (x1 >= 0) {
+          const k = img.width / S
+          const pad = 1
+          const w = x1 - x0 + 1 + pad * 2
+          const h = y1 - y0 + 1 + pad * 2
+          const side = Math.max(w, h) * k
+          const cx = (x0 + x1 + 1) / 2 * k
+          const cy = (y0 + y1 + 1) / 2 * k
+          sw = Math.min(img.width, side)
+          sh = Math.min(img.height, side)
+          sx = Math.max(0, Math.min(img.width - sw, cx - sw / 2))
+          sy = Math.max(0, Math.min(img.height - sh, cy - sh / 2))
+        }
+
+        // 3) 裁下来的那块缩到 16×16，出指纹
+        const c = document.createElement('canvas')
+        c.width = 16
+        c.height = 16
+        const g = c.getContext('2d', { willReadFrequently: true })
+        g.fillStyle = '#fff'
+        g.fillRect(0, 0, 16, 16)
+        g.drawImage(img, sx, sy, sw, sh, 0, 0, 16, 16)
+        const d = g.getImageData(0, 0, 16, 16).data
+        let bin = ''
+        for (let i = 0; i < 256; i++) {
+          // 剪影：亮度 < 246 判为"有人"。用 0/255 两档，宿主好按"改了哪些格"算差
+          bin += String.fromCharCode(lum(d, i * 4) < 246 ? 0 : 255)
+        }
+        resolve(btoa(bin))
+      } catch {
+        resolve('')
+      }
+    }
+    img.onerror = () => resolve('')
+    img.src = dataURL
+  })
 }
 
 /**
@@ -494,7 +584,13 @@ window.addEventListener('message', async (e) => {
           const ok = await m.applyTime(t, v)
           if (!ok) throw new Error(m.errorState() || `第 ${i + 1} 帧套不上人偶`)
           const png = renderOut(256) || ''
-          frames.push({ t: Number(t.toFixed(3)), pose: v.getPose(), png })
+          // 指纹在这里算：宿主那边再解一遍 PNG 纯属浪费（24 张 256² base64
+          // 解码会卡住主线程）。16×16 灰度 256 字节，够判"姿势变没变"。
+          frames.push({
+            t: Number(t.toFixed(3)), pose: v.getPose(), png,
+            hash: await frameHash(png),
+          })
+          if (i % 6 === 5) post({ type: 'progress', text: `抽帧 ${i + 1}/${count}` })
         }
         // 抽完把时间轴拉回第 0 帧，别让编辑器停在最后一帧
         await m.applyTime(0, v)
