@@ -19,7 +19,7 @@
  * 数据全在服务端（`assets/projects/<项目>/pose_frames/<名字>/`），
  * 组件只负责读和发请求 —— 关掉浏览器再打开，候选和选择都还在。
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   createPoseRender, exportPoseRenderGif, exportPoseRenderGodot, exportPoseSetGif,
   fetchPoseRender, fetchProjectPoseSet, fetchProjectPoseSets, runPoseRender,
@@ -72,6 +72,14 @@ export default function PoseBatchPanel({
   const [godotBusy, setGodotBusy] = useState(false)
   const [gifFps, setGifFps] = useState(12)
   const playTimer = useRef<number | null>(null)
+
+  /** 停下并清定时器。**所有"手动跳帧"的动作都要走它** —— 只 setPlaying(false)
+   *  而不清 interval 的话，定时器还在跑、还在改 playIndex，再点 ▶ 会从半路开始。
+   *  （定义在 `run` 之前：开始出图时要先停下预览。） */
+  const stopPlay = useCallback(() => {
+    if (playTimer.current) { window.clearInterval(playTimer.current); playTimer.current = null }
+    setPlaying(false)
+  }, [])
 
   const job = node.job
   const running = job?.status === 'queued' || job?.status === 'running'
@@ -127,6 +135,7 @@ export default function PoseBatchPanel({
     if (!set) { setErr('先选一个姿势集'); return }
     if (!charPaths.length) { setErr('先接一张角色图（左侧「角色」端口）'); return }
     setErr('')
+    stopPlay()          // 开始出图就停下预览：帧表在变，播着看会前后不一致
     setBusy(true)
     try {
       // 同名先当成"继续往这个文件夹里加候选"；但如果里面是**另一套姿势集**的
@@ -173,7 +182,7 @@ export default function PoseBatchPanel({
       setBusy(false)
     }
   }, [projectId, setName, outName, charPaths, candidates, node.params,
-    model, matteBackend, onPatch])
+    model, matteBackend, onPatch, stopPlay])
 
   const onSelect = useCallback(async (frame: number, cand: number) => {
     if (!projectId || !renderName) return
@@ -226,31 +235,45 @@ export default function PoseBatchPanel({
     }
   }, [projectId, renderName, gifFps])
 
-  /** 播放：按顺序翻"当前选中的那一张"。源帧与结果共用一条时间轴 */
+  const frames = render?.frames || []
+  const srcFrames = source?.frames || []
+  /** 一条时间轴：源帧和成片的帧序号是同一套，取长的那个 */
+  const total = Math.max(srcFrames.length, frames.length)
+
+  /**
+   * 播放：按顺序翻帧。
+   *
+   * 播的是**舞台上的大图**（原始姿势 / 换好的成片并排）。只让 38px 的缩略格
+   * 高亮等于没播 —— 用户点 ▶ 看到的是"什么都没发生"（这就是上一版的毛病）。
+   * 所以舞台无论有没有出图都渲染，播放才有内容。
+   */
   const togglePlay = useCallback(() => {
     if (playTimer.current) { window.clearInterval(playTimer.current); playTimer.current = null }
     if (playing) { setPlaying(false); return }
-    const n = Math.max(source?.frames?.length || 0, render?.frames.length || 0)
-    if (!n) return
+    if (total < 1) return
     setPlaying(true)
-    let i = 0
-    setPlayIndex(0)
+    setPlayIndex(0)            // 每次从第一帧开始，行为可预期
     playTimer.current = window.setInterval(() => {
-      i = (i + 1) % n
-      setPlayIndex(i)
+      setPlayIndex((i) => (i + 1) % total)
     }, PLAY_MS)
-  }, [playing, source, render])
+  }, [playing, total])
 
-  const frames = render?.frames || []
-  const srcFrames = source?.frames || []
-  /** 播放时按索引同步走；不播放时跟着点选的那一帧 */
-  const shownFrame = playing
-    ? (frames[playIndex] || null)
-    : (frames.find((f) => f.index === pickFrame) || frames[0] || null)
-  const shownSrc = playing
-    ? (srcFrames[playIndex] || null)
-    : (srcFrames.find((f) => f.index === pickFrame) || srcFrames[0] || null)
+  /** 不播放时跟着点选的那一帧；找不到（比如还没选过）就回第一帧 */
+  const posOfPick = useMemo(() => {
+    const list = srcFrames.length ? srcFrames : frames
+    const i = list.findIndex((f) => f.index === pickFrame)
+    return i >= 0 ? i : 0
+  }, [srcFrames, frames, pickFrame])
+  const posNow = playing
+    ? Math.min(playIndex, Math.max(0, total - 1))
+    : posOfPick
+  const shownSrc = srcFrames[posNow] || srcFrames[0] || null
+  const shownFrame = frames[posNow] || frames[0] || null
   const resultUrl = shownFrame ? (shownFrame.candidates[shownFrame.selected]?.url || '') : ''
+  /** 有源帧或成片就能开舞台 —— 这是"播放有内容"的前提 */
+  const hasStage = srcFrames.length > 0 || frames.length > 0
+  /** 只有两边都有、且勾了对照，才并排；否则单栏（不摆一个空相框） */
+  const paired = !!render && srcFrames.length > 0 && compare
 
   if (!projectId) {
     return <div className="src-note">需要项目 id（先把项目保存一次）</div>
@@ -262,7 +285,7 @@ export default function PoseBatchPanel({
       <div className="pose-batch-bar">
         <select
           value={setName}
-          onChange={(e) => { setSetName(e.target.value); setPlaying(false) }}
+          onChange={(e) => { stopPlay(); setSetName(e.target.value) }}
           title="人偶编辑器里「存为姿势集」存下来的那一套"
         >
           <option value="">{sets.length ? '（选姿势集）' : '（这个项目还没有姿势集）'}</option>
@@ -284,11 +307,6 @@ export default function PoseBatchPanel({
             <span>{srcFrames.length} 帧 · 原始姿势</span>
             <button
               type="button" className="pose-batch-btn"
-              onClick={togglePlay}
-              title="按顺序播一遍，先确认这是不是你要的那套动作"
-            >{playing ? '■ 停' : '▶ 播'}</button>
-            <button
-              type="button" className="pose-batch-btn"
               disabled={gifBusy === 'src'}
               onClick={() => void exportGif('src')}
               title="把这套原始帧导成 GIF，发群里/发给同事看动作连不连贯"
@@ -303,21 +321,78 @@ export default function PoseBatchPanel({
               <span>{srcGif.frames} 帧 · {Math.round(srcGif.bytes / 1024)}KB</span>
             </div>
           )}
-          <div className="pose-batch-strip">
-            {srcFrames.map((f, i) => (
-              <button
-                key={f.index}
-                type="button"
-                className={`pose-batch-cell${(playing ? i === playIndex : f.index === pickFrame) ? ' on' : ''}`}
-                onClick={() => { setPlaying(false); setPickFrame(f.index) }}
-                onDoubleClick={() => onPreview?.(f.url, `第 ${f.index} 帧 · 原始`)}
-                title={`第 ${f.index} 帧${f.t ? ` · ${f.t.toFixed(2)}s` : ''}（双击放大）`}
-              >
-                <img src={f.url} alt={`源 ${f.index}`} draggable={false} />
-                <i>{f.index}</i>
-              </button>
-            ))}
+        </div>
+      )}
+
+      {/* ---- 3) 舞台：**播放的就是这块大图** ----
+          没出图时也渲染（只有源帧），否则抽完帧点 ▶ 屏幕上什么都不会动，
+          用户只能看到缩略格闪一下 —— 上一版就是这么"像只写了一半"的。 */}
+      {hasStage && (
+        <div className="pose-batch-stage">
+          <div className="pose-batch-stage-bar">
+            <button
+              type="button" className="pose-batch-btn"
+              onClick={togglePlay}
+              disabled={total < 2}
+              title={total < 2 ? '只有一帧，没什么可播的' : '从头播到尾：舞台上翻的就是这套帧'}
+            >{playing ? '■ 停' : '▶ 播'}</button>
+            <b>
+              {playing
+                ? `播放中 ${Math.min(playIndex + 1, total)}/${total}`
+                : `第 ${shownSrc?.index ?? shownFrame?.index ?? 1} / ${total} 帧`}
+            </b>
+            <span>{Math.round(1000 / PLAY_MS)}fps</span>
+            {render && srcFrames.length > 0 && (
+              <label className="pose-batch-toggle"
+                title="左边原始姿势、右边换好的结果，一屏对照">
+                <input type="checkbox" checked={compare}
+                  onChange={(e) => setCompare(e.target.checked)} />
+                对照原始
+              </label>
+            )}
           </div>
+          <div className={`pose-batch-pair${paired ? '' : ' single'}`}>
+            {srcFrames.length > 0 && (
+              <figure>
+                <img src={shownSrc?.url || ''} alt="原始姿势" draggable={false}
+                  onDoubleClick={() => shownSrc
+                    && onPreview?.(shownSrc.url, `第 ${shownSrc.index} 帧 · 原始`)} />
+                <figcaption>原始 · 第 {shownSrc?.index ?? '—'} 帧</figcaption>
+              </figure>
+            )}
+            {render && (
+              <figure>
+                {resultUrl
+                  ? <img src={resultUrl} alt="生成结果" draggable={false}
+                    onDoubleClick={() => onPreview?.(resultUrl, '生成结果')} />
+                  : <div className="pose-batch-empty">还没出图：点「全部生成」</div>}
+                <figcaption>
+                  结果{shownFrame
+                    ? ` · 第 ${shownFrame.index} 帧 · 候选 ${(shownFrame.selected ?? 0) + 1}/${shownFrame.candidates.length || 0}`
+                    : ''}
+                </figcaption>
+              </figure>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* 源帧缩略条：点哪帧舞台就停在哪帧（双击放大） */}
+      {srcFrames.length > 0 && (
+        <div className="pose-batch-strip">
+          {srcFrames.map((f, i) => (
+            <button
+              key={f.index}
+              type="button"
+              className={`pose-batch-cell${(playing ? i === playIndex : f.index === pickFrame) ? ' on' : ''}`}
+              onClick={() => { stopPlay(); setPickFrame(f.index) }}
+              onDoubleClick={() => onPreview?.(f.url, `第 ${f.index} 帧 · 原始`)}
+              title={`第 ${f.index} 帧${f.t ? ` · ${f.t.toFixed(2)}s` : ''}（双击放大）`}
+            >
+              <img src={f.url} alt={`源 ${f.index}`} draggable={false} />
+              <i>{f.index}</i>
+            </button>
+          ))}
         </div>
       )}
 
@@ -371,34 +446,7 @@ export default function PoseBatchPanel({
           <div className="pose-batch-head">
             <b>{render.name}</b>
             <span>{render.done}/{render.total} 帧</span>
-            <label className="pose-batch-toggle" title="左边原始姿势、右边生成结果，一屏对照">
-              <input
-                type="checkbox" checked={compare}
-                onChange={(e) => setCompare(e.target.checked)}
-              />
-              对照原始
-            </label>
-          </div>
-
-          <div className={`pose-batch-pair${compare ? '' : ' single'}`}>
-            {compare && (
-              <figure>
-                <img src={shownSrc?.url || ''} alt="原始姿势" draggable={false}
-                  onDoubleClick={() => shownSrc && onPreview?.(shownSrc.url, '原始姿势')} />
-                <figcaption>原始 · 第 {shownSrc?.index ?? '—'} 帧</figcaption>
-              </figure>
-            )}
-            <figure>
-              {resultUrl
-                ? <img src={resultUrl} alt="生成结果" draggable={false}
-                  onDoubleClick={() => onPreview?.(resultUrl, '生成结果')} />
-                : <div className="pose-batch-empty">还没出图：点「全部生成」</div>}
-              <figcaption>
-                结果{shownFrame
-                  ? ` · 第 ${shownFrame.index} 帧 · 候选 ${(shownFrame.selected ?? 0) + 1}/${shownFrame.candidates.length || 0}`
-                  : ''}
-              </figcaption>
-            </figure>
+            {running && <span>生成中…</span>}
           </div>
 
           {/* 导出：GIF（给团队审核）+ Godot 工程包（直接进引擎） */}
@@ -457,7 +505,7 @@ export default function PoseBatchPanel({
                   key={f.index}
                   type="button"
                   className={`pose-batch-cell${f.index === (shownFrame?.index ?? -1) ? ' on' : ''}${f.selectedIndex < 0 ? ' empty' : ''}`}
-                  onClick={() => { setPlaying(false); setPickFrame(f.index) }}
+                  onClick={() => { stopPlay(); setPickFrame(f.index) }}
                   title={`第 ${f.index} 帧（${f.candidates.length} 个候选）`}
                 >
                   {url ? <img src={url} alt={`第 ${f.index} 帧`} draggable={false} /> : <span>—</span>}

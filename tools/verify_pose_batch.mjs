@@ -60,7 +60,12 @@ function serve(port) {
   return new Promise((ok) => srv.listen(port, '127.0.0.1', () => ok(srv)))
 }
 
-const FRAMES = [1, 2, 3, 4].map((i) => ({ index: i, t: (i - 1) * 0.2, yaw: 0, url: IMG }))
+const FRAMES = [1, 2, 3, 4].map((i) => ({
+  index: i, t: (i - 1) * 0.2, yaw: 0,
+  // 每帧**不同的 URL**（同一个文件挂个 query）：播放要验"大图真的换了"，
+  // 四帧都指同一个 src 的话，断言永远是绿的却什么都没动
+  url: `${IMG}?f=${i}`,
+}))
 const RENDER = {
   name: '走路-成片', poseSet: '走路', prompt: 'a cat knight', created: 1,
   done: 3, total: 4,
@@ -94,7 +99,7 @@ async function main() {
 
   try {
     const page = await browser.newPage()
-    await page.setViewport({ width: 1400, height: 1100 })
+    await page.setViewport({ width: 1600, height: 1400 })
     page.on('pageerror', (e) => console.log('  [pageerror]', e.message))
 
     await page.setRequestInterception(true)
@@ -119,6 +124,12 @@ async function main() {
               id: 'n1', kind: 'posebatch', x: 420, y: 60, w: 400, view: 'expanded',
               poseRender: '走路-成片', charSource: { nodeId: 'n0' },
               params: { pcPoseSet: '走路', pcOut: '走路-成片', prompt: 'a cat knight' },
+            },
+            {
+              // **只选了姿势集**：没接角色图、没出过图。用来验
+              // ① 输出点能不能手动拖线接进来；② 没出图时舞台也要有内容可播。
+              id: 'n2', kind: 'posebatch', x: 900, y: 60, w: 400, view: 'expanded',
+              params: { pcPoseSet: '走路' },
             },
           ],
         })
@@ -180,7 +191,7 @@ async function main() {
       const n = [...document.querySelectorAll('.node')]
         .find((x) => (x.querySelector('.node-kind')?.textContent || '').includes('姿态批量'))
       return {
-        srcCells: n.querySelectorAll('.pose-batch-source .pose-batch-cell').length,
+        srcCells: n.querySelectorAll('.pose-batch > .pose-batch-strip .pose-batch-cell').length,
         pairFigures: n.querySelectorAll('.pose-batch-pair figure').length,
         pairImgs: [...n.querySelectorAll('.pose-batch-pair img')].map((i) => i.getAttribute('src')),
         captions: [...n.querySelectorAll('.pose-batch-pair figcaption')].map((c) => c.textContent || ''),
@@ -236,16 +247,144 @@ async function main() {
       expect(links.length > 0, `点「${label}」后出现下载链接`, links.join(' | '))
     }
 
-    const clip = await page.evaluate(() => {
-      const n = [...document.querySelectorAll('.node')]
-        .find((x) => (x.querySelector('.node-kind')?.textContent || '').includes('姿态批量'))
-      const r = n.getBoundingClientRect()
-      return { x: Math.max(0, r.x - 8), y: Math.max(0, r.y - 8), width: r.width + 16, height: r.height + 16 }
+    /* ---------------- A) 手动连线：n0 的输出点 → n2 的角色端口 ----------------
+       用户报的"下拉能选、拖线不行"：`onConnect` 的角色图白名单漏了 posebatch，
+       于是拖过去被静默忽略。这里**真的用鼠标拖**（pointerdown → pointerup），
+       走的是 Canvas 的 elementFromPoint 落点判定，不是直接改 state。 */
+    const pt = (sel, id) => page.evaluate((s, i) => {
+      const root = i ? document.querySelector(`[data-node-id="${i}"]`) : document
+      const el = root?.querySelector(s)
+      if (!el) return null
+      const r = el.getBoundingClientRect()
+      return { x: r.x + r.width / 2, y: r.y + r.height / 2 }
+    }, sel, id)
+
+    const genBtn = (id) => page.evaluate((nid) => {
+      const n = document.querySelector(`[data-node-id="${nid}"]`)
+      const b = [...(n?.querySelectorAll('.pose-batch-bar .pose-batch-btn') || [])]
+        .find((x) => (x.textContent || '').includes('全部生成'))
+      return b ? { disabled: b.disabled, title: b.getAttribute('title') || '' } : null
+    }, id)
+    const beforeBtn = await genBtn('n2')
+    expect(beforeBtn?.disabled === true, '没接角色图时「全部生成」是禁用的',
+      JSON.stringify(beforeBtn))
+
+    const beforeChar = await page.evaluate(
+      () => document.querySelectorAll('path.link.char').length)
+    const from = await pt('.conn.out', 'n0')
+    const to = await pt('[data-port="char"]', 'n2')
+    expect(!!from && !!to, '找得到输出点与角色端口', JSON.stringify({ from, to }))
+    if (from && to) {
+      await page.mouse.move(from.x, from.y)
+      await page.mouse.down()
+      await page.mouse.move(from.x + 40, from.y + 10, { steps: 4 })
+      await page.mouse.move(to.x, to.y, { steps: 12 })
+      await page.mouse.up()
+      await new Promise((r) => setTimeout(r, 400))
+    }
+    const afterChar = await page.evaluate(() => {
+      const n = document.querySelector('[data-node-id="n2"]')
+      return {
+        edges: document.querySelectorAll('path.link.char').length,
+        thumb: !!n?.querySelector('.src-thumb img'),
+        note: (n?.textContent || '').includes('还没接角色图'),
+      }
     })
+    expect(afterChar.edges === beforeChar + 1, '拖一条角色图连线（图上多一条 char 边）',
+      `${beforeChar} → ${afterChar.edges}`)
+    expect(afterChar.thumb, '拖完角色图缩略图出现在节点里')
+    expect(!afterChar.note, '「还没接角色图」提示消失')
+    // **这条是用户报的那个 bug 的正面证据**：接上之后按钮真的能点，
+    // 说明 `charPaths` 被解析出来了（不只是"界面上有个缩略图"）。
+    const afterBtn = await genBtn('n2')
+    expect(afterBtn?.disabled === false, '接上角色图后「全部生成」可点',
+      afterBtn?.title || '')
+
+    /* ---------------- B) 播放：没出图也要有内容 ----------------
+       上一版只在"已经有成片"时才渲染大图，抽完帧点 ▶ 屏幕上什么都不动 —— 这次
+       舞台必须独立渲染，播放时大图要跟着换（验的是 img src 变、不是格子里高亮）。 */
+    const stage = await page.evaluate(() => {
+      const n = document.querySelector('[data-node-id="n2"]')
+      return {
+        hasStage: !!n?.querySelector('.pose-batch-stage'),
+        figures: n?.querySelectorAll('.pose-batch-stage .pose-batch-pair figure').length,
+        playBtn: [...(n?.querySelectorAll('.pose-batch-stage-bar .pose-batch-btn') || [])]
+          .map((b) => b.textContent || ''),
+        label: n?.querySelector('.pose-batch-stage-bar b')?.textContent || '',
+        img: n?.querySelector('.pose-batch-stage figure img')?.getAttribute('src') || '',
+      }
+    })
+    expect(stage.hasStage, '没出图也有舞台（播放才有内容）')
+    expect(stage.figures === 1, '只有源帧时舞台单栏（不摆空相框）', String(stage.figures))
+    expect(stage.playBtn.some((t) => t.includes('播')), '舞台上有 ▶ 播', stage.playBtn.join('|'))
+    expect(stage.label.includes('/ 4 帧'), '舞台显示"第 N / 4 帧"', stage.label)
+
+    await page.evaluate(() => {
+      document.querySelector('[data-node-id="n2"] .pose-batch-stage-bar .pose-batch-btn')?.click()
+    })
+    // 等一个多 tick（125ms/帧），看大图有没有真的换
+    await new Promise((r) => setTimeout(r, 300))
+    const playing = await page.evaluate(() => {
+      const n = document.querySelector('[data-node-id="n2"]')
+      return {
+        label: n?.querySelector('.pose-batch-stage-bar b')?.textContent || '',
+        btn: n?.querySelector('.pose-batch-stage-bar .pose-batch-btn')?.textContent || '',
+        onCells: n?.querySelectorAll('.pose-batch > .pose-batch-strip .pose-batch-cell.on').length,
+        img: n?.querySelector('.pose-batch-stage figure img')?.getAttribute('src') || '',
+        caption: n?.querySelector('.pose-batch-stage figcaption')?.textContent || '',
+      }
+    })
+    expect(playing.label.includes('播放中'), '点播后标签变成"播放中 N/M"', playing.label)
+    expect(playing.btn.includes('停'), '播放时按钮变成「■ 停」', playing.btn)
+    expect(playing.onCells === 1, '缩略条同步高亮当前帧', String(playing.onCells))
+    // **这条才是"播放有内容"的硬证据**：大图 src 换了、帧号跟着走
+    expect(!!stage.img && playing.img !== stage.img, '播放时舞台大图真的在换',
+      `${stage.img} → ${playing.img}`)
+    expect(/第 [2-4] 帧/.test(playing.caption), '舞台标注跟着走到后面的帧', playing.caption)
+
+    // 趁还在播，留一张"播放中"的截图 —— 用户报的就是"点了播看不出在播"
+    {
+      mkdirSync(OUT, { recursive: true })
+      const box = await page.evaluate(() => {
+        const n = document.querySelector('[data-node-id="n2"]')
+        const r = n.getBoundingClientRect()
+        return { x: Math.max(0, r.x - 8), y: Math.max(0, r.y - 8),
+          width: Math.min(r.width + 16, 1600), height: Math.min(r.height + 16, 1400) }
+      })
+      await page.screenshot({ path: join(OUT, 'pose_batch_playing.png'), clip: box })
+      console.log(`  → ${join(OUT, 'pose_batch_playing.png')}`)
+    }
+
+    // 停下 → 回到静止态；再点一次从第 1 帧开始（不能停在哪就从哪开始）
+    await page.evaluate(() => {
+      document.querySelector('[data-node-id="n2"] .pose-batch-stage-bar .pose-batch-btn')?.click()
+    })
+    await new Promise((r) => setTimeout(r, 200))
+    const stopped = await page.evaluate(() => {
+      const n = document.querySelector('[data-node-id="n2"]')
+      return {
+        label: n?.querySelector('.pose-batch-stage-bar b')?.textContent || '',
+        btn: n?.querySelector('.pose-batch-stage-bar .pose-batch-btn')?.textContent || '',
+      }
+    })
+    expect(stopped.label.includes('第 ') && !stopped.label.includes('播放中'),
+      '停下后回到"第 N / M 帧"', stopped.label)
+    expect(stopped.btn.includes('播'), '停下后按钮变回「▶ 播」', stopped.btn)
+
     mkdirSync(OUT, { recursive: true })
-    const shot = join(OUT, 'pose_batch_node.png')
-    await page.screenshot({ path: shot, clip })
-    console.log(`  → ${shot}`)
+    for (const [id, file] of [['n1', 'pose_batch_node.png'], ['n2', 'pose_batch_source.png']]) {
+      const box = await page.evaluate((nid) => {
+        const n = document.querySelector(`[data-node-id="${nid}"]`)
+        if (!n) return null
+        const r = n.getBoundingClientRect()
+        return { x: Math.max(0, r.x - 8), y: Math.max(0, r.y - 8),
+          width: Math.min(r.width + 16, 1600), height: Math.min(r.height + 16, 1400) }
+      }, id)
+      if (!box) continue
+      const shot = join(OUT, file)
+      await page.screenshot({ path: shot, clip: box })
+      console.log(`  → ${shot}`)
+    }
   } finally {
     await browser.close()
     srv.close()

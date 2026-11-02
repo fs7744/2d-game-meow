@@ -1065,8 +1065,10 @@ export default function App() {
     const target = nodesRef.current.find((n) => n.id === to)
     if (!target || target.id === from) return
     if (field === 'char') {
-      // 只有这两类节点有角色图输入；别的节点拖过来静默忽略，别乱塞字段
-      if (!['poseclone', 'spriteswap'].includes(target.kind)) return
+      // 有角色图输入的节点：角色迁移 / 序列帧替换 / 姿态批量。
+      // **新增节点类型时必须加到这里** —— 漏了就是"下拉能选、拖线没反应"，
+      // 而且不报错，用户只会觉得连线功能坏了（姿态批量就踩过这一条）。
+      if (!['poseclone', 'spriteswap', 'posebatch'].includes(target.kind)) return
       patchNode(to, { charSource: { nodeId: from } })
       return
     }
@@ -1183,18 +1185,32 @@ export default function App() {
     return up.job?.path || up.job?.raw
   }, [])
 
+  /**
+   * 一个节点**产出的图片路径**（磁盘相对路径）。
+   *
+   * 「角色图」永远是**上游节点的产物**，不是上游节点自己的 `charSource`。
+   * 这两件事很容易搞混：`image` 节点是 `image.path`，生成类节点是
+   * `job.path`（原图）或 `job.raw`。
+   *
+   * 以前「姿态批量」把上游节点整个丢给 `charPathsOf`，它读的是上游节点自己
+   * 的 `charSource` —— 对 `image` / `gen` 节点永远是 undefined，于是**接好了
+   * 也一直报"先接一张角色图"**。要按引用取路径就得走这个函数。
+   */
+  const imagePathOf = useCallback((n?: GenNode): string | undefined => {
+    if (!n) return undefined
+    if (n.kind === 'image') return n.image?.path
+    return n.job?.path || n.job?.raw
+  }, [])
+
   /** 一个节点上所有的角色参考图：`charSource` 是第一张，`charSources` 是额外的。
    *  多给几张同一角色的不同角度，模型对发型/服装细节的把握明显更稳。 */
   const charPathsOf = useCallback((n: GenNode): string[] => {
     const pick = (c?: NodeCharSource): string | undefined => {
       if (!c) return undefined
       if (c.path) return c.path
-      const up = c.nodeId
+      return imagePathOf(c.nodeId
         ? nodesRef.current.find((x) => x.id === c.nodeId)
-        : undefined
-      if (!up) return undefined
-      if (up.kind === 'image') return up.image?.path
-      return up.job?.path || up.job?.raw
+        : undefined)
     }
     const out: string[] = []
     for (const c of [n.charSource, ...(n.charSources ?? [])]) {
@@ -1202,7 +1218,7 @@ export default function App() {
       if (p && !out.includes(p)) out.push(p)
     }
     return out
-  }, [])
+  }, [imagePathOf])
 
   const generate = useCallback(async (id: string) => {
     const node = nodesRef.current.find((n) => n.id === id)
@@ -1778,10 +1794,11 @@ export default function App() {
             void savePoseToLibrary(name, pose, yaw, preview)}
           onSavePoseSet={savePoseSet}
           /* 姿态批量要的是**上游节点产物的磁盘路径**（`charSource` 只存 nodeId，
-             路径得按节点现算）—— 直接把解析函数传下去，别在卡片里猜 */
+             路径得按节点现算）。注意这里取的是**上游节点自己的产图**，
+             不是它的 charSource —— 传错就是"接了也一直说没接"。 */
           charPathsOf={(id) => {
-            const up = id ? nodesRef.current.find((x) => x.id === id) : undefined
-            return up ? charPathsOf(up) : []
+            const p = imagePathOf(id ? nodesRef.current.find((x) => x.id === id) : undefined)
+            return p ? [p] : []
           }}
           onOpenPoseLibrary={() => openLibrary('pose')}
           onImportPose={(id, file) => importPoseFromImage(id, file)}

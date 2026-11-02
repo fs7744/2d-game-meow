@@ -1168,6 +1168,14 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
   grid-template-columns: repeat(auto-fill, minmax(42px, 1fr));
 }
 .pose-batch-strip { grid-template-columns: repeat(auto-fill, minmax(38px, 1fr)); }
+/* 结果网格用 `auto-fit`：只有 4 帧时 auto-fill 会留一排空格子、把缩略图挤到
+   44px 宽（截图里就是这样）。auto-fit 会把空列收掉，少帧也能看清。
+   上限 82px 是给"一整套 12 帧"留的 —— 再大就两屏看不完了。 */
+.pose-batch-grid { grid-template-columns: repeat(auto-fit, minmax(52px, 82px)); }
+/* 结果网格用 `auto-fit`：只有 4 帧时 auto-fill 会留一排空格子、把缩略图挤到
+   44px 宽（截图里就是这样）。auto-fit 会把空列收掉，少帧也能看清。
+   上限 82px 是给"一整套 12 帧"留的 —— 再大就两屏看不完了。 */
+.pose-batch-grid { grid-template-columns: repeat(auto-fit, minmax(52px, 82px)); }
 .pose-batch-cell {
   position: relative; padding: 0; border: 1px solid var(--line);
   background: #12141c; aspect-ratio: 1; overflow: hidden; cursor: pointer;
@@ -1218,6 +1226,44 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
 }
 /* 姿态批量节点的正文：比单张宽松一点，别把对照图挤扁 */
 .posebatch-body { gap: 6px; }
+
+/* 舞台：播放翻的就是这块大图。没出图时只有左边「原始」一栏，也要够大 ——
+   38px 的缩略格看不出动作，那正是上一版"点播什么都不动"的根因。 */
+.pose-batch-stage { display: flex; flex-direction: column; gap: 3px; }
+.pose-batch-stage-bar {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 9px; color: var(--muted);
+}
+.pose-batch-stage-bar b {
+  color: var(--white); font-weight: 500; font-family: var(--mono);
+  white-space: nowrap;
+}
+.pose-batch-stage-bar > span {
+  color: var(--muted-2); font-family: var(--mono);
+}
+.pose-batch-stage-bar .pose-batch-toggle { margin-left: auto; }
+.pose-batch-pair.single img { height: 260px; }
+/* 单栏时框跟着图走，别留一条 168px 高的空白带 */
+.pose-batch-pair.single .pose-batch-empty { height: 260px; }
+
+/* 舞台：播放翻的就是这块大图。没出图时只有左边「原始」一栏，也要够大 ——
+   38px 的缩略格看不出动作，那正是上一版"点播什么都不动"的根因。 */
+.pose-batch-stage { display: flex; flex-direction: column; gap: 3px; }
+.pose-batch-stage-bar {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 9px; color: var(--muted);
+}
+.pose-batch-stage-bar b {
+  color: var(--white); font-weight: 500; font-family: var(--mono);
+  white-space: nowrap;
+}
+.pose-batch-stage-bar > span {
+  color: var(--muted-2); font-family: var(--mono);
+}
+.pose-batch-stage-bar .pose-batch-toggle { margin-left: auto; }
+.pose-batch-pair.single img { height: 260px; }
+/* 单栏时框跟着图走，别留一条 168px 高的空白带 */
+.pose-batch-pair.single .pose-batch-empty { height: 260px; }
 /* 导出行：GIF / Godot 两个按钮 + 帧率 */
 .pose-batch-export {
   display: flex; align-items: center; gap: 5px; flex-wrap: wrap; margin-top: 4px;
