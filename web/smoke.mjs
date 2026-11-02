@@ -2647,19 +2647,11 @@ function check(name, cond, extra = '') {
   check('推荐值写的是具体数字（不是"视情况"）',
     /\d/.test(stepsTip.split('推荐：')[1] || ''), stepsTip)
 
-  // 「像素块」曾经漏过一条：hint 查不到键时返回空串，界面上只是没说明、不报错。
-  // 现在既补了说明，也让 hint 返回显眼文案 + 加了静态检查。
-  // 像素块默认藏在「自定义参数」风格下——先切过去再查 tooltip
-  const stSel3 = [...doc.querySelectorAll('select')].find((x) =>
-    [...x.options].some((o) => o.textContent.includes('自定义参数')))
-  if (stSel3) {
-    const s3 = Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value').set
-    s3.call(stSel3, 'custom')
-    stSel3.dispatchEvent(new win.Event('change', { bubbles: true }))
-    await new Promise((r) => setTimeout(r, 120))
-  }
-  const pxTip = lab('像素块')?.getAttribute('title') || ''
-  check('像素块有 tooltip（自定义档下）', pxTip.includes('有效像素'), pxTip)
+  // 像素块/色数**不再让用户填**（2026-11-02）：那两个数强耦合，填错不报错、
+  // 只是出图看着不对；而且「只填色数」以前还会硬切 alpha、在透明图边上压出白边。
+  // 现在一档「产出风格」决定全部，这里钉住「不许再暴露回去」。
+  check('参数区没有「像素块」输入', !lab('像素块'), '像素块不该再暴露')
+  check('参数区没有「色数」输入', !lab('色数'), '色数不该再暴露')
   const allTips = [...nd().querySelectorAll('label[title]')]
     .map((l) => l.getAttribute('title') || '')
   check('没有「未定义说明」的占位',
@@ -2721,61 +2713,52 @@ function check(name, cond, extra = '') {
     await wait(150)
     check('连续切到「8-bit」也生效', stylePick()?.value === 'pixel8', stylePick()?.value)
 
-    // 参数要真的落地，不只是下拉显示对：切到自定义档看像素块的输入值
-    // （8-bit 档的 pixel=8；连调 bug 下这里会是切换前的 6）
-    const s2 = stylePick()
-    setSelValue.call(s2, 'custom')
-    s2.dispatchEvent(new win.Event('change', { bubbles: true }))
-    await wait(150)
-    check('切档位时像素块真的写进去了（8-bit → 8）',
-      Number(lab('像素块')?.querySelector('input')?.value) === 8,
-      lab('像素块')?.querySelector('input')?.value)
+    // 参数要真的落地，不只是下拉显示对。旧写法是切到「自定义」看像素块输入值，
+    // 但自定义档已经不给手选了 —— 改成看**尺寸**：各档自带尺寸，切过去必须跟着变
+    // （spriteIll 是 1024²，spriteHi 是 768²）。这同样是"一次改多个字段"的证据。
+    const sizeSel = () => [...doc.querySelectorAll('select')]
+      .find((x) => [...x.options].some((o) => o.textContent.includes('1024×1024')))
+    setSelValue.call(stylePick(), 'spriteIll')
+    stylePick().dispatchEvent(new win.Event('change', { bubbles: true }))
+    await wait(200)
+    check('切到「像素精灵·Illustrious」后尺寸跟着变 1024²',
+      (sizeSel()?.value || '').includes('1024'), sizeSel()?.value)
     // 切回像素精灵·高清，为后续用例保持默认态
     const s3 = stylePick()
     setSelValue.call(s3, 'spriteHi')
     s3.dispatchEvent(new win.Event('change', { bubbles: true }))
     await wait(150)
+    check('切回后尺寸回到 768²',
+      (sizeSel()?.value || '').includes('768'), sizeSel()?.value)
   }
 
-  // 像素块/色数只在「自定义参数」风格下暴露——先切过去
-  const styleSel = [...doc.querySelectorAll('select')].find((x) =>
-    [...x.options].some((o) => o.textContent.includes('自定义参数')))
-  check('有「产出风格」下拉（含 7 档）', !!styleSel && styleSel.options.length >= 7,
-    styleSel?.options.length)
+  // 「自定义参数」不再是可选档位：像素块/色数这两个手填入口已经删掉。
+  // 旧存档里参数偏离档位时下拉会显示这个只读条目，但不该能选。
+  const styleSel = stylePick()
+  const customOpt = [...(styleSel?.options || [])]
+    .find((o) => o.textContent.includes('自定义参数'))
+  check('「产出风格」下拉还在', !!styleSel)
+  check('「自定义参数」只读、不可选', !!customOpt && customOpt.disabled === true,
+    String(customOpt?.disabled))
+  check('风格档位仍是 7 档可选项',
+    [...(styleSel?.options || [])].filter((o) => !o.disabled).length === 7,
+    String([...(styleSel?.options || [])].filter((o) => !o.disabled).length))
   check('默认不暴露像素块（由风格档位决定）', !lab('像素块'), '像素块本该隐藏')
-  const selSetter = Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value').set
-  selSetter.call(styleSel, 'custom')
-  styleSel.dispatchEvent(new win.Event('change', { bubbles: true }))
-  await wait(150)
-  check('切到自定义后出现像素块与色数', !!lab('像素块') && !!lab('色数'))
+  check('默认不暴露色数（由风格档位决定）', !lab('色数'), '色数本该隐藏')
 
-  // 768² 配像素块 6 → 128px 有效像素（参考图那种密度）
-  setNum(lab('像素块').querySelector('input'), 6)
-  await wait(120)
-  check('显示有效像素（768/6 = 128px）',
-    (lab('像素块').textContent || '').includes('128px'),
-    lab('像素块').textContent)
-  check('正常密度不告警', !doc.querySelector('.node .warn'), doc.querySelector('.warn')?.textContent)
-
-  // 手输 64 会被夹到 16（max 挡不住手输），且给出告警
-  setNum(lab('像素块').querySelector('input'), 64)
-  await wait(120)
-  check('手输超过上限时被夹住（64 → 16）',
-    lab('像素块').querySelector('input').value === '16',
-    lab('像素块').querySelector('input').value)
-  check('极端密度给出告警并说明后果',
-    (doc.querySelector('.node .warn')?.textContent || '').includes('有效像素'),
-    doc.querySelector('.node .warn')?.textContent)
-
-  check('像素块告警场景无脚本错误', errors.length === 0, errors[0] || '')
+  check('像素块/色数入口场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 
-// 31) 像素化是显式开关（由用户控制要不要）
+// 31) 色数 / 像素块不再暴露给用户（画风由档位 + 提示词决定）
+//
+// 2026-11-02：用户反馈「业界其他 AI 生图没让人填色数和像素块」，而且
+// **「只填色数」以前会硬切 alpha** —— 白底预乘的过渡带（RGB 220~240）被
+// 实化成完全不透明的白，深色背景上就是一圈白边。两个入口一起删掉：
+// 手填的参数不再存在，后端的量化也只跟着「像素化」走（见 test_paint_path）。
 {
   const { dom, errors } = await boot('?demo=1')
   const doc = dom.window.document
-  const win = dom.window
   const wait = (ms) => new Promise((r) => setTimeout(r, ms))
   await wait(500)
   doc.querySelector('details.fold').open = true
@@ -2783,45 +2766,20 @@ function check(name, cond, extra = '') {
 
   const lab = (name) => [...doc.querySelectorAll('label')]
     .find((l) => (l.textContent || '').trim().startsWith(name))
-  // React 的 checkbox 走 click（ChangeEventPlugin 对 checkbox/radio 监听 click），
-  // 派发 change 不会触发 onChange——这是测试写法问题，不是功能问题。
-  const clickCheck = (el) =>
-    el.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  check('「更多设置」展开后没有像素化开关', !lab('像素化'), '像素化开关本该删除')
+  check('没有色数输入框', !lab('色数'))
+  check('没有像素块输入框', !lab('像素块'))
 
-  // 像素化开关只在「自定义参数」风格下暴露——先切过去
-  const stSel2 = [...doc.querySelectorAll('select')].find((x) =>
-    [...x.options].some((o) => o.textContent.includes('自定义参数')))
-  if (stSel2) {
-    const set2 = Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value').set
-    set2.call(stSel2, 'custom')
-    stSel2.dispatchEvent(new win.Event('change', { bubbles: true }))
-    await wait(150)
-  }
+  // 档位仍在，且都带一句「这一档出什么」的说明
+  const styleSel = [...doc.querySelectorAll('select')].find((x) =>
+    [...x.options].some((o) => o.textContent.includes('像素精灵（16-bit）')))
+  check('有「产出风格」下拉', !!styleSel)
+  check('风格说明可见',
+    (doc.querySelector('.node .src-note')?.textContent || '').length > 6,
+    doc.querySelector('.node .src-note')?.textContent)
 
-  const pxToggle = lab('像素化')?.querySelector('input')
-  check('有「像素化」开关（自定义档下）', !!pxToggle)
-  check('默认是开的（推荐值 6）', pxToggle?.checked === true, String(pxToggle?.checked))
-  check('像素块输入框可用', lab('像素块')?.querySelector('input')?.disabled === false)
-
-  // 关掉 → 像素块置 0 并禁用
-  clickCheck(pxToggle)
-  await wait(120)
-  check('关掉后像素块变 0', lab('像素块')?.querySelector('input')?.value === '0',
-    lab('像素块')?.querySelector('input')?.value)
-  check('关掉后像素块输入框禁用',
-    lab('像素块')?.querySelector('input')?.disabled === true)
-  check('关掉后不再显示有效像素', (lab('像素块')?.textContent || '').includes('关'),
-    lab('像素块')?.textContent)
-  check('关掉后不再告警', !doc.querySelector('.node .warn'), doc.querySelector('.warn')?.textContent)
-
-  // 再打开 → 恢复默认 6
-  clickCheck(lab('像素化').querySelector('input'))
-  await wait(120)
-  check('再打开恢复成 6（128px 有效像素）',
-    lab('像素块')?.querySelector('input')?.value === '6',
-    lab('像素块')?.querySelector('input')?.value)
-
-  check('像素化开关场景无脚本错误', errors.length === 0, errors[0] || '')
+  // 契约兜底提示还在（选 none 时警告"没有全身/居中约束"）
+  check('色数/像素块入口场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 

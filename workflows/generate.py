@@ -235,10 +235,11 @@ def _postprocess(img: Image.Image, eng: Engine, *, matte: bool, matte_backend: s
     edge: list[str] = []
     subjects = None
     cut = False
-    # 像素化档（pixel>1 或 palette>0）才要「硬边」：像素画是 0/255 的实心块。
-    # 插画档要「柔边」——同样是收 alpha，硬切会把 1~2px 的抗锯齿过渡砍成台阶，
-    # 那就是「没勾像素化却看着像像素」的直接来源（实测最刺眼的一档）。
-    hard_edge = pixel > 1 or palette > 0
+    # 像素化档（pixel>1）才要「硬边」：像素画是 0/255 的实心块。
+    # **只看 pixel，不看 palette** —— 以前写的是 `pixel > 1 or palette > 0`，
+    # 于是「只填了个色数」也被当成像素档：alpha 被硬切、过渡带被实化成白边。
+    # 色数只是像素画内部的减色步骤，不该单独构成像素化（用户报的"白边"就是它）。
+    hard_edge = pixel > 1
 
     if matte and not transparent:
         # 保留 alpha：转回 RGB 会把透明区域压成黑色，等于白抠
@@ -301,14 +302,18 @@ def _postprocess(img: Image.Image, eng: Engine, *, matte: bool, matte_backend: s
         # 像素化**之前**的图（已抠图）。质量闸门要用它数关节：
         # 128 有效像素、32 色的像素画上，姿态模型本来就检不出几个点，
         # 拿产物评分会把好帧判成废帧，白白触发补提。
-        info["pre_pixel"] = img.copy() if (pixel > 1 or palette) else img
+        info["pre_pixel"] = img.copy() if pixel > 1 else img
     if pixel > 1:
         # 中位数取色：BOX 平均会把背景色按比例混进边缘块，轮廓外挂一圈灰边
         #（看着像抗锯齿）。实测并排对比，中位数的边缘更硬、色块更纯。
         img = pp.pixelate(img, pixel, grid_align=True, sample='median')
-    if palette:
-        img = pp.quantize_palette(img, palette)
-    if clean_iso and (pixel > 1 or palette):
+    if palette and pixel > 1:
+        # **减色只在像素化里做**。单独设色数不再生效：不缩格子的"限色"只会
+        # 把平滑渐变压成色带，而那既不是像素画也不是插画，用户也看不出是
+        # 哪个参数造成的。`binary_alpha=True` 是像素档的硬边（0/255），
+        # 已经跟 pixel 绑定，不会再污染插画路径。
+        img = pp.quantize_palette(img, palette, binary_alpha=True)
+    if clean_iso and pixel > 1:
         # 量化之后才去孤立点：量化本身就会把相邻色合并，此时再判「孤立」才准
         img = pp.clean_isolated(img, passes=clean_iso)
     return img, edge, subjects
@@ -688,7 +693,7 @@ def _qwen_txt2img(eng: Engine, *, prompt: str, negative: Optional[str],
             # 不像素化时用"无风格词"的构图契约：pixel art / hard outline /
             # 压 anti-aliasing 这几条会把任何画风都拽出像素味（实测）
             prompt, negative = presets.build(
-                prompt, negative, preset, pixelate=(pixel > 1 or palette > 0))
+                prompt, negative, preset, pixelate=pixel > 1)
     stripped = False
     if transparent:
         # 透明底时把「白底/纯色底」这类措辞清掉：它们是和透明声明直接打架的
@@ -705,7 +710,7 @@ def _qwen_txt2img(eng: Engine, *, prompt: str, negative: Optional[str],
     seconds = dt()
     width, height = img.size
     # 透明底的原图自带 alpha，再跑抠图会把 alpha 当背景重算一遍，纯属浪费
-    raw = img.copy() if (pixel > 1 or palette) else None
+    raw = img.copy() if pixel > 1 else None
     info: Dict[str, Any] = {}
     img2, edge, subjects = _postprocess(
         img, eng, matte=matte, matte_backend=matte_backend,
@@ -826,7 +831,7 @@ def _qwen_img2img(eng: Engine, *, init_image: str | Path, prompt: str,
     """
     if preset and preset != "none":
         prompt, negative = presets.build(
-            prompt, negative, preset, pixelate=(pixel > 1 or palette > 0))
+            prompt, negative, preset, pixelate=pixel > 1)
     if transparent:
         # 同文生图：透明底时清掉「白底」这类与透明声明打架的措辞
         prompt, _stripped = _strip_bg_words(prompt)
@@ -1785,7 +1790,7 @@ def _qwen_pose_clone(eng: Engine, *, pose_image: str | Path,
         output_resolution=max(width, height))
     seconds = dt()
     width, height = out.size
-    raw = out.copy() if (matte or pixel > 1 or palette) else None
+    raw = out.copy() if (matte or pixel > 1) else None
     matte_info: Dict[str, Any] = {}
     out, edge, subjects = _postprocess(
         out, eng, matte=matte, matte_backend=matte_backend, denoise=denoise,
@@ -2034,7 +2039,7 @@ def _qwen_vnccs(eng: Engine, *, pose_image: str | Path,
         eng.unload_loras(pipe, scope="temp")
     seconds = dt()
 
-    raw = out.copy() if (matte or pixel > 1 or palette) else None
+    raw = out.copy() if (matte or pixel > 1) else None
     matte_info: Dict[str, Any] = {}
     # **transparent 必须传下去**：模型出了 RGBA 之后，alpha 还要过一遍
     # 「可信就复用、起雾就硬切/重抠」的判断。漏传的后果是带雾的 alpha 直接进量化，

@@ -128,13 +128,29 @@ def pixelate(img: Image.Image, block: int, resample=Image.BOX,
     return small.resize((w, h), Image.NEAREST)
 
 
-def quantize_palette(img: Image.Image, colors: int = 16) -> Image.Image:
-    """压到固定色数（默认 16 色），保留 alpha。PIL 的中位切分，确定性可复现。"""
+def quantize_palette(img: Image.Image, colors: int = 16,
+                     binary_alpha: bool = False) -> Image.Image:
+    """压到固定色数（默认 16 色），**alpha 默认原样保留**。
+
+    **不要再默认把 alpha 二值化**（以前是 `>127 → 255`）。那一步会把模型
+    白底预乘出来的半透明过渡带（RGB 大约 220~240）变成**完全不透明的近白
+    像素**——深色背景上就是一圈实心白边，而且用户只是调了「色数」一个参数，
+    根本不知道自己在做像素化。实测一张带 12px 过渡带的图量化到 32 色后，
+    5708 个半透明像素全部消失、其中 1556 个被强行变成不透明（平均亮度 223）。
+
+    硬边是**像素画的风格**，应该由「像素化」（pixel>1）决定，而不是量化色的
+    副作用。`binary_alpha=True` 只给显式的像素管线用（那里确实是 0/255 的世界）。
+
+    PIL 的中位切分，确定性可复现。
+    """
     rgba = img.convert("RGBA")
     alpha = rgba.getchannel("A")
     pal = rgba.convert("RGB").quantize(colors=colors, method=Image.MEDIANCUT, dither=Image.NONE)
     out = pal.convert("RGBA")
-    out.putalpha(alpha.point(lambda a: 255 if a > 127 else 0))  # 硬边 alpha
+    if binary_alpha:
+        out.putalpha(alpha.point(lambda a: 255 if a > 127 else 0))
+    else:
+        out.putalpha(alpha)
     return out
 
 

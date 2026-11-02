@@ -59,13 +59,40 @@ def test_paint_path_keeps_soft_alpha_edges():
 
 
 def test_pixel_path_still_hardens_alpha():
-    """像素化档：维持旧的硬切行为（像素画就是要 0/255）。"""
-    out, info = _run(_foggy_rgba(), pixel=0, palette=32)
+    """像素化档（pixel>1）：维持旧的硬切行为（像素画就是要 0/255）。"""
+    out, info = _run(_foggy_rgba(), pixel=6, palette=32)
     a = np.asarray(out.convert("RGBA").getchannel("A"))
     assert info.get("alpha_hardened") is True, info
     assert info.get("alpha_softened") is None
     assert int(a[9, 20]) == 0, "像素档的过渡带应被硬切成 0"
     assert int(a[20, 20]) == 255
+
+
+def test_palette_alone_is_not_pixelation():
+    """**只填色数 ≠ 像素化**（用户报的白边就是这个）。
+
+    以前 `hard_edge = pixel > 1 or palette > 0`，于是「色数 32、像素块 0」
+    也会硬切 alpha、把过渡带实化成白；契约词还会换成 pixel art。
+    现在色数只是像素化内部的减色步骤，单独给值不改变任何东西。
+    """
+    out, info = _run(_foggy_rgba(), pixel=0, palette=32)
+    a = np.asarray(out.convert("RGBA").getchannel("A"))
+    assert info.get("alpha_hardened") is None, "只填色数不该硬切"
+    assert int(a[9, 20]) == 200, "过渡带被砍了"
+    assert ((a >= 16) & (a <= 240)).sum() > 0, "过渡带应保留"
+
+    # 颜色也不能被量化：造一张 60 级渐变，量化到 32 色会明显掉色数
+    h, w = 60, 60
+    arr = np.zeros((h, w, 4), np.uint8)
+    arr[..., 0] = np.mgrid[0:h, 0:w][1] * 4
+    arr[..., 1] = np.mgrid[0:h, 0:w][0] * 4
+    arr[..., 2] = 120
+    arr[..., 3] = 255
+    grad = Image.fromarray(arr, "RGBA")
+    before = len({p[:3] for p in grad.getdata()})
+    out2, _ = _run(grad, pixel=0, palette=32)
+    after = len({p[:3] for p in out2.convert("RGB").getdata()})
+    assert after > 32, f"色数被偷偷量化了：{before} → {after}"
 
 
 def test_paint_path_does_not_erode_thin_details():

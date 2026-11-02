@@ -73,9 +73,23 @@ def test_quantize_limits_colors():
     assert len(colors) <= 16
 
 
-def test_quantize_alpha_is_binary():
+def test_quantize_keeps_alpha_gradient():
+    """**量化不再动 alpha**。
+
+    以前这里断言「量化后 alpha 只剩 0/255」，那是错的：模型白底预乘出来的
+    半透明过渡带（RGB 220~240）会被实化成完全不透明的近白像素，深色背景上
+    就是一圈实心白边。而用户只是在「色数」里填了个数字，根本不知道自己在
+    做像素化。硬边要由「像素化」决定，见 test_quantize_binary_alpha_when_asked。
+    """
     im = Image.new("RGBA", (16, 16), (10, 20, 30, 100))   # 半透明
     q = pp.quantize_palette(im, colors=8)
+    assert all(p[3] == 100 for p in q.getdata()), "量化把 alpha 改了"
+
+
+def test_quantize_binary_alpha_when_asked():
+    """像素档显式要硬边时才二值化。"""
+    im = Image.new("RGBA", (16, 16), (10, 20, 30, 100))
+    q = pp.quantize_palette(im, colors=8, binary_alpha=True)
     assert all(p[3] in (0, 255) for p in q.getdata())
 
 

@@ -115,19 +115,6 @@ const PARAM_HINTS: Record<string, { what: string; effect: string; rec: string }>
     effect: '决定最终像素密度；0=自动检测输入图的网格',
     rec: '0（自动）。已知原图是 128px 像素画时直接填 128',
   },
-  像素化: {
-    what: '要不要把出图变成像素画（把画面按色块栅格化）',
-    effect: '关掉就是普通插画/立绘；打开才做像素化。像素化会**丢掉大量细节**——'
-      + '同一句提示词，1024² 生成再砍成 128 有效像素，比 768² 生成再砍成 128 明显更精细',
-    rec: '要游戏素材就开（128px 有效像素是标准精灵尺寸）；要立绘/宣传图就关',
-  },
-  像素块: {
-    what: '像素化时每个色块的边长（0 = 不像素化）',
-    effect: '块越大，有效像素越少、越"像素"；块太小会保留 AI 图的软边和噪点，'
-      + '看着像插画而不是像素画',
-    rec: '768² 用 6（正好降到 128 有效像素，标准精灵尺寸）；512² 用 4；'
-      + '要 64px 的素材就用 12',
-  },
   色数: {
     what: '量化的调色板色数（0=不量化）',
     effect: '越少越像素；太少丢层次，太多脏',
@@ -413,18 +400,6 @@ export default function GenNodeCard({
   const isBg = node.kind === 'bg'
   const isInpaint = node.kind === 'inpaint'
   const isAiRepaint = node.kind === 'airepaint'
-  /**
-   * 像素化之后**还剩多少有效像素**：边长 / 像素块。
-   *
-   * 必须显示出来：这个字段很容易被理解成"想要的成品尺寸"（比如填 64 想要 64px 的
-   * 像素画），实际它是"每个色块多少像素"——512 配 64 得到的是 **8×8**，
-   * 细节必然全没。只靠 tooltip 拦不住这种误用。
-   */
-  const effPx = p.pixel > 1
-    ? Math.max(1, Math.round(Math.max(p.width, p.height) / p.pixel))
-    : Math.max(p.width, p.height)
-  // 参考图那种像素角色大约 128px；低到 64px 以下细节就必然糊掉
-  const pxWarn = p.pixel > 1 && (effPx < 64 || (p.palette > 0 && p.palette < 8))
   // 候选数上限：后端按"本机总显存"给（SDXL@768 是 3、@1024 只有 1）。
   // 用户填超了就夹住——不是不让他填，是那个配置会让耗时崩掉且不报错。
   const candCap = Math.max(1, Math.min(6, maxCandidates ?? 6))
@@ -566,8 +541,8 @@ export default function GenNodeCard({
    * 只有 palette 落地——`styleOf()` 发现参数偏离档位就回退成「自定义参数」，
    * 用户看到的现象是**下拉怎么点都弹回去**。
    *
-   * 顺带记一条：给这种多字段联动写测试时别只测「自定义」档（它只改一个字段，
-   * 恰好绕过 bug），要测真会改多个字段的档位。
+   * 顺带记一条：给这种多字段联动写测试时别只测「只改一个字段」的档位，
+   * 要测真会改多个字段的档位。
    */
   const setParams = (patch: Partial<GenParams>) =>
     onPatch({ params: { ...p, ...patch } })
@@ -2537,7 +2512,15 @@ export default function GenNodeCard({
                   if (st.model && st.model !== model) onModel?.(st.model, { keepNodes: true })
                 }}
               >
-                {GEN_STYLES.map((x) => (
+                {/* 「自定义参数」不提供手选：像素块/色数这两个数强耦合
+                    （有效像素 = 宽 ÷ 块），填错不报错、只是出图看着不对。
+                    业界（Midjourney / 即梦 / 各家 web UI）都不让用户填色数
+                    和像素块——画风由提示词和档位决定。旧存档里参数偏离档位时
+                    `styleOf` 会返回 custom，这里给一个只读条目兜住回显。 */}
+                <option value="custom" disabled>
+                  自定义参数（旧存档，不可选）
+                </option>
+                {GEN_STYLES.filter((x) => x.v !== 'custom').map((x) => (
                   <option key={x.v} value={x.v}>
                     {x.label}
                   </option>
@@ -2631,58 +2614,12 @@ export default function GenNodeCard({
                     模型直接输出 alpha，不用再抠图；此时「抠图」会被跳过。
                   </p>
                 )}
-                {/* 像素块 / 色数**只在「自定义」风格下暴露**：
-                    平时由产出风格一档决定（用户不用算「768² 配 6px = 128 有效像素」），
-                    填错不报错、只是出图看着不对，所以默认藏起来。 */}
-                {styleOf(p) === 'custom' && (
-                  <>
-                    <label className="check" title={hint('像素化')}>
-                      <input
-                        type="checkbox"
-                        checked={p.pixel > 1}
-                        onChange={(e) => setParam('pixel',
-                          e.target.checked ? (p.pixel > 1 ? p.pixel : 6) : 0)}
-                      />
-                      像素化
-                    </label>
-                    <label title={hint('像素块')}>
-                      像素块
-                      <input
-                        type="number"
-                        min={0}
-                        max={16}
-                        value={p.pixel}
-                        disabled={p.pixel <= 1}
-                        // max 挡不住手输，所以 onChange 也要夹一下：曾经手输 64，
-                        // 512/64 = 8px 有效像素，出图细节全被抹平
-                        onChange={(e) => setParam('pixel',
-                          Math.min(16, Math.max(0, Number(e.target.value) || 0)))}
-                      />
-                      <b>{p.pixel > 1 ? `${effPx}px` : '关'}</b>
-                    </label>
-                    <label title={hint('色数')}>
-                      色数
-                      <input
-                        type="number"
-                        min={0}
-                        max={64}
-                        value={p.palette}
-                        onChange={(e) => setParam('palette',
-                          Math.min(64, Math.max(0, Number(e.target.value) || 0)))}
-                      />
-                    </label>
-                  </>
-                )}
+                {/* 像素块 / 色数**不再让用户填**：它们由「产出风格」一档
+                    决定，用户要选的是「什么样的成品」而不是「块多大、几色」。
+                    这两个数强耦合（有效像素 = 宽 ÷ 块），填错不报错、只是出图
+                    看着不对；而且「只填色数」以前还会偷偷硬切 alpha、把透明图
+                    的边缘压成白边。 */}
               </div>
-              {/* 极端值直接说后果：这类设置不会报错，只是出图"看着不对"，
-                  而用户会归因为模型不行（实测有人填了 64/4 → 8px 有效像素）。 */}
-              {pxWarn && (
-                <p className="warn" style={{ margin: '4px 0 0' }}>
-                  ⚠ 现在是 {effPx}px 有效像素{p.palette > 0 ? ` / ${p.palette} 色` : ''}——
-                  细节会被抹平。要像参考图那样的像素角色，用 768² 配像素块 6
-                  （→128px）、色数 32。
-                </p>
-              )}
               <label className="check" title={hint('抠图')}>
                 <input
                   type="checkbox"

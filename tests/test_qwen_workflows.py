@@ -31,7 +31,7 @@ def sandbox(monkeypatch, tmp_path):
     def fake_qwen(eng, *, prompt, negative, width, height, steps, seed,
                   ref_image=None, transparent=False, model="qwen-image-2.1",
                   label="w1", cfg=4.0, output_resolution=None,
-                  fast=False, fast_lora=True):
+                  fast=False, fast_lora=True, raw=False):
         calls.append({"prompt": prompt, "width": width, "height": height,
                       "ref": ref_image, "output_resolution": output_resolution,
                       "steps": steps, "cfg": cfg})
@@ -651,21 +651,24 @@ def _foggy(alpha_bg: int, alpha_fg: int = 255) -> Image.Image:
 
 
 def test_foggy_alpha_is_hardened_not_quantized_into_white(eng):
-    """**雾状背景必须在量化之前硬切掉，否则会被实化成白块。**
+    """**像素档下，雾状背景必须在量化之前硬切掉，否则会被实化成白块。**
 
     用户报的原话是「为何透明背景这么多白色的」。链路是这样坏的：
-    模型输出的背景 alpha 是 128~240 的雾 → `quantize_palette` 的
-    `>127 → 255` 把它实化 → 背景变成两大块实心白。
-    一条 1024² 的实测图里，雾占 68%，实化后不透明率从 14% 跳到 82%。
+    模型输出的背景 alpha 是 128~240 的雾 → 量化的 `>127 → 255` 把它实化
+    → 背景变成两大块实心白。一条 1024² 的实测图里，雾占 68%，实化后
+    不透明率从 14% 跳到 82%。
 
     **修法不是"重抠"**：模型给的主体 alpha 仍是 255，边界比分割模型准。
     所以只要还有实心主体（>=240 占 2% 以上），就用 `_harden_alpha` 沿模型的
     边界切一刀；重抠只留给「整张都是雾」的情况（见下一条测试）。
+
+    注意量化现在**只在 pixel>1 时执行**（见 test_palette_alone_is_not_pixelation），
+    所以这里必须给 pixel=6；插画档（pixel=0）不该硬切，雾会原样留着。
     """
     info: dict = {}
     out, _edge, _subj = g._postprocess(
         _foggy(180), eng, matte=False, matte_backend="color", denoise=0,
-        pixel=0, palette=16, clean_iso=0, info=info, transparent=True)
+        pixel=6, palette=16, clean_iso=0, info=info, transparent=True)
     a = np.asarray(out)[:, :, 3]
     assert info.get("alpha_hardened") is True, f"没走硬切：{info}"
     assert info.get("alpha_recut") is None, "有实心主体时不该动分割模型"
