@@ -106,8 +106,14 @@
   同一个词在不同骨架里意思相反（Mixamo 的 `LeftLeg` 是小腿，KayKit 的 `Leg`
   是大腿），所以别指望只靠名字表。
 - 认不出就**明确报错**（缺哪几根 + 文件骨名样本），不要沉默。
-- 批量入库走 `POST /library/poses/batch`（`library.add_poses`）**一次落盘**；
-  逐条 POST 是 N 次整库重写（每帧还带预览图）。
+- **抽出来的帧不进资料库**（2026-11-02 晚用户明确要求）：走
+  `assets/projects/<项目>/poses/<用户取的名字>/`（`poseset.py`）。
+  同名一律 409、每次存都是新文件夹。资料库只管"跨项目复用的**单个**姿势"。
+- **角色迁移批量出片**（`posebatch.py` + `PoseBatchPanel.tsx`）：一个姿势集 →
+  `pose_frames/<名字>/`，每帧 `candidates[] + selected`。**候选只增不删**——
+  重生成是追加，旧图必须还能选回来（用户原话：说不定他更喜欢之前的）。
+  `add_candidate` 里**不许出现任何删除路径**。
+- 面板里的 `▶` 是"按顺序翻当前选中那张"（8fps），不是帧动画引擎。
 - **真机验证用 puppeteer**（`tools/verify_anim_import.mjs`，puppeteer-core 隔离
   装在 `tools/shot/node_modules`，已 gitignore）。**别用
   `--virtual-time-budget` + `--dump-dom`**：虚拟时钟会把等待瞬间走完，而解析是
