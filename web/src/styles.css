@@ -451,10 +451,10 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
   position: fixed; inset: 0; z-index: 70;
   background: rgba(0, 0, 0, 0.88);
   display: flex; flex-direction: column; align-items: center; justify-content: center;
-  gap: 10px; padding: 16px;
+  gap: 10px; padding: 14px;
 }
 .lightbox-bar {
-  display: flex; align-items: center; gap: 8px; width: 100%; max-width: 1200px;
+  display: flex; align-items: center; gap: 8px; width: 100%; max-width: 1400px;
   color: var(--muted); font-size: 12px;
 }
 .lightbox-name {
@@ -466,10 +466,51 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
   display: inline-flex; align-items: center; gap: 4px; color: var(--muted);
 }
 .lightbox-bar a.mini.wide:hover { color: var(--green); border-color: var(--green); }
+
+/* 缩放工具条：− 百分比 + 适应 1:1
+   百分比要固定宽度，否则 100% → 800% 时按钮会左右跳 */
+.lightbox-zoomctl {
+  display: flex; align-items: center; gap: 6px;
+}
+.lightbox-pct {
+  min-width: 46px; text-align: center;
+  font-family: var(--mono); font-size: 11px; color: var(--white);
+}
+/* 禁用态：边框也要跟着弱化，否则只是文字变暗、看着还像能点 */
+.lightbox-zoomctl .mini:disabled,
+.lightbox-bar .mini:disabled {
+  color: var(--muted-2); border-color: var(--line);
+  background: transparent; cursor: default;
+}
+
+/* 舞台：图在这里缩放/拖动。**必须 overflow:hidden**——放大到 16 倍时
+   图片尺寸是几十万像素，不裁掉会把整个页面撑出滚动条。 */
+.lightbox-stage {
+  position: relative; flex: 1 1 auto; width: 100%; max-width: 1400px;
+  min-height: 0; overflow: hidden;
+  display: flex; align-items: center; justify-content: center;
+  cursor: grab;
+}
+.lightbox-stage.dragging { cursor: grabbing; }
 .lightbox-img {
-  max-width: 100%; max-height: calc(100vh - 70px);
-  object-fit: contain; image-rendering: pixelated;
+  flex: 0 0 auto;
+  /* 宽高由 JS 按「自然尺寸 × 缩放」直接写死（见 Lightbox.tsx 头注释），
+     这里不能再留 max-width，否则两者打架、缩放锚点会漂 */
+  max-width: none; max-height: none;
+  object-fit: contain;
+  user-select: none; -webkit-user-drag: none;
   box-shadow: 0 0 0 1px var(--line-strong);
+  /* **棋盘格底色**：透明 PNG 画在纯黑上根本看不出边界，也看不出"边缘有没有
+     白边/脏边"——而这正是最常要检查的东西。业界图片查看器都铺格子。 */
+  background-color: #1a1a20;
+  background-image:
+    linear-gradient(45deg, #26262e 25%, transparent 25%, transparent 75%, #26262e 75%),
+    linear-gradient(45deg, #26262e 25%, transparent 25%, transparent 75%, #26262e 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 8px 8px;
+}
+.lightbox-hint {
+  font-size: 11px; color: var(--muted); flex: 0 0 auto;
 }
 
 /* 删除确认框 */
@@ -1568,7 +1609,12 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
     repeating-conic-gradient(#191b22 0% 25%, #12141a 0% 50%) 0 0 / 16px 16px;
   min-height: 280px; overflow: hidden;
 }
-.sprite-stage img { max-width: 100%; max-height: 460px; object-fit: contain; display: block; }
+.sprite-stage img {
+  max-width: 100%; max-height: 460px; object-fit: contain; display: block;
+  /* 点开全屏看细节（灯箱里能滚轮缩放/拖动）；cursor 是唯一能提前告诉
+     用户"这里可点"的线索，不加的话没人会去点 */
+  cursor: zoom-in;
+}
 .sprite-missing {
   font-size: 11.5px; color: var(--muted); line-height: 1.7;
   text-align: center; padding: 20px 12px; margin: 0;

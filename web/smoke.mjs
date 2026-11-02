@@ -1880,6 +1880,57 @@ function check(name, cond, extra = '') {
   check('下载链接带 download=1', (dl?.getAttribute('href') || '').includes('download=1'),
     dl?.getAttribute('href'))
 
+  // ---- 缩放 / 平移（图片预览要看细节）----
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms))
+  const pct = () => (doc.querySelector('.lightbox-pct')?.textContent || '').trim()
+  check('灯箱有缩放工具条', !!doc.querySelector('.lightbox-zoomctl'))
+  check('显示当前缩放百分比', /^\d+%$/.test(pct()), pct())
+  const zoomBtn = (kw) => [...doc.querySelectorAll('.lightbox-zoomctl .mini')]
+    .find((b) => (b.getAttribute('title') || '').startsWith(kw))
+  const plus = zoomBtn('放大')
+  const minus = zoomBtn('缩小')
+  const fitBtn = zoomBtn('适应')
+  const oneBtn = [...doc.querySelectorAll('.lightbox-zoomctl .mini')]
+    .find((b) => (b.textContent || '').trim() === '1:1')
+  check('有放大/缩小/适应/1:1 四个按钮',
+    !!plus && !!minus && !!fitBtn && !!oneBtn,
+    String([!!plus, !!minus, !!fitBtn, !!oneBtn]))
+
+  const atStart = parseInt(pct(), 10)
+  plus.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await wait(120)
+  const zoomed = parseInt(pct(), 10)
+  check('点「+」后百分比变大', zoomed > atStart, `${atStart}% → ${zoomed}%`)
+  check('放大后换成最近邻（像素方块要方）',
+    (doc.querySelector('.lightbox-img')?.style.imageRendering || '') === 'pixelated',
+    doc.querySelector('.lightbox-img')?.style.imageRendering)
+  check('放大后「适应」可点（能缩回去）', fitBtn?.disabled === false)
+
+  minus.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await wait(120)
+  check('点「−」能缩回去', parseInt(pct(), 10) === atStart, pct())
+
+  // 滚轮缩放：jsdom 没有布局，clientX/clientY 取 0 也行（锚点算不出但缩放要生效）
+  doc.querySelector('.lightbox-stage')?.dispatchEvent(new win.WheelEvent('wheel', {
+    deltaY: -240, bubbles: true, cancelable: true,
+  }))
+  await wait(120)
+  check('滚轮向上能放大', parseInt(pct(), 10) > atStart, pct())
+
+  // 双击：适应 ↔ 4 倍
+  const stage = doc.querySelector('.lightbox-stage')
+  const fitNow = await (async () => {
+    fitBtn.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+    await wait(120)
+    return parseInt(pct(), 10)
+  })()
+  stage.dispatchEvent(new win.MouseEvent('dblclick', { bubbles: true, clientX: 0, clientY: 0 }))
+  await wait(120)
+  check('双击放大到 4 倍', parseInt(pct(), 10) === fitNow * 4, `${pct()}（适应 ${fitNow}%）`)
+  stage.dispatchEvent(new win.MouseEvent('dblclick', { bubbles: true, clientX: 0, clientY: 0 }))
+  await wait(120)
+  check('再双击回适应窗口', parseInt(pct(), 10) === fitNow, pct())
+
   // Esc 关闭
   win.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
   await new Promise((r) => setTimeout(r, 120))
@@ -4161,6 +4212,16 @@ function check(name, cond, extra = '') {
   check('翻页后 src 的 index 跟着变',
     (doc.querySelector('.sprite-stage img')?.getAttribute('src') || '').includes('index=1'),
     doc.querySelector('.sprite-stage img')?.getAttribute('src'))
+
+  // 素材页也能放大看细节：点图 → 灯箱（滚轮缩放 / 拖动都在灯箱里）
+  doc.querySelector('.sprite-stage img')
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 150))
+  check('点精灵帧能打开灯箱（放大看细节）', !!doc.querySelector('.lightbox'))
+  check('灯箱里有缩放工具条', !!doc.querySelector('.lightbox-zoomctl'))
+  win.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+  await new Promise((r) => setTimeout(r, 150))
+  check('Esc 关掉角色中心的灯箱', !doc.querySelector('.lightbox'))
 
   // 全部帧的缩略图条
   check('缩略图条列出全部 3 帧',

@@ -17,6 +17,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { base } from '../api'
 import { COSTUME_LABEL, EMOTION_LABEL, zh } from '../labels'
+import Lightbox from './Lightbox'
 
 type Props = {
   character: string
@@ -38,6 +39,8 @@ export default function SpritePreview({ character, costume, emotion, onMeta }: P
   /** 三种状态：`idle`（还没问）/`empty`（确认真没有）/`ready` */
   const [state, setState] = useState<'idle' | 'empty' | 'ready'>('idle')
   const [error, setError] = useState('')
+  /** 点图放大看细节：交给全屏灯箱（滚轮缩放 / 拖动平移都在那边） */
+  const [zoom, setZoom] = useState<{ url: string; name: string } | null>(null)
 
   // 竞态守卫：**每次换目标都让在途请求作废**（官方 `invalidate()`）
   const requestRef = useRef(0)
@@ -127,6 +130,12 @@ export default function SpritePreview({ character, costume, emotion, onMeta }: P
             key={src}
             src={src}
             alt={`${character} 第 ${index + 1} 帧`}
+            title="点开全屏，滚轮缩放看细节"
+            onClick={() => setZoom({
+              url: src,
+              name: `${character} · ${zh(COSTUME_LABEL, costume || 'Naked')}`
+                + `/${zh(EMOTION_LABEL, emotion || 'neutral')} · 第 ${index + 1} 帧`,
+            })}
             onLoad={() => setLoading(false)}
             onError={() => { setLoading(false); setError('这一帧读不出来（文件可能已被删掉）') }}
           />
@@ -150,6 +159,9 @@ export default function SpritePreview({ character, costume, emotion, onMeta }: P
         </p>
       )}
       {error && <p className="sprite-err">{error}</p>}
+      {zoom && (
+        <Lightbox url={zoom.url} name={zoom.name} onClose={() => setZoom(null)} />
+      )}
     </div>
   )
 }
