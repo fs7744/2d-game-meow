@@ -203,7 +203,8 @@ def _defringe_white_matte(img: Image.Image) -> Image.Image:
 
 def _postprocess(img: Image.Image, eng: Engine, *, matte: bool, matte_backend: str,
                  denoise: int, pixel: int, palette: int, clean_iso: int,
-                 info: Dict[str, Any] | None = None, transparent: bool = False):
+                 info: Dict[str, Any] | None = None, transparent: bool = False,
+                 raw_output: bool = False):
     """抠图 → 像素化 → 量化 → 去孤立点。返回 (图, 贴边边, 主体数)。
 
     顺序固定，不能改：先抠图（按原始颜色判连通域更准），再像素化与量化。
@@ -255,7 +256,7 @@ def _postprocess(img: Image.Image, eng: Engine, *, matte: bool, matte_backend: s
             # 87% 的过渡像素接近纯白 —— 深色背景上就是一整圈白边。
             # `_defringe_white_matte` 只改 RGB、不动 alpha，所以"复用 alpha"的
             # 语义没变。
-            img = _defringe_white_matte(rgba)
+            img = rgba if raw_output else _defringe_white_matte(rgba)
             info.update(alpha_reused=True, **obs)
         elif (np.asarray(rgba.getchannel("A")) >= 240).mean() >= 0.02:
             # 雾状背景，但主体是实心的 → 用**模型的边界**收一刀，不重抠。
@@ -268,7 +269,8 @@ def _postprocess(img: Image.Image, eng: Engine, *, matte: bool, matte_backend: s
                 # 保留过渡带，但**必须去掉白底残留**：模型给的是"白底预乘"的
                 # 半透明边缘（实测过渡带亮度 203 vs 实心区 128），不去的话
                 # 深色背景上就是一圈白雾边（用户实拍："你看这边缘这头发"）。
-                img = _defringe_white_matte(sanitize_alpha(rgba))
+                _clean = sanitize_alpha(rgba)
+                img = _clean if raw_output else _defringe_white_matte(_clean)
                 info.update(alpha_softened=True, **obs)
             cut = True
         else:
@@ -282,7 +284,8 @@ def _postprocess(img: Image.Image, eng: Engine, *, matte: bool, matte_backend: s
             # 这里只做最小清理（清脏 alpha + 去白底残留），把情况写进 info，
             # 交给前端提示"这次没出干净透明底"。真要抠，用户自己勾「抠背景」，
             # 走上面 `matte and not transparent` 那条分支。
-            img = _defringe_white_matte(sanitize_alpha(rgba))
+            _clean = sanitize_alpha(rgba)
+            img = _clean if raw_output else _defringe_white_matte(_clean)
             info.update(alpha_missing=True, **obs)
 
     if cut:
@@ -468,7 +471,8 @@ def _qwen_call(eng: Engine, *, prompt: str, negative: str, width: int, height: i
                transparent: bool = False, model: str = "qwen-image-2.1",
                label: str = "w1", cfg: float = 1.0,
                output_resolution: Optional[int] = None,
-               fast: bool = False, fast_lora: bool = True) -> Image.Image:
+               fast: bool = False, fast_lora: bool = True,
+               raw: bool = False) -> Image.Image:
     """Qwen 单次推理。带 ref_image 就走「指令改图」，不带就是文生图。
 
     三个**必须**记住的点（都是实测踩出来的）：
@@ -543,7 +547,11 @@ def _qwen_call(eng: Engine, *, prompt: str, negative: str, width: int, height: i
         else:
             kw["image"] = ref_image.convert("RGB").resize((w, h), Image.LANCZOS)
     out = _infer(eng, pipe, kw, label=label)
-    return sanitize_alpha(out.images[0].convert("RGBA"))
+    rgba = out.images[0].convert("RGBA")
+    # `raw=True`：**一个像素都不动**。模型的 alpha 会带 1~15 的脏毛边、
+    # 透明区 RGB 是 VAE 噪声（实测一张是品红 (160,63,201)），忽略 alpha 的
+    # 工具会露馅 —— 所以默认还是清一下，只在用户明确要"模型原样"时才关。
+    return rgba if raw else sanitize_alpha(rgba)
 
 
 # ---- Qwen 的「局部重绘」公共件（w3 / w5 共用） ----
@@ -664,7 +672,7 @@ def _qwen_txt2img(eng: Engine, *, prompt: str, negative: Optional[str],
                   transparent: bool, pixel: int, palette: int, preset: str,
                   matte: bool, matte_backend: str, denoise: int, clean_iso: int,
                   cfg: float = 1.0, model: str, scope: str,
-                  tag: str) -> Dict[str, Any]:
+                  tag: str, raw_output: bool = False) -> Dict[str, Any]:
     """Qwen 文生图。
 
     **透明底时不能用 SD 那套契约后缀**：SPRITE_SUFFIX 里写着 "flat plain
@@ -693,7 +701,7 @@ def _qwen_txt2img(eng: Engine, *, prompt: str, negative: Optional[str],
     img = _qwen_call(eng, prompt=prompt, negative=(negative or ""),
                      width=width, height=height, steps=steps, seed=seed,
                      transparent=transparent, model=model, label="w1",
-                     cfg=cfg)
+                     cfg=cfg, raw=raw_output)
     seconds = dt()
     width, height = img.size
     # 透明底的原图自带 alpha，再跑抠图会把 alpha 当背景重算一遍，纯属浪费
@@ -702,7 +710,7 @@ def _qwen_txt2img(eng: Engine, *, prompt: str, negative: Optional[str],
     img2, edge, subjects = _postprocess(
         img, eng, matte=matte, matte_backend=matte_backend,
         denoise=denoise, pixel=pixel, palette=palette, clean_iso=clean_iso,
-        info=info, transparent=transparent)
+        info=info, transparent=transparent, raw_output=raw_output)
     # 真 CFG（cfg>1）时管线才会收到负向词；cfg=1 时它一次都没传过，
     # meta 里再写一份负向词会让人以为它生效了。
     neg_used = (negative or QWEN_NEG) if float(cfg) > 1.0 else None
@@ -730,6 +738,7 @@ def _qwen_txt2img(eng: Engine, *, prompt: str, negative: Optional[str],
         "alpha_softened": info.get("alpha_softened"),
         # 模型这次没出干净透明底（整张都是雾）。前端据此提示"重试或自己勾抠背景"
         "alpha_missing": info.get("alpha_missing"),
+        "alpha_defringe": not raw_output,
         "alpha_mid": info.get("mid"),
         "prompt_bg_stripped": stripped or None,
         "edge_touch": edge, "model": model, "clip_skip": None,
@@ -746,7 +755,7 @@ def txt2img(eng: Engine, *, prompt: str, negative: Optional[str] = None,
             width: int = 768, height: int = 768, steps: int = 16, cfg: float = 1.0,
             seed: int = -1, pixel: int = 0, palette: int = 0, preset: str = "sprite",
             matte: bool = False, matte_backend: str = "auto", denoise: int = 1,
-            clean_iso: int = 1, transparent: bool = False,
+            clean_iso: int = 1, transparent: bool = False, raw_output: bool = False,
             model: str = DEFAULT_MODEL, scope: str = "", tag: str = "w1"
             ) -> Dict[str, Any]:
     """文生图（Qwen-Image-2.1 原生 DiT）。
@@ -761,7 +770,7 @@ def txt2img(eng: Engine, *, prompt: str, negative: Optional[str] = None,
         steps=steps, seed=seed, transparent=transparent, pixel=pixel,
         palette=palette, preset=preset, matte=matte,
         matte_backend=matte_backend, denoise=denoise, clean_iso=clean_iso,
-        cfg=cfg, model=model, scope=scope, tag=tag)
+        cfg=cfg, model=model, scope=scope, tag=tag, raw_output=raw_output)
 
 
 # ---------------- W2 图生图 ----------------
@@ -809,7 +818,7 @@ def _qwen_img2img(eng: Engine, *, init_image: str | Path, prompt: str,
                   transparent: bool, preset: Optional[str], pixel: int,
                   palette: int, matte: bool, matte_backend: str, denoise: int,
                   clean_iso: int, cfg: float = 1.0, model: str, scope: str,
-                  tag: str) -> Dict[str, Any]:
+                  tag: str, raw_output: bool = False) -> Dict[str, Any]:
     """Qwen 指令改图：源图当参考，提示词当指令。
 
     输出尺寸跟源图走（16 的倍数、必要时等比缩放），不额外接受 width/height——
@@ -837,7 +846,7 @@ def _qwen_img2img(eng: Engine, *, init_image: str | Path, prompt: str,
                      width=ref_img.width, height=ref_img.height,
                      steps=steps, seed=seed, ref_image=ref_img,
                      transparent=transparent, model=model, label="w2",
-                     cfg=cfg)
+                     cfg=cfg, raw=raw_output)
     seconds = dt()
     # **raw 一律存**：它是「后处理之前的原图」，前端图生图节点的
     # 「用原图（未像素化），保留细节」指的就是它。以前只在 pixel>1 或 palette>0
@@ -848,7 +857,7 @@ def _qwen_img2img(eng: Engine, *, init_image: str | Path, prompt: str,
     img, edge, subjects = _postprocess(
         img, eng, matte=matte, matte_backend=matte_backend,
         denoise=denoise, pixel=pixel, palette=palette, clean_iso=clean_iso,
-        info=info, transparent=transparent)
+        info=info, transparent=transparent, raw_output=raw_output)
     neg_used = (negative or QWEN_NEG) if float(cfg) > 1.0 else None
     return _save(img, _stamp(tag), "img2img", {
         "workflow": "w2", "prompt": _qwen_prompt(prompt, transparent),
@@ -871,6 +880,7 @@ def _qwen_img2img(eng: Engine, *, init_image: str | Path, prompt: str,
         "alpha_hardened": info.get("alpha_hardened"),
         "alpha_softened": info.get("alpha_softened"),
         "alpha_missing": info.get("alpha_missing"),
+        "alpha_defringe": not raw_output,
         "edge_touch": edge, "subjects": subjects, "model": model,
         "clip_skip": None, "transparent": transparent,
         "seconds": seconds,
@@ -883,7 +893,7 @@ def img2img(eng: Engine, *, init_image: str | Path, prompt: str,
             seed: int = -1, model: str = DEFAULT_MODEL,
             preset: Optional[str] = None, pixel: int = 0, palette: int = 0,
             matte: bool = False, matte_backend: str = "auto", denoise: int = 1,
-            clean_iso: int = 1, transparent: bool = False,
+            clean_iso: int = 1, transparent: bool = False, raw_output: bool = False,
             scope: str = "", tag: str = "w2") -> Dict[str, Any]:
     """图生图 = **指令改图**：源图当参考，提示词当指令。
 
@@ -896,7 +906,8 @@ def img2img(eng: Engine, *, init_image: str | Path, prompt: str,
         steps=steps, seed=seed, transparent=transparent, preset=preset,
         pixel=pixel, palette=palette, matte=matte,
         matte_backend=matte_backend, denoise=denoise,
-        clean_iso=clean_iso, cfg=cfg, model=model, scope=scope, tag=tag)
+        clean_iso=clean_iso, cfg=cfg, model=model, scope=scope, tag=tag,
+        raw_output=raw_output)
 
 
 # ---------------- W3 局部重绘 ----------------

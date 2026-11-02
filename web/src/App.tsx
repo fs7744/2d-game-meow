@@ -89,6 +89,8 @@ const DEFAULT_PARAMS: GenParams = {
   pixel: 6,
   palette: 32,
   matte: false,
+  // 模型原样：勾上就一个像素都不动（默认关 = 清脏 alpha + 去白边）
+  raw_output: false,
   // 抠图节点默认：透明底（纯去背景）
   bgMode: 'alpha',
   bgColor: '#ffffff',

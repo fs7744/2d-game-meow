@@ -266,3 +266,67 @@ def test_clean_alpha_still_defringes_rgb():
     assert mid.any() and solid.any()
     delta = abs(float(rgb[mid].mean()) - float(rgb[solid].mean()))
     assert delta < 25, f'alpha 复用了但没去白底：过渡带 {rgb[mid].mean():.1f} vs 实心 {rgb[solid].mean():.1f}'
+
+
+def test_defringe_can_be_disabled_for_raw_output():
+    """`raw_output=True` = **模型输出原样**（用户要"原生"时用这个开关）。
+
+    只允许 `sanitize_alpha` 那点清理（<16 清零、>240 拉满），过渡带的 RGB
+    一个数都不许改 —— 否则"原生"就成了空话。
+    """
+    src = _white_matte()
+    info: dict = {}
+    out, _e, _s = G._postprocess(src, None, matte=False, matte_backend='auto',
+                                 denoise=1, pixel=0, palette=0, clean_iso=1,
+                                 info=info, transparent=True, raw_output=True)
+    a = np.asarray(out.convert('RGBA')).astype(np.float32)
+    b = np.asarray(src.convert('RGBA')).astype(np.float32)
+    mid = (a[..., 3] >= 16) & (a[..., 3] <= 240)
+    assert mid.any(), '过渡带没了，这个测试就没意义'
+    delta = abs(float(a[..., :3][mid].mean()) - float(b[..., :3][mid].mean()))
+    assert delta < 1.0, f'关掉去白边后 RGB 仍被改了：{delta:.2f}'
+
+
+def test_defringe_does_not_touch_alpha():
+    """去白边**只改 RGB**：alpha 分布前后必须逐值一致。"""
+    src = _white_matte()
+    out, _e, _s = G._postprocess(src, None, matte=False, matte_backend='auto',
+                                 denoise=1, pixel=0, palette=0, clean_iso=1,
+                                 info={}, transparent=True)
+    a1 = np.asarray(src.convert('RGBA'))[..., 3]
+    a2 = np.asarray(out.convert('RGBA'))[..., 3]
+    # sanitize_alpha 会把 >240 拉满 / <16 归零，先把这一步算进预期
+    expect = np.where(a1 > 240, 255, np.where(a1 < 16, 0, a1)).astype(np.uint8)
+    assert np.array_equal(expect, a2), 'alpha 被去白边改动了'
+
+
+def test_defringe_can_be_disabled_for_raw_output():
+    """`raw_output=True` = **模型输出原样**（用户要"原生"时用这个开关）。
+
+    只允许 `sanitize_alpha` 那点清理（<16 清零、>240 拉满），过渡带的 RGB
+    一个数都不许改 —— 否则"原生"就成了空话。
+    """
+    src = _white_matte()
+    info: dict = {}
+    out, _e, _s = G._postprocess(src, None, matte=False, matte_backend='auto',
+                                 denoise=1, pixel=0, palette=0, clean_iso=1,
+                                 info=info, transparent=True, raw_output=True)
+    a = np.asarray(out.convert('RGBA')).astype(np.float32)
+    b = np.asarray(src.convert('RGBA')).astype(np.float32)
+    mid = (a[..., 3] >= 16) & (a[..., 3] <= 240)
+    assert mid.any(), '过渡带没了，这个测试就没意义'
+    delta = abs(float(a[..., :3][mid].mean()) - float(b[..., :3][mid].mean()))
+    assert delta < 1.0, f'关掉去白边后 RGB 仍被改了：{delta:.2f}'
+
+
+def test_defringe_does_not_touch_alpha():
+    """去白边**只改 RGB**：alpha 分布前后必须逐值一致。"""
+    src = _white_matte()
+    out, _e, _s = G._postprocess(src, None, matte=False, matte_backend='auto',
+                                 denoise=1, pixel=0, palette=0, clean_iso=1,
+                                 info={}, transparent=True)
+    a1 = np.asarray(src.convert('RGBA'))[..., 3]
+    a2 = np.asarray(out.convert('RGBA'))[..., 3]
+    # sanitize_alpha 会把 >240 拉满 / <16 归零，先把这一步算进预期
+    expect = np.where(a1 > 240, 255, np.where(a1 < 16, 0, a1)).astype(np.uint8)
+    assert np.array_equal(expect, a2), 'alpha 被去白边改动了'

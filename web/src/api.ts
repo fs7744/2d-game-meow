@@ -112,6 +112,8 @@ function common(params: GenParams, opts: SubmitOpts) {
     // 透明背景：只有 Qwen-Image-2.1 原生支持（VAE 第 4 通道）。
     // 后端会在这个字段为真时给提示词加双段式声明，否则 alpha 不会激活。
     transparent: params.transparent || undefined,
+    // 模型原样（不做任何后处理）：默认不传 = 走默认清理
+    raw_output: params.raw_output || undefined,
     // 项目作用域：产物写进 assets/projects/<scope>/，项目之间互不可见
     scope: opts.scope || undefined,
   }

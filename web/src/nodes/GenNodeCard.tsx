@@ -2606,6 +2606,26 @@ export default function GenNodeCard({
                   透明背景（原生 RGBA）
                   {!canTransparent && <span className="dim"> 仅 Qwen-Image</span>}
                 </label>
+                {/* 模型原样：默认会做两件很轻的事（清 alpha 脏边 + 去白底混色），
+                    勾上就一个像素都不动。用户要「原生」时用这个。 */}
+                {canTransparent && p.transparent && (
+                  <label
+                    className="check"
+                    title={'**默认会做两件事**（都不改形状、不抠图）：\n'
+                      + '1. 清 alpha 脏边：<16 清零、>240 拉满（模型会留 1~15 的毛边）；\n'
+                      + '2. 去白底混色：半透明那圈 RGB 是「前景×α + 白色×(1−α)」\n'
+                      + '   混出来的（实测过渡带亮度 237.8、实心区 206.4，87% 接近纯白），\n'
+                      + '   深色背景上就是一圈白边。只改 RGB，alpha 一个像素都不动。\n\n'
+                      + '勾上 = 模型吐出来什么样就存什么样，一个像素都不碰。'}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={!!p.raw_output}
+                      onChange={(e) => setParam('raw_output', e.target.checked)}
+                    />
+                    模型原样（不做任何后处理）
+                  </label>
+                )}
                 {canTransparent && p.transparent && (
                   <p className="src-note">
                     模型直接输出 alpha，不用再抠图；此时「抠图」会被跳过。
