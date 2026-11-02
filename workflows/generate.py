@@ -212,7 +212,9 @@ def _postprocess(img: Image.Image, eng: Engine, *, matte: bool, matte_backend: s
 
     `transparent=True`（模型直接出了 RGBA）时的三条路，**都不含"替用户抠图"**：
 
-    1. alpha 干净（`alpha_trust` 通过）→ 直接复用，什么都不做；
+    1. alpha 干净（`alpha_trust` 通过）→ **alpha 原样复用**（一个像素都不动），
+       但 RGB 仍过一遍 `_defringe_white_matte`：`alpha_trust` 只看 alpha 的
+       数值分布，看不出过渡带的颜色是白底混合出来的；
     2. alpha 是雾，但**有实心主体**（≥240 的像素占 2% 以上）→ 按档位收边：
        像素化档 `_harden_alpha` 硬切成 0/255；插画档 `_defringe_white_matte`
        + `sanitize_alpha`（清脏 alpha、把白底预乘的过渡带还原成前景色，
@@ -246,7 +248,14 @@ def _postprocess(img: Image.Image, eng: Engine, *, matte: bool, matte_backend: s
         rgba = img.convert("RGBA")
         ok, obs = matte_mod.alpha_trust(rgba)
         if ok:
-            # 模型这次画干净了：直接用（再抠一次反而会咬掉白毛）
+            # 模型这次画干净了：**alpha 直接复用**（再抠一次反而会咬掉白毛）。
+            # 但 RGB 仍要过一遍去白底：`alpha_trust` 只看 alpha 的数值分布
+            # （有没有真透明区、雾多不多），**看不出过渡带的颜色是白底混合出来的**。
+            # 实测一张 alpha_reused=True 的图：过渡带亮度 237.8、实心区 206.4，
+            # 87% 的过渡像素接近纯白 —— 深色背景上就是一整圈白边。
+            # `_defringe_white_matte` 只改 RGB、不动 alpha，所以"复用 alpha"的
+            # 语义没变。
+            img = _defringe_white_matte(rgba)
             info.update(alpha_reused=True, **obs)
         elif (np.asarray(rgba.getchannel("A")) >= 240).mean() >= 0.02:
             # 雾状背景，但主体是实心的 → 用**模型的边界**收一刀，不重抠。

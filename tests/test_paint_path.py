@@ -229,3 +229,40 @@ def test_explicit_matte_still_runs_segmentation_on_fog():
     finally:
         M.matte_auto = orig
     assert calls == ['auto'], '勾了抠图却没跑'
+
+
+def test_clean_alpha_still_defringes_rgb():
+    """**alpha 可信 ≠ RGB 干净**。
+
+    `alpha_trust` 只看 alpha 的数值分布（有没有真透明区、雾多不多），看不出
+    过渡带的颜色是"白底预乘"出来的。实测一张 `alpha_reused=True` 的图：
+    过渡带亮度 237.8、实心区 206.4，87% 的过渡像素接近纯白 —— 深色背景上
+    就是一整圈白边。所以复用 alpha 时 **RGB 仍要去白底**。
+    """
+    # 造一张「alpha 结构干净（有真透明区、雾很少）但 RGB 是白底预乘」的图
+    # 尺寸要够大：`_defringe_white_matte` 在过渡带样本 < 64 时不动手
+    # （防"整张图只有零星几个抗锯齿点"被误判成白污染）。
+    arr = np.zeros((100, 100, 4), np.uint8)
+    arr[..., 0], arr[..., 1], arr[..., 2] = 120, 90, 80
+    arr[30:70, 30:70, 3] = 255          # 实心主体（40×40）
+    # 上下各 1px 过渡带（白底预乘，α≈0.5），共 80 像素 ≥ 64
+    for row in (29, 70):
+        arr[row, 30:70, 3] = 128
+        arr[row, 30:70, 0:3] = (188, 172, 167)
+    img = Image.fromarray(arr, "RGBA")
+
+    ok, obs = __import__('workflows.matte', fromlist=['x']).alpha_trust(img)
+    assert ok, f'这张图本该 alpha 可信：{obs}'
+
+    info: dict = {}
+    out, _e, _s = G._postprocess(img, None, matte=False, matte_backend='auto',
+                                 denoise=1, pixel=0, palette=0, clean_iso=1,
+                                 info=info, transparent=True)
+    assert info.get('alpha_reused') is True, info
+    a = np.asarray(out.convert('RGBA')).astype(np.float32)
+    al, rgb = a[..., 3], a[..., :3]
+    mid = (al >= 16) & (al <= 240)
+    solid = al >= 241
+    assert mid.any() and solid.any()
+    delta = abs(float(rgb[mid].mean()) - float(rgb[solid].mean()))
+    assert delta < 25, f'alpha 复用了但没去白底：过渡带 {rgb[mid].mean():.1f} vs 实心 {rgb[solid].mean():.1f}'
