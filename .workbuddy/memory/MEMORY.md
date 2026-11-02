@@ -159,6 +159,33 @@
 - 逐帧路线的短板是**姿态贴合**不是帧间一致性（PLAN §2.8）：腿部常被参考图站姿覆盖。
 - 白毛/白甲角色别用白底抠图——换 `bg=dark`，或出图时直接勾透明底。
 
+## 抠图必须是用户的选择（2026-11-02）
+
+**默认 `matte=False`，任何"偷偷抠"都是 bug。** 用户原话：「我没选抠图，你为啥要主动扣？」
+
+排查要查四处，少一处就会复现：
+1. `generate._postprocess` 的透明分支（曾用 `matte_auto` 兜底全雾 alpha）
+2. `pipeline.PIPELINE_DEFAULTS["matte"]`
+3. 前端硬编码（曾在「一键出全套」写死 `matte: true`）
+4. `app.py` 请求模型的 `matte: bool = True` 默认值
+
+判断"有没有抠"看产物 meta 的 `matte` 字段，不要靠猜。
+配套：不抠就必须走原生透明（`charactergen.normalize_background_color` 默认
+`Transparent`、`posegen`/`emotiongen` 背景默认空），否则出来是绿底图。
+
+## 透明底的白边：RGB 是白底预乘的（2026-11-02）
+
+模型出的透明 PNG，半透明边缘的 RGB 是 `前景*α + 白色*(1-α)`。实测过渡带亮度
+237.8、实心区 206.4，**87% 的过渡像素接近纯白** —— 只保留过渡带（不像素化时
+必须保留）就会在深色背景上留一圈白边。
+
+必须做 **unpremultiply**（`generate._defringe_white_matte`）：
+`C_fg = (C_obs - 255*(1-α)) / max(α, 0.25)`。
+
+**最坑的一点**：`alpha_trust` 只看 alpha 数值分布，**不看 RGB**。所以
+`alpha_reused=True`（alpha 结构可信）时 RGB 照样可能是白的 —— 复用 alpha
+时也要过 defringe。真机上出问题的图恰好就是这一支。
+
 ## 「像素感」的三个来源：不只有 pixelate（2026-11-02）
 
 用户报「没勾像素化还是有像素感」。三处都会造成，后两处更隐蔽：
