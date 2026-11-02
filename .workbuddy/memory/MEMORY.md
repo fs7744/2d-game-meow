@@ -89,6 +89,30 @@
 - 官方 `capture()` **不隐藏方向天穹**（`VNCCS_DirectionalSkydome`，彩虹网格球），
   导出前必须临时关掉 —— 否则每张条件图背景都带一层彩色网格。
 
+## 动作导入：glb / fbx 取帧（2026-11-02 起，§6 六项已清）
+
+节点里「导入动作」读一段带骨骼动画的 3D 文件，拖滑块选帧，或「存入 N 帧」。
+**动画的 3D 是文件自带的**，没有「从图片反推」的深度歧义 —— 要整套 walk/run
+动作优先走这条，别去摆。细节见 `docs/人偶动作导入-glTF-FBX-调研与实现.md`。
+
+- **解析器是本地副本**（`web/public/vnccs-pose/vendor/three/jsm/`，r160），
+  靠 `studio.html` 的 **importmap** 把裸名 `three` 解析到 vendor 的
+  three.module.js；上游文件**一个字没改**。改 three 版本时 jsm 必须同版本。
+  FBX 还有 4 个依赖文件（fflate / NURBS×2 / BufferGeometryUtils），
+  缺一个就"本地失败→悄悄回落 CDN"，**断网才炸**。smoke 逐个断言存在。
+- **骨骼映射不改官方 `mixamo.js`**：`anim-skeleton.js` 只做别名登记，
+  把真实骨头挂到 Mixamo 的 17 个锚点名下。**结构优先、名字兜底** ——
+  名字只取根锚点（Hips / 上臂 / 大腿），肘腕膝踝沿子链走。
+  同一个词在不同骨架里意思相反（Mixamo 的 `LeftLeg` 是小腿，KayKit 的 `Leg`
+  是大腿），所以别指望只靠名字表。
+- 认不出就**明确报错**（缺哪几根 + 文件骨名样本），不要沉默。
+- 批量入库走 `POST /library/poses/batch`（`library.add_poses`）**一次落盘**；
+  逐条 POST 是 N 次整库重写（每帧还带预览图）。
+- **真机验证用 puppeteer**（`tools/verify_anim_import.mjs`，puppeteer-core 隔离
+  装在 `tools/shot/node_modules`，已 gitignore）。**别用
+  `--virtual-time-budget` + `--dump-dom`**：虚拟时钟会把等待瞬间走完，而解析是
+  真 CPU 活 → 一律"用例超时"（踩过）。断网靠 request interception 拦外部请求验证。
+
 ## 目录约定（2026-10-31 起）
 
 - **路径只有一处定义**：`workflows/paths.py`。别在别的模块写 `ROOT/"assets"`。
