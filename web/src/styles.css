@@ -1382,7 +1382,7 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
   padding: 3px 6px; font: inherit; font-size: 11px;
 }
 .chars-row input { width: 72px; }
-.chars-field { display: flex; flex-direction: column; gap: 3px; }
+.chars-field { display: flex; flex-direction: column; gap: 3px; position: relative; }
 .chars-field > span, .chars-field { font-size: 10.5px; color: var(--muted); }
 .chars-field input { width: 100%; }
 .chars-field-label { font-size: 10px; color: var(--muted); font-weight: 600; }
@@ -1633,3 +1633,106 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
   padding: 3px 6px; font: inherit; font-size: 11px;
 }
 .tag-act { display: flex; gap: 5px; }
+
+/* ==========================================================================
+   提示词放大编辑（PromptZoom）
+   节点卡片里的 prompt 只有 2~3 行高，写长描述看不到全段。这里给一个
+   右下角的 ⤢ 按钮 + 居中弹窗。弹窗走 Portal 到 body，因为节点卡片有
+   overflow:hidden 与 transform，直接渲染会被裁掉、也会跟着画布缩放。
+   ========================================================================== */
+.pzoom {
+  position: absolute;
+  z-index: 3;
+  width: 20px; height: 20px;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0; line-height: 1;
+  font-size: 12px;
+  background: rgba(0, 0, 0, 0.62);
+  border: 1px solid var(--line);
+  color: var(--muted-2);
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+.pzoom:hover:not(:disabled) {
+  color: var(--green);
+  border-color: var(--green);
+  background: rgba(0, 255, 136, 0.12);
+}
+.pzoom:disabled { opacity: 0.3; cursor: not-allowed; }
+
+/* **不要用 opacity 做"低调"**：整个按钮（含图标和边框）一起变半透明，
+   在近黑画布上等于隐形（实测 0.45 时完全看不见）。改成实心 + 低调配色：
+   深底、灰白边框、灰白图标，hover 才转绿。 */
+.pzoom {
+  background: rgba(0, 0, 0, 0.86);
+  border-color: rgba(255, 255, 255, 0.3);
+  color: rgba(255, 255, 255, 0.68);
+}
+.pzoom:hover:not(:disabled) {
+  background: rgba(0, 255, 136, 0.16);
+  border-color: var(--green);
+  color: var(--green);
+}
+
+/* prompt-wrap 里右上角已经有一个「收藏」星标（right:4px），放大按钮排在它左边 */
+.prompt-wrap > .pzoom { top: 4px; right: 28px; }
+/* 角色中心 / 反向提示词这些窄表单里没有星标，直接贴右下角 */
+.chars-field > .pzoom,
+.fold label.block > .pzoom { bottom: 3px; right: 3px; }
+
+.pzoom-mask {
+  position: fixed; inset: 0; z-index: 9000;
+  background: rgba(0, 0, 0, 0.72);
+  display: flex; align-items: center; justify-content: center;
+  padding: 32px;
+  backdrop-filter: blur(2px);
+}
+.pzoom-panel {
+  width: min(860px, 100%);
+  max-height: 100%;
+  display: flex; flex-direction: column;
+  background: var(--bg-2);
+  border: 1px solid var(--line-strong);
+  box-shadow: var(--shadow-hard);
+}
+.pzoom-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px; color: var(--white);
+}
+/* 标题和「完成」都别换行：窄窗口下 .mini 会被压成两行（实测） */
+.pzoom-head b, .pzoom-head .mini { white-space: nowrap; flex: 0 0 auto; }
+/* 标题和「完成」都别换行：窄窗口下 .mini 会被压成两行（实测） */
+.pzoom-head b, .pzoom-head .mini { white-space: nowrap; flex: 0 0 auto; }
+.pzoom-meta {
+  font-family: var(--mono); font-size: 10.5px; color: var(--muted-2);
+}
+.pzoom-area {
+  flex: 1; min-height: 220px; max-height: 60vh;
+  margin: 12px; padding: 10px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  color: var(--white);
+  font-family: var(--mono);
+  font-size: 13px; line-height: 1.75;
+  resize: vertical;
+}
+.pzoom-area:focus { outline: none; border-color: var(--green); }
+.pzoom-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 0 12px 10px;
+  font-size: 10.5px; color: var(--muted-2);
+}
+.pzoom-hint { color: var(--muted); }
+.pzoom-keys { font-family: var(--mono); }
+
+/* 尺寸预设：比宽/高两个数字框宽一点，选项里带「1024×1024 · 方形」这种全称 */
+.row label.size-preset { flex: 1 1 auto; min-width: 118px; }
+.row label.size-preset select { width: 100%; }
+/* 宽/高/步数**固定 52px**（够放 4 位数），剩下的全给尺寸下拉。
+   之前用 flex-grow 比例分配，三个数字框被压到 30px，768 直接看不见了。 */
+.row label.size-preset ~ label { flex: 0 0 52px; min-width: 52px; }
+
+/* 反向提示词的放大按钮在 <label class="block"> 里，也要有定位上下文 */
+.fold label.block { position: relative; }

@@ -2,12 +2,13 @@ import { useRef, useState } from 'react'
 import MaskEditor from '../components/MaskEditor'
 import MaskPreview from '../components/MaskPreview'
 import PoseStudio from '../components/PoseStudio'
+import PromptZoom from '../components/PromptZoom'
 import type { ModelCaps, PoseDir } from '../api'
 import { fileNameOf } from '../fileName'
 import {
   MAX_CHAR_SOURCES, type GenNode, type GenParams, type PosePreset,
 } from '../types'
-import { GEN_STYLES, styleFromParams } from '../genStyles'
+import { GEN_STYLES, SIZE_PRESETS, sizePresetKey, styleFromParams } from '../genStyles'
 
 /**
  * 每个参数的说明：做什么 / 影响什么 / 推荐值。
@@ -1124,6 +1125,7 @@ export default function GenNodeCard({
               value={p.prompt}
               onChange={(e) => setParam('prompt', e.target.value)}
             />
+            <PromptZoom value={p.prompt} onChange={(v) => setParam('prompt', v)} label="正向提示词" />
           </div>
           <details className="adv">
             <summary>更多设置</summary>
@@ -1327,6 +1329,7 @@ export default function GenNodeCard({
                 value={p.prompt}
                 onChange={(e) => setParam('prompt', e.target.value)}
               />
+              <PromptZoom value={p.prompt} onChange={(v) => setParam('prompt', v)} label="正向提示词" />
             </div>
           )}
           <details className="adv">
@@ -1502,6 +1505,7 @@ export default function GenNodeCard({
               value={p.prompt}
               onChange={(e) => setParam('prompt', e.target.value)}
             />
+            <PromptZoom value={p.prompt} onChange={(v) => setParam('prompt', v)} label="正向提示词" />
           </div>
           <div className="src-note">
             靠 Outpaint LoRA + 中性灰填充：原图区域贴回，新区域按场景连续性补全。
@@ -1556,6 +1560,7 @@ export default function GenNodeCard({
               value={p.prompt}
               onChange={(e) => setParam('prompt', e.target.value)}
             />
+            <PromptZoom value={p.prompt} onChange={(v) => setParam('prompt', v)} label="正向提示词" />
           </div>
           <div className="src-note">
             {isOutfit
@@ -1630,6 +1635,7 @@ export default function GenNodeCard({
               value={p.prompt}
               onChange={(e) => setParam('prompt', e.target.value)}
             />
+            <PromptZoom value={p.prompt} onChange={(v) => setParam('prompt', v)} label="正向提示词" />
           </div>
 
           {/* 朝向：**不再写方向词**（和 VNCCS 官方一致）。
@@ -1777,6 +1783,7 @@ export default function GenNodeCard({
               value={p.prompt}
               onChange={(e) => setParam('prompt', e.target.value)}
             />
+            <PromptZoom value={p.prompt} onChange={(v) => setParam('prompt', v)} label="正向提示词" />
           </div>
           <div className="px-opts">
             <label className="strength" title={hint('像素边长')}>
@@ -2004,6 +2011,7 @@ export default function GenNodeCard({
               value={p.prompt}
               onChange={(e) => setParam('prompt', e.target.value)}
             />
+            <PromptZoom value={p.prompt} onChange={(v) => setParam('prompt', v)} label="正向提示词" />
           </div>
                     <p className="src-note">
             Qwen 没有重绘幅度，改成什么样由提示词里的指令决定。它是
@@ -2168,6 +2176,7 @@ export default function GenNodeCard({
               value={p.prompt}
               onChange={(e) => setParam('prompt', e.target.value)}
             />
+            <PromptZoom value={p.prompt} onChange={(v) => setParam('prompt', v)} label="正向提示词" />
           </div>
                     <p className="src-note">
             Qwen 没有重绘幅度，改成什么样由提示词里的指令决定。它是
@@ -2389,6 +2398,7 @@ export default function GenNodeCard({
               value={p.prompt}
               onChange={(e) => setParam('prompt', e.target.value)}
             />
+            <PromptZoom value={p.prompt} onChange={(v) => setParam('prompt', v)} label="正向提示词" />
             <button
               className={`star${favorited ? ' on' : ''}`}
               title={favorited ? '取消收藏' : '收藏这条提示词'}
@@ -2417,6 +2427,33 @@ export default function GenNodeCard({
           <div className="row">
             {!isI2I && (
               <>
+                {/* 尺寸预设：业界的通用做法（SD WebUI / ComfyUI 都给一串常用档）。
+                    手填那套换算（「竖版立绘该填什么」「8 的倍数」）不该让用户背。
+                    选了预设就写进宽高；手改宽高会让这一项自动跳回「自定义」。 */}
+                <label
+                  className="size-preset"
+                  title={SIZE_PRESETS.find((x) => x.key === sizePresetKey(p.width, p.height))?.note
+                    || `自定义 ${p.width}×${p.height}（宽高都要是 8 的倍数）`}
+                >
+                  尺寸
+                  <select
+                    value={sizePresetKey(p.width, p.height)}
+                    onChange={(e) => {
+                      const hit = SIZE_PRESETS.find((x) => x.key === e.target.value)
+                      // 「自定义」只表示当前值不在表里，点了不做事——
+                      // 真要改数值还是填下面那两个框
+                      if (!hit) return
+                      setParams({ width: hit.w, height: hit.h })
+                    }}
+                  >
+                    {SIZE_PRESETS.map((x) => (
+                      <option key={x.key} value={x.key}>{x.label}</option>
+                    ))}
+                    <option value="custom">
+                      自定义（{p.width}×{p.height}）
+                    </option>
+                  </select>
+                </label>
                 <label title={hint('宽')}>
                   宽
                   <input
@@ -2424,7 +2461,7 @@ export default function GenNodeCard({
                     value={p.width}
                     step={64}
                     min={128}
-                    max={1024}
+                    max={1344}
                     onChange={(e) => setParam('width', Number(e.target.value) || 512)}
                   />
                 </label>
@@ -2435,7 +2472,7 @@ export default function GenNodeCard({
                     value={p.height}
                     step={64}
                     min={128}
-                    max={1024}
+                    max={1344}
                     onChange={(e) => setParam('height', Number(e.target.value) || 512)}
                   />
                 </label>
@@ -2533,6 +2570,12 @@ export default function GenNodeCard({
                   placeholder="留空则用内置契约"
                   value={p.negative}
                   onChange={(e) => setParam('negative', e.target.value)}
+                />
+                <PromptZoom
+                  value={p.negative}
+                  label="负向提示词"
+                  hint="只在 cfg > 1 时才真正发给模型；cfg=1 时它一次都不会被传进去。"
+                  onChange={(v) => setParam('negative', v)}
                 />
               </label>
               <div className="row">

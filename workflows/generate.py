@@ -177,18 +177,25 @@ def _postprocess(img: Image.Image, eng: Engine, *, matte: bool, matte_backend: s
     `transparent=True`（模型直接出了 RGBA）时，处理顺序是**先信模型、再兜底**：
 
     1. alpha 干净（`alpha_trust` 通过）→ 直接复用，什么都不做；
-    2. alpha 是雾，但**有实心主体**（≥240 的像素占 2% 以上）→ `_harden_alpha`
-       硬切一刀。边界仍是模型给的，逐像素精确；
+    2. alpha 是雾，但**有实心主体**（≥240 的像素占 2% 以上）→ 按档位收边：
+       像素化档 `_harden_alpha` 硬切成 0/255；插画档 `sanitize_alpha` 只清
+       <16 / >240，中间过渡原样保留（硬切会把抗锯齿边缘砍成台阶锯齿，
+       那是"没勾像素化却看着像像素"最刺眼的一处）；
     3. 整张图连一块实心都没有（模型压根没画透明）→ 才走分割模型重抠。
 
     第 2 步是这里的关键：以前只有 1 和 3，雾状 alpha 会直接进量化，
     被 `>127 → 255` 实化成两大块白；而改成"雾就重抠"又丢掉了模型更准的边界
-    （u2net 的 mask 天生胖 1~2px，白鞋还会被啃）。所以补上"硬切"这一档。
+    （u2net 的 mask 天生胖 1~2px，白鞋还会被啃）。所以补上"收边"这一档，
+    并且**收得多狠要跟着档位走**——硬边是像素画的风格，不是插画的。
     """
     info = info if info is not None else {}
     edge: list[str] = []
     subjects = None
     cut = False
+    # 像素化档（pixel>1 或 palette>0）才要「硬边」：像素画是 0/255 的实心块。
+    # 插画档要「柔边」——同样是收 alpha，硬切会把 1~2px 的抗锯齿过渡砍成台阶，
+    # 那就是「没勾像素化却看着像像素」的直接来源（实测最刺眼的一档）。
+    hard_edge = pixel > 1 or palette > 0
 
     if matte and not transparent:
         # 保留 alpha：转回 RGB 会把透明区域压成黑色，等于白抠
@@ -202,10 +209,16 @@ def _postprocess(img: Image.Image, eng: Engine, *, matte: bool, matte_backend: s
             # 模型这次画干净了：直接用（再抠一次反而会咬掉白毛）
             info.update(alpha_reused=True, **obs)
         elif (np.asarray(rgba.getchannel("A")) >= 240).mean() >= 0.02:
-            # 雾状背景，但主体是实心的 → 用**模型的边界**硬切，不重抠
-            img = _harden_alpha(rgba, 240)
+            # 雾状背景，但主体是实心的 → 用**模型的边界**收一刀，不重抠。
+            # 像素化档硬切（要 0/255），插画档只做 sanitize_alpha 的温和清理
+            # （<16 清零、>240 拉满），中间过渡原样保留，边缘才不会变锯齿。
+            if hard_edge:
+                img = _harden_alpha(rgba, 240)
+                info.update(alpha_hardened=True, **obs)
+            else:
+                img = sanitize_alpha(rgba)
+                info.update(alpha_softened=True, **obs)
             cut = True
-            info.update(alpha_hardened=True, **obs)
         else:
             # 整张都是雾 → 模型没打算画透明，只能靠分割模型兜底
             img = matte_mod.matte_auto(rgba, matte_backend,
@@ -214,7 +227,11 @@ def _postprocess(img: Image.Image, eng: Engine, *, matte: bool, matte_backend: s
             info.update(alpha_recut=True, **obs)
 
     if cut:
-        img = matte_mod.despeckle(img, denoise_iters=denoise)
+        # 形态学开运算（3×3 腐蚀→膨胀）会削掉轮廓上 <3px 的突起：像素画要它
+        # （去毛刺），插画不要（会吃掉发丝、挂饰、裙摆的细边）。所以只在
+        # 像素化档把它交给用户设的 denoise，插画档只做面积过滤（清碎屑/印章）。
+        iters = denoise if hard_edge else 0
+        img = matte_mod.despeckle(img, denoise_iters=iters)
         edge = matte_mod.edge_touch(img)
         # 多主体是画小怪物的通病，负向词压不住，只能量出来
         subjects = pp.foreground_blobs(img)
@@ -601,7 +618,10 @@ def _qwen_txt2img(eng: Engine, *, prompt: str, negative: Optional[str],
             prompt = f"{prompt}, single character, full body, centered" if prompt \
                 else "single character, full body, centered"
         else:
-            prompt, negative = presets.build(prompt, negative, preset)
+            # 不像素化时用"无风格词"的构图契约：pixel art / hard outline /
+            # 压 anti-aliasing 这几条会把任何画风都拽出像素味（实测）
+            prompt, negative = presets.build(
+                prompt, negative, preset, pixelate=(pixel > 1 or palette > 0))
     stripped = False
     if transparent:
         # 透明底时把「白底/纯色底」这类措辞清掉：它们是和透明声明直接打架的
@@ -732,7 +752,8 @@ def _qwen_img2img(eng: Engine, *, init_image: str | Path, prompt: str,
     改图场景下"我要跟原图一样大"是压倒性预期。
     """
     if preset and preset != "none":
-        prompt, negative = presets.build(prompt, negative, preset)
+        prompt, negative = presets.build(
+            prompt, negative, preset, pixelate=(pixel > 1 or palette > 0))
     if transparent:
         # 同文生图：透明底时清掉「白底」这类与透明声明打架的措辞
         prompt, _stripped = _strip_bg_words(prompt)

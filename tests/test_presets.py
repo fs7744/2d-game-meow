@@ -75,3 +75,51 @@ def test_suffix_is_kept_short():
         # 当前最长的是 sprite（28 词，含 FRAMING 的留白约束）。32 是上限，
         # 不是目标值——加词前先问自己"这句是不是产线硬要求"。
         assert len(suffix.split()) <= 32, (name, len(suffix.split()), suffix)
+
+
+# ---------------- 不像素化时的契约（2026-11-02） ----------------
+#
+# 用户报「没勾像素化、只选透明背景，出图仍有像素感」。根子有两处，都在契约层：
+#   1. sprite 档写着 "16-bit pixel art, hard outline, flat colors" —— 没勾像素化
+#      却还挂着这个档，等于直接要求模型画像素画；
+#   2. sprite 的负向词压 "anti-aliasing" —— 描边不能抗锯齿，边缘就是台阶状锯齿，
+#      远看同样像低分辨率像素画。
+# 所以 `pixelate=False` 时必须换成 `SPRITE_SUFFIX_PAINT` / `SPRITE_NEG_PAINT`。
+
+def test_paint_contract_has_no_pixel_style_words():
+    """不像素化：正向不得出现 pixel art / hard outline / flat colors。"""
+    pos, _ = presets.build("韩式漫画风格的女剑士", None, "sprite", pixelate=False)
+    lowered = pos.lower()
+    for bad in ("pixel art", "hard outline", "flat colors", "16-bit"):
+        assert bad not in lowered, f"不像素化却带了像素风格词 {bad!r}: {pos}"
+    # 构图约束要留着：单主体 / 全身 / 居中 / 干净背景仍是产线要求
+    assert "single character" in lowered and "full body" in lowered
+    assert "centered" in lowered
+
+
+def test_paint_contract_keeps_anti_aliasing_allowed():
+    """不像素化：负向词不能压 anti-aliasing（插画要的就是抗锯齿边缘）。"""
+    _, neg = presets.build("x", None, "sprite", pixelate=False)
+    assert "anti-aliasing" not in neg.lower(), f"插画被压了抗锯齿: {neg}"
+
+
+def test_pixelate_true_keeps_pixel_style_words():
+    """像素化：原契约一个字都不能少（像素精灵就是要硬边、要压抗锯齿）。"""
+    pos, neg = presets.build("x", None, "sprite", pixelate=True)
+    assert pos.endswith(presets.SPRITE_SUFFIX)
+    assert "16-bit pixel art" in pos
+    assert "anti-aliasing" in neg
+
+
+def test_paint_contract_leaves_other_presets_alone():
+    """只有 sprite 档有像素风格词；anime/portrait/wuxia 本来就没有，不该被动。"""
+    for name in ("anime", "portrait", "wuxia"):
+        a = presets.build("x", None, name, pixelate=True)
+        b = presets.build("x", None, name, pixelate=False)
+        assert a == b, f"{name} 档被 pixelate 改动了：{a} != {b}"
+
+
+def test_build_default_still_pixelates():
+    """默认参数保持旧行为（pixelate=True）——老调用方不受影响。"""
+    pos, _ = presets.build("x", None, "sprite")
+    assert pos.endswith(presets.SPRITE_SUFFIX)

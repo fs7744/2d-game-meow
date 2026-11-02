@@ -30,6 +30,7 @@ import {
   type CharacterPrompt, type TagCatalog,
 } from '../api'
 import SpritePreview from './SpritePreview'
+import PromptZoom from './PromptZoom'
 import TagPicker from './TagPicker'
 import {
   BG_COLOR_LABEL, COSTUME_LABEL, EMOTION_CATEGORY_LABEL, STYLE_GROUP_LABEL,
@@ -1257,6 +1258,13 @@ export default function CharactersPage({ onNotice }: Props) {
                     value={cPrompt?.prompt ?? ''}
                     onChange={(e) => setCPrompt((p) => (p ? { ...p, prompt: e.target.value } : p))}
                   />
+                  <PromptZoom
+                    value={cPrompt?.prompt ?? ''}
+                    label="正向 prompt"
+                    disabled={!cPrompt}
+                    hint="英文描述效果更稳。改完直接出图，不用重拼。"
+                    onChange={(v) => setCPrompt((p) => (p ? { ...p, prompt: v } : p))}
+                  />
                 </label>
                 <label className="chars-field">
                   负向词
@@ -1264,6 +1272,13 @@ export default function CharactersPage({ onNotice }: Props) {
                     className="chars-prompt short"
                     value={cPrompt?.negative ?? ''}
                     onChange={(e) => setCPrompt((p) => (p ? { ...p, negative: e.target.value } : p))}
+                  />
+                  <PromptZoom
+                    value={cPrompt?.negative ?? ''}
+                    label="负向词"
+                    disabled={!cPrompt}
+                    hint="只在 cfg > 1 时才真正发给模型。"
+                    onChange={(v) => setCPrompt((p) => (p ? { ...p, negative: v } : p))}
                   />
                 </label>
                 <div className="chars-row">

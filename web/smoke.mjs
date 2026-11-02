@@ -887,7 +887,8 @@ function check(name, cond, extra = '') {
 {
   calls.length = 0
   const { dom, errors } = await boot('?demo=gen')
-  const doc = dom.window.document
+  const win = dom.window
+  const doc = win.document
   await new Promise((r) => setTimeout(r, 1200))
   check('生成卡渲染', !!doc.querySelector('.node.gen'))
   check('卡片标题是「图生成」', doc.querySelector('.node-kind')?.textContent === '图生成')
@@ -902,6 +903,52 @@ function check(name, cond, extra = '') {
   }
   check('轮询了任务状态', calls.some((c) => c.url.includes('/jobs/')))
   check('出图后显示预览图', !!doc.querySelector('.preview img, .node-image-only img'))
+
+  // ---- 提示词放大编辑 + 尺寸预设（2026-11-02） ----
+  // 用户反馈：节点里的 prompt 只有两三行高，写长描述看不全；尺寸还得自己
+  // 记「768 是精灵甜点」「竖版立绘填什么」。
+  const zoomBtn = doc.querySelector('.prompt-wrap .pzoom')
+  check('提示词旁有放大编辑按钮', !!zoomBtn, zoomBtn?.title)
+  zoomBtn?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 200))
+  const zoomArea = doc.querySelector('.pzoom-area')
+  check('点开后出现放大编辑弹窗', !!zoomArea)
+  check('弹窗里带的就是这段提示词',
+    (zoomArea?.value || '').includes('猫骑士'), (zoomArea?.value || '').slice(0, 40))
+  check('弹窗显示字数统计',
+    /字/.test(doc.querySelector('.pzoom-meta')?.textContent || ''),
+    doc.querySelector('.pzoom-meta')?.textContent)
+
+  // 在弹窗里改 → 原输入框要跟着变（受控组件，不能各改各的）
+  Object.getOwnPropertyDescriptor(win.HTMLTextAreaElement.prototype, 'value')
+    .set.call(zoomArea, '白色猫骑士，蓝披风')
+  zoomArea?.dispatchEvent(new win.Event('input', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 200))
+  check('弹窗里改了就同步回原输入框',
+    (doc.querySelector('.prompt')?.value || '') === '白色猫骑士，蓝披风',
+    doc.querySelector('.prompt')?.value)
+  ;[...doc.querySelectorAll('.pzoom-head button')]
+    .find((b) => (b.textContent || '').includes('完成'))
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 200))
+  check('点「完成」关闭弹窗', !doc.querySelector('.pzoom-mask'))
+
+  const sizeSel = doc.querySelector('.size-preset select')
+  const sizeVals = [...(sizeSel?.options || [])].map((o) => o.value)
+  check('宽高旁边有尺寸预设下拉', !!sizeSel, sizeVals.join(','))
+  check('尺寸预设含常见档位（方形 / 竖 2:3 / 横 3:2）',
+    ['1024x1024', '768x768', '832x1216', '1216x832'].every((k) => sizeVals.includes(k)),
+    sizeVals.join(','))
+  Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value')
+    .set.call(sizeSel, '832x1216')
+  sizeSel?.dispatchEvent(new win.Event('change', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 250))
+  const numIns = [...doc.querySelectorAll('.row input[type=number]')]
+  check('选了竖版预设后宽高跟着变',
+    numIns[0]?.value === '832' && numIns[1]?.value === '1216',
+    `${numIns[0]?.value}×${numIns[1]?.value}`)
+  check('下拉自身回显为选中那一档', sizeSel?.value === '832x1216', sizeSel?.value)
+
   check('无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }

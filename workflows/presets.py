@@ -32,6 +32,17 @@ SPRITE_SUFFIX = (
     f"16-bit pixel art, hard outline, flat colors, {FRAMING}"
 )
 
+# **不像素化**时用的同族契约：只留构图 + 背景约束，剥掉风格词。
+#
+# 为什么必须有这一版：`pixel <= 1`（用户没勾像素化）却还挂着 `sprite` 契约时，
+# "16-bit pixel art, hard outline, flat colors" 会把模型往像素画上拽——用户
+# 明明选了韩式漫画/厚涂这类画风，出图却还是带一层像素感，根子就在这三句。
+# 契约该描述的是**构图**（单主体 / 全身 / 居中 / 干净背景），风格应交给画风
+# 与用户提示词，不该由"产出档位"偷偷决定。
+SPRITE_SUFFIX_PAINT = (
+    "single character, full body, centered, flat plain background, " + FRAMING
+)
+
 # 负向词：按「污染程度」排序，前面被保留的概率最高
 SPRITE_NEG = (
     # 最脏的放最前：格纹背景是像素化之后最刺眼的败笔
@@ -39,6 +50,16 @@ SPRITE_NEG = (
     "text, letters, chinese characters, sign, watermark, "
     "gradient, background scenery, multiple characters, "
     "photo, 3d render, blurry, anti-aliasing, extra limbs, cropped"
+)
+
+# 不像素化时的负向词：**只差一条 `anti-aliasing`**。
+# 像素画要硬边所以压抗锯齿；插画要的就是抗锯齿——压掉它，边缘会变成台阶状
+# 锯齿，远看就像低分辨率像素画（这是"像素感"的第二个来源，比风格词更隐蔽）。
+SPRITE_NEG_PAINT = (
+    "checkerboard, grid, lattice, tile pattern, pattern, texture, "
+    "text, letters, chinese characters, sign, watermark, "
+    "gradient, background scenery, multiple characters, "
+    "photo, 3d render, blurry, extra limbs, cropped"
 )
 
 PORTRAIT_SUFFIX = "single character, full body, centered, plain background, clean lineart"
@@ -132,8 +153,13 @@ PRESETS = {
 
 
 def build(prompt: str, negative: str | None,
-          preset: str = "sprite") -> tuple[str, str]:
+          preset: str = "sprite", *, pixelate: bool = True) -> tuple[str, str]:
     """用户描述 + 契约后缀。**一个字都不截**。
+
+    `pixelate=False`（用户没勾像素化）时，`sprite` 档换成只约束构图的
+    `SPRITE_SUFFIX_PAINT`：不写 "16-bit pixel art / hard outline"，
+    负向词也不压 `anti-aliasing`。否则「不像素化」和「要求画像素画」自相矛盾，
+    实测出来就是"任何画风都带一股像素味"。
 
     **为什么不截**：截断是我们的判断，不是模型的限制。Qwen-Image 的编码器是
     Qwen3-VL，tokenizer 的 `model_max_length` 是 262144，diffusers 的
@@ -151,7 +177,11 @@ def build(prompt: str, negative: str | None,
     """
     if preset not in PRESETS:
         raise ValueError(f"未知 preset: {preset}（可选 {', '.join(PRESETS)}）")
-    suffix, neg = PRESETS[preset]
+    if not pixelate and preset == "sprite":
+        # 不像素化 → 用"同族但无风格词"的构图契约，见 SPRITE_SUFFIX_PAINT
+        suffix, neg = SPRITE_SUFFIX_PAINT, SPRITE_NEG_PAINT
+    else:
+        suffix, neg = PRESETS[preset]
     user = (prompt or "").strip().strip(",")
     if user and suffix:
         pos = f"{user}, {suffix}"
