@@ -368,11 +368,12 @@ CLOTHES_DEFAULTS = {"steps": 25, "cfg": 3.0, "target_size": 1024}
 TRANSPARENT_BACKGROUND = "Transparent"
 
 
-def normalize_background_color(value: Any, default: str = "Green") -> str:
+def normalize_background_color(value: Any, default: str = "Transparent") -> str:
     """官方 `:354-356`：`green` / `GREEN` 一律归一到 `Green`/`Blue`/`Transparent`。
 
-    认不出就回 `Green`——不是"什么都不做"：prompt 里的背景段必须有值，
-    否则模型会自己画背景，抠像就废了。
+    认不出就回默认值。**默认是 `Transparent`**（QI2 原生 alpha）：既不用抠图，
+    prompt 里的背景段也有值（否则模型会自己画场景）。透明不支持的模型会在
+    `effective_background_color` 里退回 Green。
     """
     text = str(value or default).strip().capitalize()
     return text if text in CLOTHES_BACKGROUNDS else default

@@ -45,13 +45,19 @@ def test_background_prompt_transparent():
         "Transparent background with alpha channel.")
 
 
-def test_normalize_background_color_falls_back_to_green():
-    """官方 `:354-356`：只认 Green/Blue/Transparent，其余一律 Green。"""
+def test_normalize_background_color_falls_back_to_transparent():
+    """只认 Green/Blue/Transparent，其余回落**默认值**。
+
+    默认值改成 Transparent 而不是 Green：QI2 能出原生 alpha，没必要先画绿幕
+    再抠一遍（那一步会啃掉头发和挂饰，正是用户报的那个问题）。
+    需要旧行为时由调用方显式传 `default`。
+    """
     assert cg.normalize_background_color("green") == "Green"
     assert cg.normalize_background_color("BLUE") == "Blue"
     assert cg.normalize_background_color("transparent") == "Transparent"
-    assert cg.normalize_background_color("white") == "Green"
-    assert cg.normalize_background_color("") == "Green"
+    assert cg.normalize_background_color("white") == "Transparent"
+    assert cg.normalize_background_color("") == "Transparent"
+    assert cg.normalize_background_color("white", "Green") == "Green"
 
 
 def test_effective_background_transparent_only_for_qi2():

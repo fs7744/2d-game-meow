@@ -849,7 +849,6 @@ def run_batch(
     info = cfg_data.get("character_info") or {}
     emos = resolve_emotions(params.get("emotions") or [])
     negative = negative_prompt(str(info.get("negative_prompt") or ""))
-    transparent = bool(params.get("transparent"))
 
     steps = int(params.get("steps") or 25)
     cfg_scale = float(params.get("cfg") or 3.0)
@@ -858,8 +857,18 @@ def run_batch(
     feather = int(params.get("feather") if params.get("feather") is not None
                   else EMOTION_DEFAULTS["feather"])
     do_matte = bool(params.get("matte"))
+    # 背景默认**留空**（= 走原生透明）。以前默认 "Green" 会把整条链路拖回
+    # "绿幕 + 抠图"，那正是用户抱怨的"我没选抠图你为啥要抠"。
     background = str(params.get("background_color")
-                     or info.get("background_color") or "Green")
+                     or info.get("background_color") or "")
+    # 透明判定同 posegen：显式 `transparent` 优先；否则实色幕布出实色图、
+    # 其余走原生 alpha。以前默认 False = 强制"绿幕 + 抠图"。
+    _tr = params.get("transparent")
+    if _tr is None:
+        transparent = background.strip().lower() not in {
+            "green", "blue", "white", "grey", "magenta"}
+    else:
+        transparent = bool(_tr)
 
     sources = characters.source_sprite_paths(name, costume)
     if not sources:

@@ -1109,7 +1109,8 @@ class ClothesDesignReq(BaseModel):
     seed: int = -1
     lora_scale: float = 1.0
     #: 出完顺带抠掉纯色幕布（绿/蓝底才有意义）
-    matte: bool = True
+    # 默认**不抠**：QI2 自带透明底，抠图是用户的选择（见 generate._postprocess）
+    matte: bool = False
 
 
 class PoseGenReq(BaseModel):
@@ -1132,7 +1133,8 @@ class PoseGenReq(BaseModel):
     #: **整批共用一个种子**（官方 `inherit_pipe=True`），-1 = 现场随机一个
     seed: int = -1
     transparent: bool = False
-    matte: bool = True
+    # 默认**不抠**：QI2 自带透明底，抠图是用户的选择（见 generate._postprocess）
+    matte: bool = False
     lora: str = ""
 
 
@@ -1157,7 +1159,8 @@ class PipelineReq(BaseModel):
     emotion_target_size: int = int(pipeline.PIPELINE_DEFAULTS["emotion_target_size"])
     background_color: str = ""
     seed: int = -1
-    matte: bool = True
+    # 默认**不抠**：QI2 自带透明底，抠图是用户的选择（见 generate._postprocess）
+    matte: bool = False
     transparent: bool = False
     #: 某一步失败后是否继续后面的（默认继续，别把整条流水线拖死）
     continue_on_error: bool = True
@@ -1226,7 +1229,8 @@ class UnderwearReq(BaseModel):
     seed: int = -1
     lora_scale: float = 1.0
     #: 出完顺带抠掉背景
-    matte: bool = True
+    # 默认**不抠**：QI2 自带透明底，抠图是用户的选择（见 generate._postprocess）
+    matte: bool = False
 
 
 class ClothesWizardReq(BaseModel):
@@ -1289,7 +1293,8 @@ class EmotionGenerateReq(BaseModel):
     #: 要不要把 `Transparent background with alpha channel.` 追加进 prompt
     transparent: bool = False
     #: 贴回后再走一遍官方的纯色幕抠像（bg_remove）
-    matte: bool = True
+    # 默认**不抠**：QI2 自带透明底，抠图是用户的选择（见 generate._postprocess）
+    matte: bool = False
 
 
 @app.post("/characters/wizard")
@@ -1379,7 +1384,8 @@ class CharacterFromImageReq(BaseModel):
     #: 幕布色（抠图按它取样）
     background_color: str = ""
     #: 收编时先抠掉纯色背景（官方 bg_remove）
-    matte: bool = True
+    # 默认**不抠**：QI2 自带透明底，抠图是用户的选择（见 generate._postprocess）
+    matte: bool = False
     timeout: float = 300.0
 
 

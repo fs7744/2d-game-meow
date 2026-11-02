@@ -160,6 +160,9 @@ export default function CharactersPage({ onNotice }: Props) {
   /** 一键出全套：勾选项 / 表情多选 / 进度 / 提示 */
   const [pipeUnderwear, setPipeUnderwear] = useState(true)
   const [pipeEmotions, setPipeEmotions] = useState<string[]>([])
+  // 抠图默认**关**：模型自己能出透明底（QI2 原生 alpha），没必要每张再跑一遍
+  // 分割模型。跑不跑是用户的选择，不该替他决定。
+  const [pipeMatte, setPipeMatte] = useState(false)
   const [pipeBusy, setPipeBusy] = useState(false)
   const [pipeMsg, setPipeMsg] = useState('')
   const [pipeProg, setPipeProg] = useState<{ done: number; total: number;
@@ -590,7 +593,7 @@ export default function CharactersPage({ onNotice }: Props) {
         underwear: pipeUnderwear,
         pose_dir: poseDir,
         emotions: pipeEmotions,
-        matte: true,
+        matte: pipeMatte,
       })
       setPipeMsg(`开始：${r.steps.map((k) => r.labels[k] || k).join(' → ')}`)
       for (let i = 0; i < 3600; i++) {
@@ -620,7 +623,7 @@ export default function CharactersPage({ onNotice }: Props) {
     } finally {
       setPipeBusy(false)
     }
-  }, [sel, pipeBusy, poseDir, pipeUnderwear, pipeEmotions, browseCostume, finishOp])
+  }, [sel, pipeBusy, poseDir, pipeUnderwear, pipeEmotions, pipeMatte, browseCostume, finishOp])
 
   /**
    * 换白色内衣底图（官方 `remove_clothes`）。
@@ -1564,10 +1567,19 @@ export default function CharactersPage({ onNotice }: Props) {
                     以前这三步要自己点三次、还得记住顺序；点错一次出来的图就不能用。
                   </p>
                   <div className="chars-row">
-                    <label className="chars-check">
+                    <label className="chars-check"
+                      title={'模型自己能出透明底（QI2 的原生 alpha），一般不用再抠。\n'
+                        + '只有出图带实色背景、或者边缘明显不干净时才勾这个。\n'
+                        + '勾了会跑分割模型（慢几秒），代价是头发/挂饰边缘可能被啃掉一圈。'}>
                       <input type="checkbox" checked={pipeUnderwear}
                         onChange={(e) => setPipeUnderwear(e.target.checked)} />
                       先换白内衣底图
+                    </label>
+                    <label className="chars-check" title={'跑完要不要再抠一遍背景。\n'
+                      + '**默认关**：模型自带透明底就够了；勾了会多跑一次分割模型。'}>
+                      <input type="checkbox" checked={pipeMatte}
+                        onChange={(e) => setPipeMatte(e.target.checked)} />
+                      抠背景
                     </label>
                     <label>
                       骨架帧目录

@@ -165,6 +165,42 @@ def _harden_alpha(img: Image.Image, thr: int = 240) -> Image.Image:
     return Image.fromarray(arr, "RGBA")
 
 
+def _defringe_white_matte(img: Image.Image) -> Image.Image:
+    """把「白底预乘」的半透明边缘还原成**真正的前景色**（unpremultiply）。
+
+    **为什么需要**：模型出透明底时，RGB 通道通常是**在白底上合成过的** ——
+    半透明边缘 = `前景色*α + 白色*(1-α)`。实测一张 Qwen 透明图：过渡带
+    （16≤α≤240）RGB 亮度 203，而实心区只有 128。也就是说 alpha 200 的头发
+    边缘，RGB 看起来接近白。
+
+    不像素化时我们要**保留这条过渡带**（硬切会变台阶锯齿），但直接留下就
+    会在深色背景上露出一圈白雾边 —— 用户看到的就是"抠图没抠干净"。
+
+    还原公式（标准 unpremultiply）：
+        C_fg = (C_obs - 255*(1-α)) / α
+    α 小时除法会过曝，所以分母按 `max(α, 0.25)` 兜底。实测这一式把过渡带
+    亮度从 203 拉回 125.3，和实心区 128.2 基本吻合。
+
+    **只在检测到白污染时才动手**：过渡带亮度比实心区高 25 以上才做。模型
+    若给的就是正确前景色（比如深色背景合成），这一步会伤害它。
+    """
+    if img.mode != "RGBA":
+        return img
+    arr = np.asarray(img).astype(np.float32)
+    rgb, a = arr[..., :3], arr[..., 3]
+    mid = (a >= 16) & (a <= 240)
+    solid = a >= 241
+    # 样本太少时不判（可能只是零星的抗锯齿点）
+    if int(mid.sum()) < 64 or int(solid.sum()) < 64:
+        return img
+    if float(rgb[mid].mean()) - float(rgb[solid].mean()) < 25.0:
+        return img                     # 没有白污染，别动
+    alpha = (a / 255.0)[..., None]
+    fixed = (rgb - 255.0 * (1.0 - alpha)) / np.maximum(alpha, 0.25)
+    arr[..., :3] = np.clip(fixed, 0, 255)
+    return Image.fromarray(arr.round().astype(np.uint8), "RGBA")
+
+
 def _postprocess(img: Image.Image, eng: Engine, *, matte: bool, matte_backend: str,
                  denoise: int, pixel: int, palette: int, clean_iso: int,
                  info: Dict[str, Any] | None = None, transparent: bool = False):
@@ -174,19 +210,23 @@ def _postprocess(img: Image.Image, eng: Engine, *, matte: bool, matte_backend: s
     反过来会把背景噪点量化成格纹，抠图也会因为色阶被压而失效。
     三张卡（文生图 / 图生图 / 姿态帧）共用这一份，避免各写一遍走样。
 
-    `transparent=True`（模型直接出了 RGBA）时，处理顺序是**先信模型、再兜底**：
+    `transparent=True`（模型直接出了 RGBA）时的三条路，**都不含"替用户抠图"**：
 
     1. alpha 干净（`alpha_trust` 通过）→ 直接复用，什么都不做；
     2. alpha 是雾，但**有实心主体**（≥240 的像素占 2% 以上）→ 按档位收边：
-       像素化档 `_harden_alpha` 硬切成 0/255；插画档 `sanitize_alpha` 只清
-       <16 / >240，中间过渡原样保留（硬切会把抗锯齿边缘砍成台阶锯齿，
-       那是"没勾像素化却看着像像素"最刺眼的一处）；
-    3. 整张图连一块实心都没有（模型压根没画透明）→ 才走分割模型重抠。
+       像素化档 `_harden_alpha` 硬切成 0/255；插画档 `_defringe_white_matte`
+       + `sanitize_alpha`（清脏 alpha、把白底预乘的过渡带还原成前景色，
+       alpha 本身保持渐变）；
+    3. 整张图连一块实心都没有（模型压根没画透明）→ 同样只做最小清理，
+       打上 `alpha_missing` 标记。**不调分割模型**。
 
-    第 2 步是这里的关键：以前只有 1 和 3，雾状 alpha 会直接进量化，
-    被 `>127 → 255` 实化成两大块白；而改成"雾就重抠"又丢掉了模型更准的边界
-    （u2net 的 mask 天生胖 1~2px，白鞋还会被啃）。所以补上"收边"这一档，
-    并且**收得多狠要跟着档位走**——硬边是像素画的风格，不是插画的。
+    第 3 条曾经是 `matte_auto(...)` 兜底，那是错的：用户没勾「抠背景」，
+    我们却自己跑了 u2net，结果是头发边缘被啃、轮廓外一圈 mask 肥边，而用户
+    看不出"这是自动抠的"，只会问「我没选抠图你为啥要抠」。**跑不跑分割模型
+    是用户的选择**——`matte=True` 才是那个开关，走上面第一条分支。
+
+    第 2 步的"收边"是必要的（雾状 alpha 直接进量化会被 `>127→255` 实化成
+    两大块白），但**收得多狠要跟着档位走**：硬边是像素画的风格，不是插画的。
     """
     info = info if info is not None else {}
     edge: list[str] = []
@@ -216,15 +256,25 @@ def _postprocess(img: Image.Image, eng: Engine, *, matte: bool, matte_backend: s
                 img = _harden_alpha(rgba, 240)
                 info.update(alpha_hardened=True, **obs)
             else:
-                img = sanitize_alpha(rgba)
+                # 保留过渡带，但**必须去掉白底残留**：模型给的是"白底预乘"的
+                # 半透明边缘（实测过渡带亮度 203 vs 实心区 128），不去的话
+                # 深色背景上就是一圈白雾边（用户实拍："你看这边缘这头发"）。
+                img = _defringe_white_matte(sanitize_alpha(rgba))
                 info.update(alpha_softened=True, **obs)
             cut = True
         else:
-            # 整张都是雾 → 模型没打算画透明，只能靠分割模型兜底
-            img = matte_mod.matte_auto(rgba, matte_backend,
-                                       eng.matte_dir, info=info)
-            cut = True
-            info.update(alpha_recut=True, **obs)
+            # 整张都是雾：模型这次**没打算画透明**。
+            #
+            # **不主动抠**。这里原来是 `matte_auto(...)` 兜底 —— 用户明明没勾
+            # 「抠背景」，我们却自己把分割模型跑了一遍。后果是头发边缘被啃、
+            # 轮廓外留一圈 mask 肥边，而用户根本看不出"这是自动抠的"，只会觉得
+            # 「我没选抠图，你为啥要抠」。跑不跑分割模型是用户的选择，不是我们的。
+            #
+            # 这里只做最小清理（清脏 alpha + 去白底残留），把情况写进 info，
+            # 交给前端提示"这次没出干净透明底"。真要抠，用户自己勾「抠背景」，
+            # 走上面 `matte and not transparent` 那条分支。
+            img = _defringe_white_matte(sanitize_alpha(rgba))
+            info.update(alpha_missing=True, **obs)
 
     if cut:
         # 形态学开运算（3×3 腐蚀→膨胀）会削掉轮廓上 <3px 的突起：像素画要它
@@ -658,14 +708,19 @@ def _qwen_txt2img(eng: Engine, *, prompt: str, negative: Optional[str],
         "seed": seed,
         "lora": None, "lora_scale": None,
         "pixel_block": pixel, "palette": palette,
-        # 透明底时**默认**不抠（模型自带 alpha）；但 alpha 是雾时会重抠一遍，
-        # 所以这里记的是「实际跑没跑抠图」，不是用户勾没勾
-        "matte": bool(matte and not transparent) or bool(info.get("alpha_recut")),
+        # 透明底时**绝不替用户抠**：模型自带 alpha，`matte=True` 才是显式要求。
+        # alpha 起雾时做的是"收边"（改 alpha 数值），不是抠图，所以不计入这里。
+        "matte": bool(matte and not transparent),
         "matte_backend": matte_backend, "denoise": denoise, "clean_iso": clean_iso,
         "matte_used": info.get("backend"), "matte_fallback": info.get("fallback"),
         "alpha_reused": info.get("alpha_reused"),
+        # 老版本「整张雾 → 自动重抠」留下的字段；现在恒为 None，保留是为了
+        # 读得懂旧项目 meta
         "alpha_recut": info.get("alpha_recut"),
         "alpha_hardened": info.get("alpha_hardened"),
+        "alpha_softened": info.get("alpha_softened"),
+        # 模型这次没出干净透明底（整张都是雾）。前端据此提示"重试或自己勾抠背景"
+        "alpha_missing": info.get("alpha_missing"),
         "alpha_mid": info.get("mid"),
         "prompt_bg_stripped": stripped or None,
         "edge_touch": edge, "model": model, "clip_skip": None,
@@ -798,12 +853,15 @@ def _qwen_img2img(eng: Engine, *, init_image: str | Path, prompt: str,
         # 实际输出尺寸（w2 之前根本没记，产线无从得知）
         "width": img.width, "height": img.height,
         "pixel_block": pixel, "palette": palette,
-        "matte": bool(matte and not transparent) or bool(info.get("alpha_recut")),
+        # 透明底时**绝不替用户抠**（见 _postprocess 的说明），只记显式勾选
+        "matte": bool(matte and not transparent),
         "matte_backend": matte_backend, "matte_used": info.get("backend"),
         "matte_fallback": info.get("fallback"),
         "alpha_reused": info.get("alpha_reused"),
         "alpha_recut": info.get("alpha_recut"),
         "alpha_hardened": info.get("alpha_hardened"),
+        "alpha_softened": info.get("alpha_softened"),
+        "alpha_missing": info.get("alpha_missing"),
         "edge_touch": edge, "subjects": subjects, "model": model,
         "clip_skip": None, "transparent": transparent,
         "seconds": seconds,
@@ -1970,7 +2028,8 @@ def _qwen_vnccs(eng: Engine, *, pose_image: str | Path,
     # serializable"。只挑可序列化的几个键（其它工作流也这么做）。
     safe_info = {k: matte_info[k] for k in
                  ("backend", "fallback", "alpha_reused", "alpha_hardened",
-                  "alpha_recut", "a0", "mid", "fg")
+                  "alpha_softened", "alpha_missing", "alpha_recut",
+                  "a0", "mid", "fg")
                  if k in matte_info}
     return _save(out, _stamp(tag), "vnccs_pose", {
         "workflow": "wvnccs", "scope": scope or "default",
@@ -1982,8 +2041,8 @@ def _qwen_vnccs(eng: Engine, *, pose_image: str | Path,
         "canvas": [w, h], "steps": _eff_steps(eng, steps, fast=False),
         "cfg": cfg, "seed": seed,
         "transparent": bool(transparent),
-        # 记**实际**有没有跑抠图：透明底 + alpha 可信时是 False（一个像素都不动）
-        "matte": bool(matte and not transparent) or bool(matte_info.get("alpha_recut")),
+        # 记**实际**有没有跑抠图：透明底时恒为 False（模型自带 alpha，我们不动）
+        "matte": bool(matte and not transparent),
         **_fast_meta(eng, applied=False),
         "seconds": round(seconds, 2),
         "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),

@@ -107,3 +107,125 @@ def test_matte_node_still_cuts(transparent: bool, expected: int):
     finally:
         M.matte_auto = orig
     assert len(calls) == expected, f"transparent={transparent} 时抠图次数不对: {calls}"
+
+
+# ---------------- 白底预乘边缘：保留过渡带 ≠ 保留白色 ----------------
+#
+# 用户的第二份反馈：「你看这边缘这头发，你肯定抠图了」。上一版只把 alpha 硬切
+# 换成了「保留过渡带」，但**过渡带的 RGB 是白底合成出来的**——实测一张 Qwen
+# 透明图：过渡带（16≤α≤240）RGB 亮度 203，实心区 128。保留它就是保留白色，
+# 深色背景上就是一圈白雾边。
+#
+# 正解是 unpremultiply：C_fg = (C_obs - 255*(1-α)) / α。实测把 203 拉回 125.3，
+# 与实心区 128.2 吻合。
+
+def _white_matte(w=40, h=40):
+    """前半张是「白底预乘」的半透明边缘，后半张是实心主体。"""
+    arr = np.zeros((h, w, 4), np.uint8)
+    arr[..., 0], arr[..., 1], arr[..., 2] = 180, 100, 90
+    arr[15:35, :, 3] = 128                    # 大片半透明（白底混合）
+    # 白底预乘：α=0.5 时 RGB = fg*0.5 + 255*0.5 ≈ (218, 178, 173)
+    arr[15:35, :, 0], arr[15:35, :, 1], arr[15:35, :, 2] = 218, 178, 173
+    arr[35:40, 10:30, 3] = 255                # 实心主体
+    return Image.fromarray(arr, "RGBA")
+
+
+def test_defringe_pulls_white_back_to_foreground():
+    """白污染必须被还原：过渡带亮度要落回实心区附近。"""
+    out = G._defringe_white_matte(_white_matte())
+    a = np.asarray(out).astype(np.float32)
+    al, rgb = a[..., 3], a[..., :3]
+    mid = (al >= 16) & (al <= 240)
+    solid = al >= 241
+    assert mid.any() and solid.any()
+    delta = abs(float(rgb[mid].mean()) - float(rgb[solid].mean()))
+    assert delta < 12, f'过渡带亮度 {rgb[mid].mean():.1f} 没拉回实心区 {rgb[solid].mean():.1f}'
+
+
+def test_defringe_leaves_clean_edges_alone():
+    """过渡带本来就正确（无白污染）时不许动 —— 动了会让边缘发暗。"""
+    arr = np.zeros((40, 40, 4), np.uint8)
+    arr[..., 0], arr[..., 1], arr[..., 2] = 60, 40, 40
+    arr[15:35, :, 3] = 128
+    arr[35:40, 10:30, 3] = 255
+    src = Image.fromarray(arr, "RGBA")
+    out = G._defringe_white_matte(src)
+    assert np.array_equal(np.asarray(src), np.asarray(out)), '没有白污染却改了像素'
+
+
+def test_soft_path_also_defringes(monkeypatch):
+    """端到端：插画档走软边时，白雾边必须一起去掉。"""
+    out, info = _run(_white_matte(), pixel=0, palette=0)
+    assert info.get('alpha_softened') is True, info
+    a = np.asarray(out.convert('RGBA')).astype(np.float32)
+    al, rgb = a[..., 3], a[..., :3]
+    mid = (al >= 16) & (al <= 240)
+    solid = al >= 241
+    assert mid.any()
+    delta = abs(float(rgb[mid].mean()) - float(rgb[solid].mean()))
+    assert delta < 12, f'软边档没去白边：过渡带 {rgb[mid].mean():.1f} vs 实心 {rgb[solid].mean():.1f}'
+    # alpha 本身仍是渐变的（不能顺手又硬切了）：128 这个中间值必须还在
+    assert 128 in set(np.unique(al).tolist()), '过渡带被二值化了'
+
+
+# ---------------- 没勾抠图就**绝不**调分割模型 ----------------
+#
+# 用户第三份反馈：「我没选抠图，你为啥要主动扣？」。原来的 `_postprocess` 在
+# 「整张 alpha 都是雾」时会自己调 `matte_auto`（u2net），后果是头发边缘被啃、
+# 轮廓外一圈 mask 肥边。跑不跑分割模型是用户的选择，不该替他决定。
+
+def _all_foggy(w=40, h=40):
+    """整张都是雾：没有任何 >=240 的实心像素，alpha_trust 必然不通过。"""
+    arr = np.zeros((h, w, 4), np.uint8)
+    arr[..., 0], arr[..., 1], arr[..., 2] = 200, 150, 140
+    arr[..., 3] = 128
+    return Image.fromarray(arr, "RGBA")
+
+
+def test_no_matte_never_runs_segmentation():
+    """整张雾 + 没勾抠图 → 一个像素都不许交给分割模型。"""
+    import types
+    import workflows.matte as M
+
+    calls = []
+
+    def _forbidden(*a, **k):
+        calls.append(1)
+        raise AssertionError('没勾抠图却调了 matte_auto（分割模型）')
+
+    orig = M.matte_auto
+    M.matte_auto = _forbidden
+    info: dict = {}
+    try:
+        G._postprocess(_all_foggy(), types.SimpleNamespace(matte_dir='.'),
+                       matte=False, matte_backend='auto', denoise=1,
+                       pixel=0, palette=0, clean_iso=1, info=info,
+                       transparent=True)
+    finally:
+        M.matte_auto = orig
+    assert calls == [], '没勾抠图却跑了分割模型'
+    assert info.get('alpha_missing') is True, f'没标记"没出透明底": {info}'
+    assert info.get('alpha_recut') is None
+
+
+def test_explicit_matte_still_runs_segmentation_on_fog():
+    """显式勾了抠图 → 该抠就抠（这是用户的选择）。"""
+    import types
+    import workflows.matte as M
+
+    calls = []
+
+    def _fake(rgba, backend, matte_dir, **k):
+        calls.append(backend)
+        return rgba
+
+    orig = M.matte_auto
+    M.matte_auto = _fake
+    try:
+        G._postprocess(_all_foggy(), types.SimpleNamespace(matte_dir='.'),
+                       matte=True, matte_backend='auto', denoise=1,
+                       pixel=0, palette=0, clean_iso=1, info={},
+                       transparent=False)
+    finally:
+        M.matte_auto = orig
+    assert calls == ['auto'], '勾了抠图却没跑'

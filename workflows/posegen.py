@@ -178,12 +178,23 @@ def run_batch(
     # 衣服/发型/画风互相飘。
     seed = int(seed) if seed is not None and int(seed) >= 0 else int.from_bytes(
         os.urandom(3), "big")
-    transparent = bool(params.get("transparent"))
-    do_matte = bool(params.get("matte"))
     # 背景：参数优先，否则用角色自己的 background_color（没有就不追这句）
     info = characters.load_config(name) or {}
     background = str(params.get("background_color")
                      or (info.get("character_info") or {}).get("background_color") or "")
+    # **透明判定的优先级**：
+    #   1. 显式传了 `transparent` → 听它；
+    #   2. 没传 → 看背景色：实色幕布（绿/蓝/白/灰/品红）就出实色图，
+    #      其余（空 / alpha / transparent）走 QI2 原生 alpha；
+    #   3. 两边都没有 → 默认原生透明（不再默认出绿幕再抠）。
+    # 以前这里默认 False，等于强制"绿幕 + 抠图"多一道工序，边缘还会被啃。
+    _tr = params.get("transparent")
+    if _tr is None:
+        _bg = background.strip().lower()
+        transparent = _bg not in {"green", "blue", "white", "grey", "magenta"}
+    else:
+        transparent = bool(_tr)
+    do_matte = bool(params.get("matte"))
 
     if pose_fn is None:
         from workflows import generate as gen

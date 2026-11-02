@@ -64,7 +64,9 @@ PIPELINE_DEFAULTS: Dict[str, Any] = {
     "emotion_steps": 25,       # 表情采样（官方 :4136 用 25 / 3.0）
     "emotion_cfg": 3.0,
     "emotion_target_size": 2048,
-    "matte": True,
+    # **抠图默认关**：QI2 自己能出透明底（原生 alpha），多跑一遍分割模型只会
+    # 啃掉头发和挂饰的边缘。跑不跑是用户的选择 —— 前端有「抠背景」复选框。
+    "matte": False,
     "transparent": False,
     "continue_on_error": True,
 }

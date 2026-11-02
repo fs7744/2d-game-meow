@@ -673,18 +673,21 @@ def test_foggy_alpha_is_hardened_not_quantized_into_white(eng):
     assert ((a >= 16) & (a <= 240)).mean() == 0, "量化后不应留下半透明像素"
 
 
-def test_alpha_without_solid_core_falls_back_to_recut(eng):
-    """**整张图连一块实心都没有**（模型压根没画透明）→ 才重抠。
+def test_alpha_without_solid_core_does_not_recut(eng):
+    """**整张图连一块实心都没有**（模型压根没画透明）→ 也**不重抠**。
 
-    这种情况硬切会切出空图，只能靠分割模型兜底。
+    这条以前是 `matte_auto` 兜底（`alpha_recut=True`），但那等于「用户没勾
+    抠图、我们自己把分割模型跑了一遍」：头发边缘被啃、轮廓外一圈 mask 肥边，
+    而用户看不出这是自动抠的，只会问「我没选抠图你为啥要抠」。
+
+    现在只打 `alpha_missing` 标记，把选择权交回用户（勾「抠背景」才走分割模型）。
     """
     info: dict = {}
     out, _edge, _subj = g._postprocess(
         _foggy(150, alpha_fg=200), eng, matte=False, matte_backend="color",
         denoise=0, pixel=0, palette=16, clean_iso=0, info=info, transparent=True)
-    assert info.get("alpha_recut") is True, f"该重抠却没重抠：{info}"
-    a = np.asarray(out)[:, :, 3]
-    assert (a > 240).mean() > 0.02, "重抠后应该留下主体"
+    assert info.get("alpha_recut") is None, f"没勾抠图却重抠了：{info}"
+    assert info.get("alpha_missing") is True, f"没标记「没出透明底」：{info}"
 
 
 def test_clean_alpha_is_reused_not_recut(eng):
@@ -714,52 +717,3 @@ def _foggy(alpha_bg: int, alpha_fg: int = 255) -> Image.Image:
     ImageDraw.Draw(im).rectangle([88, 88, 168, 200],
                                  fill=(30, 30, 40, alpha_fg))
     return im
-
-
-def test_foggy_alpha_is_hardened_not_quantized_into_white(eng):
-    """**雾状背景必须在量化之前硬切掉，否则会被实化成白块。**
-
-    用户报的原话是「为何透明背景这么多白色的」。链路是这样坏的：
-    模型输出的背景 alpha 是 128~240 的雾 → `quantize_palette` 的
-    `>127 → 255` 把它实化 → 背景变成两大块实心白。
-    一条 1024² 的实测图里，雾占 68%，实化后不透明率从 14% 跳到 82%。
-
-    **修法不是"重抠"**：模型给的主体 alpha 仍是 255，边界比分割模型准。
-    所以只要还有实心主体（>=240 占 2% 以上），就用 `_harden_alpha` 沿模型的
-    边界切一刀；重抠只留给「整张都是雾」的情况（见下一条测试）。
-    """
-    info: dict = {}
-    out, _edge, _subj = g._postprocess(
-        _foggy(180), eng, matte=False, matte_backend="color", denoise=0,
-        pixel=0, palette=16, clean_iso=0, info=info, transparent=True)
-    a = np.asarray(out)[:, :, 3]
-    assert info.get("alpha_hardened") is True, f"没走硬切：{info}"
-    assert info.get("alpha_recut") is None, "有实心主体时不该动分割模型"
-    assert (a > 240).mean() < 0.35, f"背景被实化了：{(a > 240).mean():.0%} 不透明"
-    assert ((a >= 16) & (a <= 240)).mean() == 0, "量化后不应留下半透明像素"
-
-
-def test_alpha_without_solid_core_falls_back_to_recut(eng):
-    """**整张图连一块实心都没有**（模型压根没画透明）→ 才重抠。
-
-    这种情况硬切会切出空图，只能靠分割模型兜底。
-    """
-    info: dict = {}
-    out, _edge, _subj = g._postprocess(
-        _foggy(150, alpha_fg=200), eng, matte=False, matte_backend="color",
-        denoise=0, pixel=0, palette=16, clean_iso=0, info=info, transparent=True)
-    assert info.get("alpha_recut") is True, f"该重抠却没重抠：{info}"
-    a = np.asarray(out)[:, :, 3]
-    assert (a > 240).mean() > 0.02, "重抠后应该留下主体"
-
-
-def test_clean_alpha_is_reused_not_recut(eng):
-    """模型画干净时要**直接用**它的 alpha——重抠会把白毛/白鞋咬掉。"""
-    info: dict = {}
-    out, _edge, _subj = g._postprocess(
-        _foggy(0), eng, matte=False, matte_backend="color", denoise=0,
-        pixel=0, palette=16, clean_iso=0, info=info, transparent=True)
-    assert info.get("alpha_reused") is True
-    assert info.get("alpha_recut") is None
-    a = np.asarray(out)[:, :, 3]
-    assert 0.05 < (a > 240).mean() < 0.35, (a > 240).mean()

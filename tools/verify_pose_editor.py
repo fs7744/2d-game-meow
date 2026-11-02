@@ -67,19 +67,22 @@ window.addEventListener('message', (e) => {
   else if (d.type === 'ready') {
     if (stage === 0) {
       stage = 1
-      // 1) 套一个官方姿势库的姿势（真 3D 骨骼 JSON）
-      f.contentWindow.postMessage({ type:'setPose', pose: POSE }, '*')
-      // 相机视角：开 → 任意角度（30°，非 45 倍数）
+      // **不套任何姿势，用默认站姿**：这张图会被 `tests/test_emotiongen.py`
+      // 当素材做人脸检测，套 Ballet/Arabesque 那种伸展姿势时脸朝下/被身体
+      // 挡住，YOLO 直接检不出来（踩过）。姿势套用由 entry.js 自己那条链路保证。
+      // 相机视角：开 → 与导出机位对齐
       f.contentWindow.postMessage({ type:'setCameraMode', on: true }, '*')
-      f.contentWindow.postMessage({ type:'setYaw', yaw: 30 }, '*')
+      // **必须是 0° 正面**：这张图还会被 test_emotiongen 当素材（检出人脸）。
+      // 改成 30/90 会导出侧脸，人脸检测直接失败（踩过一次）。
+      f.contentWindow.postMessage({ type:'setYaw', yaw: 0 }, '*')
       // 2) 问子窗要姿势 + 朝向，验证相机视角下 yaw 是否被正确保持
       setTimeout(() => f.contentWindow.postMessage({ type:'getPose' }, '*'), 400)
-      setTimeout(() => f.contentWindow.postMessage({ type:'export', yaw: 30, size: 768 }, '*'), 1400)
+      setTimeout(() => f.contentWindow.postMessage({ type:'export', yaw: 0, size: 768 }, '*'), 1400)
     }
   } else if (d.type === 'pose') {
     // 相机视角下 getPose 应该把 yaw 原样回传（不是被 orbit 干扰的随机值）
     if (stage === 1 && d.yaw !== undefined) {
-      yawCheck = 'yaw=' + d.yaw + ' expect=30 '
+      yawCheck = 'yaw=' + d.yaw + ' expect=0 '
     }
   } else if (d.type === 'result') {
     const url = d.dataURL || ''
