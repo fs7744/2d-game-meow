@@ -27,10 +27,19 @@
  *     { type:'preview', yaw?, size? }        只要一张小缩略图（存姿势库用）→ 回 preview
  *     { type:'getPose' }                     回 { type:'pose', pose, yaw }
  *     { type:'resetPose' } / { type:'resetView' }
+ *     { type:'animLoad', buffer, name }     动作文件（glb/gltf/fbx 的 ArrayBuffer）
+ *                                           → 回 { type:'animLoaded', clips:[{name,duration}] }
+ *     { type:'animClip', index }            切动画轨道（一个文件里可能有多条）
+ *     { type:'animTime', t }                采样 t 秒并套到人偶上 → 回 pose
  *   子 → 父：
  *     { type:'ready' } | { type:'progress', text }
  *     | { type:'result', dataURL } | { type:'pose', pose, yaw }
+ *     | { type:'animLoaded', clips, boneCount, format }
  *     | { type:'error', message }
+ *
+ * **为什么动作文件走 ArrayBuffer 而不是路径**：父子是同源 iframe，但子窗拿不到
+ * 用户 `<input type=file>` 选的 File 对象（跨文档不行）。宿主读成字节发过来，
+ * 子窗自己造 Blob 解析。见 anim-import.js。
  */
 import { PoseViewerCore } from './pose_studio/core.js'
 import { loadMorphPack, solveMorph, buildStaticModelData } from './pose_studio/morph_runtime.js'
@@ -355,6 +364,31 @@ window.addEventListener('message', async (e) => {
       // （同一个 viewport capture），只是尺寸小、不算正式产物，所以单独回一个类型。
       const url = renderOut(msg.size || 256)
       if (url) post({ type: 'preview', dataURL: url })
+    } else if (msg.type === 'animLoad') {
+      // 动作文件：宿主读好字节传进来（子窗拿不到 File 对象）
+      try {
+        const m = await import('./anim-import.js')
+        const info = await m.loadAnimation(msg.buffer, msg.name)
+        post({ type: 'animLoaded', ...info })
+      } catch (e) {
+        post({ type: 'error', message: String(e?.message || e) })
+      }
+    } else if (msg.type === 'animClip') {
+      // 切轨道后立刻采第 0 帧，宿主只管更新下拉，不用再等一轮消息
+      const m = await import('./anim-import.js')
+      if (m.selectClip(msg.index || 0)) {
+        const ok = await m.applyTime(0, v)
+        if (ok) post({ type: 'pose', pose: v.getPose(), yaw: currentYaw })
+      }
+    } else if (msg.type === 'animTime') {
+      const m = await import('./anim-import.js')
+      const ok = await m.applyTime(msg.t, v)
+      if (ok) {
+        // 每帧都回一次 pose：宿主拿它当存档点（和拖动松手的语义一致）
+        post({ type: 'pose', pose: v.getPose(), yaw: currentYaw })
+      } else {
+        post({ type: 'error', message: '这一帧套不到人偶上（骨骼映射不上）' })
+      }
     } else if (msg.type === 'export') {
       // 导出**当前编辑器视角**（所见即所得）：不做任何对齐，直接 viewport capture。
       const url = renderOut(msg.size)

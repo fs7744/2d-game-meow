@@ -3020,8 +3020,16 @@ function check(name, cond, extra = '') {
   const node = [...doc.querySelectorAll('.node')].find((n) =>
     (n.querySelector('.node-kind')?.textContent || '').includes('人偶姿势'))
 
-  const input = node?.querySelector('input[type=file]')
+  // **按 accept 精确选**：节点里现在有两个 file input（从图片提姿势 / 导入动作），
+  // 只按 `input[type=file]` 会抓到先出现的那个（导入动作），用例就测错东西了。
+  const input = node?.querySelector('input[type=file][accept*="image"]')
   check('编辑器有「从图片」的文件入口', !!input)
+  // 导入动作的入口（glb/gltf/fbx）
+  check('编辑器有「导入动作」的文件入口',
+    !!node?.querySelector('input[type=file][accept*=".glb"]'))
+  check('有「导入动作」按钮',
+    [...(node?.querySelectorAll('button') || [])]
+      .some((b) => (b.textContent || '').includes('导入动作')))
   const file = new win.File([new Uint8Array([1, 2, 3])], 'pose.png', { type: 'image/png' })
   Object.defineProperty(input, 'files', { value: [file], configurable: true })
   input.dispatchEvent(new win.Event('change', { bubbles: true }))

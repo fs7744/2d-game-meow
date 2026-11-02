@@ -1068,6 +1068,20 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
 .pose-lib-sel, .pose-row select { flex: 1; min-width: 0; }
 .pose-row select { flex: 1; }
 .pose-yaw-slider input[type='range'] { flex: 1; min-width: 0; height: 16px; }
+/* 动作文件（glb/fbx）：滑块要占满剩余宽度，时间读数固定宽度不抖 */
+.pose-anim { gap: 5px; }
+.pose-anim-range { flex: 1; min-width: 0; height: 16px; }
+.pose-anim-t {
+  font-family: var(--mono); font-weight: 400; color: var(--cyan);
+  min-width: 44px; text-align: right; font-size: 10px;
+}
+/* 动作文件（glb/fbx）：滑块要占满剩余宽度，时间读数固定宽度不抖 */
+.pose-anim { gap: 5px; }
+.pose-anim-range { flex: 1; min-width: 0; height: 16px; }
+.pose-anim-t {
+  font-family: var(--mono); font-weight: 400; color: var(--cyan);
+  min-width: 44px; text-align: right; font-size: 10px;
+}
 .pose-yaw-val { font-family: var(--mono); font-weight: 400; color: var(--cyan); min-width: 30px; text-align: right; }
 .pose-cam-hint-row { font-size: 9px; color: var(--muted-2); line-height: 1.4; }
 .pose-save input {

@@ -90,6 +90,16 @@ export default function PoseStudio({
   const [saving, setSaving] = useState(false)
   const [saveName, setSaveName] = useState('')
   const [libSel, setLibSel] = useState('')
+  /**
+   * 导入的动作文件（glb/gltf/fbx）。`clips` 是文件里的动画轨道，
+   * 一个 glb 可能同时带 Idle/Walk/Run（three 的 Soldier.glb 就是 3 条）。
+   */
+  const [anim, setAnim] = useState<{ clips: { name: string; duration: number }[]; index: number } | null>(null)
+  const [animT, setAnimT] = useState(0)
+  const [animBusy, setAnimBusy] = useState(false)
+  const animFileRef = useRef<HTMLInputElement>(null)
+  /** 拖滑块时的节流器：每 60ms 才真采样一次，否则一帧一次 WebGL 解算会卡 */
+  const animTimer = useRef<number | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   // 导出/取姿势没有回执就没法收尾：超时要明确告诉用户，别让按钮一直转
   const exportTimer = useRef<number | null>(null)
@@ -138,6 +148,8 @@ export default function PoseStudio({
       const d = e.data as {
         type?: string; dataURL?: string; message?: string
         text?: string; pose?: unknown; yaw?: number
+        clips?: { name: string; duration: number }[]
+        boneCount?: number; format?: string; switched?: boolean
       } | null
       if (!d || typeof d.type !== 'string') return
       if (d.type === 'ready') {
@@ -157,6 +169,14 @@ export default function PoseStudio({
         askPoseRef.current = null
         cb?.(d.pose)
         onPoseRef.current(d.pose)
+      } else if (d.type === 'animLoaded') {
+        setAnimBusy(false)
+        const clips = d.clips || []
+        if (!clips.length) return
+        setAnim({ clips, index: 0 })
+        setAnimT(0)
+        setStatus(`动作已载入：${clips[0].name}（${d.boneCount} 根骨，${d.format}）——拖滑块选帧`)
+        post({ type: 'animTime', t: 0 })
       } else if (d.type === 'error') {
         setStatus('')
         setErr(String(d.message || '未知错误'))
@@ -215,6 +235,34 @@ export default function PoseStudio({
   useEffect(() => () => {
     if (exportTimer.current) window.clearTimeout(exportTimer.current)
   }, [])
+
+  /** 读动作文件 → 字节发给子窗解析（子窗拿不到 File 对象，只能传 Byte） */
+  const loadAnimFile = useCallback((f: File) => {
+    setErr('')
+    setAnimBusy(true)
+    if (!iframeRef.current?.contentWindow) {
+      setAnimBusy(false)
+      setErr('编辑器还没起来，等一下再试')
+      return
+    }
+    f.arrayBuffer().then((buf) => {
+      iframeRef.current?.contentWindow?.postMessage(
+        { type: 'animLoad', buffer: buf, name: f.name }, '*', [buf])
+    }).catch((e: Error) => {
+      setAnimBusy(false)
+      setErr(`读文件失败：${e.message}`)
+    })
+  }, [])
+
+  /** 拖滑块选帧。节流 60ms：每帧都要跑一次关键点提取 + 全骨 IK，不解节流会卡 */
+  const scrubAnim = useCallback((t: number) => {
+    setAnimT(t)
+    if (animTimer.current) window.clearTimeout(animTimer.current)
+    animTimer.current = window.setTimeout(() => {
+      animTimer.current = null
+      post({ type: 'animTime', t })
+    }, 60)
+  }, [post])
 
   const doExport = useCallback(() => {
     if (!ready) return
@@ -333,6 +381,64 @@ export default function PoseStudio({
         </button>
       </div>
 
+      {/* 动作文件（glb/gltf/fbx）：**比「从图片提姿势」可靠**——动画里的 3D 是
+          真的，不用从 2D 猜深度。载入后拖滑块逐帧选，停在哪帧人偶就是哪帧。 */}
+      <div className="pose-lib pose-anim">
+        <button
+          type="button" className="mini"
+          onClick={() => animFileRef.current?.click()}
+          disabled={!ready || animBusy}
+          title={'导入 .glb / .gltf / .fbx 动画（Mixamo 导出的骨骼直接能用）。\n'
+            + '动画自带真实 3D，比「从图片提姿势」准得多：不会有"人偶躺倒"这类深度歧义。'}
+        >
+          {animBusy ? '读取中…' : '导入动作'}
+        </button>
+        {anim && anim.clips.length > 1 && (
+          <select
+            className="pose-lib-sel"
+            value={anim.index}
+            onChange={(e) => {
+              const i = Number(e.target.value)
+              setAnim({ ...anim, index: i })
+              setAnimT(0)
+              post({ type: 'animClip', index: i })
+            }}
+            title="这个文件里有多个动作（Idle / Walk / Run…）"
+          >
+            {anim.clips.map((c, i) => (
+              <option key={i} value={i}>{c.name}</option>
+            ))}
+          </select>
+        )}
+        {anim && (
+          <>
+            <input
+              className="pose-anim-range"
+              type="range"
+              min={0}
+              max={Math.max(0.02, anim.clips[anim.index]?.duration ?? 1)}
+              step={0.01}
+              value={animT}
+              onChange={(e) => scrubAnim(Number(e.target.value))}
+              title="拖到想要的那一帧停住（人偶实时跟帧）"
+            />
+            <b className="pose-anim-t">{animT.toFixed(2)}s</b>
+          </>
+        )}
+      </div>
+
+      <input
+        ref={animFileRef}
+        type="file"
+        accept=".glb,.gltf,.fbx"
+        hidden
+        onChange={(e) => {
+          const f = e.target.files?.[0]
+          if (f) loadAnimFile(f)
+          e.target.value = ''
+        }}
+      />
+
       {saving && (
         <div className="pose-save">
           <input
@@ -427,7 +533,8 @@ export default function PoseStudio({
         拖橙色关节标记摆姿势（官方两骨 IK + 肘膝极点约束），滚轮缩放看细节。
         <b>导出的是白底灰 3D 人偶</b>，把它连到「角色迁移」的<b>动作参考</b>输入。
         摆好的姿势点 <b>存入</b> 就进资料库（存在磁盘 library/ 下），
-        别的节点和项目都能原样复用。
+        别的节点和项目都能原样复用。要现成的整套动作（idle / walk / run），
+        用 <b>导入动作</b> 读 Mixamo 的 glb/fbx，拖滑块选帧。
       </div>
     </div>
   )
