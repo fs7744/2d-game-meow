@@ -22,6 +22,90 @@
 
 ---
 
+## 2026-11-02 · 批量点了不出图（漏传姿势集名）+ 主按钮与透明底
+
+### 1) 「全部生成」建了一堆空格子，但一张图都没有 —— **后端漏传 pose_set**
+
+`/pose_renders/{name}/run` 组 params 时只放了 `project` / `render`，**没放
+`pose_set`**；而 `posebatch.run_batch` 第一件事就是拿它去 `poses/<名字>/set.json`
+找源帧，缺了直接抛「缺成片集名或姿势集名」。
+
+坑在于**失败发生在 worker 里**：`render.json` 已经建好了（所以界面上一排
+空格子），接口也早返回了 `job_id`，而面板只显示 `job.result.failed`（整批抛错
+时它是 `undefined`）→ 用户看到的就是「点了没反应」。
+
+- 端点从 `detail["poseSet"]` 补上 `params["pose_set"]`，取不到就 400 明说；
+- 面板补一条 `job.status === 'failed'` 的红字（整批失败必须看得见）；
+- `tests/test_poseset.py` 补 `run_batch` 的两条：缺 pose_set 必须抛、
+  给了之后候选要**追加**进 `render.json` 且自动选中；
+- `tests/test_api.py` 补端点级断言：直接查 `_jobs[job_id]["params"]["pose_set"]`
+  （队列 `put` 换成空操作，不惊动 GPU worker）。
+
+### 2) 「全部生成」改成绿色大按钮
+
+之前用 `.pose-batch-btn`，底色是 `--bg`(#0a0a0a) —— 比卡片底 `--bg-2`(#121216)
+还暗，看着像"透明的洞"，也不像主操作。改成和「迁移角色」同一套 `gen-btn`：
+整行、32px、品牌绿、带文字帧数（`全部生成（12 帧）`）。
+
+次级按钮（导出 GIF / Godot / 重生成）底色从 `--bg` 提到 `--bg-3`，至少比卡片亮一档。
+
+### 3) 底色加「透明底」
+
+用户要的是**底色下拉里的透明选项**（不是抠图）。三处配套：
+
+| 层 | 改动 |
+|---|---|
+| `types.ts` | `BgTone = 'white' \| 'dark' \| 'transparent'` |
+| 节点「更多设置 → 底色」 | 角色迁移 / 姿态批量都加「透明底（模型直接出 alpha）」 |
+| `PoseBatchPanel` | `bg` 原样透传（旧代码 `=== 'dark' ? 'dark' : 'white'` 会把透明悄悄换回白底） |
+| `generate._qwen_pose_clone` | `bg="transparent"` → `_qwen_call(transparent=True)`（提示词加 alpha 尾句）+ `_postprocess(transparent=True)`；meta 里记 `transparent` |
+| `api.submitVnccsPose` | 底色选透明 ≡ 勾透明，两条引擎语义一致 |
+
+> 透明底 ≠ 抠图：透明底是让模型**直接画 alpha**，背景干不干净由模型决定；
+> 要稳定透明得另勾「抠背景」。这条写进了 select 的 tooltip。
+
+## 2026-11-02 · 批量点了不出图（漏传姿势集名）+ 主按钮与透明底
+
+### 1) 「全部生成」建了一堆空格子，但一张图都没有 —— **后端漏传 pose_set**
+
+`/pose_renders/{name}/run` 组 params 时只放了 `project` / `render`，**没放
+`pose_set`**；而 `posebatch.run_batch` 第一件事就是拿它去 `poses/<名字>/set.json`
+找源帧，缺了直接抛「缺成片集名或姿势集名」。
+
+坑在于**失败发生在 worker 里**：`render.json` 已经建好了（所以界面上一排
+空格子），接口也早返回了 `job_id`，而面板只显示 `job.result.failed`（整批抛错
+时它是 `undefined`）→ 用户看到的就是「点了没反应」。
+
+- 端点从 `detail["poseSet"]` 补上 `params["pose_set"]`，取不到就 400 明说；
+- 面板补一条 `job.status === 'failed'` 的红字（整批失败必须看得见）；
+- `tests/test_poseset.py` 补 `run_batch` 的两条：缺 pose_set 必须抛、
+  给了之后候选要**追加**进 `render.json` 且自动选中；
+- `tests/test_api.py` 补端点级断言：直接查 `_jobs[job_id]["params"]["pose_set"]`
+  （队列 `put` 换成空操作，不惊动 GPU worker）。
+
+### 2) 「全部生成」改成绿色大按钮
+
+之前用 `.pose-batch-btn`，底色是 `--bg`(#0a0a0a) —— 比卡片底 `--bg-2`(#121216)
+还暗，看着像"透明的洞"，也不像主操作。改成和「迁移角色」同一套 `gen-btn`：
+整行、32px、品牌绿、带文字帧数（`全部生成（12 帧）`）。
+
+次级按钮（导出 GIF / Godot / 重生成）底色从 `--bg` 提到 `--bg-3`，至少比卡片亮一档。
+
+### 3) 底色加「透明底」
+
+用户要的是**底色下拉里的透明选项**（不是抠图）。三处配套：
+
+| 层 | 改动 |
+|---|---|
+| `types.ts` | `BgTone = 'white' \| 'dark' \| 'transparent'` |
+| 节点「更多设置 → 底色」 | 角色迁移 / 姿态批量都加「透明底（模型直接出 alpha）」 |
+| `PoseBatchPanel` | `bg` 原样透传（旧代码 `=== 'dark' ? 'dark' : 'white'` 会把透明悄悄换回白底） |
+| `generate._qwen_pose_clone` | `bg="transparent"` → `_qwen_call(transparent=True)`（提示词加 alpha 尾句）+ `_postprocess(transparent=True)`；meta 里记 `transparent` |
+| `api.submitVnccsPose` | 底色选透明 ≡ 勾透明，两条引擎语义一致 |
+
+> 透明底 ≠ 抠图：透明底是让模型**直接画 alpha**，背景干不干净由模型决定；
+> 要稳定透明得另勾「抠背景」。这条写进了 select 的 tooltip。
+
 ## 2026-11-02 · 修「姿态批量」两个真 bug：连线接不上、播放没内容
 
 用户报的：**下拉能选角色图，手动拖线不行**；**有播放按钮但没有播放的内容**。

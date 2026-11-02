@@ -414,7 +414,10 @@ export function submitVnccsPose(
     steps: Math.max(20, params.steps),
     // 透明底在 VNCCS 下**是可用的**（实测主体 16.6%、半透明 2.1%、背景全透），
     // 不像 ControlNet 那条路会被控制信号压成半透膜。
-    transparent: params.transparent === true || undefined,
+    // 底色选「透明底」等价于勾透明（两条引擎给的是同一个语义，别让用户
+    // 在 vnccs 下选了透明底却没反应）
+    transparent: params.transparent === true || params.bgTone === 'transparent'
+      || undefined,
     cfg: params.cfg,
     seed: params.seed,
     model: opts.model || 'qwen-image-2.1',

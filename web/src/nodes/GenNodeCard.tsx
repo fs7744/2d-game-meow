@@ -1695,7 +1695,8 @@ export default function GenNodeCard({
               + '角色本身偏白（白毛、白甲）时白底会让抠图分不清主体与背景，'
               + '把脸/腿一起判成背景 —— 这种情况选「深色底」，靠对比度抠干净。\n'
               + '深色系角色（黑袍、黑甲）反过来仍用白底。\n'
-              + '勾了「透明背景」之后这个选项就没意义了（模型直接出 alpha）。'}>
+              + '「透明底」是让模型**直接画 alpha**，不是抠图：出来就是透明 PNG，\n'
+              + '但背景干不干净由模型决定；要稳定透明请另勾「抠背景」。'}>
               底色
               <select
                 value={p.bgTone}
@@ -1704,6 +1705,7 @@ export default function GenNodeCard({
               >
                 <option value="white">白底（默认）</option>
                 <option value="dark">深色底（白毛角色）</option>
+                <option value="transparent">透明底（模型直接出 alpha）</option>
               </select>
             </label>
             {/* 透明底：Qwen 原生 RGBA。VNCCS 下实测可用（主体 16.6%、
@@ -1853,6 +1855,7 @@ export default function GenNodeCard({
               >
                 <option value="white">白底（默认）</option>
                 <option value="dark">深色底（白毛角色）</option>
+                <option value="transparent">透明底（模型直接出 alpha）</option>
               </select>
             </label>
             <div className="src-note">

@@ -1769,12 +1769,19 @@ def _qwen_pose_clone(eng: Engine, *, pose_image: str | Path,
              for p in char_paths]
 
     sem = (prompt or "").strip()
+    # 底色三档：white / dark / **transparent**。
+    #
+    # `transparent` 不是"抠图"，是让模型**直接出 alpha**（`_qwen_call` 会往
+    # 提示词尾部加 `QWEN_ALPHA_TAIL`）。抠图要靠用户勾 `matte`——两件事分开，
+    # 见 `_postprocess` 的注释（"跑不跑分割模型是用户的选择"）。
+    bg_key = (bg or "").strip().lower()
+    transparent = bg_key in ("transparent", "alpha", "none")
     instr = (
         "The first image is the character reference: keep the same face, hairstyle, "
         "outfit and colors. The second image is the pose condition (a body skeleton "
         "or silhouette). Redraw the same character in exactly that pose, "
         "full body, centered, "
-        + ("clean simple black background" if (bg or "").lower() == "dark"
+        + ("clean simple black background" if bg_key == "dark"
            else "clean simple background") + ".")
     if sem:
         instr += " " + sem
@@ -1787,6 +1794,7 @@ def _qwen_pose_clone(eng: Engine, *, pose_image: str | Path,
         eng, prompt=instr, negative=negative or QWEN_NEG,
         ref_image=[*chars, cond], width=width, height=height, steps=steps,
         cfg=cfg, seed=seed, model=model, label="wpc",
+        transparent=transparent,
         output_resolution=max(width, height))
     seconds = dt()
     width, height = out.size
@@ -1794,13 +1802,16 @@ def _qwen_pose_clone(eng: Engine, *, pose_image: str | Path,
     matte_info: Dict[str, Any] = {}
     out, edge, subjects = _postprocess(
         out, eng, matte=matte, matte_backend=matte_backend, denoise=denoise,
-        pixel=pixel, palette=palette, clean_iso=clean_iso, info=matte_info)
+        pixel=pixel, palette=palette, clean_iso=clean_iso, info=matte_info,
+        # **必须传下去**：模型出了 RGBA 之后 alpha 还要判「可信就复用、起雾就
+        # 收边」。漏传的话带雾的 alpha 会直接进量化，背景被实化成白块。
+        transparent=transparent)
     return _save(out, _stamp(tag), "pose_clone", {
         "workflow": "wpc", "scope": scope or "default",
         "prompt": instr, "negative": negative or QWEN_NEG,
         "pose_image": str(pose_image), "char_image": str(char_paths[0]),
         "char_images": char_paths, "n_refs": len(char_paths),
-        "backend": "qwen-multiref", "bg": bg,
+        "backend": "qwen-multiref", "bg": bg, "transparent": transparent,
         "ref_mode": ref_mode, "ref_mode_used": used_mode,
         "ref_fallback_from": cond_info.get("fallback_from"),
         "ref_fallback_reason": cond_info.get("fallback_reason"),

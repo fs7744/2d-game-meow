@@ -8,8 +8,9 @@
 2. **候选只增不删**：重新生成只是追加，旧的必须还能选回来。
 3. **名字不能跳出项目目录**：名字直接当文件夹名，`../` 之类的必须挡掉。
 
-生成（`posebatch.run_batch`）不在这里测 —— 那条要真跑 Qwen，按项目约定
-不在常规测试里开（见 README 的测试子集表）。
+生成（`posebatch.run_batch`）在这里测**编排**，但把 `generate.pose_clone`
+换成一个假的落盘函数 —— 真跑 Qwen 要 GPU，按项目约定不在常规测试里开
+（见 README 的测试子集表）。这样能钉住"帧表有没有走对、候选有没有追加上"。
 """
 from __future__ import annotations
 
@@ -242,3 +243,54 @@ def test_gif_skips_unselected_render_frames():
     poseset.create_render(PROJECT, "空成片", "跑")
     with pytest.raises(poseset.PoseSetError):
         poseset.export_gif(PROJECT, poseset.RENDERS_DIR, "空成片")
+
+
+def test_run_batch_requires_pose_set():
+    """`run_batch` 靠 `params["pose_set"]` 去 `poses/<名字>/set.json` 找源帧。
+
+    2026-11-02 这里漏传过：`/pose_renders/{name}/run` 只传了 `render`，
+    于是每帧都抛「缺成片集名或姿势集名」，而 `render.json` 已经建好 ——
+    界面上的表现就是用户说的「点全部生成，出来一堆空格子但没有图」。
+    """
+    from workflows import posebatch
+
+    poseset.save_pose_set(PROJECT, "走路", _frames(2))
+    poseset.create_render(PROJECT, "走路成片", "走路")
+    with pytest.raises(posebatch.PoseBatchError):
+        posebatch.run_batch(None, {"project": PROJECT, "render": "走路成片",
+                                   "char_image": "char.png"})
+
+
+def test_run_batch_appends_candidates(monkeypatch, tmp_path):
+    """一帧一候选：候选**追加**进 render.json，`bg` 原样透传到 pose_clone。
+
+    `bg` 那条断言是"透明底"的下游保证：面板以前把非 dark 的底色一律映射成
+    white，用户选了透明底却出白图。
+    """
+    from workflows import generate, posebatch
+
+    poseset.save_pose_set(PROJECT, "跑", _frames(2))
+    poseset.create_render(PROJECT, "跑成片", "跑")
+
+    seen = []
+
+    def fake_clone(eng, *, pose_image, char_image, seed=-1, scope="", tag="", **kw):
+        out = tmp_path / f"gen_{len(seen)}.png"
+        out.write_bytes(base64.b64decode(PNG_B64))
+        seen.append({"pose": pose_image, "seed": seed, "bg": kw.get("bg")})
+        return {"file": str(out), "meta": {"seed": seed}}
+
+    monkeypatch.setattr(generate, "pose_clone", fake_clone)
+    res = posebatch.run_batch(None, {
+        "project": PROJECT, "render": "跑成片", "pose_set": "跑",
+        "char_image": "char.png", "bg": "transparent",
+    })
+
+    assert res["images"] == 2 and res["failed"] == []
+    doc = poseset.load_render(PROJECT, "跑成片")
+    assert doc["done"] == 2
+    assert all(len(f["candidates"]) == 1 for f in doc["frames"])
+    assert all(f["selectedIndex"] == 1 for f in doc["frames"]), "新候选自动选中"
+    # 透传：条件图用的是姿势集里的帧文件，底色没被改写成 white
+    assert [Path(m["pose"]).name for m in seen] == ["f_001.png", "f_002.png"]
+    assert {m["bg"] for m in seen} == {"transparent"}

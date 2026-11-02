@@ -1111,7 +1111,10 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
    `white-space: nowrap` 是关键：卡片只有 280px，换行就溢出边框。 */
 .pose-batch-btn {
   flex: 0 0 auto; height: 22px; padding: 0 8px;
-  background: var(--bg); color: var(--muted);
+  /* 底色用 `--bg-3`(#17171c) 而不是 `--bg`(#0a0a0a)：卡片底是 `--bg-2`(#121216)，
+     用 `--bg` 会比卡片还暗，看起来像"透明的洞"而不是一个按钮（实测就是这么
+     被报上来的）。比底色亮一档，才像能按的东西。 */
+  background: var(--bg-3); color: var(--muted);
   border: 1px solid var(--line); border-radius: 2px;
   font: inherit; font-size: 10px; white-space: nowrap; cursor: pointer;
 }

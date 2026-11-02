@@ -164,7 +164,9 @@ export default function PoseBatchPanel({
         height: node.params.height,
         seed: node.params.seed,
         ref_mode: node.params.pcRefMode || 'auto',
-        bg: node.params.bgTone === 'dark' ? 'dark' : 'white',
+        // **原样透传**：以前写成 `bgTone === 'dark' ? 'dark' : 'white'`，
+        // 于是「透明底」被悄悄换回白底——用户选了透明却出白图。
+        bg: node.params.bgTone || 'white',
         matte: !!node.params.matte,
         matte_backend: matteBackend || 'auto',
         pixel: node.params.pixel,
@@ -396,7 +398,7 @@ export default function PoseBatchPanel({
         </div>
       )}
 
-      {/* ---- 3) 出图设置 ---- */}
+      {/* ---- 4) 出图设置 + 主操作 ---- */}
       <div className="pose-batch-bar">
         <input
           className="pose-batch-out"
@@ -412,16 +414,21 @@ export default function PoseBatchPanel({
             onChange={(e) => setCandidates(Math.max(1, Math.min(4, Number(e.target.value) || 1)))}
           />
         </label>
-        <button
-          type="button" className="pose-batch-btn"
-          disabled={!setName || running || busy || !charPaths.length}
-          onClick={() => void run([])}
-          title={!charPaths.length ? '先接一张角色图（左侧「角色」端口）'
-            : '把整个姿势集逐帧生成，进度在节点底部'}
-        >
-          {running ? '生成中…' : '全部生成'}
-        </button>
       </div>
+
+      {/* 主操作和别的节点一致：**整行绿色大按钮**（`gen-btn`）。
+          以前用 `.pose-batch-btn`，底色是 `--bg`(#0a0a0a)、比卡片底色
+          `--bg-2`(#121216) 还暗，看上去像"透明的洞"，也不像主操作。 */}
+      <button
+        type="button" className="gen-btn"
+        disabled={!setName || running || busy || !charPaths.length}
+        onClick={() => void run([])}
+        title={!charPaths.length ? '先接一张角色图（左侧「角色」端口）'
+          : '把整个姿势集逐帧生成，进度在节点底部'}
+      >
+        {running ? '生成中…（进度在下方）'
+          : `全部生成${total ? `（${total} 帧）` : ''}`}
+      </button>
 
       {!charPaths.length && !hasChar && (
         <div className="src-note">
@@ -429,6 +436,13 @@ export default function PoseBatchPanel({
         </div>
       )}
       {err && <div className="err" title={err}>⚠ {err}</div>}
+      {/* 整批失败必须显眼：`render.json` 是先建的，失败时界面上只剩一排空格子，
+          用户会以为是"点了没反应"（实测被这么问过）。 */}
+      {job?.status === 'failed' && (
+        <div className="err" title={job.error || ''}>
+          ⚠ 批量失败：{job.error || '未知原因'}
+        </div>
+      )}
       {(() => {
         const f = (job?.result as { failed?: unknown[] } | undefined)?.failed
         if (!Array.isArray(f) || !f.length) return null

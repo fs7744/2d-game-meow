@@ -2429,6 +2429,12 @@ def project_pose_render_run(scope: str, name: str, req: PoseRenderRunReq
         detail = poseset.load_render(scope, name)
     except poseset.PoseSetError as exc:
         raise HTTPException(404, str(exc)) from exc
+    # **必须把姿势集名带下去**：`posebatch.run_batch` 靠它去 `poses/<名字>/set.json`
+    # 找源帧。漏了这一行 → 每帧都抛「缺成片集名或姿势集名」，而 `render.json`
+    # 已经建好了，界面上的表现就是"点全部生成，出来一堆空格子但没有图"。
+    params["pose_set"] = str(detail.get("poseSet") or "")
+    if not params["pose_set"]:
+        raise HTTPException(400, "这个成片集没记着属于哪套姿势集（render.json 被改过？）")
     planned = params["frames"] or [f["index"] for f in detail["frames"]]
     total = max(1, len(planned) * max(1, params["candidates"]))
 

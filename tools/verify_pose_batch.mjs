@@ -261,13 +261,28 @@ async function main() {
 
     const genBtn = (id) => page.evaluate((nid) => {
       const n = document.querySelector(`[data-node-id="${nid}"]`)
-      const b = [...(n?.querySelectorAll('.pose-batch-bar .pose-batch-btn') || [])]
-        .find((x) => (x.textContent || '').includes('全部生成'))
-      return b ? { disabled: b.disabled, title: b.getAttribute('title') || '' } : null
+      const b = n?.querySelector('.posebatch-body .gen-btn')
+      if (!b) return null
+      const cs = getComputedStyle(b)
+      return {
+        disabled: b.disabled, title: b.getAttribute('title') || '',
+        text: (b.textContent || '').trim(),
+        bg: cs.backgroundColor, color: cs.color, width: Math.round(b.getBoundingClientRect().width),
+        height: Math.round(b.getBoundingClientRect().height),
+      }
     }, id)
     const beforeBtn = await genBtn('n2')
     expect(beforeBtn?.disabled === true, '没接角色图时「全部生成」是禁用的',
       JSON.stringify(beforeBtn))
+    // 主操作必须是**整行绿色大按钮**（和「迁移角色」同一套 `gen-btn`）：
+    // 底色要是不透明绿、宽度撑满、高度 32 —— 之前用 `.pose-batch-btn` 时
+    // 底色 `--bg` 比卡片还暗，被用户当成"透明了"
+    expect(beforeBtn?.text.includes('全部生成'), '按钮文案是「全部生成」', beforeBtn?.text || '')
+    expect((beforeBtn?.height || 0) >= 30, '主按钮是大号（≥30px 高）', String(beforeBtn?.height))
+    expect((beforeBtn?.width || 0) >= 300, '主按钮整行撑满', String(beforeBtn?.width))
+    // 禁用态也必须是**实色**（透明的话在深色卡片上就是一个洞，正是被报的现象）
+    expect(/^rgb\(/.test(beforeBtn?.bg || ''), '禁用态也是实色填充，不是透明',
+      beforeBtn?.bg || '')
 
     const beforeChar = await page.evaluate(
       () => document.querySelectorAll('path.link.char').length)
@@ -299,10 +314,26 @@ async function main() {
     const afterBtn = await genBtn('n2')
     expect(afterBtn?.disabled === false, '接上角色图后「全部生成」可点',
       afterBtn?.title || '')
+    expect(/^rgb\(0, 255, 136\)/.test(afterBtn?.bg || ''),
+      '可点时是品牌绿主按钮（gen-btn），不是暗色小按钮', afterBtn?.bg || '')
 
     /* ---------------- B) 播放：没出图也要有内容 ----------------
        上一版只在"已经有成片"时才渲染大图，抽完帧点 ▶ 屏幕上什么都不动 —— 这次
        舞台必须独立渲染，播放时大图要跟着换（验的是 img src 变、不是格子里高亮）。 */
+    // 底色三档：白 / 深 / **透明**（用户报的"更多设置里没有透明选项"）
+    const bgOpts = await page.evaluate(() => {
+      const n = document.querySelector('[data-node-id="n2"]')
+      const sel = [...n.querySelectorAll('select')]
+        .find((x) => [...x.options].some((o) => o.value === 'dark'))
+      return sel ? { values: [...sel.options].map((o) => o.value),
+        labels: [...sel.options].map((o) => o.textContent || ''),
+        disabled: sel.disabled } : null
+    })
+    expect(bgOpts?.values.join(',') === 'white,dark,transparent',
+      '底色有「透明底」选项', bgOpts?.values.join('|') || '（没找到底色下拉）')
+    expect(bgOpts?.disabled === false, '底色下拉可改（没被别的开关锁住）',
+      String(bgOpts?.disabled))
+
     const stage = await page.evaluate(() => {
       const n = document.querySelector('[data-node-id="n2"]')
       return {
@@ -373,6 +404,10 @@ async function main() {
 
     mkdirSync(OUT, { recursive: true })
     for (const [id, file] of [['n1', 'pose_batch_node.png'], ['n2', 'pose_batch_source.png']]) {
+      await page.evaluate((nid) => {
+        const d = document.querySelector(`[data-node-id="${nid}"] details.adv`)
+        if (d) d.open = true
+      }, id)
       const box = await page.evaluate((nid) => {
         const n = document.querySelector(`[data-node-id="${nid}"]`)
         if (!n) return null

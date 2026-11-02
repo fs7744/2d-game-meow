@@ -597,6 +597,42 @@ def test_pose_dirs_lists_directories_with_frames(client):
         assert isinstance(it["sample"], list) and it["sample"]
 
 
+def test_pose_render_run_carries_pose_set(client, monkeypatch):
+    """`/pose_renders/{name}/run` 必须把**姿势集名**带进 params。
+
+    2026-11-02 漏过：只传了 `render`，而 `run_batch` 靠 `pose_set` 去
+    `poses/<名字>/set.json` 找源帧 → 每帧抛「缺成片集名或姿势集名」，
+    但 `render.json` 已经建好了，界面上的表现是"点全部生成，一堆空格子
+    但没有图"。这条断言盯的就是 job params 本身。
+    """
+    import shutil
+
+    import app as appmod
+    from workflows import paths
+
+    proj = "ptest_api_run"
+    root = paths.PROJECTS_DIR / proj
+    if root.exists():
+        shutil.rmtree(root, ignore_errors=True)
+
+    frames = [{"t": i * 0.1, "yaw": 0, "pose": {}, "png": "data:image/png;base64," + PNG_1PX}
+              for i in range(2)]
+    assert client.post(f"/projects/{proj}/pose_sets",
+                       json={"name": "走路", "frames": frames}).status_code == 200
+    assert client.post(f"/projects/{proj}/pose_renders",
+                       json={"name": "走路成片", "poseSet": "走路"}).status_code == 200
+
+    # 别让真 worker 去跑（那要 GPU）：把队列的 put 换成空操作
+    monkeypatch.setattr(appmod._q, "put", lambda *a, **k: None)
+    r = client.post(f"/projects/{proj}/pose_renders/走路成片/run", json={})
+    assert r.status_code == 200, r.text
+    job = appmod._jobs[r.json()["job_id"]]
+    assert job["workflow"] == "wpcbatch"
+    assert job["params"]["pose_set"] == "走路", "漏了姿势集名 → 批量必然全帧失败"
+    assert job["params"]["render"] == "走路成片"
+    assert job["params"]["frames"] == [], "没指定帧 = 整批（由 run_batch 展开）"
+
+
 def test_models_endpoint_reports_refiner_availability(client):
     """前端要靠这个字段决定 Refiner 开关能不能点。"""
     body = client.get("/models").json()

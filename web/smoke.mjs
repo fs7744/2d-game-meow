@@ -3071,6 +3071,19 @@ function check(name, cond, extra = '') {
   check('姿态批量节点有「全部生成」按钮',
     [...(batchNode?.querySelectorAll('button') || [])]
       .some((b) => (b.textContent || '').includes('全部生成')))
+  // 主操作要和别的节点一致：**整行绿色大按钮**（`gen-btn`）。
+  // 用 `.pose-batch-btn` 时底色 `--bg` 比卡片还暗，看着像"透明的洞"。
+  const pbGo = [...(batchNode?.querySelectorAll('button') || [])]
+    .find((b) => (b.textContent || '').includes('全部生成'))
+  check('「全部生成」是绿色主按钮（gen-btn）',
+    !!pbGo && pbGo.classList.contains('gen-btn'),
+    pbGo?.className || '（没有按钮）')
+  // 底色三档：白 / 深 / **透明**。少「透明」就是用户报的那个"没有透明选项"。
+  const pbBgSel = [...(batchNode?.querySelectorAll('select') || [])]
+    .find((s2) => [...s2.options].some((o) => o.value === 'dark'))
+  const pbBgVals = pbBgSel ? [...pbBgSel.options].map((o) => o.value) : []
+  check('底色有「透明底」选项',
+    pbBgVals.includes('transparent'), pbBgVals.join('|') || '（没找到底色下拉）')
   check('姿态批量节点接了角色图端口（0/1 未接时给提示）',
     !!batchNode?.querySelector('.conn.in.char'),
     batchNode?.querySelector('.conn.in')?.className || '（没有端口）')

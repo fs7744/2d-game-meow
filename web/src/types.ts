@@ -39,7 +39,7 @@ export type PoseImportRequest = {
 
 /** 角色迁移 / 序列帧替换：动作参考图的解释方式 */
 /** 逐帧生成用的底色。白毛/白甲角色用白底会被抠图吃掉，换 dark 更稳 */
-export type BgTone = 'white' | 'dark'
+export type BgTone = 'white' | 'dark' | 'transparent'
 
 export type RefMode = 'auto' | 'pose' | 'outline' | 'skeleton'
 
@@ -184,7 +184,8 @@ export type GenParams = {
    */
   pcView?: PcView
   twoStage: boolean       // 姿态序列：两阶段（先出姿态草图再换皮），动作更准但慢一倍
-  bgTone: BgTone          // 逐帧生成用的底色：white=白底（默认）/ dark=深色底（白毛角色用）
+  /** 底色：white=白底（默认）/ dark=深色底（白毛角色）/ transparent=模型直接出 alpha */
+  bgTone: BgTone
   ssCols: number          // 序列帧替换：精灵图列数（0 = 自动检测）
   ssRows: number          // 序列帧替换：精灵图行数（0 = 自动检测）
   ssMode: SwapMode        // 序列帧替换：AI 重绘 还是 确定性换皮
