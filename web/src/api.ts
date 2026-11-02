@@ -775,6 +775,8 @@ export function runPoseRender(
   body: {
     frames?: number[]
     candidates?: number
+    /** 引擎：wvnccs（默认，能跟住姿势）/ wpc（旧） */
+    engine?: string
     char_image?: string
     char_images?: string[]
     prompt?: string

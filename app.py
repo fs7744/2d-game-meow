@@ -2254,6 +2254,8 @@ class PoseRenderRunReq(BaseModel):
     """跑（或补跑）成片集。`frames` 为空 = 整个姿势集。"""
     frames: list[int] = Field(default_factory=list)
     candidates: int = 1
+    #: 走哪条引擎（和「角色迁移」节点的 `pcEngine` 同一个字段）
+    engine: str = "wvnccs"
     char_image: str = ""
     char_images: list[str] = Field(default_factory=list)
     prompt: str = ""
@@ -2414,6 +2416,7 @@ def project_pose_render_run(scope: str, name: str, req: PoseRenderRunReq
         "project": scope, "render": name,
         "frames": [int(v) for v in req.frames],
         "candidates": int(req.candidates),
+        "engine": req.engine,
         "char_image": req.char_image,
         "char_images": list(req.char_images),
         "prompt": req.prompt, "negative": req.negative,

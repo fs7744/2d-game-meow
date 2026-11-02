@@ -629,6 +629,8 @@ def test_pose_render_run_carries_pose_set(client, monkeypatch):
     job = appmod._jobs[r.json()["job_id"]]
     assert job["workflow"] == "wpcbatch"
     assert job["params"]["pose_set"] == "走路", "漏了姿势集名 → 批量必然全帧失败"
+    assert job["params"]["engine"] == "wvnccs", "默认引擎必须和角色迁移节点一致（VNCCS）"
+    assert job["params"]["engine"] == "wvnccs", "默认引擎必须和角色迁移节点一致（VNCCS）"
     assert job["params"]["render"] == "走路成片"
     assert job["params"]["frames"] == [], "没指定帧 = 整批（由 run_batch 展开）"
 

@@ -283,6 +283,15 @@ buildMixamoWorldKeypoints(sb, viewer)     // 官方原样调用
 - 点缩略格 / 换姿势集 / 开始出图都走 `stopPlay()`：只 `setPlaying(false)`
   不 `clearInterval` 的话，定时器还在改 `playIndex`，再点播会从半路开始。
 
+**引擎跟着节点走（这是最容易写错的一条）**：`posebatch.run_batch` 以前写死
+`generate.pose_clone`（wpc），而「角色迁移」节点的 `pcEngine` 默认 VNCCS ——
+界面选 VNCCS、实际跑 wpc。实测 wpc 遇到「站立角色图 + 灰人偶」会整段照抄
+角色图的站姿（12 帧帧间差异 0.08/255），VNCCS 同一批帧间差异 28.4。
+所以：
+- 批量必须读 `params["engine"]`（wvnccs 默认），走 `vnccs_pose` 或 `pose_clone`；
+- 参考模式**归一化**：姿势集帧永远是灰人偶，`auto`/`pose` 旧存量值统一归
+  `skeleton`（前端源头 + 后端兜底），否则灰人偶走 DWPose 会被画成几乎空白的细线。
+
 **连线两个坑**（用户报"下拉能选、拖线不行"）：
 
 1. `onConnect` 的角色图白名单是硬编码的 `['poseclone','spriteswap']`，

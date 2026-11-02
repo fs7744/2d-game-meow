@@ -283,7 +283,7 @@ def test_run_batch_appends_candidates(monkeypatch, tmp_path):
     monkeypatch.setattr(generate, "pose_clone", fake_clone)
     res = posebatch.run_batch(None, {
         "project": PROJECT, "render": "跑成片", "pose_set": "跑",
-        "char_image": "char.png", "bg": "transparent",
+        "char_image": "char.png", "bg": "transparent", "engine": "wpc",
     })
 
     assert res["images"] == 2 and res["failed"] == []
@@ -294,3 +294,39 @@ def test_run_batch_appends_candidates(monkeypatch, tmp_path):
     # 透传：条件图用的是姿势集里的帧文件，底色没被改写成 white
     assert [Path(m["pose"]).name for m in seen] == ["f_001.png", "f_002.png"]
     assert {m["bg"] for m in seen} == {"transparent"}
+
+
+def test_run_batch_defaults_to_vnccs(monkeypatch, tmp_path):
+    """引擎跟着节点走，**默认 VNCCS**。
+
+    批量以前写死 `pose_clone`（wpc），而「角色迁移」节点默认是 VNCCS ——
+    界面选 VNCCS、实际跑 wpc。实测 wpc 遇到「站立角色图 + 灰人偶」会整段照抄
+    角色图的站姿（12 帧帧间差异 0.08/255，肉眼就是"和原图一模一样"），
+    同一批走 VNCCS 帧间差异 28.4。这条用例盯住"别再退回 wpc"。
+    """
+    from workflows import generate, posebatch
+
+    poseset.save_pose_set(PROJECT, "踢", _frames(1))
+    poseset.create_render(PROJECT, "踢成片", "踢")
+
+    calls = []
+
+    def fake_vnccs(eng, *, pose_image, **kw):
+        out = tmp_path / "v.png"
+        out.write_bytes(base64.b64decode(PNG_B64))
+        calls.append(kw)
+        return {"file": str(out), "meta": {}}
+
+    def boom(*a, **kw):                       # wpc 不该被调用
+        raise AssertionError("默认引擎应该是 VNCCS，不该走 pose_clone")
+
+    monkeypatch.setattr(generate, "vnccs_pose", fake_vnccs)
+    monkeypatch.setattr(generate, "pose_clone", boom)
+
+    res = posebatch.run_batch(None, {
+        "project": PROJECT, "render": "踢成片", "pose_set": "踢",
+        "char_image": "char.png", "bg": "transparent", "steps": 16,
+    })
+    assert res["engine"] == "wvnccs" and res["images"] == 1
+    assert calls and calls[0]["transparent"] is True, "透明底要转到 VNCCS 的 transparent"
+    assert calls[0]["steps"] >= 20, "VNCCS 的 LoRA 按 25 步训的，步数不能压到 16"

@@ -1833,16 +1833,45 @@ export default function GenNodeCard({
 
           <details className="adv">
             <summary>更多设置</summary>
-            <label className="bg-mode" title={hint('参考')}>
+            {/* 引擎：和「角色迁移」节点同一个字段 `pcEngine`，批量必须跟着走
+                （以前批量写死 wpc，节点却默认 VNCCS —— 于是选了 VNCCS 也照抄姿势）。 */}
+            <label className="bg-mode"
+              title={'走哪条姿态迁移引擎。\n'
+                + 'VNCCS（默认）：官方工作流复刻 + 专用 LoRA，实测能真正跟住人偶的姿势，\n'
+                + '  25 步，单张约 25 秒。\n'
+                + 'wpc（旧）：双图条件 + 自写指令，快一点，但实测遇到「站立角色图」\n'
+                + '  会整段照抄角色图的站姿（12 帧出来一模一样）。'}>
+              引擎
+              <select
+                value={p.pcEngine ?? 'wvnccs'}
+                onChange={(e) => setParam('pcEngine', e.target.value as typeof p.pcEngine)}
+              >
+                <option value="wvnccs">VNCCS（跟住姿势 · 推荐）</option>
+                <option value="wpc">旧版 wpc（快，容易照抄角色图）</option>
+              </select>
+            </label>
+            {/* 姿态批量的源帧**永远是人偶编辑器的白底灰人偶**，所以这里只留两项：
+                「骨架图」= 直接把灰人偶当条件图（正确做法，和角色迁移对上骨骼
+                编辑节点时一致）；「轮廓」= 按剪影处理。
+                以前照抄了真人照片那套四选项，默认 `auto` 会去跑 DWPose，把灰人偶
+                重画成「黑底彩色骨架」→ 反相后只剩浅灰细线，模型读不到，
+                12 帧结果和角色原图一模一样（用户报的就是这个）。
+                `auto`/`pose` 是旧工程里的存量值，统一按「骨架图」显示。 */}
+            <label className="bg-mode"
+              title={'姿势集里的帧是人偶编辑器出的白底灰人偶，\n'
+                + '所以默认按「骨架图」直接喂给模型（角色迁移对上骨骼编辑节点也是这么做的）。\n'
+                + '「轮廓」是把灰人偶当剪影，适合线条更极简的素材。\n'
+                + '不要用「自动/真人照片」那两档：它们会先跑 DWPose 姿态提取，\n'
+                + '把灰人偶重画成一张几乎空白的细线图，模型会直接忽略。\n'
+                + '（引擎选 VNCCS 时这一项不生效：它直接把灰人偶喂给模型。）'}>
               参考
               <select
-                value={p.pcRefMode}
+                value={p.pcRefMode === 'outline' ? 'outline' : 'skeleton'}
+                disabled={isVnccs}
                 onChange={(e) => setParam('pcRefMode', e.target.value as typeof p.pcRefMode)}
               >
-                <option value="auto">自动（骨架→轮廓）</option>
-                <option value="pose">骨架（真人照片）</option>
-                <option value="outline">轮廓（游戏素材）</option>
-                <option value="skeleton">已画好的骨架图（骨骼编辑节点）</option>
+                <option value="skeleton">骨架图（人偶编辑器产物）</option>
+                <option value="outline">轮廓（灰人偶当剪影）</option>
               </select>
             </label>
             <label className="bg-mode" title={'生成时的底色。\n'

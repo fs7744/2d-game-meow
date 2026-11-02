@@ -163,7 +163,14 @@ export default function PoseBatchPanel({
         width: node.params.width,
         height: node.params.height,
         seed: node.params.seed,
-        ref_mode: node.params.pcRefMode || 'auto',
+        // **引擎跟着节点走**：批量以前写死 wpc，而节点默认是 VNCCS —— 于是
+        // 界面选的是 VNCCS、实际跑的是 wpc，12 帧全照抄角色图的站姿。
+        engine: node.params.pcEngine || 'wvnccs',
+        // 参考模式**在源头归一化**：姿势集帧永远是人偶编辑器的灰人偶，
+        // 只认 skeleton（直接用）/ outline（剪影）。`auto`/`pose` 是旧工程
+        // 的存量值（`|| 'skeleton'` 拦不住它们），这里显式归到 skeleton，
+        // 否则灰人偶会走 DWPose 提取、条件图被画成几乎空白的细线。
+        ref_mode: node.params.pcRefMode === 'outline' ? 'outline' : 'skeleton',
         // **原样透传**：以前写成 `bgTone === 'dark' ? 'dark' : 'white'`，
         // 于是「透明底」被悄悄换回白底——用户选了透明却出白图。
         bg: node.params.bgTone || 'white',

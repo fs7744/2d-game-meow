@@ -92,6 +92,8 @@ async function main() {
     args: ['--no-sandbox', '--window-size=1400,1100'],
   })
   let bad = 0
+  /** 点「全部生成」时抓到 `/run` 的请求体，断言前端把引擎/参考模式带对了 */
+  let runBody = null
   const expect = (cond, label, detail) => {
     if (!cond) bad++
     console.log(`${cond ? '✓' : '✗'} ${label}${detail ? '  ' + detail : ''}`)
@@ -141,6 +143,13 @@ async function main() {
         return json({ set: { name: '走路', count: 4, cover: IMG, created: 1, frames: FRAMES } })
       }
       if (p === '/projects/pdemo/pose_renders/走路-成片') {
+        return json({ render: RENDER, items: [{ name: RENDER.name, poseSet: '走路', created: 1, total: 4, done: 3, cover: IMG }] })
+      }
+      if (p === '/projects/pdemo/pose_renders/走路-成片/run') {
+        runBody = JSON.parse(r.postData() || '{}')
+        return json({ job_id: 'j1', status: 'queued', total: 4, frames: [1, 2, 3, 4] })
+      }
+      if (p === '/projects/pdemo/pose_renders') {
         return json({ render: RENDER, items: [{ name: RENDER.name, poseSet: '走路', created: 1, total: 4, done: 3, cover: IMG }] })
       }
       if (p === '/projects/pdemo/pose_renders/走路-成片/gif') {
@@ -317,6 +326,7 @@ async function main() {
     expect(/^rgb\(0, 255, 136\)/.test(afterBtn?.bg || ''),
       '可点时是品牌绿主按钮（gen-btn），不是暗色小按钮', afterBtn?.bg || '')
 
+
     /* ---------------- B) 播放：没出图也要有内容 ----------------
        上一版只在"已经有成片"时才渲染大图，抽完帧点 ▶ 屏幕上什么都不动 —— 这次
        舞台必须独立渲染，播放时大图要跟着换（验的是 img src 变、不是格子里高亮）。 */
@@ -402,7 +412,20 @@ async function main() {
       '停下后回到"第 N / M 帧"', stopped.label)
     expect(stopped.btn.includes('播'), '停下后按钮变回「▶ 播」', stopped.btn)
 
-    mkdirSync(OUT, { recursive: true })
+    // 点「全部生成」→ 前端必须把引擎/参考模式**原样**带上：
+    // 引擎默认 VNCCS（以前批量写死 wpc，节点选 VNCCS 也没用）；参考模式
+    // 默认 skeleton（灰人偶不能走 auto 的 DWPose 提取，否则条件图被画成
+    // 几乎空白的细线，12 帧全照抄角色图的站姿）。
+    await page.evaluate(() => {
+      document.querySelector('[data-node-id="n2"] .posebatch-body .gen-btn')?.click()
+    })
+    await new Promise((r) => setTimeout(r, 600))
+    expect(runBody?.engine === 'wvnccs', '请求体带 engine=wvnccs（和角色迁移节点一致）',
+      runBody?.engine || '（没发出去）')
+    expect(runBody?.ref_mode === 'skeleton', '请求体带 ref_mode=skeleton（人偶图不能走 auto）',
+      runBody?.ref_mode || '')
+
+        mkdirSync(OUT, { recursive: true })
     for (const [id, file] of [['n1', 'pose_batch_node.png'], ['n2', 'pose_batch_source.png']]) {
       await page.evaluate((nid) => {
         const d = document.querySelector(`[data-node-id="${nid}"] details.adv`)

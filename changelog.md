@@ -22,6 +22,49 @@
 
 ---
 
+## 2026-11-02 · 批量出图和角色图一模一样 —— 引擎写死了 wpc
+
+用户报：12 帧结果跟原始角色图一模一样（站姿没变）。
+
+### 根因：批量无视节点的引擎设置
+
+「角色迁移」节点的 `pcEngine` 默认是 **VNCCS**，但 `posebatch.run_batch` 写死
+调 `generate.pose_clone`（**wpc**）。所以界面上选的是 VNCCS、实际跑的是 wpc。
+
+用用户那套真实素材做 A/B（同一张站立角色图 + 同一组灰人偶帧、同 seed）：
+
+| 引擎 | 帧 1 vs 帧 6 平均差（/255） | 结果 |
+|---|---|---|
+| wpc（auto） | 0.08 | 12 帧全照抄角色图站姿 |
+| wpc（skeleton） | 0.27 | 还是照抄 |
+| **VNCCS** | **28.4** | 真正跟住了跑步/踢腿 |
+
+wpc 会把「站立角色图」当主参考、灰人偶条件图当陪衬；VNCCS 的图序反着来
+（骨架在前、角色在后 + 专用 LoRA），所以跟得住。
+
+### 修法
+
+- `posebatch.run_batch` 按 `params["engine"]`（wvnccs 默认 / wpc）走，两条引擎
+  各自显式传参；VNCCS 步数 `max(20, steps)`、`transparent = bg=="transparent"`；
+  `job["result"]` 里记 `engine` / `ref_mode` 方便排查。
+- `/pose_renders/{name}/run` 加 `engine` 字段（默认 wvnccs）；面板透传
+  `node.params.pcEngine`。
+- **参考模式归一化**：姿势集帧永远是人偶编辑器的灰人偶，`auto`/`pose` 是旧
+  存量值，统一归到 `skeleton`（面板在源头归一化，后端再兜底一次）。否则灰人偶
+  会走 DWPose 提取 → 条件图被画成「黑底彩色骨架 → 反相 → 几乎空白的细线」。
+- 节点「更多设置」加**引擎下拉**（VNCCS 推荐 / 旧版 wpc）；选 VNCCS 时「参考」
+  下拉禁用（它不走 ref_mode）。
+
+### 验证
+
+- **真跑**：`posebatch.run_batch`（真实引擎，2 帧）→ `engine=wvnccs`、
+  帧间差异 **29.4**、候选正常落盘；生成的跑步帧肉眼复核过（前腿抬起、摆臂）。
+- 单测 `test_run_batch_defaults_to_vnccs`（默认不退回 wpc、transparent 与
+  steps>=20 都传到 vnccs）；`test_run_batch_appends_candidates` 固定走 wpc 分支。
+- `verify_pose_batch` 补：**点「全部生成」抓请求体**，断言 `engine=wvnccs`、
+  `ref_mode=skeleton`（前端契约，不靠后端兜底）。
+- smoke 635、verify_frame_pick 26、verify_anim_import 5、pytest 53 全绿。
+
 ## 2026-11-02 · 批量点了不出图（漏传姿势集名）+ 主按钮与透明底
 
 ### 1) 「全部生成」建了一堆空格子，但一张图都没有 —— **后端漏传 pose_set**
