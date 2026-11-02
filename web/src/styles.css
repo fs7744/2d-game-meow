@@ -1094,6 +1094,100 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
   flex: 0 0 auto; font-size: 9px; color: var(--muted-2);
   font-family: var(--mono); white-space: nowrap;
 }
+/* 姿势集名字输入框：跟帧数并排，占满剩下的宽度 */
+.pose-set-name {
+  flex: 1; min-width: 0; height: 22px;
+  background: var(--bg-3); color: var(--white);
+  border: 1px solid var(--line-strong); border-radius: 2px;
+  padding: 2px 6px; font: inherit; font-size: 11px;
+}
+.pose-set-name::placeholder { color: var(--muted-2); }
+
+/* ---- 角色迁移的批量面板（姿势集 → 成片；候选只增不删） ---- */
+.pose-batch { display: flex; flex-direction: column; gap: 5px; }
+.pose-batch-bar { display: flex; gap: 5px; align-items: center; }
+.pose-batch-bar select { flex: 1; min-width: 0; }
+/* 文字按钮**不能**用 .mini（那是 28×28 的图标按钮，四个字会被挤成竖排并裁掉）。
+   `white-space: nowrap` 是关键：卡片只有 280px，换行就溢出边框。 */
+.pose-batch-btn {
+  flex: 0 0 auto; height: 22px; padding: 0 8px;
+  background: var(--bg); color: var(--muted);
+  border: 1px solid var(--line); border-radius: 2px;
+  font: inherit; font-size: 10px; white-space: nowrap; cursor: pointer;
+}
+.pose-batch-btn:hover:not(:disabled) { border-color: var(--green); color: var(--green); }
+.pose-batch-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+/* 文字按钮**不能**用 .mini（那是 28×28 的图标按钮，四个字会被挤成竖排并裁掉）。
+   `white-space: nowrap` 是关键：卡片只有 280px，换行就溢出边框。 */
+.pose-batch-btn {
+  flex: 0 0 auto; height: 22px; padding: 0 8px;
+  background: var(--bg); color: var(--muted);
+  border: 1px solid var(--line); border-radius: 2px;
+  font: inherit; font-size: 10px; white-space: nowrap; cursor: pointer;
+}
+.pose-batch-btn:hover:not(:disabled) { border-color: var(--green); color: var(--green); }
+.pose-batch-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+.pose-batch-out {
+  flex: 1; min-width: 0; height: 22px;
+  background: var(--bg-3); color: var(--white);
+  border: 1px solid var(--line-strong); border-radius: 2px;
+  padding: 2px 6px; font: inherit; font-size: 11px;
+}
+.pose-batch-n {
+  display: inline-flex; align-items: center; gap: 3px;
+  font-size: 10px; color: var(--muted); flex: 0 0 auto;
+}
+.pose-batch-n input {
+  width: 30px; flex: 0 0 30px; height: 22px; text-align: center;
+  background: var(--bg-3); color: var(--white);
+  border: 1px solid var(--line-strong); border-radius: 2px;
+  font: inherit; font-size: 11px; font-family: var(--mono);
+}
+.pose-batch-head {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 10px; color: var(--muted);
+}
+.pose-batch-head b { color: var(--cyan); font-weight: 500; }
+.pose-batch-head span { flex: 1; }
+.pose-batch-main {
+  position: relative; background: #12141c; border: 1px solid var(--line);
+  display: flex; align-items: center; justify-content: center;
+  min-height: 120px; overflow: hidden;
+}
+.pose-batch-main img { width: 100%; display: block; }
+.pose-batch-tag {
+  position: absolute; left: 4px; bottom: 4px;
+  background: rgba(0, 0, 0, 0.62); color: #dfe3ee;
+  font-size: 9px; font-family: var(--mono); padding: 1px 5px; border-radius: 2px;
+}
+.pose-batch-empty { color: var(--muted-2); font-size: 10px; padding: 10px; }
+/* 缩略网格：一屏看完整套，点哪帧编哪帧 */
+.pose-batch-grid, .pose-batch-strip {
+  display: grid; gap: 3px;
+  grid-template-columns: repeat(auto-fill, minmax(42px, 1fr));
+}
+.pose-batch-strip { grid-template-columns: repeat(auto-fill, minmax(38px, 1fr)); }
+.pose-batch-cell {
+  position: relative; padding: 0; border: 1px solid var(--line);
+  background: #12141c; aspect-ratio: 1; overflow: hidden; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+.pose-batch-cell img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.pose-batch-cell i {
+  position: absolute; left: 1px; top: 0; font-style: normal;
+  font-size: 8px; font-family: var(--mono); color: #cfd4e2;
+  background: rgba(0, 0, 0, 0.55); padding: 0 2px;
+}
+.pose-batch-cell.on { border-color: var(--cyan); box-shadow: 0 0 0 1px var(--cyan) inset; }
+.pose-batch-cell.empty { opacity: 0.45; }
+.pose-batch-cell:hover { border-color: var(--green); }
+.pose-batch-cands { display: flex; flex-direction: column; gap: 3px; }
+.pose-batch-cands-head {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 10px; color: var(--muted);
+}
+.pose-batch-cands-head span { flex: 1; }
+.pose-batch-box summary { cursor: pointer; }
 .pose-yaw-val { font-family: var(--mono); font-weight: 400; color: var(--cyan); min-width: 30px; text-align: right; }
 .pose-cam-hint-row { font-size: 9px; color: var(--muted-2); line-height: 1.4; }
 .pose-save input {

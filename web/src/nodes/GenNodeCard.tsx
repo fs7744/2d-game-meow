@@ -2,6 +2,7 @@ import { useRef, useState } from 'react'
 import MaskEditor from '../components/MaskEditor'
 import MaskPreview from '../components/MaskPreview'
 import PoseStudio from '../components/PoseStudio'
+import PoseBatchPanel from '../components/PoseBatchPanel'
 import PromptZoom from '../components/PromptZoom'
 import type { ModelCaps, PoseDir } from '../api'
 import { fileNameOf } from '../fileName'
@@ -219,7 +220,8 @@ export const TALL_MAX = 1400
 export type NodePatch = Partial<
   Pick<GenNode,
     'x' | 'y' | 'w' | 'h' | 'params' | 'view' | 'job' | 'source' | 'image'
-    | 'charSource' | 'charSources' | 'pose' | 'yaw' | 'poseImport' | 'poseApply'>
+    | 'charSource' | 'charSources' | 'pose' | 'yaw' | 'poseImport' | 'poseApply'
+    | 'poseRender'>
 >
 
 /**
@@ -245,6 +247,8 @@ type Props = {
   favorited: boolean
   onToggleFavorite: () => void
   model: string
+  /** 全局抠图后端（批量面板出图时透传，和单张生成保持一致） */
+  matteBackend?: string
   /** 切底模：产出风格档位可能要求特定底模（如「像素精灵·Illustrious」要 sdxl-anime）。
    *  keepNodes=true 表示参数由档位负责，别套推荐值（否则会覆盖刚 patch 的 LoRA/尺寸）。 */
   onModel?: (m: string, opts?: { keepNodes?: boolean }) => void
@@ -270,8 +274,9 @@ type Props = {
   poseApply?: { nodeId: string; pose: unknown; yaw: number; tick: number } | null
   /** 把当前姿势存进库（缩略图一并提交，浏览面板要用） */
   onSavePose?: (name: string, pose: unknown, yaw: number, preview: string) => void
-  /** 一次存多条（一条动画抽出来的 N 帧，一次请求落盘） */
-  onSavePoses?: (items: { name: string; pose: unknown; yaw: number; preview: string }[]) => void
+  /** 把一个动作抽出来的 N 帧存成**项目里**的姿势集（`poses/<名字>/`） */
+  onSavePoseSet?: (name: string,
+    frames: { t: number; yaw: number; pose: unknown; png: string }[]) => Promise<boolean> | boolean
   /** 打开资料库的姿势页（那里能一眼翻完、改名、删除） */
   onOpenPoseLibrary?: () => void
   /** 人偶编辑器「从图片」：上传 + DWPose 提关节，返回 Promise 以便显示"提取中" */
@@ -366,6 +371,7 @@ export default function GenNodeCard({
   favorited,
   onToggleFavorite,
   model,
+  matteBackend,
   onModel,
   maxCandidates,
   poseDirs,
@@ -378,7 +384,7 @@ export default function GenNodeCard({
   poses,
   poseApply,
   onSavePose,
-  onSavePoses,
+  onSavePoseSet,
   onOpenPoseLibrary,
   onImportPose,
   sourceNode,
@@ -988,8 +994,9 @@ export default function GenNodeCard({
             poses={poses ?? []}
             poseApply={poseApply?.nodeId === node.id ? poseApply : null}
             onSavePose={onSavePose}
-            onSavePoses={onSavePoses}
             onOpenPoseLibrary={onOpenPoseLibrary}
+            projectId={projectId}
+            onSavePoseSet={onSavePoseSet}
           />
           {node.image?.url && (
             <div className="pose-preview">
@@ -1732,6 +1739,24 @@ export default function GenNodeCard({
           >
             {busy ? '迁移中…' : '迁移角色'}
           </button>
+
+          {/* 批量：一个姿势集一次出整套。默认收起 —— 单张那条路是主用法，
+              批量是多出来的，不该把卡片顶长。 */}
+          <details className="adv pose-batch-box">
+            <summary>批量：用姿势集出整套</summary>
+            {projectId ? (
+              <PoseBatchPanel
+                projectId={projectId}
+                node={node}
+                onPatch={onPatch}
+                model={model}
+                matteBackend={matteBackend}
+              />
+            ) : (
+              <div className="src-note">批量要项目 id：先把项目保存一次</div>
+            )}
+          </details>
+
           {hasImage && (
             <button
               className="mini wide"

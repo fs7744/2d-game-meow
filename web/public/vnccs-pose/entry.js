@@ -33,12 +33,15 @@
  *     { type:'animClip', index }            切动画轨道（一个文件里可能有多条）
  *     { type:'animTime', t }                采样 t 秒并套到人偶上 → 回 pose
  *     { type:'animSample', count }          等分抽 count 帧（入库用）
- *                                           → 回 { type:'animFrames', frames:[{t,pose,preview}], clip, yaw }
+ *                                           → 回 { type:'animFrames', frames:[{t,pose,png}], clip, yaw }
+ *     { type:'animPlay', on, t? }           播放 / 停止（从头播到尾；t 缺省 = 当前滑块位置）
+ *                                           → 过程中回 { type:'animTick', t }，播完回 pose
  *   子 → 父：
  *     { type:'ready' } | { type:'progress', text }
  *     | { type:'result', dataURL } | { type:'pose', pose, yaw }
  *     | { type:'animLoaded', clips, boneCount, format, rig }
  *     | { type:'animFrames', frames, clip, yaw }
+ *     | { type:'animTick', t } | { type:'animPlaying', on }
  *     | { type:'error', message }
  *
  * **为什么动作文件走 ArrayBuffer 而不是路径**：父子是同源 iframe，但子窗拿不到
@@ -282,6 +285,84 @@ function frameView(v) {
 
 function post(msg) { window.parent?.postMessage(msg, '*') }
 
+/**
+ * 动作播放：从头播到尾。
+ *
+ * **为什么不是 rAF 每帧**：一帧要跑「关键点提取 + 全骨 IK + 重绘」，实测量级
+ * 20~40ms。用 requestAnimationFrame 会被这个开销拖成 15fps 且越播越偏
+ * （时间是按帧累加的，慢一帧就落后一帧）。所以这里按 **wall clock** 算 t，
+ * 用 setTimeout 定节奏：慢的时候自动跳帧，但整段时长是对的。
+ *
+ * 播放中**不推 pose**：那是"拖动松手"的存档语义，25 次/秒会把项目文件写穿。
+ * 只推 `animTick` 让宿主的滑块跟着走；停下来时把滑块对应那一帧的姿势交回去。
+ */
+let playing = null
+
+function stopPlay(v, restore = true) {
+  if (!playing) return
+  const { t } = playing
+  playing.stopped = true
+  if (playing.timer) clearTimeout(playing.timer)
+  playing = null
+  post({ type: 'animPlaying', on: false })
+  if (!restore) return
+  // 恢复到停下时滑块的位置（播放不该偷偷改掉节点存的姿势）
+  ;(async () => {
+    try {
+      const m = await import('./anim-import.js')
+      await m.applyTime(t, v)
+      post({ type: 'animTick', t })
+      post({ type: 'pose', pose: v.getPose(), yaw: currentYaw })
+    } catch { /* 播放结束时的收尾失败不影响用户 */ }
+  })()
+}
+
+async function startPlay(v, from = 0) {
+  stopPlay(v, false)
+  const m = await import('./anim-import.js')
+  const st = m.animationState()
+  if (!st) {
+    post({ type: 'error', message: '还没有载入动作' })
+    return
+  }
+  const dur = Math.max(0.05, st.duration)
+  const t0 = Math.max(0, Math.min(dur - 0.01, from))
+  const wall0 = performance.now() - t0 * 1000
+  const self = { stopped: false, timer: 0, t: t0, lastTick: 0 }
+  playing = self
+  post({ type: 'animPlaying', on: true })
+
+  const step = async () => {
+    if (self.stopped) return
+    const t = (performance.now() - wall0) / 1000
+    if (t >= dur) {
+      self.t = dur
+      try {
+        await m.applyTime(dur, v)
+        post({ type: 'animTick', t: dur })
+        post({ type: 'pose', pose: v.getPose(), yaw: currentYaw })
+      } catch { /* 尾帧失败就在这儿收 */ }
+      self.stopped = true
+      playing = null
+      post({ type: 'animPlaying', on: false })
+      return
+    }
+    self.t = t
+    try {
+      await m.applyTime(t, v)
+    } catch { /* 单帧失败跳过，别把整段播放打断 */ }
+    if (self.stopped) return
+    const now = performance.now()
+    if (now - self.lastTick > 80) {          // 滑块 12Hz 更新足够跟手
+      self.lastTick = now
+      post({ type: 'animTick', t })
+    }
+    self.timer = setTimeout(step, 35)
+  }
+  self.timer = setTimeout(step, 0)
+}
+
+
 function setStatus(text, isError = false) {
   if (statusEl) {
     statusEl.textContent = text
@@ -398,10 +479,13 @@ window.addEventListener('message', async (e) => {
       // 缩略图走**和导出同一条通路**（renderOut → viewport capture），
       // 所以存进姿势库的预览和「导出人偶图」长得一样，只是小一号。
       try {
+        stopPlay(v)                       // 抽帧期间别让播放抢着改姿势
         const m = await import('./anim-import.js')
         const st = m.animationState()
         if (!st) throw new Error('还没载入动作')
-        const count = Math.max(1, Math.min(48, Math.round(Number(msg.count) || 8)))
+        // 上限跟后端 `poseset.MAX_FRAMES` 对齐（240）。抽帧数量由用户自己填，
+        // 以前写死 24 是拍脑袋定的，一条慢动作 30 帧就抽不全。
+        const count = Math.max(1, Math.min(240, Math.round(Number(msg.count) || 8)))
         // 首尾都是端点帧（站立/收势），等分时避开两头一点点，取中段更"有动作"
         const dur = Math.max(0.001, st.duration)
         const frames = []
@@ -409,8 +493,8 @@ window.addEventListener('message', async (e) => {
           const t = count === 1 ? dur * 0.5 : (dur * (i + 0.5)) / count
           const ok = await m.applyTime(t, v)
           if (!ok) throw new Error(m.errorState() || `第 ${i + 1} 帧套不上人偶`)
-          const preview = renderOut(192) || ''
-          frames.push({ t: Number(t.toFixed(3)), pose: v.getPose(), preview })
+          const png = renderOut(256) || ''
+          frames.push({ t: Number(t.toFixed(3)), pose: v.getPose(), png })
         }
         // 抽完把时间轴拉回第 0 帧，别让编辑器停在最后一帧
         await m.applyTime(0, v)
@@ -419,6 +503,12 @@ window.addEventListener('message', async (e) => {
       } catch (e) {
         post({ type: 'error', message: String(e?.message || e) })
       }
+    } else if (msg.type === 'animPlay') {
+      // **从头播到尾**：按真实时间推进 mixer，逐帧套到人偶上。
+      // 播放中**不往宿主推 pose**（那是"存档点"语义，25 次/秒会把项目文件写穿），
+      // 只推 `animTick` 让滑块跟着走；停下来时再把姿势交回去。
+      if (msg.on) await startPlay(v, Number(msg.t) || 0)
+      else stopPlay(v)
     } else if (msg.type === 'export') {
       // 导出**当前编辑器视角**（所见即所得）：不做任何对齐，直接 viewport capture。
       const url = renderOut(msg.size)

@@ -496,16 +496,6 @@ export function addPoseApi(
   })
 }
 
-/** 一次存多条姿势（一条动画等分抽出来的 N 帧）。服务端一次落盘。 */
-export function addPosesApi(
-  items: { name: string; pose: unknown; yaw: number; preview?: string }[],
-): Promise<Library> {
-  return libraryReq<Library>('/library/poses/batch', {
-    method: 'POST',
-    body: JSON.stringify({ items }),
-  })
-}
-
 export function renamePoseApi(id: string, name: string): Promise<Library> {
   return libraryReq<Library>(`/library/poses/${encodeURIComponent(id)}`, {
     method: 'PUT',
@@ -604,6 +594,135 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 export function fetchCharacters(): Promise<{ count: number; items: CharacterSummary[] }> {
   return req('/characters')
 }
+
+/* ------------------------------------------------------------------ *
+ * 项目内的姿势集 / 成片集
+ *
+ * **不是用户资料库**：资料库存的是"跨项目复用的单个姿势"；这里存的是
+ * 一条动作抽出来的**一整组帧**（人偶图 + 成片的每帧候选），属于这个项目。
+ * 磁盘位置：`assets/projects/<项目>/poses/<名字>/` 与
+ * `assets/projects/<项目>/pose_frames/<名字>/`。
+ * ------------------------------------------------------------------ */
+
+export type ProjectPoseSetFrame = {
+  index: number; t: number; yaw: number; url: string
+}
+
+export type ProjectPoseSet = {
+  name: string
+  count: number
+  cover: string
+  created: number
+  source?: Record<string, unknown>
+  frames?: ProjectPoseSetFrame[]
+}
+
+export type PoseRenderCandidate = {
+  index: number; url: string; at: number; seed?: number | null
+}
+
+export type PoseRenderFrame = {
+  index: number
+  /** 姿势集里对应那一帧的人偶图（从哪张换的姿势） */
+  source: string
+  candidates: PoseRenderCandidate[]
+  selected: number
+  /** 当前选中的候选序号（-1 = 还没出过图） */
+  selectedIndex: number
+}
+
+export type PoseRender = {
+  name: string
+  poseSet: string
+  prompt: string
+  created: number
+  frames: PoseRenderFrame[]
+  done: number
+  total: number
+}
+
+export type PoseRenderSummary = {
+  name: string; poseSet: string; created: number
+  total: number; done: number; cover: string
+}
+
+export function fetchProjectPoseSets(project: string): Promise<{ count: number; items: ProjectPoseSet[] }> {
+  return req(`/projects/${encodeURIComponent(project)}/pose_sets`)
+}
+
+export function createProjectPoseSet(
+  project: string,
+  name: string,
+  frames: { t: number; yaw: number; pose: unknown; png: string }[],
+  source: Record<string, unknown> = {},
+): Promise<{ set: ProjectPoseSet; items: ProjectPoseSet[] }> {
+  return req(`/projects/${encodeURIComponent(project)}/pose_sets`, {
+    method: 'POST',
+    body: JSON.stringify({ name, frames, source }),
+  })
+}
+
+export function fetchProjectPoseSet(project: string, name: string): Promise<{ set: ProjectPoseSet }> {
+  return req(`/projects/${encodeURIComponent(project)}/pose_sets/${encodeURIComponent(name)}`)
+}
+
+export function fetchPoseRenders(project: string): Promise<{ count: number; items: PoseRenderSummary[] }> {
+  return req(`/projects/${encodeURIComponent(project)}/pose_renders`)
+}
+
+export function createPoseRender(
+  project: string, name: string, poseSet: string,
+  prompt = '', params: Record<string, unknown> = {},
+): Promise<{ render: PoseRender; items: PoseRenderSummary[] }> {
+  return req(`/projects/${encodeURIComponent(project)}/pose_renders`, {
+    method: 'POST',
+    body: JSON.stringify({ name, poseSet, prompt, params }),
+  })
+}
+
+export function fetchPoseRender(project: string, name: string): Promise<{ render: PoseRender; items: PoseRenderSummary[] }> {
+  return req(`/projects/${encodeURIComponent(project)}/pose_renders/${encodeURIComponent(name)}`)
+}
+
+export function selectPoseCandidate(
+  project: string, name: string, frame: number, candidate: number,
+): Promise<{ render: PoseRender }> {
+  return req(`/projects/${encodeURIComponent(project)}/pose_renders/${encodeURIComponent(name)}/select`, {
+    method: 'POST',
+    body: JSON.stringify({ frame, candidate }),
+  })
+}
+
+/** 跑成片集（`frames` 为空 = 整个姿势集；给一帧就是单独重生成那一帧） */
+export function runPoseRender(
+  project: string, name: string,
+  body: {
+    frames?: number[]
+    candidates?: number
+    char_image?: string
+    char_images?: string[]
+    prompt?: string
+    negative?: string
+    steps?: number
+    cfg?: number
+    width?: number
+    height?: number
+    seed?: number
+    ref_mode?: string
+    bg?: string
+    matte?: boolean
+    matte_backend?: string
+    pixel?: number
+    palette?: number
+    model?: string
+  },
+): Promise<{ job_id: string; status: string; total: number; frames: number[] }> {
+  return req(`/projects/${encodeURIComponent(project)}/pose_renders/${encodeURIComponent(name)}/run`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
 
 export function createCharacter(name: string,
   info?: Record<string, unknown>): Promise<{ name: string; config: unknown }> {

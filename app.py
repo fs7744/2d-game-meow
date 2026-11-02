@@ -16,10 +16,17 @@
   POST /library/prompts    收藏一条提示词（正向+负向）
   DELETE /library/prompts/{pid}
   POST /library/poses      存一条姿势（官方 pose JSON + 预览图）
-  POST /library/poses/batch  一次存多条（一条动画等分抽的 N 帧，一次落盘）
   PUT  /library/poses/{pid}  改名
   DELETE /library/poses/{pid}
   PUT  /library/prefs      写界面偏好
+  GET  /projects/{id}/pose_sets            项目里的姿势集（动作抽帧存下来的）
+  POST /projects/{id}/pose_sets            新建一个姿势集文件夹（同名拒绝）
+  GET  /projects/{id}/pose_sets/{name}     姿势集的帧表
+  GET  /projects/{id}/pose_renders         项目里的成片集
+  POST /projects/{id}/pose_renders         新建成片集文件夹（同名拒绝）
+  GET  /projects/{id}/pose_renders/{name}  每帧的候选 + 当前选中
+  POST /projects/{id}/pose_renders/{name}/select     选某一帧的第几个候选
+  POST /projects/{id}/pose_renders/{name}/run        生成/补生成（候选追加）
   GET  /pose_library       随项目发行的 VNCCS 官方姿势库清单（191 个）
   POST /pose/extract       一张图 → OpenPose-18 归一化关节点
   GET  /pose_dirs          可以当 W4 输入的骨架帧目录
@@ -71,6 +78,7 @@ from workflows import library
 from workflows import matte_screen
 from workflows import paths
 from workflows import poselib
+from workflows import poseset
 from workflows import projectio
 from workflows import projectstore
 from workflows.assetdb import AssetIndex
@@ -217,6 +225,15 @@ def _run(job_id: str, workflow: str, params: Dict[str, Any]) -> None:
             from workflows import emotiongen
             with _gpu_lock:                # 单卡不并发
                 job["result"] = emotiongen.run_batch(engine, params, job=job)
+            job["status"] = "done"
+            return
+        if workflow == "wpcbatch":
+            # **角色迁移批量**：一个姿势集 → 一套成片，每帧若干候选。
+            # 候选是**追加**进 render.json 的（旧的不删，用户可能更喜欢上一版），
+            # 所以同一个任务可以对同一帧反复跑而不丢东西。
+            from workflows import posebatch
+            with _gpu_lock:                # 单卡不并发
+                job["result"] = posebatch.run_batch(engine, params, job=job)
             job["status"] = "done"
             return
         fn = {"w1": gen.txt2img, "w2": gen.img2img, "w3": gen.inpaint,
@@ -563,11 +580,6 @@ class PoseRenameReq(BaseModel):
     name: str
 
 
-class PoseBatchReq(BaseModel):
-    """批量存姿势（一条动画等分抽出来的 N 帧，一次落盘）。"""
-    items: List[PoseReq]
-
-
 class LibrarySeedReq(BaseModel):
     """从 localStorage 迁移过来的旧数据。缺哪个字段就不动哪个库。"""
     prompts: Optional[List[Dict[str, Any]]] = None
@@ -595,16 +607,6 @@ def library_add_pose(req: PoseReq) -> Dict[str, Any]:
     try:
         return {"poses": library.add_pose(req.name, req.pose, req.yaw,
                                           req.preview)}
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
-
-
-@app.post("/library/poses/batch")
-def library_add_poses(req: PoseBatchReq) -> Dict[str, Any]:
-    """一次存多条姿势（从一条动画等分抽出来的 N 帧）。一次落盘。"""
-    try:
-        return {"poses": library.add_poses(
-            [p.model_dump() for p in req.items])}
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -2208,6 +2210,181 @@ def put_workspace(req: Dict[str, Any]) -> Dict[str, Any]:
     """记「当前打开的是哪个项目」——重开浏览器时回到同一个画布。"""
     projectstore.save_workspace(req)
     return {"ok": True}
+
+
+# ------------------------------------------------------------------ *
+# 项目内的姿势集 / 成片集
+#
+# **为什么放在项目目录而不是用户资料库**：一整套动作（N 帧人偶图）属于
+# 这一次的动作采样，跟项目和那条动画绑定；资料库存的是"跨项目复用的单个姿势"。
+# 目录结构与取舍见 `workflows/poseset.py` 的模块注释。
+# ------------------------------------------------------------------ *
+
+
+class PoseSetFrameReq(BaseModel):
+    t: float = 0.0
+    yaw: int = 0
+    pose: Any = None
+    #: 人偶图，dataURL 或裸 base64（宿主手里就是 dataURL，不用再转一次）
+    png: str
+
+
+class PoseSetCreateReq(BaseModel):
+    name: str
+    source: Dict[str, Any] = Field(default_factory=dict)
+    frames: list[PoseSetFrameReq]
+
+
+class PoseRenderCreateReq(BaseModel):
+    name: str
+    poseSet: str
+    prompt: str = ""
+    params: Dict[str, Any] = Field(default_factory=dict)
+
+
+class PoseRenderSelectReq(BaseModel):
+    frame: int
+    candidate: int
+
+
+class PoseRenderRunReq(BaseModel):
+    """跑（或补跑）成片集。`frames` 为空 = 整个姿势集。"""
+    frames: list[int] = Field(default_factory=list)
+    candidates: int = 1
+    char_image: str = ""
+    char_images: list[str] = Field(default_factory=list)
+    prompt: str = ""
+    negative: str = ""
+    steps: int = 16
+    cfg: float = 1.0
+    width: int = 768
+    height: int = 768
+    seed: int = -1
+    ref_mode: str = "auto"
+    bg: str = "white"
+    matte: bool = False
+    matte_backend: str = "auto"
+    pixel: int = 0
+    palette: int = 0
+    model: str = ""
+
+
+@app.get("/projects/{scope}/pose_sets")
+def project_pose_sets(scope: str) -> Dict[str, Any]:
+    """项目里存过的姿势集（人偶编辑器抽帧存下来的那几套）。"""
+    items = poseset.list_pose_sets(scope)
+    return {"project": scope, "count": len(items), "items": items}
+
+
+@app.post("/projects/{scope}/pose_sets")
+def project_pose_set_create(scope: str, req: PoseSetCreateReq) -> Dict[str, Any]:
+    """新建一个姿势集文件夹。**同名一律拒绝**（用户的心智是"再存一份"）。"""
+    try:
+        one = poseset.save_pose_set(
+            scope, req.name,
+            [f.model_dump() for f in req.frames], source=req.source)
+    except poseset.PoseSetExists as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except poseset.PoseSetError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"set": one, "items": poseset.list_pose_sets(scope)}
+
+
+@app.get("/projects/{scope}/pose_sets/{name}")
+def project_pose_set(scope: str, name: str) -> Dict[str, Any]:
+    try:
+        return {"set": poseset.load_pose_set(scope, name)}
+    except poseset.PoseSetError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/projects/{scope}/pose_renders")
+def project_pose_renders(scope: str) -> Dict[str, Any]:
+    items = poseset.list_renders(scope)
+    return {"project": scope, "count": len(items), "items": items}
+
+
+@app.post("/projects/{scope}/pose_renders")
+def project_pose_render_create(scope: str, req: PoseRenderCreateReq
+                               ) -> Dict[str, Any]:
+    """建一个成片集文件夹（同名拒绝），帧表按姿势集先铺好。"""
+    try:
+        one = poseset.create_render(scope, req.name, req.poseSet,
+                                    prompt=req.prompt, params=req.params)
+    except poseset.PoseSetExists as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except poseset.PoseSetError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"render": one, "items": poseset.list_renders(scope)}
+
+
+@app.get("/projects/{scope}/pose_renders/{name}")
+def project_pose_render(scope: str, name: str) -> Dict[str, Any]:
+    try:
+        return {"render": poseset.load_render(scope, name),
+                "items": poseset.list_renders(scope)}
+    except poseset.PoseSetError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/projects/{scope}/pose_renders/{name}/select")
+def project_pose_render_select(scope: str, name: str,
+                               req: PoseRenderSelectReq) -> Dict[str, Any]:
+    """选某一帧的第几个候选。**旧候选一直留着**，随时能选回去。"""
+    try:
+        return {"render": poseset.select_candidate(scope, name, req.frame,
+                                                   req.candidate)}
+    except poseset.PoseSetError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/projects/{scope}/pose_renders/{name}/run")
+def project_pose_render_run(scope: str, name: str, req: PoseRenderRunReq
+                            ) -> Dict[str, Any]:
+    """生成（或补生成）成片：走同一个单卡队列，立刻返回 `job_id`。
+
+    前端把 `job_id` 挂到节点的 `job` 上，现有的轮询/看门狗就会接管进度。
+    """
+    params: Dict[str, Any] = {
+        "project": scope, "render": name,
+        "frames": [int(v) for v in req.frames],
+        "candidates": int(req.candidates),
+        "char_image": req.char_image,
+        "char_images": list(req.char_images),
+        "prompt": req.prompt, "negative": req.negative,
+        "steps": int(req.steps), "cfg": float(req.cfg),
+        "width": int(req.width), "height": int(req.height),
+        "seed": int(req.seed), "ref_mode": req.ref_mode, "bg": req.bg,
+        "matte": bool(req.matte), "matte_backend": req.matte_backend,
+        "pixel": int(req.pixel), "palette": int(req.palette),
+        "model": req.model or None,
+    }
+    # 先把"要跑几帧"算准，前端才好显示总张数（也顺手挡掉不存在的帧）
+    try:
+        detail = poseset.load_render(scope, name)
+    except poseset.PoseSetError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    planned = params["frames"] or [f["index"] for f in detail["frames"]]
+    total = max(1, len(planned) * max(1, params["candidates"]))
+
+    job_id = uuid.uuid4().hex[:12]
+    _jobs[job_id] = {"job_id": job_id, "workflow": "wpcbatch", "params": params,
+                     "status": "queued", "created": time.time(),
+                     "progress": {"done": 0, "total": total, "current": ""}}
+    _q.put((job_id, "wpcbatch", params))
+    _prune(_jobs, JOB_KEEP)
+    return {"job_id": job_id, "status": "queued", "total": total,
+            "render": name, "frames": planned, "position": _q.qsize()}
 
 
 @app.post("/projects/export")

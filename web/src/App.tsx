@@ -16,7 +16,7 @@ import {
   submitPoseSeq,
   submitSpriteSwap, submitTxt2Img, uploadImage, extractPose,
   getLibrary, seedLibraryApi, addPromptApi, removePromptApi,
-  renamePoseApi, removePoseApi, addPoseApi, addPosesApi,
+  renamePoseApi, removePoseApi, addPoseApi, createProjectPoseSet,
   fetchLoras, applyLoras, setFastMode, type QwenLora, type ActiveLora,
   submitOutpaint, submitOutfitSwap, submitFaceSwap, submitVnccsPose,
   exportProject, importProject, fetchTemplates, saveTemplate, instantiateTemplate,
@@ -957,25 +957,36 @@ export default function App() {
   }, [patchNode, currentId])
 
   /**
-   * 批量存姿势（一条动画抽出来的 N 帧）。
+   * 把一条动作抽出来的 N 帧存成**项目里的姿势集**。
    *
-   * **一次请求**：逐条发 addPoseApi 会重写 N 次 library/poses.json（每帧还带
-   * 一张预览图），抽 16 帧就是 16 次整库落盘。后端 `/library/poses/batch`
-   * 合并完只写一次。
+   * **不进跨项目的资料库**：一整套动作（N 张 768² 人偶图）属于这一次采样、
+   * 这个项目，塞进 `library/poses.json` 会把库文件撑爆，而且换项目复用它
+   * 没意义。所以落在 `assets/projects/<项目>/poses/<名字>/`，名字由用户取、
+   * **同名一律拒绝**（后端 409），每次存都是一个新的文件夹。
    */
-  const savePosesToLibrary = useCallback(async (
-    items: { name: string; pose: unknown; yaw: number; preview: string }[],
+  const savePoseSet = useCallback(async (
+    name: string,
+    frames: { t: number; yaw: number; pose: unknown; png: string }[],
   ) => {
-    if (!items.length) return
-    try {
-      const r = await addPosesApi(items)
-      setLib((l) => ({ ...l, poses: r.poses ?? l.poses }))
-      setNotice(`${items.length} 个姿势已存入资料库（${items[0].name} … ${items[items.length - 1].name}）`)
-    } catch (e) {
-      setNotice(`批量存姿势失败：${e instanceof Error ? e.message : '未知错误'}`)
+    if (!currentId) {
+      setNotice('还没有项目 id：先保存一次项目')
+      window.setTimeout(() => setNotice(''), 5000)
+      return false
     }
-    window.setTimeout(() => setNotice(''), 5000)
-  }, [])
+    try {
+      const r = await createProjectPoseSet(currentId, name, frames, {
+        count: frames.length, at: Date.now(),
+      })
+      setNotice(`已存成姿势集「${r.set.name}」（${r.set.count} 帧，`
+        + `在项目目录 poses/${r.set.name}/ 下）`)
+      window.setTimeout(() => setNotice(''), 6000)
+      return true
+    } catch (e) {
+      setNotice(`${e instanceof Error ? e.message : '存姿势集失败'}`)
+      window.setTimeout(() => setNotice(''), 8000)
+      return false
+    }
+  }, [currentId])
 
   /** 存当前姿势进库（带一张缩略图，浏览时能一眼认出来）。 */
   const savePoseToLibrary = useCallback(async (
@@ -1762,7 +1773,7 @@ export default function App() {
           poseApply={selectedNode?.poseApply}
           onSavePose={(name, pose, yaw, preview) =>
             void savePoseToLibrary(name, pose, yaw, preview)}
-          onSavePoses={(items) => void savePosesToLibrary(items)}
+          onSavePoseSet={savePoseSet}
           onOpenPoseLibrary={() => openLibrary('pose')}
           onImportPose={(id, file) => importPoseFromImage(id, file)}
           onDropFiles={(files, world, targetId) => void handleFiles(files, world, targetId)}

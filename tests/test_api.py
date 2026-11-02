@@ -604,34 +604,69 @@ def test_models_endpoint_reports_refiner_availability(client):
     assert isinstance(body["refiner"], bool)
 
 
-def test_library_poses_batch_endpoint(client):
-    """批量存姿势（一条动画抽的 N 帧）。
+PNG_1PX = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGA"
+           "hKmMIQAAAABJRU5ErkJggg==")
 
-    **路由顺序是个真陷阱**：`POST /library/poses/batch` 必须在
-    `POST /library/poses` 之前被匹配到，否则 "batch" 会被当成姿势名塞进去。
-    这里从 HTTP 层验一次，因为单看 `library.add_poses` 测不到路由。
+
+def test_project_pose_sets_and_renders_endpoints(client):
+    """项目内姿势集 / 成片集：**同名 409**（不覆盖），帧表来自姿势集。
+
+    路由和错误码必须从 HTTP 层验一次 —— 前端用 409 的文案提示"换个名字"，
+    换成 200 + 覆盖就变成"悄悄把上一次的动作弄丢了"。
     """
-    from workflows import library as lb
-    lb._write(lb.POSES_FILE, [])
+    import shutil
+    from workflows import paths
 
-    r = client.post("/library/poses/batch", json={"items": [
-        {"name": "跑步 01", "pose": {"bones": {}}, "yaw": 90, "preview": ""},
-        {"name": "跑步 02", "pose": {"bones": {}}, "yaw": 90, "preview": ""},
-    ]})
+    proj = "ptest_api_poseset"
+    root = paths.PROJECTS_DIR / proj
+    if root.exists():
+        shutil.rmtree(root, ignore_errors=True)
+
+    frames = [{"t": i * 0.2, "yaw": 0, "pose": {"bones": {}},
+               "png": "data:image/png;base64," + PNG_1PX} for i in range(3)]
+
+    r = client.post(f"/projects/{proj}/pose_sets",
+                    json={"name": "走路", "frames": frames, "source": {"clip": "Walk"}})
     assert r.status_code == 200, r.text
-    poses = r.json()["poses"]
-    assert [p["name"] for p in poses] == ["跑步 02", "跑步 01"]
+    assert r.json()["set"]["count"] == 3
 
-    # 单条那条老接口不能被打断
-    r2 = client.post("/library/poses",
-                     json={"name": "单条", "pose": {"bones": {}}, "yaw": 0})
-    assert r2.status_code == 200
-    assert len(r2.json()["poses"]) == 3
+    # 同名 → 409，且原来的还在
+    r2 = client.post(f"/projects/{proj}/pose_sets",
+                     json={"name": "走路", "frames": frames[:1]})
+    assert r2.status_code == 409, r2.text
+    assert client.get(f"/projects/{proj}/pose_sets").json()["items"][0]["count"] == 3
 
-    # 空 items 不报错（前端可能抽到 0 帧）
-    r3 = client.post("/library/poses/batch", json={"items": []})
-    assert r3.status_code == 200
-    assert len(r3.json()["poses"]) == 3
+    assert client.post(f"/projects/{proj}/pose_sets",
+                       json={"name": "走路 2", "frames": frames}).status_code == 200
+    listing = client.get(f"/projects/{proj}/pose_sets").json()
+    assert listing["count"] == 2
+
+    detail = client.get(f"/projects/{proj}/pose_sets/走路")
+    assert detail.status_code == 200
+    assert [f["index"] for f in detail.json()["set"]["frames"]] == [1, 2, 3]
+
+    # 成片集：帧表按姿势集铺好，还没出图
+    r3 = client.post(f"/projects/{proj}/pose_renders",
+                     json={"name": "走路成片", "poseSet": "走路", "prompt": "cat"})
+    assert r3.status_code == 200, r3.text
+    body = r3.json()["render"]
+    assert body["total"] == 3 and body["done"] == 0
+    assert all(f["selectedIndex"] == -1 for f in body["frames"])
+
+    # 同名 409
+    r4 = client.post(f"/projects/{proj}/pose_renders",
+                     json={"name": "走路成片", "poseSet": "走路"})
+    assert r4.status_code == 409
+
+    # 不存在的姿势集 / 成片集 → 4xx（不能 500）
+    assert client.post(f"/projects/{proj}/pose_renders",
+                       json={"name": "x", "poseSet": "没有这套"}).status_code == 400
+    assert client.get(f"/projects/{proj}/pose_renders/没有这个").status_code == 404
+
+    # 选候选：还没有候选 → 400（明确告诉用户"这帧还没出图"）
+    r5 = client.post(f"/projects/{proj}/pose_renders/走路成片/select",
+                     json={"frame": 1, "candidate": 1})
+    assert r5.status_code == 400 and "候选" in r5.json()["detail"]
 
 
 def test_generate_topixel_roundtrip(client, tmp_path):
@@ -744,6 +779,9 @@ def test_clone_rejects_existing_name(client, monkeypatch):
 
     ref = _clone_ref_png("clone_dup.png")
     name = "克隆重名"
+    # 上一次跑留下的同名角色会让 create 直接抛冲突（测试目录是复用的），
+    # 先清掉再建 —— 否则这条用例第二次跑就红
+    characters.delete_character(name, remove_files=True)
     characters.create_character(name)
     try:
         monkeypatch.setattr(

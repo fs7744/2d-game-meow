@@ -218,12 +218,31 @@ async function one(c) {
     out.pngBytes = Math.floor((url.split(',')[1] || '').length * 3 / 4)
     out.pngB64 = url.split(',')[1] || ''       // 落到 tests/_out，肉眼复核用
   }
+  if (c.play) {
+    // **播放**：从 0 播 1.2 秒，看 tick 有没有单调推进（iframe 按 wall clock 算 t）
+    const ticks = []
+    const onTick = (e) => {
+      if (e.source !== f.contentWindow) return
+      const d = e.data || {}
+      if (d.type === 'animTick' && typeof d.t === 'number') ticks.push(d.t)
+      if (d.type === 'animPlaying') out.playEvents = (out.playEvents || 0) + 1
+    }
+    window.addEventListener('message', onTick)
+    send({ type: 'animPlay', on: true, t: 0 })
+    await new Promise((r) => setTimeout(r, 1200))
+    send({ type: 'animPlay', on: false })
+    await new Promise((r) => setTimeout(r, 500))
+    window.removeEventListener('message', onTick)
+    out.ticks = ticks.length
+    out.tickMax = ticks.length ? Math.max(...ticks) : 0
+    out.tickMonotonic = ticks.every((v, i) => i === 0 || v >= ticks[i - 1] - 1e-6)
+  }
   if (c.sample) {
     send({ type: 'animSample', count: c.sample })
     const fr = await waitFor('animFrames', 180000)
     const frames = fr.frames || []
     out.frames = frames.length
-    out.framesWithPreview = frames.filter((x) => String(x.preview || '').startsWith('data:image/png')).length
+    out.framesWithPreview = frames.filter((x) => String(x.png || '').startsWith('data:image/png')).length
     out.framesWithPose = frames.filter((x) => x.pose && typeof x.pose === 'object').length
     out.clipOfFrames = fr.clip
     // 抽出来的帧必须**互不相同**：全一样说明采样没生效（时间没推进到 mixer）
@@ -326,7 +345,8 @@ async function main() {
   rewriteGlbNames(soldier, join(MESH, 'Soldier.junk.glb'), junk)
 
   let cases = [
-    { name: 'glb-mixamo', model: '/__model/Soldier.glb', file: 'Soldier.glb', export: true, sample: 4 },
+    { name: 'glb-mixamo', model: '/__model/Soldier.glb', file: 'Soldier.glb',
+      export: true, sample: 4, play: true },
     { name: 'fbx-mixamo', model: '/__model/SambaDancing.fbx', file: 'SambaDancing.fbx', export: true },
     { name: 'glb-unreal', model: '/__model/Soldier.unreal.glb', file: 'Soldier.glb' },
     { name: 'glb-kaykit', model: '/__model/Soldier.kaykit.glb', file: 'Soldier.glb' },
@@ -426,6 +446,11 @@ async function main() {
       expect(r.pngOk === true && r.pngBytes > 2000, '导出的人偶图应为非空 PNG', String(r.pngBytes))
       expect(r.frames === 4 && r.framesWithPose === 4, '抽 4 帧应拿到 4 份 pose')
       expect(r.framesWithPreview === 4, '每帧都应带缩略图', String(r.framesWithPreview))
+      // 播放：滑块要真在走（tick 单调递增、能推进到 1 秒附近）
+      expect(r.ticks >= 4, '播放应持续推出 animTick', String(r.ticks))
+      expect(r.tickMax > 0.5, '播放应真的推进时间轴', String(r.tickMax))
+      expect(r.tickMonotonic === true, 'animTick 必须单调（不能来回跳）', String(r.tickMonotonic))
+      expect(r.playEvents >= 2, '播放要回 animPlaying on/off', String(r.playEvents))
       expect(r.distinctFrames >= 3, '抽出来的帧应互不相同（时间真在走）', String(r.distinctFrames))
     }
     if (r.name === 'fbx-mixamo') {

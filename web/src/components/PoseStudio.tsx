@@ -73,24 +73,26 @@ type Props = {
   poseApply?: { pose: unknown; yaw: number; tick: number } | null
   /** 把当前姿势存进库（缩略图一并提交） */
   onSavePose?: (name: string, pose: unknown, yaw: number, preview: string) => void
-  /** 一次存多条（从一条动画抽的 N 帧，一次请求落盘） */
-  onSavePoses?: (items: PoseToSave[]) => void
   /** 打开资料库的姿势页 */
   onOpenPoseLibrary?: () => void
+  /** 当前项目 id：抽出来的帧要存进**这个项目**的 `poses/<名字>/` 下 */
+  projectId?: string
+  /** 把一个动作抽出来的 N 帧存成项目里的姿势集（同名会被后端拒绝） */
+  onSavePoseSet?: (name: string, frames: PoseSetFrameIn[]) => Promise<boolean> | boolean
 }
 
-/** 一条待入库的姿势（批量抽帧用） */
-export type PoseToSave = {
-  name: string
-  pose: unknown
+/** 抽帧结果的一帧（`png` 是 iframe 出的人偶图 dataURL） */
+export type PoseSetFrameIn = {
+  t: number
   yaw: number
-  preview: string
+  pose: unknown
+  png: string
 }
 
 export default function PoseStudio({
   pose, yaw, onPose, onYaw, onExport, exporting,
   onImportImage, importing, importPoints, importReprojected, poses,
-  poseApply, onSavePose, onSavePoses, onOpenPoseLibrary,
+  poseApply, onSavePose, onOpenPoseLibrary, projectId, onSavePoseSet,
 }: Props) {
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const [status, setStatus] = useState('正在加载人偶模型（37MB，首次约十几秒）…')
@@ -112,9 +114,12 @@ export default function PoseStudio({
   } | null>(null)
   const [animT, setAnimT] = useState(0)
   const [animBusy, setAnimBusy] = useState(false)
-  /** 抽帧入库：帧数 + 进行中 */
+  /** 抽帧存姿势集：帧数（用户自己填）/ 名字 / 进行中 */
   const [frameCount, setFrameCount] = useState(8)
+  const [setName, setSetName] = useState('')
   const [sampling, setSampling] = useState(false)
+  /** 正在播放（iframe 那边在推进时间轴） */
+  const [playing, setPlaying] = useState(false)
   const animFileRef = useRef<HTMLInputElement>(null)
   /** 拖滑块时的节流器：每 60ms 才真采样一次，否则一帧一次 WebGL 解算会卡 */
   const animTimer = useRef<number | null>(null)
@@ -124,11 +129,10 @@ export default function PoseStudio({
   // 子窗一直在推消息，回调要用最新的；放 ref 避免 effect 反复重建
   const onPoseRef = useRef(onPose)
   onPoseRef.current = onPose
-  const onSavePosesRef = useRef(onSavePoses)
-  onSavePosesRef.current = onSavePoses
-  /** 消息回调里要用最新的库（去重用），放 ref 避免 effect 反复重建 */
-  const posesRef = useRef(poses)
-  posesRef.current = poses
+  const onSavePoseSetRef = useRef(onSavePoseSet)
+  onSavePoseSetRef.current = onSavePoseSet
+  /** 抽帧请求发出时记下"这批帧要存什么名字"，回包时直接取（不用闭包） */
+  const pendingSetRef = useRef<{ name: string; count: number } | null>(null)
   const yawRef = useRef(yaw)
   yawRef.current = yaw
   const poseRef = useRef<unknown>(pose)
@@ -174,8 +178,10 @@ export default function PoseStudio({
         clips?: { name: string; duration: number }[]
         boneCount?: number; format?: string; switched?: boolean
         rig?: { familyLabel?: string; mapped?: number; missing?: string[] }
-        frames?: { t: number; pose: unknown; preview?: string }[]
+        frames?: { t: number; pose: unknown; png?: string }[]
         clip?: string
+        t?: number
+        on?: boolean
       } | null
       if (!d || typeof d.type !== 'string') return
       if (d.type === 'ready') {
@@ -209,28 +215,37 @@ export default function PoseStudio({
         setStatus(`动作已载入：${clips[0].name}（${d.boneCount} 根骨，${d.format}`
           + `${rig?.familyLabel ? `，${rig.familyLabel} 骨架` : ''}）——拖滑块选帧`)
         post({ type: 'animTime', t: 0 })
+      } else if (d.type === 'animTick') {
+        // 播放中每 ~80ms 推一次时间，滑块跟着走（播放时不再推 pose，见 entry.js）
+        if (typeof d.t === 'number') setAnimT(d.t)
+      } else if (d.type === 'animPlaying') {
+        setPlaying(!!d.on)
       } else if (d.type === 'animFrames') {
-        // 批量抽帧回来了：命名 + 交给 App 一次落盘
+        // 抽帧回来了：直接存成**项目里的姿势集**（不进跨项目的资料库）
         setSampling(false)
-        const frames = (d.frames || []) as { t: number; pose: unknown; preview?: string }[]
+        const pending = pendingSetRef.current
+        pendingSetRef.current = null
+        const frames = (d.frames || []) as { t: number; pose: unknown; png?: string }[]
         if (!frames.length) {
           setErr('抽帧没拿到内容')
           return
         }
-        const base = String(d.clip || '动作').trim() || '动作'
-        const taken = new Set(posesRef.current.map((p) => p.name))
-        const items: PoseToSave[] = frames.map((f, i) => {
-          let name = `${base} ${String(i + 1).padStart(2, '0')}`
-          let k = 2
-          while (taken.has(name)) name = `${base} ${String(i + 1).padStart(2, '0')} (${k++})`
-          taken.add(name)
-          return { name, pose: f.pose, yaw: yawRef.current, preview: String(f.preview || '') }
-        })
-        onSavePosesRef.current?.(items)
-        setStatus(`已从「${base}」抽 ${items.length} 帧入库`)
+        const name = String(pending?.name || '').trim()
+        const items: PoseSetFrameIn[] = frames.map((f) => ({
+          t: Number(f.t) || 0,
+          yaw: yawRef.current,
+          pose: f.pose,
+          png: String(f.png || ''),
+        }))
+        Promise.resolve(onSavePoseSetRef.current?.(name, items))
+          .then((ok) => {
+            if (ok) setStatus(`已存成姿势集「${name}」（${items.length} 帧）`)
+          })
+          .catch(() => { /* App 那边已经提示过错误，这里不重复报 */ })
       } else if (d.type === 'error') {
         setAnimBusy(false)
         setSampling(false)
+        setPlaying(false)
         setStatus('')
         setErr(String(d.message || '未知错误'))
       } else if (d.type === 'result') {
@@ -466,14 +481,27 @@ export default function PoseStudio({
         )}
         {anim && (
           <>
+            <button
+              type="button" className="mini"
+              onClick={() => {
+                setErr('')
+                post({ type: 'animPlay', on: !playing, t: playing ? 0 : animT })
+              }}
+              disabled={!ready || animBusy}
+              title={playing ? '停止播放（回到滑块那一帧）'
+                : '从头播到尾（按真实时长，慢的时候自动跳帧，不会越播越拖）'}
+            >
+              {playing ? '■' : '▶'}
+            </button>
             <input
               className="pose-anim-range"
               type="range"
               min={0}
               max={Math.max(0.02, anim.clips[anim.index]?.duration ?? 1)}
               step={0.01}
-              value={animT}
+              value={Math.min(animT, Math.max(0.02, anim.clips[anim.index]?.duration ?? 1))}
               onChange={(e) => scrubAnim(Number(e.target.value))}
+              disabled={playing}
               title="拖到想要的那一帧停住（人偶实时跟帧）"
             />
             <b className="pose-anim-t">{animT.toFixed(2)}s</b>
@@ -481,44 +509,62 @@ export default function PoseStudio({
         )}
       </div>
 
-      {/* 批量抽帧入库：一条 walk 直接灌成一整套姿势，比一帧一帧拖、一帧一帧存
-          快得多（帧间差异正是走路动画的价值所在）。 */}
+      {/* 抽帧存成**项目里的姿势集**（`assets/projects/<项目>/poses/<名字>/`）。
+          一条 walk 直接灌成一整套，比一帧一帧拖、一帧一帧存快得多。
+          帧数由用户自己填 —— 慢动作 30 帧、快动作 8 帧本来就该不一样。 */}
       {anim && (
-        <div className="pose-lib pose-frames">
-          <label className="pose-frames-n" title="沿这条动作等分抽几帧（2~24）">
-            抽
+        <>
+          <div className="pose-lib pose-frames">
+            <label className="pose-frames-n" title="沿这条动作等分抽几帧（1~240）">
+              抽
+              <input
+                type="number"
+                min={1}
+                max={240}
+                value={frameCount}
+                disabled={sampling}
+                onChange={(e) => {
+                  const n = Math.max(1, Math.min(240, Math.round(Number(e.target.value) || 8)))
+                  setFrameCount(n)
+                }}
+              />
+              帧
+            </label>
             <input
-              type="number"
-              min={2}
-              max={24}
-              value={frameCount}
+              className="pose-set-name"
+              value={setName}
+              placeholder={anim.clips[anim.index]?.name ? `姿势集名（默认 ${anim.clips[anim.index].name}）` : '姿势集名'}
               disabled={sampling}
-              onChange={(e) => {
-                const n = Math.max(2, Math.min(24, Math.round(Number(e.target.value) || 8)))
-                setFrameCount(n)
-              }}
+              onChange={(e) => setSetName(e.target.value)}
+              title="存到本项目的 poses/<这个名字>/ 下。**同名会被拒绝**（不会覆盖上一次的）"
             />
-            帧
-          </label>
-          <button
-            type="button" className="mini wide"
-            disabled={!ready || sampling || !onSavePoses}
-            onClick={() => {
-              setErr('')
-              setSampling(true)
-              post({ type: 'animSample', count: frameCount })
-            }}
-            title={'把这条动作等分成 N 帧，每帧连人偶缩略图一起存进姿势库。\n'
-              + '名字是「动作名 01 / 02 …」，同名会覆盖。'}
-          >
-            {sampling ? '抽帧中…' : `存入 ${frameCount} 帧`}
-          </button>
+            <button
+              type="button" className="mini"
+              disabled={!ready || sampling || !onSavePoseSet || !projectId}
+              onClick={() => {
+                setErr('')
+                const name = (setName.trim() || anim.clips[anim.index]?.name || '动作').trim()
+                if (!projectId) {
+                  setErr('没有项目 id，存不了（先保存项目）')
+                  return
+                }
+                pendingSetRef.current = { name, count: frameCount }
+                setSampling(true)
+                post({ type: 'animSample', count: frameCount })
+              }}
+              title={projectId
+                ? '按当前机位把这条动作等分成 N 帧，存成项目里的一个姿势集文件夹'
+                : '还没有项目 id：先保存项目再抽帧'}
+            >
+              {sampling ? '抽帧中…' : '存为姿势集'}
+            </button>
+          </div>
           {anim.rig && (
-            <span className="pose-frames-rig" title="骨骼是按名字 + 层级认出来的">
+            <div className="pose-frames-rig" title="骨骼是按名字 + 层级认出来的">
               {anim.rig.familyLabel} · {anim.rig.mapped} 锚点
-            </span>
+            </div>
           )}
-        </div>
+        </>
       )}
 
       <input

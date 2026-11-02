@@ -12,6 +12,8 @@ type Props = {
   model: string
   /** 当前底模的候选数上限（后端按总显存算），透传给每个节点卡 */
   maxCandidates?: number
+  /** 全局抠图后端（auto/…），角色迁移的批量面板也要按它出图 */
+  matteBackend?: string
   /** W4 可用的骨架帧目录 */
   poseDirs?: PoseDir[]
   /** 本机是否装了 SDXL refiner 权重 */
@@ -50,8 +52,9 @@ type Props = {
   poseApply?: { nodeId: string; pose: unknown; yaw: number; tick: number } | null
   /** 把当前姿势存进库（带缩略图） */
   onSavePose?: (name: string, pose: unknown, yaw: number, preview: string) => void
-  /** 一次存多条（从一条动画抽的 N 帧） */
-  onSavePoses?: (items: { name: string; pose: unknown; yaw: number; preview: string }[]) => void
+  /** 把一个动作抽出来的 N 帧存成项目里的姿势集 */
+  onSavePoseSet?: (name: string,
+    frames: { t: number; yaw: number; pose: unknown; png: string }[]) => Promise<boolean> | boolean
   /** 打开资料库的姿势页 */
   onOpenPoseLibrary?: () => void
   onDropFiles: (files: File[], world: { x: number; y: number }, targetId?: string) => void
@@ -70,6 +73,7 @@ export default function Canvas({
   nodes,
   model,
   maxCandidates,
+  matteBackend,
   poseDirs,
   canTransparent,
   models,
@@ -94,7 +98,7 @@ export default function Canvas({
   poses,
   poseApply,
   onSavePose,
-  onSavePoses,
+  onSavePoseSet,
   onOpenPoseLibrary,
   onDropFiles,
   onConnect,
@@ -495,6 +499,7 @@ export default function Canvas({
             favorited={isFavorite(n.params.prompt, n.params.negative || '')}
             onToggleFavorite={() => onToggleFavorite(n.id)}
             model={n.params.model || model}
+            matteBackend={matteBackend}
             onModel={(m, opts) => onNodeModel?.(n.id, m, opts?.keepNodes)}
             nodesModels={models}
             modelCaps={modelCaps}
@@ -515,7 +520,7 @@ export default function Canvas({
             // 带着 nodeId 往下传：只有目标节点会套用，别的节点必须忽略
             poseApply={poseApply}
             onSavePose={onSavePose}
-            onSavePoses={onSavePoses}
+            onSavePoseSet={onSavePoseSet}
             onOpenPoseLibrary={onOpenPoseLibrary}
             sourceNode={nodes.find((x) => x.id === n.source?.nodeId)}
             sourceOptions={sourceOptions}

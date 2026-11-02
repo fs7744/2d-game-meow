@@ -163,6 +163,13 @@ export type GenParams = {
    */
   pcEngine?: 'wpc' | 'wvnccs'
   /**
+   * 角色迁移**批量**：用项目里的哪个姿势集（`assets/projects/<项目>/poses/<名字>/`）。
+   * 空 = 走单张那张动作参考图。
+   */
+  pcPoseSet?: string
+  /** 角色迁移批量：输出版（成片集）的文件夹名，落在 `pose_frames/<名字>/` */
+  pcOut?: string
+  /**
    * 角色迁移：人物的**朝向**（写进指令，是模型唯一可靠的朝向线索）。
    *
    * 为什么必须有这个输入：骨架图本身分不清角度——正/背面在 2D 投影里互为镜像，
@@ -330,6 +337,11 @@ export type GenNode = {
    * 别的人偶节点必须忽略它。`tick` 变化才触发应用（避免重复套用）。
    */
   poseApply?: { nodeId: string; pose: unknown; yaw: number; tick: number } | null
+  /**
+   * 角色迁移批量：当前在看的成片集名字（服务端 `pose_frames/<名字>/`）。
+   * 帧候选与"选了哪一张"都在服务端的 render.json 里，这里只记名字。
+   */
+  poseRender?: string
   job?: JobState
 }
 

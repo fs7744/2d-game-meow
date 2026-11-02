@@ -132,7 +132,9 @@ glb 与 fbx 都符合。**非 Mixamo 骨架（如 Quaternius / KayKit 的 CC0 �
 | `web/src/components/PoseStudio.tsx` | 「导入动作」按钮、轨道下拉、时间滑块、「存入 N 帧」 |
 | `web/src/canvas/Canvas.tsx`、`web/src/nodes/GenNodeCard.tsx` | 把 `onSavePoses` 透到编辑器 |
 | `web/src/App.tsx` | `savePosesToLibrary`（一次请求） |
-| `workflows/library.py` / `app.py` / `web/src/api.ts` | `add_poses` + `POST /library/poses/batch` + `addPosesApi` |
+| `workflows/poseset.py` | **新增**。项目内的姿势集 / 成片集存储（同名拒绝、候选只增不删） |
+| `workflows/posebatch.py` | **新增**。姿势集 → 一整套成片（每帧若干候选） |
+| `web/src/components/PoseBatchPanel.tsx` | **新增**。批量面板：缩略网格 / 候选条 / 播放 / 单帧重生成 |
 | `web/src/styles.css` | `.pose-anim*` / `.pose-frames*` |
 | `tools/verify_anim_import.mjs` | **新增**。真机验证（§5.6） |
 
@@ -217,15 +219,40 @@ buildMixamoWorldKeypoints(sb, viewer)     // 官方原样调用
 5. **认不出就明说**：`missing` 非空时 `describeRig()` 拼出「缺 Hips / LeftArm …」
    + 文件里的骨名样本，`loadAnimation` 直接抛这个错，宿主显示在 `.pose-err` 里。
 
-### 5.5 批量抽帧入库
+### 5.5 播放与抽帧（2026-11-02 晚改版）
 
-「一条 walk → 一整套姿势」：`animSample {count}` → iframe 等分 `applyTime` →
-每帧 `getPose()` + `renderOut(192)` 缩略图 → `animFrames` → 宿主命名
-`动作名 01/02/…`（重名自动加 `(2)`）→ `POST /library/poses/batch` **一次落盘**。
+- **播放**：`{type:'animPlay', on, t}`。按 **wall clock** 推进 mixer，不是 rAF ——
+  一帧要跑「关键点提取 + 全骨 IK」，实测 20~40ms，用 rAF 会被拖成 15fps 并且
+  **越播越偏**（时间是按帧累加的）。慢的时候跳帧，整段时长仍准。
+  播放中只推 `animTick`（滑块 12Hz 跟随），**不推 `pose`**：那是"拖动松手"的
+  存档语义，25 次/秒会把项目文件写穿。停下/播完时把姿势交回宿主。
+- **抽帧数量由用户填**（1~240，上限 = `poseset.MAX_FRAMES`）。以前写死 2~24，
+  一条慢动作 30 帧根本抽不全。
 
-**为什么不用逐条 `POST /library/poses`**：那是 N 次整库重写（每帧还带一张预览图），
-抽 16 帧就是 16 次。`library.add_poses` 合并完只写一次，
-`tests/test_library.py::test_pose_add_batch_single_write` 直接数 `_write` 调用次数。
+**帧存到哪**：不再是跨项目的 `library/poses.json`，而是
+`assets/projects/<项目>/poses/<用户取的名字>/`（`set.json` + `f_001.png`…）。
+**同名一律 409**，每次存都是新文件夹。理由：
+
+- N 张 768² 人偶图塞进 poses.json 会把库文件撑爆；
+- 一整套动作属于**这次采样、这个项目**，换项目复用它没意义；
+- 资料库存的是"跨项目复用的单个姿势"，两者语义不同。
+
+接口见 `workflows/poseset.py`（模块注释里有完整目录结构）。
+
+### 5.5b 角色迁移批量出片（`workflows/posebatch.py`）
+
+选一个姿势集 →「全部生成」→ 逐帧生成到 `pose_frames/<用户取的名字>/`：
+
+- 用的是**角色迁移那条管线**（`generate.pose_clone`：DWPose 条件图 + 双图
+  vision context），所以批量出来的和逐张点「迁移角色」是同一套效果，
+  不是另一条"官方批量"的路子。
+- **候选只增不删**：每帧 `candidates[]` + `selected`。重生成 = 追加一张并选中它，
+  旧文件原地留着 —— 用户很可能看完新的又觉得上一版更好。
+  `add_candidate` 只搬文件、只在 `render.json` 里追加，**没有任何删除路径**。
+- 逐帧逐候选串行（QI2 一次一张），进度按"已出的张数"报，前端挂 `job_id`
+  就有进度条（复用现有的任务轮询 + 30 分钟看门狗）。
+- 同名输出文件夹：当成"接着往里加候选"；但如果里面是**另一套姿势集**的成片，
+  直接报错让用户改名（帧表对不上会张冠李戴）。
 
 ### 5.6 验证（真机，2026-11-02）
 
@@ -272,7 +299,9 @@ Samba 的张臂，肢体无扭曲无穿透。**`fbx` 这条以前只是"代码�
 | A | ASCII FBX | `FBXLoader` 只吃二进制 FBX；ASCII 版本直接报解析错。Mixamo 默认导出就是二进制，影响不大 |
 | B | 病态骨架仍是尽力而为 | 像 `RobotExpressive`（腿链没有独立脚骨、脚是独立的 IK 控制骨）能映射出来但姿势未必准；这类资产不在产线范围内 |
 | C | 批量抽帧共用当前朝向 | 抽 N 帧时全部用当前机位，不能一帧一个角度。要 8 方向的同一动作，得抽完再逐个改朝向 |
-| D | 抽帧上限 24 | 再多就得进库后手动删，姿势库整体上限 200 |
+| D | 抽帧上限 240 | 由用户自己填；再大就该拆成几条动作了 |
+| E | 成片还不进下游 | 批量出的是"挑好的那套帧"，没接进角色库/精灵图集；要用得先手动导出 |
+| F | 播放是"翻图"不是真播放 | 面板里的 `▶` 按 8fps 翻当前选中的那张，判断连贯性够用，但不是帧动画引擎 |
 
 **别做的事**（已否决，理由见 §3）：
 把 HybrIK/SMPL-X 接进来；为了"更准"去装 PyTorch3D。
