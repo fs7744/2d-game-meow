@@ -31,7 +31,7 @@
 | 改动 | 子集 | 约 |
 |---|---|---|
 | engine.py | test_models test_vramopt test_stability | 110s |
-| generate.py | test_qwen_workflows test_denoise | 45s |
+| generate.py | test_qwen_workflows test_denoise test_paint_path | 47s |
 | presets.py | test_presets test_quality | 10s |
 | matte.py / refprep.py | test_matte test_refprep | 20s |
 | postprocess.py / pixelfy.py | test_postprocess test_pixelfy test_sheet | 15s |
@@ -55,6 +55,21 @@
 **iframe 内部 jsdom 验不到**（PoseStudio 那块）。动了 `web/public/vnccs-pose/**`
 或人偶编辑器接线，要用 `python tools/verify_pose_editor.py` 真机验
 （无头 Edge + SwiftShader，跑一遍约 1 分钟）。
+
+## 前端真截图（脱离 GPU，2026-11-01 起）
+
+要截真实节点界面（不依赖后端/GPU，纯 DOM），套路：
+
+- 工具放在 **`tools/shot/`**（隔离装 `puppeteer-core`，不污染项目 `package.json`），
+  驱动系统 Edge：`C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`。
+- **`npm run build` 会触发批量删除守卫**（vite 清空 `dist/vnccs` 约 528 文件 >50 上限被拦）。
+  改 `vite build --outDir dist_shot`（全新空目录 → emptyDir 删 0 个，不触发守卫），截完即删。
+- 加载 `index.html?demo=1` 铺一个 gen 节点；要哪种节点就点侧栏对应 `.rail-item` 里的
+  `.rail-add`（"放到画布原点"，实际落可见区中心并错开）。
+- **节点卡片选择器是 `.node.gen`（外层），不是 `.node-kind.poseclone`** —— 后者只是卡头里
+  的「角色迁移」文字 `<span>`，拿它截只能截到四个字。
+- 高级项在 `details.adv`（「更多设置」），截图前把 `det.open=true` 才能看到占高/参考模式/
+  底色/透明背景。产物落 `docs/img/`。
 
 `tests/test_generate.py` / `test_clip` / `test_controlnet` / `test_lora` /
 `test_train` / `test_review_fixes` / `test_review_p1` / `test_fetch` **已删除**
@@ -144,6 +159,32 @@
 - 逐帧路线的短板是**姿态贴合**不是帧间一致性（PLAN §2.8）：腿部常被参考图站姿覆盖。
 - 白毛/白甲角色别用白底抠图——换 `bg=dark`，或出图时直接勾透明底。
 
+## 「像素感」的三个来源：不只有 pixelate（2026-11-02）
+
+用户报「没勾像素化还是有像素感」。三处都会造成，后两处更隐蔽：
+
+1. **契约词**：`SPRITE_SUFFIX` 带 `16-bit pixel art, hard outline, flat colors`，
+   负向词压 `anti-aliasing`。`pixel<=1` 时用 `presets.build(..., pixelate=False)`
+   → 换成 `SPRITE_SUFFIX_PAINT` / `SPRITE_NEG_PAINT`。
+2. **alpha 硬切**：`_postprocess` 里 `_harden_alpha(240)` 把过渡带砍成 0/255。
+   像素档要硬边，插画档只能 `sanitize_alpha`（<16 清零、>240 拉满、中间留着）。
+3. **形态学开运算**：`despeckle(denoise_iters>0)` 削掉 <3px 突起（发丝/挂饰）。
+   只在像素档开。
+
+判据：`hard_edge = pixel > 1 or palette > 0`。不像素化时这三条一律不生效。
+`tests/test_paint_path.py` 钉住这条。**别再用"看数值有没有 pixel"判断是否像素化了。**
+
+## 前端小部件踩过的坑（2026-11-02）
+
+- **`.mini` 是 28×28 图标按钮**（✕ / ⤢ 这种单字符用）。文字按钮另起类，
+  否则两个字会竖排换行并溢出边框。
+- **别用 `opacity` 做"低调按钮"**：连图标带边框整体半透明，近黑画布上等于隐形。
+  要实心底 + 灰白边框，hover 换强调色。
+- **数字输入框别用 flex-grow 比例分**：会被压到 30px，`768` 直接看不见。
+  用 `flex: 0 0 52px` 固定，剩余空间给旁边的下拉。
+- 覆盖层弹窗（提示词放大、看图）**走 Portal 到 body**：节点卡片有
+  `overflow:hidden` + `transform`，就地渲染会被裁掉且跟着画布缩放。
+
 ## 界面中文化：只翻译显示层，别改标识（2026-11-01 起）
 
 界面上的 `Naked` / `angry 😠` / `Shonen Anime` / `Ballet` **不是文案，是数据标识**——
@@ -167,3 +208,11 @@
 - 要保持英文的：提示词示例（`blonde hair, twin tails`）、官方固定指令
   （`Dress character: White underwear`）、错误码（`MODEL_MISSING` ——
   前端和测试靠它做字符串匹配，翻译会断契约）、文件路径与目录名。
+
+## 文档/科普：归开源 upstream，别宣传商业站点（2026-11-01）
+
+写原理/科普文档、引用截图时：**只归到开源上游**（AHEKOT/ComfyUI_VNCCS、
+AHEKOT/ComfyUI_VNCCS_Utils、MIUProject/VNCCS_PoseStudio_QI2.1），
+**不要写 runcomfy.com 这类商业托管/二次发布站点**——用户明确要求不替商业公司宣传。
+讲解文案可直接用上游官方描述（中文/英文皆可），截图用上游官方仓库或用户贴的图，
+不要链商业页面。
