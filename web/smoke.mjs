@@ -1931,6 +1931,28 @@ function check(name, cond, extra = '') {
   await wait(120)
   check('再双击回适应窗口', parseInt(pct(), 10) === fitNow, pct())
 
+  // ---- 拖拽平移不能把预览关掉（用户报："一拖预览就关了"）----
+  // 舞台里的 click 以前会冒泡到 .lightbox 的"点背景关闭"，拖动松手补的那个
+  // click 也被算进去 → 拖一下就没了。现在舞台先 stopPropagation 再判断。
+  stage.querySelector('.lightbox-img')
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await wait(120)
+  check('点图片本身不关闭预览', !!doc.querySelector('.lightbox'))
+
+  stage.dispatchEvent(new win.PointerEvent('pointerdown', {
+    bubbles: true, button: 0, clientX: 100, clientY: 100,
+  }))
+  stage.dispatchEvent(new win.PointerEvent('pointermove', {
+    bubbles: true, clientX: 180, clientY: 160,
+  }))
+  stage.dispatchEvent(new win.PointerEvent('pointerup', { bubbles: true }))
+  stage.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await wait(120)
+  check('拖动平移后预览还在（松手补的 click 不算点背景）',
+    !!doc.querySelector('.lightbox'))
+  check('拖动时舞台有 dragging 类（光标变抓手）',
+    !!doc.querySelector('.lightbox-stage.dragging') === false, '松手后应清掉')
+
   // Esc 关闭
   win.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
   await new Promise((r) => setTimeout(r, 120))
@@ -2209,6 +2231,70 @@ function check(name, cond, extra = '') {
     JSON.stringify({ c: body.params.colors, s: body.params.sample_method }))
 
   check('像素转换场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 22b) 转像素节点（topixel）：源图必须真的传给后端
+//
+// 回归：这个节点能建、能连线、界面还提示"有源图可留空提示词"，但提交时
+// `init` 从来没被赋值过（判断列表里漏了 topixel），后端只收到空 prompt，
+// 直接抛「需要 prompt 或 init_image 之一」——用户看到的就是"转像素失败"。
+{
+  const { dom, errors } = await boot('')
+  const doc = dom.window.document
+  const win = dom.window
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms))
+
+  const items = [...section(doc, '节点').querySelectorAll('.rail-item')]
+  const tpItem = items.find((it) => (it.querySelector('b')?.textContent || '') === '转像素')
+  check('侧栏有「转像素」节点类型', !!tpItem)
+  tpItem?.querySelector('.rail-add').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await wait(150)
+
+  const tpNode = () => [...doc.querySelectorAll('.node')].find(
+    (n) => (n.querySelector('.node-kind')?.textContent || '') === '转像素')
+  check('能新建转像素节点', !!tpNode())
+  check('有源图区（可留空）',
+    (tpNode()?.querySelector('.src-note')?.textContent || '').includes('有源图'),
+    tpNode()?.querySelector('.src-note')?.textContent)
+
+  // 拖一张图进画布当源
+  const viewport = doc.querySelector('.canvas-viewport')
+  const file = new win.File([new Uint8Array([1])], 'pic.png', { type: 'image/png' })
+  const ev = new win.Event('drop', { bubbles: true })
+  Object.defineProperties(ev, {
+    clientX: { value: 300 }, clientY: { value: 260 },
+    dataTransfer: { value: { types: ['Files'], files: [file], getData: () => '' } },
+  })
+  viewport.dispatchEvent(ev)
+  await wait(400)
+  const imgNode = [...doc.querySelectorAll('.node')].find(
+    (n) => (n.querySelector('.node-kind')?.textContent || '') === '图片')
+  check('画布上出现了源图节点', !!imgNode)
+
+  imgNode?.querySelector('.conn.out')
+    .dispatchEvent(new win.PointerEvent('pointerdown', { bubbles: true, button: 0 }))
+  await wait(60)
+  tpNode()?.dispatchEvent(new win.PointerEvent('pointerover', { bubbles: true }))
+  await wait(60)
+  win.dispatchEvent(new win.PointerEvent('pointerup', { bubbles: true }))
+  await wait(150)
+  check('连线后转像素节点接上了源', !!tpNode()?.querySelector('.src-box select')?.value)
+
+  calls.length = 0
+  tpNode()?.querySelector('.gen-btn')
+    .dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await wait(300)
+  const sub = calls.filter((c) => c.url.endsWith('/generate')).pop()
+  check('转像素提交了', !!sub)
+  const body = sub ? JSON.parse(sub.body) : {}
+  check('workflow=topixel', body.workflow === 'topixel', body.workflow)
+  // **核心断言**：源图路径必须传过去（以前这里是 undefined）
+  check('把源图路径传给了后端（否则后端只会看到空 prompt）',
+    typeof body.params?.init_image === 'string' && body.params.init_image.length > 0,
+    String(body.params?.init_image))
+
+  check('转像素场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 

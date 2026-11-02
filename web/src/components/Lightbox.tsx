@@ -170,9 +170,16 @@ export default function Lightbox({ url, name, onClose }: Props) {
 
   /** 拖拽平移 */
   const drag = useRef<{ x: number; y: number; tx: number; ty: number; moved: boolean } | null>(null)
+  /**
+   * 刚刚是否拖动过。要在 click 之前知道——`pointerup` 之后浏览器还会补一个
+   * `click`（按下和抬起在同一元素上），那个 click 属于拖拽的收尾，
+   * 不处理的话"拖到边缘松手"会被当成"点了背景"把预览关掉。
+   */
+  const justDragged = useRef(false)
 
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0) return
+    justDragged.current = false
     drag.current = { x: e.clientX, y: e.clientY, tx: view.current.tx, ty: view.current.ty, moved: false }
     setDragging(true)
     // jsdom / 老浏览器不一定实现了指针捕获，失败也不该让拖拽整段挂掉
@@ -184,7 +191,10 @@ export default function Lightbox({ url, name, onClose }: Props) {
     if (!d) return
     const dx = e.clientX - d.x
     const dy = e.clientY - d.y
-    if (!d.moved && Math.hypot(dx, dy) > 3) d.moved = true
+    if (!d.moved && Math.hypot(dx, dy) > 3) {
+      d.moved = true
+      justDragged.current = true
+    }
     commit({ tx: d.tx + dx, ty: d.ty + dy })
   }
 
@@ -258,7 +268,15 @@ export default function Lightbox({ url, name, onClose }: Props) {
         ref={stageRef}
         className={`lightbox-stage${dragging ? ' dragging' : ''}`}
         onClick={(e) => {
-          // 点空白关掉；点到图上不关（放大后满屏都是图，误触太容易）
+          // **先无条件挡住冒泡**：外层 `.lightbox` 的 onClick 是"点背景关闭"，
+          // 舞台里的任何点击（点图、拖完松手产生的 click）以前都会冒上去把
+          // 预览关掉——表现就是"一拖就关"。只有点在舞台空白处才关。
+          e.stopPropagation()
+          if (justDragged.current) {
+            // 刚拖过：这次 click 是拖拽的收尾，不算"点背景"
+            justDragged.current = false
+            return
+          }
           if (e.target === e.currentTarget) onClose()
         }}
         onPointerDown={onPointerDown}

@@ -1185,16 +1185,21 @@ export default function App() {
       || node.kind === 'airepaint'
     if (needPrompt && !node.params.prompt.trim()) return
     let init: string | undefined
+    /** 源图**可选**的节点：拿得到就传，拿不到就让后端用提示词先出一张 */
+    const srcOptional = node.kind === 'topixel'
     if (node.kind === 'img2img' || node.kind === 'bg' || node.kind === 'inpaint'
       || node.kind === 'airepaint' || node.kind === 'pixelify' || node.kind === 'poseclone'
       || node.kind === 'spriteswap'
       // 扩图只吃源图；换装/换脸吃源图（图1）+ charSource（图2）
       || node.kind === 'outpaint' || node.kind === 'outfit' || node.kind === 'faceswap'
-      // **topixel 例外**：源图是可选的。没有源图时后端会用 prompt 先出
-      // 一张图再转像素——这才是这条链路的默认用法（用户只写描述）。
+      // **转像素也在这一组里**，只是源图可缺：没源图时后端用 prompt 先出图再转。
+      // 以前只写了那句注释、没加进判断，`init` 永远是 undefined —— 界面上明明
+      // 连着源图、还提示"有源图可留空提示词"，提交过去后端只收到空 prompt，
+      // 直接报「需要 prompt 或 init_image 之一」。用户看到的就是"转像素失败"。
+      || srcOptional
       ) {
       init = sourcePathOf(node)
-      if (!init) {
+      if (!init && !srcOptional) {
         // 没有源图就没法提交，直接在节点上报错，别让用户等一个必然失败的任务
         patchNode(id, {
           job: { id: 'error', status: 'failed',
