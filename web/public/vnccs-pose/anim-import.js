@@ -13,94 +13,121 @@
  * pose"，适合批量导入；我们要的是"拖滑块实时改时间点"，必须自己持有 mixer。
  *
  * 支持的格式：`.glb` / `.gltf`（GLTFLoader）、`.fbx`（FBXLoader）。
- * **注意**：解析器是从 esm.sh 动态 import 的（vendor 里只有 three 本体，
- * 没有 loader），所以第一次导入需要联网；断网会给出明确报错而不是静默失败。
+ *
+ * **解析器在本地**（`vendor/three/jsm/`，r160，和 vendor 的 three 同版本）——
+ * 断网也能导入。只有本地那份加载失败时才回落 esm.sh（老行为），
+ * 回落时会明确告诉用户「用的是联网解析器」。
+ *
+ * **非 Mixamo 骨架**（Quaternius / KayKit / Unreal / VRM 命名）走
+ * `anim-skeleton.js` 把真实骨头挂到 Mixamo 名下，官方代码一行不改。
+ * 认不出来时抛明确错误（缺哪几根 + 文件里的骨名样本），不再"点了没反应"。
  */
+import {
+  readSkeleton, resolveRig, buildSourceBones, describeRig,
+} from './anim-skeleton.js'
+
 const THREE_VER = '0.160.0'
-const THREE_URL = `https://esm.sh/three@${THREE_VER}`
-const FBX_LOADER_URL = `${THREE_URL}/examples/jsm/loaders/FBXLoader.js`
-const GLTF_LOADER_URL = `${THREE_URL}/examples/jsm/loaders/GLTFLoader.js`
-
-/** { THREE, buildMixamoWorldKeypoints } —— 只加载一次 */
-let deps = null
-let depsPromise = null
-
-async function loadDeps() {
-  if (deps) return deps
-  if (!depsPromise) {
-    depsPromise = (async () => {
-      const THREE = await import(THREE_URL)
-      const { buildMixamoWorldKeypoints } = await import('./pose_studio/imports/mixamo.js')
-      deps = { THREE, buildMixamoWorldKeypoints }
-      return deps
-    })().catch((e) => {
-      depsPromise = null
-      throw new Error('加载动画解析器失败（需要联网）：' + (e?.message || e))
-    })
-  }
-  return depsPromise
+const CDN_BASE = `https://esm.sh/three@${THREE_VER}`
+const LOCAL = {
+  gltf: new URL('./vendor/three/jsm/loaders/GLTFLoader.js', import.meta.url).href,
+  fbx: new URL('./vendor/three/jsm/loaders/FBXLoader.js', import.meta.url).href,
+}
+const CDN = {
+  gltf: `${CDN_BASE}/examples/jsm/loaders/GLTFLoader.js`,
+  fbx: `${CDN_BASE}/examples/jsm/loaders/FBXLoader.js`,
 }
 
-/** 当前动作状态：{ root, clips, clip, mixer, sourceBones, time } */
+/** 解析器只加载一次（本地优先）。`{ Loader, THREE, source }` */
+const loaderCache = new Map()
+
+async function getLoader(kind) {
+  const hit = loaderCache.get(kind)
+  if (hit) return hit
+  let out
+  try {
+    const m = await import(LOCAL[kind])
+    out = {
+      Loader: kind === 'fbx' ? m.FBXLoader : m.GLTFLoader,
+      // 本地 loader 里的 `from 'three'` 由 studio.html 的 importmap 指到 vendor 的
+      // three.module.js —— 与 viewer 同一份实例，所以这里不用另取 THREE
+      THREE: null,
+      source: 'local',
+    }
+  } catch (localErr) {
+    try {
+      const m = await import(CDN[kind])
+      const THREE = await import(CDN_BASE)
+      out = {
+        Loader: kind === 'fbx' ? m.FBXLoader : m.GLTFLoader,
+        THREE,
+        source: 'cdn',
+      }
+    } catch (cdnErr) {
+      throw new Error('动画解析器加载失败（本地副本读不到，联网回落也失败）：'
+        + (cdnErr?.message || cdnErr))
+    }
+  }
+  loaderCache.set(kind, out)
+  return out
+}
+
+/** 当前动作状态 */
 let state = null
-
-/** 把 root 下所有骨骼按"原名 / 去掉 mixamorig: 前缀 / 归一化名"三种方式登记 */
-function collectBones(root) {
-  const bones = {}
-  const normalizedBones = {}
-  const reg = (o) => {
-    if (!o?.name) return
-    bones[o.name] = o
-    const short = o.name.includes(':') ? o.name.split(':').pop() : o.name
-    if (!bones[short]) bones[short] = o
-    const norm = short.replace(/[^a-z0-9]/gi, '').toLowerCase()
-    if (norm && !normalizedBones[norm]) normalizedBones[norm] = o
-  }
-  root.traverse((o) => {
-    if (o?.isBone) reg(o)
-    if (o?.isSkinnedMesh && Array.isArray(o.skeleton?.bones)) o.skeleton.bones.forEach(reg)
-  })
-  return { bones, normalizedBones }
-}
+/** 最近一次失败的原因（宿主要拿到具体文案，不能只说"没反应"） */
+let lastError = ''
 
 /**
  * 读一个动作文件。
  *
  * `buffer` 是宿主读好的 ArrayBuffer（iframe 里拿不到用户选的 File —— 跨文档
- * 只能传字节）。返回 `{ clips: [{name, duration}] }` 供宿主列出来选。
+ * 只能传字节）。`viewer` 只用来借它的 THREE 实例（保证与 loader 同一份）。
  */
-export async function loadAnimation(buffer, fileName) {
-  const { THREE } = await loadDeps()
-  const url = URL.createObjectURL(new Blob([buffer]))
+export async function loadAnimation(buffer, fileName, viewer) {
   const isFbx = /\.fbx$/i.test(fileName || '')
+  const kind = isFbx ? 'fbx' : 'gltf'
+  const { Loader, THREE: loaderTHREE, source } = await getLoader(kind)
+  const THREE = loaderTHREE || viewer?.THREE
+  if (!THREE) throw new Error('渲染器还没就绪，读不了动画')
+
+  const url = URL.createObjectURL(new Blob([buffer]))
   try {
-    let root
-    let clips = []
-    if (isFbx) {
-      const m = await import(FBX_LOADER_URL)
-      root = await new m.FBXLoader().loadAsync(url)
-      clips = root.animations || []
-    } else {
-      const m = await import(GLTF_LOADER_URL)
-      const gltf = await new m.GLTFLoader().loadAsync(url)
-      root = gltf.scene
-      clips = gltf.animations || []
-    }
+    const loader = new Loader()
+    const loaded = await loader.loadAsync(url)
+    // FBXLoader 直接返回 Object3D；GLTFLoader 返回 { scene, animations }
+    const root = isFbx ? loaded : loaded.scene
+    const clips = (isFbx ? loaded.animations : loaded.animations) || []
     if (!clips.length) {
-      throw new Error('这个文件里没有动画轨道（可能是静态模型）')
+      throw new Error('这个文件里没有动画轨道（可能是静态模型，或者动作没烘进文件）')
     }
-    const sourceBones = collectBones(root)
-    if (!Object.keys(sourceBones.bones).length) {
-      throw new Error('文件里没有骨骼（不是骨架动画）')
+
+    // ---- 骨骼：解析成官方认的 17 个锚点 ----
+    const rig = readSkeleton(root)
+    const map = resolveRig(rig)
+    if (map.missing.length) {
+      throw new Error(describeRig(map))
     }
+    const sourceBones = buildSourceBones(rig, map)
+
     const clip = clips[0]
     const mixer = new THREE.AnimationMixer(root)
     mixer.clipAction(clip).play()
-    state = { root, clips, clip, mixer, sourceBones, time: 0 }
+    state = { root, clips, clip, mixer, sourceBones, rig, map, time: 0 }
+    lastError = ''
     return {
       clips: clips.map((c) => ({ name: c.name || '(未命名)', duration: c.duration })),
-      boneCount: Object.keys(sourceBones.bones).length,
-      format: isFbx ? 'fbx' : 'gltf',
+      boneCount: rig.nodes.filter((n) => n.obj?.isBone).length,
+      format: source === 'cdn' ? `${kind}（联网解析器）` : kind,
+      rig: {
+        family: map.family,
+        familyLabel: map.familyLabel,
+        mapped: Object.keys(map.alias).length,
+        missing: map.missing,
+        // 每个锚点对到文件里的哪根骨头 —— 界面不显示，但用户报"套歪了"时
+        // 一眼就能看出是映射错了还是 IK 错了
+        anchors: Object.fromEntries(
+          Object.entries(map.alias).map(([k, i]) => [k, rig.nodes[i]?.name || '']),
+        ),
+      },
     }
   } finally {
     URL.revokeObjectURL(url)
@@ -119,9 +146,20 @@ export function selectClip(index) {
   return { name: clip.name || '(未命名)', duration: clip.duration }
 }
 
-/** 有没有加载过动作 */
+/** 当前动作的信息 */
 export function animationState() {
-  return state ? { name: state.clip.name, duration: state.clip.duration, time: state.time } : null
+  if (!state) return null
+  return {
+    name: state.clip.name,
+    duration: state.clip.duration,
+    time: state.time,
+    rig: state.map ? { family: state.map.family, label: state.map.familyLabel } : null,
+  }
+}
+
+/** 最近一次失败原因（空串 = 没失败） */
+export function errorState() {
+  return lastError
 }
 
 /**
@@ -131,8 +169,17 @@ export function animationState() {
  * 看起来像"动作有残留"。官方 FBX 导入也是每帧先 reset。
  */
 export async function applyTime(t, viewer) {
+  try {
+    return await applyTimeInner(t, viewer)
+  } catch (e) {
+    lastError = String(e?.message || e)
+    throw e
+  }
+}
+
+async function applyTimeInner(t, viewer) {
   if (!state || !viewer) return false
-  const { buildMixamoWorldKeypoints } = await loadDeps()
+  const { buildMixamoWorldKeypoints } = await import('./pose_studio/imports/mixamo.js')
   const { root, mixer, clip } = state
   const time = Math.max(0, Math.min(clip.duration, Number(t) || 0))
   state.time = time
@@ -142,18 +189,24 @@ export async function applyTime(t, viewer) {
 
   viewer.resetPose()
   const kp = buildMixamoWorldKeypoints(state.sourceBones, viewer)
-  if (!kp?.worldKps) return false
-  return !!viewer.applyWorldKeypointImport(kp.worldKps, {
+  if (!kp?.worldKps) {
+    lastError = '这一帧的关键点算不出来：骨架里缺骨盆或肩，套不到人偶上'
+    return false
+  }
+  const ok = !!viewer.applyWorldKeypointImport(kp.worldKps, {
     includeSpine: false,
     normalizeLimbs: true,
     drawFigure: false,
     updateMarkers: true,
     dispatchPoseChange: false,
   })
+  lastError = ok ? '' : '这一帧套不到人偶上（骨骼映射对不上 MakeHuman 骨架）'
+  return ok
 }
 
 /** 清掉当前动作（不删人偶姿势，只是不再按动画驱动） */
 export function clearAnimation() {
   if (state?.mixer) state.mixer.stopAllAction()
   state = null
+  lastError = ''
 }

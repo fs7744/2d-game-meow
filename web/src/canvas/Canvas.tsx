@@ -50,6 +50,8 @@ type Props = {
   poseApply?: { nodeId: string; pose: unknown; yaw: number; tick: number } | null
   /** 把当前姿势存进库（带缩略图） */
   onSavePose?: (name: string, pose: unknown, yaw: number, preview: string) => void
+  /** 一次存多条（从一条动画抽的 N 帧） */
+  onSavePoses?: (items: { name: string; pose: unknown; yaw: number; preview: string }[]) => void
   /** 打开资料库的姿势页 */
   onOpenPoseLibrary?: () => void
   onDropFiles: (files: File[], world: { x: number; y: number }, targetId?: string) => void
@@ -92,6 +94,7 @@ export default function Canvas({
   poses,
   poseApply,
   onSavePose,
+  onSavePoses,
   onOpenPoseLibrary,
   onDropFiles,
   onConnect,
@@ -512,6 +515,7 @@ export default function Canvas({
             // 带着 nodeId 往下传：只有目标节点会套用，别的节点必须忽略
             poseApply={poseApply}
             onSavePose={onSavePose}
+            onSavePoses={onSavePoses}
             onOpenPoseLibrary={onOpenPoseLibrary}
             sourceNode={nodes.find((x) => x.id === n.source?.nodeId)}
             sourceOptions={sourceOptions}

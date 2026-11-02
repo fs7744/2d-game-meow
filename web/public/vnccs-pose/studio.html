@@ -81,6 +81,14 @@
       } catch (e2) { /* 忽略 */ }
     })
   </script>
+  <!-- **importmap 必须在任何 module 脚本之前**（规范要求，晚了解析不到）。
+       vendor/three/jsm 下的 loader 是上游原样拷贝，里面写的是 `from 'three'` 这种
+       裸名，靠这条映射落到本地的 three.module.js —— 和 core.js 动态 import 的那个
+       URL 完全一致，所以 loader 与 viewer 共用同一份 three 实例。
+       见 vendor/three/jsm/SOURCE.md。 -->
+  <script type="importmap">
+    { "imports": { "three": "./vendor/three/three.module.js" } }
+  </script>
   <script type="module" src="./entry.js"></script>
 </body>
 </html>

@@ -28,13 +28,17 @@
  *     { type:'getPose' }                     回 { type:'pose', pose, yaw }
  *     { type:'resetPose' } / { type:'resetView' }
  *     { type:'animLoad', buffer, name }     动作文件（glb/gltf/fbx 的 ArrayBuffer）
- *                                           → 回 { type:'animLoaded', clips:[{name,duration}] }
+ *                                           → 回 { type:'animLoaded', clips:[{name,duration}],
+ *                                                  boneCount, format, rig:{family,familyLabel,mapped,missing} }
  *     { type:'animClip', index }            切动画轨道（一个文件里可能有多条）
  *     { type:'animTime', t }                采样 t 秒并套到人偶上 → 回 pose
+ *     { type:'animSample', count }          等分抽 count 帧（入库用）
+ *                                           → 回 { type:'animFrames', frames:[{t,pose,preview}], clip, yaw }
  *   子 → 父：
  *     { type:'ready' } | { type:'progress', text }
  *     | { type:'result', dataURL } | { type:'pose', pose, yaw }
- *     | { type:'animLoaded', clips, boneCount, format }
+ *     | { type:'animLoaded', clips, boneCount, format, rig }
+ *     | { type:'animFrames', frames, clip, yaw }
  *     | { type:'error', message }
  *
  * **为什么动作文件走 ArrayBuffer 而不是路径**：父子是同源 iframe，但子窗拿不到
@@ -368,7 +372,7 @@ window.addEventListener('message', async (e) => {
       // 动作文件：宿主读好字节传进来（子窗拿不到 File 对象）
       try {
         const m = await import('./anim-import.js')
-        const info = await m.loadAnimation(msg.buffer, msg.name)
+        const info = await m.loadAnimation(msg.buffer, msg.name, v)
         post({ type: 'animLoaded', ...info })
       } catch (e) {
         post({ type: 'error', message: String(e?.message || e) })
@@ -387,7 +391,33 @@ window.addEventListener('message', async (e) => {
         // 每帧都回一次 pose：宿主拿它当存档点（和拖动松手的语义一致）
         post({ type: 'pose', pose: v.getPose(), yaw: currentYaw })
       } else {
-        post({ type: 'error', message: '这一帧套不到人偶上（骨骼映射不上）' })
+        post({ type: 'error', message: m.errorState() || '这一帧套不到人偶上' })
+      }
+    } else if (msg.type === 'animSample') {
+      // 批量抽帧（入库用）：一条动画等分 N 帧，逐帧套到人偶上、连缩略图一起回。
+      // 缩略图走**和导出同一条通路**（renderOut → viewport capture），
+      // 所以存进姿势库的预览和「导出人偶图」长得一样，只是小一号。
+      try {
+        const m = await import('./anim-import.js')
+        const st = m.animationState()
+        if (!st) throw new Error('还没载入动作')
+        const count = Math.max(1, Math.min(48, Math.round(Number(msg.count) || 8)))
+        // 首尾都是端点帧（站立/收势），等分时避开两头一点点，取中段更"有动作"
+        const dur = Math.max(0.001, st.duration)
+        const frames = []
+        for (let i = 0; i < count; i++) {
+          const t = count === 1 ? dur * 0.5 : (dur * (i + 0.5)) / count
+          const ok = await m.applyTime(t, v)
+          if (!ok) throw new Error(m.errorState() || `第 ${i + 1} 帧套不上人偶`)
+          const preview = renderOut(192) || ''
+          frames.push({ t: Number(t.toFixed(3)), pose: v.getPose(), preview })
+        }
+        // 抽完把时间轴拉回第 0 帧，别让编辑器停在最后一帧
+        await m.applyTime(0, v)
+        post({ type: 'animFrames', frames, clip: st.name, yaw: currentYaw })
+        post({ type: 'pose', pose: v.getPose(), yaw: currentYaw })
+      } catch (e) {
+        post({ type: 'error', message: String(e?.message || e) })
       }
     } else if (msg.type === 'export') {
       // 导出**当前编辑器视角**（所见即所得）：不做任何对齐，直接 viewport capture。

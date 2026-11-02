@@ -77,6 +77,58 @@ def test_pose_rejects_bad_body():
     assert lb.load_poses() == []
 
 
+def test_pose_add_batch_single_write():
+    """批量存姿势（一条动画抽的 N 帧）：一次落盘、按顺序在最前、同名覆盖。
+
+    **一次落盘**是这个接口存在的理由：逐条 add_pose 会重写 N 次整个 poses.json
+    （每帧还带一张预览图）。这里用"文件 mtime/inode 不变 + 内容正确"以外的方式
+    验不了写入次数，所以直接数 `_write` 的调用。
+    """
+    lb._write(lb.POSES_FILE, [])
+    lb.add_pose("已有的", {"bones": {}}, 0, "")
+
+    calls = []
+    real_write = lb._write
+
+    def spy(name, doc):
+        calls.append(name)
+        return real_write(name, doc)
+
+    lb._write = spy
+    try:
+        out = lb.add_poses([
+            {"name": "行走 01", "pose": {"bones": {"a": 1}}, "yaw": 90, "preview": "data:x"},
+            {"name": "行走 02", "pose": {"bones": {"a": 2}}, "yaw": 90, "preview": ""},
+            {"name": "行走 03", "pose": {"bones": {"a": 3}}, "yaw": 90, "preview": ""},
+        ])
+    finally:
+        lb._write = real_write
+
+    assert calls == [lb.POSES_FILE], f"应该只写一次盘，实际 {calls}"
+    assert [p["name"] for p in out] == ["行走 03", "行走 02", "行走 01", "已有的"]
+    assert len(out) == 4, "三条新姿势要全进去，不能互相覆盖"
+    assert out[0]["pose"]["bones"]["a"] == 3, "最后插入的排在最前（at 递增）"
+    assert out[2]["preview"] == "data:x", "预览图要原样保留"
+    # 落盘的也确实是四条（不是只在返回值里）
+    assert len(json.loads((paths.LIBRARY_DIR / lb.POSES_FILE)
+                          .read_text(encoding="utf-8"))) == 4
+
+    # 同名 → 原地覆盖，不新增
+    again = lb.add_poses([{"name": "行走 02", "pose": {"bones": {"a": 9}}}])
+    assert len(again) == 4
+    assert next(p for p in again if p["name"] == "行走 02")["pose"]["bones"]["a"] == 9
+
+    # 坏数据 → 明确报错，且**不落盘**（不能写进一半就退出留下残局）
+    before = (paths.LIBRARY_DIR / lb.POSES_FILE).read_text(encoding="utf-8")
+    try:
+        lb.add_poses([{"name": "坏", "pose": "not-a-pose"}])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("pose 不是对象应该报错")
+    assert (paths.LIBRARY_DIR / lb.POSES_FILE).read_text(encoding="utf-8") == before
+
+
 def test_prefs_merge_and_snapshot():
     lb._write(lb.PREFS_FILE, {})
     lb.save_prefs({"maskColor": "#ff3b6b"})

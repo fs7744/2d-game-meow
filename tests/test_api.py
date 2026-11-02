@@ -604,6 +604,36 @@ def test_models_endpoint_reports_refiner_availability(client):
     assert isinstance(body["refiner"], bool)
 
 
+def test_library_poses_batch_endpoint(client):
+    """批量存姿势（一条动画抽的 N 帧）。
+
+    **路由顺序是个真陷阱**：`POST /library/poses/batch` 必须在
+    `POST /library/poses` 之前被匹配到，否则 "batch" 会被当成姿势名塞进去。
+    这里从 HTTP 层验一次，因为单看 `library.add_poses` 测不到路由。
+    """
+    from workflows import library as lb
+    lb._write(lb.POSES_FILE, [])
+
+    r = client.post("/library/poses/batch", json={"items": [
+        {"name": "跑步 01", "pose": {"bones": {}}, "yaw": 90, "preview": ""},
+        {"name": "跑步 02", "pose": {"bones": {}}, "yaw": 90, "preview": ""},
+    ]})
+    assert r.status_code == 200, r.text
+    poses = r.json()["poses"]
+    assert [p["name"] for p in poses] == ["跑步 02", "跑步 01"]
+
+    # 单条那条老接口不能被打断
+    r2 = client.post("/library/poses",
+                     json={"name": "单条", "pose": {"bones": {}}, "yaw": 0})
+    assert r2.status_code == 200
+    assert len(r2.json()["poses"]) == 3
+
+    # 空 items 不报错（前端可能抽到 0 帧）
+    r3 = client.post("/library/poses/batch", json={"items": []})
+    assert r3.status_code == 200
+    assert len(r3.json()["poses"]) == 3
+
+
 def test_generate_topixel_roundtrip(client, tmp_path):
     """图像转像素（topixel）走同一条队列。用「给源图」的模式：不跑模型，秒回。"""
     from PIL import Image, ImageDraw

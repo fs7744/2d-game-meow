@@ -496,6 +496,16 @@ export function addPoseApi(
   })
 }
 
+/** 一次存多条姿势（一条动画等分抽出来的 N 帧）。服务端一次落盘。 */
+export function addPosesApi(
+  items: { name: string; pose: unknown; yaw: number; preview?: string }[],
+): Promise<Library> {
+  return libraryReq<Library>('/library/poses/batch', {
+    method: 'POST',
+    body: JSON.stringify({ items }),
+  })
+}
+
 export function renamePoseApi(id: string, name: string): Promise<Library> {
   return libraryReq<Library>(`/library/poses/${encodeURIComponent(id)}`, {
     method: 'PUT',

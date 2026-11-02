@@ -232,6 +232,43 @@ def add_pose(name: str, pose: Any, yaw: Any = 0, preview: str = "",
     return out
 
 
+def add_poses(batch: List[Dict[str, Any]],
+              items: Optional[List[Dict[str, Any]]] = None
+              ) -> List[Dict[str, Any]]:
+    """一次存多条（从一条动画抽出来的 N 帧）。
+
+    **一次落盘**：逐条调 `add_pose` 会写 N 次文件，一条 walk 抽 16 帧就是 16 次
+    整库重写（每帧还带一张预览图），没必要。这里按顺序合并完只写一次。
+
+    规则和 `add_pose` 一致：同名**原地覆盖**（保留原 id），否则插到最前。
+    """
+    cur = list(items if items is not None else load_poses())
+    now = int(time.time() * 1000)
+    for k, raw in enumerate(batch or []):
+        if not isinstance(raw, dict):
+            continue
+        pose = raw.get("pose")
+        if not isinstance(pose, (dict, list)):
+            raise ValueError("pose 必须是官方 getPose() 的 JSON 对象")
+        nm = str(raw.get("name") or "").strip() or "姿势"
+        pv = raw.get("preview") if isinstance(raw.get("preview"), str) else ""
+        if len(pv) > MAX_PREVIEW_BYTES:
+            pv = ""
+        item = {
+            "id": _now_id("z"), "name": nm, "pose": pose,
+            "yaw": _norm_angle(raw.get("yaw")), "preview": pv,
+            "at": now + k,
+        }
+        for i, x in enumerate(cur):
+            if x.get("name") == nm:
+                cur[i] = {**item, "id": x.get("id") or item["id"]}
+                break
+        else:
+            cur.insert(0, item)
+    _save_poses(cur)
+    return cur
+
+
 def rename_pose(pid: str, name: str,
                 items: Optional[List[Dict[str, Any]]] = None
                 ) -> List[Dict[str, Any]]:

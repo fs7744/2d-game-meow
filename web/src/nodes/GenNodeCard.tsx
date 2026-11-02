@@ -270,6 +270,8 @@ type Props = {
   poseApply?: { nodeId: string; pose: unknown; yaw: number; tick: number } | null
   /** 把当前姿势存进库（缩略图一并提交，浏览面板要用） */
   onSavePose?: (name: string, pose: unknown, yaw: number, preview: string) => void
+  /** 一次存多条（一条动画抽出来的 N 帧，一次请求落盘） */
+  onSavePoses?: (items: { name: string; pose: unknown; yaw: number; preview: string }[]) => void
   /** 打开资料库的姿势页（那里能一眼翻完、改名、删除） */
   onOpenPoseLibrary?: () => void
   /** 人偶编辑器「从图片」：上传 + DWPose 提关节，返回 Promise 以便显示"提取中" */
@@ -376,6 +378,7 @@ export default function GenNodeCard({
   poses,
   poseApply,
   onSavePose,
+  onSavePoses,
   onOpenPoseLibrary,
   onImportPose,
   sourceNode,
@@ -985,6 +988,7 @@ export default function GenNodeCard({
             poses={poses ?? []}
             poseApply={poseApply?.nodeId === node.id ? poseApply : null}
             onSavePose={onSavePose}
+            onSavePoses={onSavePoses}
             onOpenPoseLibrary={onOpenPoseLibrary}
           />
           {node.image?.url && (

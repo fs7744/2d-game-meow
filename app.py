@@ -16,6 +16,7 @@
   POST /library/prompts    收藏一条提示词（正向+负向）
   DELETE /library/prompts/{pid}
   POST /library/poses      存一条姿势（官方 pose JSON + 预览图）
+  POST /library/poses/batch  一次存多条（一条动画等分抽的 N 帧，一次落盘）
   PUT  /library/poses/{pid}  改名
   DELETE /library/poses/{pid}
   PUT  /library/prefs      写界面偏好
@@ -562,6 +563,11 @@ class PoseRenameReq(BaseModel):
     name: str
 
 
+class PoseBatchReq(BaseModel):
+    """批量存姿势（一条动画等分抽出来的 N 帧，一次落盘）。"""
+    items: List[PoseReq]
+
+
 class LibrarySeedReq(BaseModel):
     """从 localStorage 迁移过来的旧数据。缺哪个字段就不动哪个库。"""
     prompts: Optional[List[Dict[str, Any]]] = None
@@ -589,6 +595,16 @@ def library_add_pose(req: PoseReq) -> Dict[str, Any]:
     try:
         return {"poses": library.add_pose(req.name, req.pose, req.yaw,
                                           req.preview)}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/library/poses/batch")
+def library_add_poses(req: PoseBatchReq) -> Dict[str, Any]:
+    """一次存多条姿势（从一条动画等分抽出来的 N 帧）。一次落盘。"""
+    try:
+        return {"poses": library.add_poses(
+            [p.model_dump() for p in req.items])}
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 

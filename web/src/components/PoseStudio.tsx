@@ -73,14 +73,24 @@ type Props = {
   poseApply?: { pose: unknown; yaw: number; tick: number } | null
   /** 把当前姿势存进库（缩略图一并提交） */
   onSavePose?: (name: string, pose: unknown, yaw: number, preview: string) => void
+  /** 一次存多条（从一条动画抽的 N 帧，一次请求落盘） */
+  onSavePoses?: (items: PoseToSave[]) => void
   /** 打开资料库的姿势页 */
   onOpenPoseLibrary?: () => void
+}
+
+/** 一条待入库的姿势（批量抽帧用） */
+export type PoseToSave = {
+  name: string
+  pose: unknown
+  yaw: number
+  preview: string
 }
 
 export default function PoseStudio({
   pose, yaw, onPose, onYaw, onExport, exporting,
   onImportImage, importing, importPoints, importReprojected, poses,
-  poseApply, onSavePose, onOpenPoseLibrary,
+  poseApply, onSavePose, onSavePoses, onOpenPoseLibrary,
 }: Props) {
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const [status, setStatus] = useState('正在加载人偶模型（37MB，首次约十几秒）…')
@@ -94,9 +104,17 @@ export default function PoseStudio({
    * 导入的动作文件（glb/gltf/fbx）。`clips` 是文件里的动画轨道，
    * 一个 glb 可能同时带 Idle/Walk/Run（three 的 Soldier.glb 就是 3 条）。
    */
-  const [anim, setAnim] = useState<{ clips: { name: string; duration: number }[]; index: number } | null>(null)
+  const [anim, setAnim] = useState<{
+    clips: { name: string; duration: number }[]
+    index: number
+    /** 骨架识别结果（家族名 + 认出几根），给用户一个"这份文件是哪种骨架"的交代 */
+    rig?: { familyLabel: string; mapped: number }
+  } | null>(null)
   const [animT, setAnimT] = useState(0)
   const [animBusy, setAnimBusy] = useState(false)
+  /** 抽帧入库：帧数 + 进行中 */
+  const [frameCount, setFrameCount] = useState(8)
+  const [sampling, setSampling] = useState(false)
   const animFileRef = useRef<HTMLInputElement>(null)
   /** 拖滑块时的节流器：每 60ms 才真采样一次，否则一帧一次 WebGL 解算会卡 */
   const animTimer = useRef<number | null>(null)
@@ -106,6 +124,11 @@ export default function PoseStudio({
   // 子窗一直在推消息，回调要用最新的；放 ref 避免 effect 反复重建
   const onPoseRef = useRef(onPose)
   onPoseRef.current = onPose
+  const onSavePosesRef = useRef(onSavePoses)
+  onSavePosesRef.current = onSavePoses
+  /** 消息回调里要用最新的库（去重用），放 ref 避免 effect 反复重建 */
+  const posesRef = useRef(poses)
+  posesRef.current = poses
   const yawRef = useRef(yaw)
   yawRef.current = yaw
   const poseRef = useRef<unknown>(pose)
@@ -150,6 +173,9 @@ export default function PoseStudio({
         text?: string; pose?: unknown; yaw?: number
         clips?: { name: string; duration: number }[]
         boneCount?: number; format?: string; switched?: boolean
+        rig?: { familyLabel?: string; mapped?: number; missing?: string[] }
+        frames?: { t: number; pose: unknown; preview?: string }[]
+        clip?: string
       } | null
       if (!d || typeof d.type !== 'string') return
       if (d.type === 'ready') {
@@ -173,11 +199,38 @@ export default function PoseStudio({
         setAnimBusy(false)
         const clips = d.clips || []
         if (!clips.length) return
-        setAnim({ clips, index: 0 })
+        const rig = d.rig as { familyLabel?: string; mapped?: number } | undefined
+        setAnim({
+          clips,
+          index: 0,
+          rig: rig ? { familyLabel: String(rig.familyLabel || ''), mapped: Number(rig.mapped) || 0 } : undefined,
+        })
         setAnimT(0)
-        setStatus(`动作已载入：${clips[0].name}（${d.boneCount} 根骨，${d.format}）——拖滑块选帧`)
+        setStatus(`动作已载入：${clips[0].name}（${d.boneCount} 根骨，${d.format}`
+          + `${rig?.familyLabel ? `，${rig.familyLabel} 骨架` : ''}）——拖滑块选帧`)
         post({ type: 'animTime', t: 0 })
+      } else if (d.type === 'animFrames') {
+        // 批量抽帧回来了：命名 + 交给 App 一次落盘
+        setSampling(false)
+        const frames = (d.frames || []) as { t: number; pose: unknown; preview?: string }[]
+        if (!frames.length) {
+          setErr('抽帧没拿到内容')
+          return
+        }
+        const base = String(d.clip || '动作').trim() || '动作'
+        const taken = new Set(posesRef.current.map((p) => p.name))
+        const items: PoseToSave[] = frames.map((f, i) => {
+          let name = `${base} ${String(i + 1).padStart(2, '0')}`
+          let k = 2
+          while (taken.has(name)) name = `${base} ${String(i + 1).padStart(2, '0')} (${k++})`
+          taken.add(name)
+          return { name, pose: f.pose, yaw: yawRef.current, preview: String(f.preview || '') }
+        })
+        onSavePosesRef.current?.(items)
+        setStatus(`已从「${base}」抽 ${items.length} 帧入库`)
       } else if (d.type === 'error') {
+        setAnimBusy(false)
+        setSampling(false)
         setStatus('')
         setErr(String(d.message || '未知错误'))
       } else if (d.type === 'result') {
@@ -388,7 +441,8 @@ export default function PoseStudio({
           type="button" className="mini"
           onClick={() => animFileRef.current?.click()}
           disabled={!ready || animBusy}
-          title={'导入 .glb / .gltf / .fbx 动画（Mixamo 导出的骨骼直接能用）。\n'
+          title={'导入 .glb / .gltf / .fbx 动画。Mixamo、Quaternius/KayKit、Unreal、\n'
+            + 'VRM 命名的骨架都能认（按骨名 + 层级自动对到人偶骨上）。\n'
             + '动画自带真实 3D，比「从图片提姿势」准得多：不会有"人偶躺倒"这类深度歧义。'}
         >
           {animBusy ? '读取中…' : '导入动作'}
@@ -426,6 +480,46 @@ export default function PoseStudio({
           </>
         )}
       </div>
+
+      {/* 批量抽帧入库：一条 walk 直接灌成一整套姿势，比一帧一帧拖、一帧一帧存
+          快得多（帧间差异正是走路动画的价值所在）。 */}
+      {anim && (
+        <div className="pose-lib pose-frames">
+          <label className="pose-frames-n" title="沿这条动作等分抽几帧（2~24）">
+            抽
+            <input
+              type="number"
+              min={2}
+              max={24}
+              value={frameCount}
+              disabled={sampling}
+              onChange={(e) => {
+                const n = Math.max(2, Math.min(24, Math.round(Number(e.target.value) || 8)))
+                setFrameCount(n)
+              }}
+            />
+            帧
+          </label>
+          <button
+            type="button" className="mini wide"
+            disabled={!ready || sampling || !onSavePoses}
+            onClick={() => {
+              setErr('')
+              setSampling(true)
+              post({ type: 'animSample', count: frameCount })
+            }}
+            title={'把这条动作等分成 N 帧，每帧连人偶缩略图一起存进姿势库。\n'
+              + '名字是「动作名 01 / 02 …」，同名会覆盖。'}
+          >
+            {sampling ? '抽帧中…' : `存入 ${frameCount} 帧`}
+          </button>
+          {anim.rig && (
+            <span className="pose-frames-rig" title="骨骼是按名字 + 层级认出来的">
+              {anim.rig.familyLabel} · {anim.rig.mapped} 锚点
+            </span>
+          )}
+        </div>
+      )}
 
       <input
         ref={animFileRef}
@@ -534,7 +628,8 @@ export default function PoseStudio({
         <b>导出的是白底灰 3D 人偶</b>，把它连到「角色迁移」的<b>动作参考</b>输入。
         摆好的姿势点 <b>存入</b> 就进资料库（存在磁盘 library/ 下），
         别的节点和项目都能原样复用。要现成的整套动作（idle / walk / run），
-        用 <b>导入动作</b> 读 Mixamo 的 glb/fbx，拖滑块选帧。
+        用 <b>导入动作</b> 读 Mixamo 的 glb/fbx（CC0 的 Quaternius / KayKit 也认），
+        拖滑块选帧，或者直接 <b>存入 N 帧</b> 一次灌进姿势库。
       </div>
     </div>
   )

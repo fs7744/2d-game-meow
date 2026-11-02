@@ -16,7 +16,7 @@ import {
   submitPoseSeq,
   submitSpriteSwap, submitTxt2Img, uploadImage, extractPose,
   getLibrary, seedLibraryApi, addPromptApi, removePromptApi,
-  renamePoseApi, removePoseApi, addPoseApi,
+  renamePoseApi, removePoseApi, addPoseApi, addPosesApi,
   fetchLoras, applyLoras, setFastMode, type QwenLora, type ActiveLora,
   submitOutpaint, submitOutfitSwap, submitFaceSwap, submitVnccsPose,
   exportProject, importProject, fetchTemplates, saveTemplate, instantiateTemplate,
@@ -956,6 +956,27 @@ export default function App() {
     window.setTimeout(() => setNotice(''), 7000)
   }, [patchNode, currentId])
 
+  /**
+   * 批量存姿势（一条动画抽出来的 N 帧）。
+   *
+   * **一次请求**：逐条发 addPoseApi 会重写 N 次 library/poses.json（每帧还带
+   * 一张预览图），抽 16 帧就是 16 次整库落盘。后端 `/library/poses/batch`
+   * 合并完只写一次。
+   */
+  const savePosesToLibrary = useCallback(async (
+    items: { name: string; pose: unknown; yaw: number; preview: string }[],
+  ) => {
+    if (!items.length) return
+    try {
+      const r = await addPosesApi(items)
+      setLib((l) => ({ ...l, poses: r.poses ?? l.poses }))
+      setNotice(`${items.length} 个姿势已存入资料库（${items[0].name} … ${items[items.length - 1].name}）`)
+    } catch (e) {
+      setNotice(`批量存姿势失败：${e instanceof Error ? e.message : '未知错误'}`)
+    }
+    window.setTimeout(() => setNotice(''), 5000)
+  }, [])
+
   /** 存当前姿势进库（带一张缩略图，浏览时能一眼认出来）。 */
   const savePoseToLibrary = useCallback(async (
     name: string, pose: unknown, yaw: number, preview: string,
@@ -1741,6 +1762,7 @@ export default function App() {
           poseApply={selectedNode?.poseApply}
           onSavePose={(name, pose, yaw, preview) =>
             void savePoseToLibrary(name, pose, yaw, preview)}
+          onSavePoses={(items) => void savePosesToLibrary(items)}
           onOpenPoseLibrary={() => openLibrary('pose')}
           onImportPose={(id, file) => importPoseFromImage(id, file)}
           onDropFiles={(files, world, targetId) => void handleFiles(files, world, targetId)}

@@ -1075,12 +1075,24 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
   font-family: var(--mono); font-weight: 400; color: var(--cyan);
   min-width: 44px; text-align: right; font-size: 10px;
 }
-/* 动作文件（glb/fbx）：滑块要占满剩余宽度，时间读数固定宽度不抖 */
-.pose-anim { gap: 5px; }
-.pose-anim-range { flex: 1; min-width: 0; height: 16px; }
-.pose-anim-t {
-  font-family: var(--mono); font-weight: 400; color: var(--cyan);
-  min-width: 44px; text-align: right; font-size: 10px;
+/* 批量抽帧入库：「抽 [8] 帧」+「存入 8 帧」+ 骨架识别结果。
+   数字框**固定宽度**（不能被 flex 压窄，否则两位数显示不全）；
+   按钮撑满剩下的，别用 opacity 做"低调"（近黑画布上等于隐形）。 */
+.pose-frames { gap: 6px; align-items: center; }
+.pose-frames-n {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 10px; color: var(--muted); flex: 0 0 auto;
+}
+.pose-frames-n input {
+  width: 38px; flex: 0 0 38px; height: 22px; text-align: center;
+  background: var(--bg-3); color: var(--white);
+  border: 1px solid var(--line-strong); border-radius: 2px;
+  font: inherit; font-size: 11px; font-family: var(--mono);
+}
+.pose-frames .mini.wide { flex: 1; min-width: 0; width: auto; }
+.pose-frames-rig {
+  flex: 0 0 auto; font-size: 9px; color: var(--muted-2);
+  font-family: var(--mono); white-space: nowrap;
 }
 .pose-yaw-val { font-family: var(--mono); font-weight: 400; color: var(--cyan); min-width: 30px; text-align: right; }
 .pose-cam-hint-row { font-size: 9px; color: var(--muted-2); line-height: 1.4; }

@@ -190,6 +190,43 @@ start.bat --no-build           # 跳过构建（前端没改过时更快）
 
 ![VNCCS PoseStudio 骨架编辑](docs/img/vnccs_posestudio_editor.png)
 
+### 动作从哪来（导入 glb / fbx 取帧）
+
+手摆一个瑜伽/舞蹈姿势要很久，而且侧身、悬空的姿势很容易摆歪。节点里的
+**导入动作** 可以直接读一段带骨骼动画的 3D 文件，拖滑块逐帧选，或者
+**存入 N 帧** 一次把整条动作灌进姿势库。动画里的 3D 是文件自带的（骨长、
+朝向、遮挡都真实），不用像「从图片提姿势」那样去猜深度。
+
+**能读的骨架**（按骨名 + 层级自动对到人偶的 17 个锚点上）：
+
+| 来源 | 命名 | 备注 |
+|---|---|---|
+| Mixamo | `mixamorig:Hips` / `LeftArm` / `LeftUpLeg` | 最省事，导出的 glb / fbx 直接能用 |
+| Unreal / Manny | `pelvis` / `upperarm_l` / `thigh_l` | 引擎导出的资产常见这套 |
+| VRM / VRoid | `J_Bip_C_Hips` / `J_Bip_L_UpperArm` | 虚拟形象通用 |
+| KayKit / Quaternius | `hips` / `upper_arm_l` / `upper_leg_l` | CC0 素材包常用 |
+| 其他标准人形 | 只认得出上臂 / 大腿也能靠**层级**补出肘膝腕踝 | 认不出时会给明确报错（缺哪几根） |
+
+**去哪下**（都不需要本项目打包分发）：
+
+- **Mixamo**（<https://www.mixamo.com>）：注册免费账号，挑动作 →
+  Download 时选 **FBX Binary** 或 **glTF Binary (.glb)**，勾上 *Without Skin*
+  可以只拿骨骼（文件小很多）。**动作可商用**，但**不要把它的模型/动作再分发**
+  进仓库或产品包里。
+- **Quaternius**（<https://quaternius.com>）与 **KayKit**
+  （<https://kaylousberg.itch.io>）：**CC0**，连模型一起可以随便用，
+  适合直接塞进游戏。它们的人形角色带 idle/walk/run 整套动作。
+- **three.js 官方示例模型**（`three.js/examples/models/`）：
+  `Soldier.glb`、`Samba Dancing.fbx` 是最好用的两个自测素材，
+  仓库里的验证脚本就是用它们。
+
+**注意**：
+
+- 带 `.gltf` + `.bin` + 贴图的**散装**格式不行（要选 `.glb` 单文件）。
+  `.fbx` 只支持二进制 FBX（ASCII 的不行）。
+- 解析器是随包发布的本地副本，**断网也能导入**。
+- 导入只取**动画**，不会把源模型/皮肤带进项目 —— 产物仍是白底灰人偶。
+
 ---
 
 ## 常见问题

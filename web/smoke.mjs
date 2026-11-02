@@ -2,7 +2,7 @@
  * 无浏览器渲染冒烟：用 jsdom 加载真实构建产物 dist/index.html + bundle，
  * 断言空状态、节点卡、生成提交路径。npm run smoke
  */
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { JSDOM, VirtualConsole } from 'jsdom'
@@ -2955,6 +2955,22 @@ function check(name, cond, extra = '') {
   const studioHtml = readFileSync(resolve(dist, 'vnccs-pose/studio.html'), 'utf8')
   check('iframe 页会按 ?embed=1 打上 embed 标记',
     studioHtml.includes("classList.add('embed')"), 'studio.html 少了加 class 的脚本')
+  // **动作导入解析器必须在本地**：这三个文件一旦缺失，导入会悄悄回落到
+  // esm.sh（断网就不能用了），而且 JS 里没有任何报错能看出这件事。
+  check('three 的 glb/fbx 解析器随包发布（断网也能导入动作）',
+    ['loaders/GLTFLoader.js', 'loaders/FBXLoader.js', 'libs/fflate.module.js',
+      'curves/NURBSCurve.js', 'utils/BufferGeometryUtils.js']
+      .every((f) => existsSync(resolve(dist, 'vnccs-pose/vendor/three/jsm', f))),
+    'vnccs-pose/vendor/three/jsm 下缺文件')
+  // 上游 loader 里写的是裸名 `from 'three'`，全靠这条 importmap 落到 vendor 的
+  // three 上；而且必须写在 module 脚本**之前**（规范要求，晚了解析不到）。
+  const mapAt = studioHtml.indexOf('type="importmap"')
+  const modAt = studioHtml.indexOf('type="module"')
+  check('studio.html 有 importmap 把 three 指到 vendor',
+    mapAt > 0 && studioHtml.includes('"three": "./vendor/three/three.module.js"'),
+    '没有 importmap，loader 会去联网找 three')
+  check('importmap 写在 module 脚本之前',
+    mapAt > 0 && modAt > mapAt, `importmap@${mapAt} module@${modAt}`)
   // 工具条从 DOM 里删掉（只保留宿主一份），不是靠 CSS 藏——藏起来的按钮
   // 仍然能被点、仍然会把人绕进"点了没反应"的死路。
   check('iframe 里不再有自带的工具条（按钮只有宿主一份）',
@@ -3030,6 +3046,10 @@ function check(name, cond, extra = '') {
   check('有「导入动作」按钮',
     [...(node?.querySelectorAll('button') || [])]
       .some((b) => (b.textContent || '').includes('导入动作')))
+  // 抽帧入库那行**只在载入动作之后**才该出现：没见过文件就摆一个"存入 N 帧"，
+  // 用户点了只会得到"还没载入动作"。
+  check('没导入动作时不摆「存入 N 帧」（避免点了必然失败）',
+    !node?.querySelector('.pose-frames'))
   const file = new win.File([new Uint8Array([1, 2, 3])], 'pose.png', { type: 'image/png' })
   Object.defineProperty(input, 'files', { value: [file], configurable: true })
   input.dispatchEvent(new win.Event('change', { bubbles: true }))
