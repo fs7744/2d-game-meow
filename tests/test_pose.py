@@ -52,6 +52,25 @@ def test_joints_inside_image_and_ordered(ex_nodet, walk_frames):
         assert kp[0][1] < kp[8][1], "鼻子应当高于右髋"
 
 
+def test_coco_to_op_mapping_is_a_bijection():
+    """COCO-17 → OpenPose-18 的映射必须**一一对应**，不能有两个 OP 索引取同一个 COCO 点。
+
+    这条是踩出来的：表里的 `13` 曾写成 `R_ANK`（应为 `L_ANK`），于是
+    OP 10 和 OP 13 都取 COCO 16（右脚踝）——**左脚踝从没被用上**。
+    直立站姿两只脚挨得近，谁也不会发现；换成抬腿/悬空姿势（瑜伽、舞蹈、
+    跳跃），两条腿就叠在同一点，3D 人偶直接崩成麻花。
+    """
+    from workflows.pose import COCO_TO_OP, L_ANK, R_ANK
+
+    assert COCO_TO_OP[13] == L_ANK, "OP 13 是左脚踝，不能取右脚的点"
+    assert COCO_TO_OP[10] == R_ANK, "OP 10 是右脚踝"
+    coco_used = list(COCO_TO_OP.values())
+    assert len(set(coco_used)) == len(coco_used), \
+        f"有 COCO 索引被用了两次：{coco_used}"
+    # 四肢 + 五官 = 16 个点（OP 的 0 nose / 1 neck 单独算）
+    assert len(COCO_TO_OP) == 16
+
+
 def test_pose_map_is_rendered(ex_nodet, walk_frames):
     img = Image.open(_humanoid(walk_frames)).convert("RGB")
     pm = ex_nodet.pose_map(img, size=(256, 256))

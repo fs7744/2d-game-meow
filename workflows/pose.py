@@ -37,12 +37,17 @@ NOSE, L_EYE, R_EYE, L_EAR, R_EAR = 0, 1, 2, 3, 4
 L_SHO, R_SHO, L_ELB, R_ELB, L_WRI, R_WRI = 5, 6, 7, 8, 9, 10
 L_HIP, R_HIP, L_KNE, R_KNE, L_ANK, R_ANK = 11, 12, 13, 14, 15, 16
 
-# COCO-17 -> OpenPose-18（OpenPose 的 R/L 与 COCO 同侧，只是编号不同）
+# OpenPose-18 索引 <- COCO-17 索引（键是 OP，值是 COCO；循环里 `out[op] = xs[coco]`）
+#
+# ⚠️ 第 13 项必须是 `L_ANK`（COCO 15 = 左脚踝）。这里曾误写成 `R_ANK`，
+# 于是 OP 10 和 OP 13 都取同一只右脚踝——**左脚踝从来没被用上**。
+# 直立站姿两只脚挨得近，看不出来；一旦是抬腿/悬空姿势（如瑜伽、舞蹈），
+# 两条腿就会叠在同一点，3D 人偶直接崩成麻花。
 COCO_TO_OP = {
     2: R_SHO, 3: R_ELB, 4: R_WRI,
     5: L_SHO, 6: L_ELB, 7: L_WRI,
     8: R_HIP, 9: R_KNE, 10: R_ANK,
-    11: L_HIP, 12: L_KNE, 13: R_ANK,
+    11: L_HIP, 12: L_KNE, 13: L_ANK,
     14: R_EYE, 15: L_EYE, 16: R_EAR, 17: L_EAR,
 }
 
