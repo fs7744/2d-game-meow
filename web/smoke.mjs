@@ -2948,6 +2948,26 @@ function check(name, cond, extra = '') {
   check('编辑器走官方 PoseStudio 的嵌入模式',
     (frame?.getAttribute('src') || '').includes('/vnccs-pose/studio.html?embed=1'),
     frame?.getAttribute('src'))
+
+  // **嵌入模式要真的生效**：studio.html 里那套 `html.embed #bar { display:none }`
+  // 一直在，但以前没人给 <html> 加 `embed` class —— 于是节点卡片里上下两套一模一样的
+  // 工具条（iframe 的朝向/重置/导出 + 宿主的），而且 iframe 那个导出点了没反应。
+  const studioHtml = readFileSync(resolve(dist, 'vnccs-pose/studio.html'), 'utf8')
+  check('iframe 页会按 ?embed=1 打上 embed 标记',
+    studioHtml.includes("classList.add('embed')"), 'studio.html 少了加 class 的脚本')
+  check('embed 模式下隐藏 iframe 自带的工具条',
+    studioHtml.includes('html.embed #bar'), 'studio.html 少了隐藏规则')
+
+  // 宿主控制条：四个动作按钮文案要完整（以前写成"视角/站立/从图"，
+  // 加上 .mini 只有 28px 宽，两字被挤成竖排）
+  const actBtns = [...(node?.querySelectorAll('.pose-actions .mini') || [])]
+    .map((b) => (b.textContent || '').trim())
+  check('动作按钮文案完整（重置视角/重置姿势/从图片提姿势/导出人偶图）',
+    actBtns.includes('重置视角') && actBtns.includes('重置姿势')
+    && actBtns.includes('从图片提姿势') && actBtns.includes('导出人偶图'),
+    actBtns.join(' | '))
+  check('导出按钮在最后（独占一行）',
+    actBtns[actBtns.length - 1] === '导出人偶图', actBtns.join(' | '))
   check('加载中给出提示（37MB 人偶模型要等）',
     (node?.querySelector('.pose-status')?.textContent || '').includes('人偶模型'),
     node?.querySelector('.pose-status')?.textContent || '（无）')

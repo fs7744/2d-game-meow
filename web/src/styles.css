@@ -1052,6 +1052,18 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
 .pose-lib, .pose-row, .pose-actions, .pose-save {
   display: flex; align-items: center; gap: 5px;
 }
+/* **人偶编辑器里的 `.mini` 必须自适应宽度**。
+   `.mini` 的基准是 28×28 的图标按钮，两字以上的中文会被挤成竖排
+   （「视/角」「站/立」「从/图」）——截图里看到的就是这个。
+   这里只覆盖本组件作用域，别处仍按图标按钮用。 */
+.pose-editor .mini {
+  width: auto; min-width: 26px; padding: 0 7px;
+  flex: 0 0 auto; white-space: nowrap;
+}
+/* 导出按钮独占一行：`.mini.wide` 是 `width:100%`，留在同一 flex 行里会被压成
+   一条窄长条，看着像输入框（用户报的"样式明显有问题"就是这个）。 */
+.pose-actions { flex-wrap: wrap; }
+.pose-actions .mini.wide { flex: 1 1 100%; width: auto; height: 26px; }
 .pose-row { font-size: 10.5px; color: var(--muted); }
 .pose-lib-sel, .pose-row select { flex: 1; min-width: 0; }
 .pose-row select { flex: 1; }

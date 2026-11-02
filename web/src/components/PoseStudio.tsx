@@ -383,21 +383,21 @@ export default function PoseStudio({
       </label>
 
       <div className="pose-cam-hint-row">
-        导出以编辑器当前视角为准（所见即所得）——右键拖动即可换角度；上面的朝向/机位只是快速对齐。
+        导出用编辑器当前视角（右键拖动换角度）；上面的朝向/机位只是快速对齐。
       </div>
 
       <div className="pose-actions">
         <button type="button" className="mini" onClick={() => post({ type: 'resetView' })}
-          disabled={!ready} title="把观察视角拉回正面（不改姿势）">视角</button>
+          disabled={!ready} title="把观察视角拉回正面（不改姿势）">重置视角</button>
         <button type="button" className="mini" onClick={() => post({ type: 'resetPose' })}
-          disabled={!ready} title="回到初始站姿">站立</button>
+          disabled={!ready} title="回到初始站姿（清掉摆好的关节）">重置姿势</button>
         <button
           type="button" className="mini"
           onClick={() => fileRef.current?.click()}
           disabled={!ready || importing || !onImportImage}
           title="从一张真人/写实人像自动提姿势（走官方 OpenPose → 骨骼转换器）"
         >
-          {importing ? '提取中…' : '从图片'}
+          {importing ? '提取中…' : '从图片提姿势'}
         </button>
         <button
           type="button" className="mini wide"
@@ -422,7 +422,7 @@ export default function PoseStudio({
         }}
       />
       <div className="src-note">
-        拖橙色关节标记摆姿势（官方两骨 IK + 肘膝极点约束）；右键拖动转视角、滚轮缩放。
+        拖橙色关节标记摆姿势（官方两骨 IK + 肘膝极点约束），滚轮缩放看细节。
         <b>导出的是白底灰 3D 人偶</b>，把它连到「角色迁移」的<b>动作参考</b>输入。
         摆好的姿势点 <b>存入</b> 就进资料库（存在磁盘 library/ 下），
         别的节点和项目都能原样复用。

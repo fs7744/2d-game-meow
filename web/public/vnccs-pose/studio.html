@@ -48,6 +48,17 @@
     <div id="out"></div>
   </div>
   <script>
+    // **嵌入模式尽早打标记**：`html.embed #bar { display:none }` 那套 CSS 一直
+    // 在，但从来没被激活过（没人加这个 class）——结果节点卡片里上下两套一模一样的
+    // 工具条（iframe 里的朝向/重置/导出 + 宿主的朝向/机位/导出），用户看到的就是
+    // "相同的东西里面又外面都有"，而且 iframe 里那个导出点了没反应（它的结果写进
+    // #out，在 embed 下本来就是隐藏的）。
+    // 放在 head 里同步执行：module 脚本是延迟的，等它跑完再打标记会先闪一下工具条。
+    if (new URLSearchParams(location.search).get('embed') === '1') {
+      document.documentElement.classList.add('embed')
+    }
+  </script>
+  <script>
     // **早期错误捕获**：模块脚本加载失败（MIME 不对 / 404）时，模块内部的
     // try/catch 根本不会执行（模块压根没跑）。只能在这里截，截到就立刻通知
     // 父页——否则父页只能空等到超时，用户只看到「导出超时」。
