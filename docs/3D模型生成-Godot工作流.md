@@ -169,16 +169,26 @@ VERIFY_ANIM Walk len=1.033 tracks=88
 （另有 `trellis_2_bf16.safetensors` 9859 MB 的未量化版，24GB 卡上用 int8 就够了。
 背景移除 `birefnet` 不在这个仓库，需要另找。）
 
-**测速实测（2026-11-03 21:25）**：
+**测速实测（2026-11-03）**：
 
 | 源 | 速度 | 8GB 需要 |
 |---|---|---|
 | hf-mirror.com 直连 | 45 KB/s | ~50 小时 |
 | huggingface.co + 代理 7897 | 159 KB/s | ~14 小时 |
-| 代理 + 6 并发 | **502 Bad Gateway**（代理不支持多隧道） | — |
+| 代理 + 6 并发 | **502 Bad Gateway**（不支持多隧道） | — |
+| **ModelScope（魔搭）** | **6.5~8.5 MB/s** | **~20 分钟** |
 
-所以：**模型必须由用户用更快的线路下**，或者挂着慢慢下。
-纯代码部分（推理编排、后处理、验证）不依赖权重，可以先写完。
+> **下 HF 模型先查魔搭。** `Comfy-Org/TRELLIS.2` 和 `microsoft/TRELLIS.2-4B`
+> 在魔搭都有镜像，直连不用代理，速度快 50 倍。命令：
+>
+> ```bash
+> B="https://modelscope.cn/models/Comfy-Org/TRELLIS.2/resolve/master"
+> curl -L -C - -o vae/xxx.safetensors "$B/vae/xxx.safetensors"
+> ```
+>
+> 或者 `pip install modelscope` 后用 `snapshot_download('microsoft/TRELLIS.2-4B')`。
+> 魔搭的 `microsoft/TRELLIS.2-4B` 是**官方 bf16 全量版**（16.24GB，9 个 safetensors），
+> 和 `Comfy-Org` 那份的 int8 版本**格式不同**，别混用 —— ComfyUI 的实现读的是后者。
 
 ### 4.2 已确认的模型参数（从官方工作流模板读出）
 
