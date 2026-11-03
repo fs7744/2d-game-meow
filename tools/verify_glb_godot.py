@@ -130,8 +130,11 @@ func _init() -> void:
 	#     节点还没真正进树，`look_at` 会报 "Node not inside tree" 然后静默不转，
 	#     相机朝 -Z，模型在视野外，截出来就是一张纯背景色。
 	#  2. `make_current()` —— 手动挂的 Camera3D 不会自动成为当前相机。
-	cam.look_at_from_position(center + Vector3(radius * 1.4, radius * 0.9, radius * 1.6),
-		center, Vector3.UP)
+	# 距离按 FOV 算，别拍脑袋乘系数：半径 r 的球要占满画面，相机距离 ≈ r / tan(fov/2)。
+	# （早先写死 radius*1.4/1.6，角色只占画面 40%，看不清细节。）
+	var dist: float = radius / tan(deg_to_rad(cam.fov * 0.5))
+	var dir := Vector3(0.75, 0.45, 1.0).normalized()
+	cam.look_at_from_position(center + dir * dist * 1.05, center, Vector3.UP)
 	root.add_child(cam)
 	cam.make_current()
 	print("VERIFY_CAM pos=%s center=%s radius=%.2f" % [cam.position, center, radius])

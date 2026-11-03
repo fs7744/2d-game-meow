@@ -77,14 +77,20 @@ def tri_count(objs) -> int:
 
 
 def world_bounds(objs):
-    """所有网格的世界空间包围盒（min / max / size）。"""
+    """所有网格的世界空间包围盒（min / max），**逐个顶点算**。
+
+    不用 `o.bound_box`：它是缓存的轴对齐盒，`transform_apply()` 之后不会立刻更新，
+    读到的是旧值。踩过 —— 目标身高 1.8，实际出来 1.387，就是拿旧包围盒又缩了一次。
+    顶点数上千时也不慢（7k 顶点约 10ms）。
+    """
     import mathutils
 
     lo = mathutils.Vector((1e30, 1e30, 1e30))
     hi = mathutils.Vector((-1e30, -1e30, -1e30))
     for o in objs:
-        for corner in o.bound_box:
-            p = o.matrix_world @ mathutils.Vector(corner)
+        mw = o.matrix_world
+        for v in o.data.vertices:
+            p = mw @ v.co
             for i in range(3):
                 lo[i] = min(lo[i], p[i])
                 hi[i] = max(hi[i], p[i])
@@ -125,42 +131,72 @@ def cleanup(meshes) -> None:
 
 
 def normalize(meshes, height: float) -> None:
-    """缩放到目标身高、水平居中、底面落在 y=0。
+    """缩放到目标身高、水平居中、底面落在 z=0。
 
-    Blender 是 **Z 向上**，glTF 是 **Y 向上**；导出时 `+Y up` 会做一次旋转转换。
-    这里按 Blender 的约定落地（z=0 是地面），导出后自然就是 y=0 是地面。
+    **必须走「空父级统一缩放」，不能逐顶点改坐标。** 这是踩出来的：
+
+    · 逐物体设 `scale`：物体之间的**相对位置不会跟着缩**，包围盒不是等比变小
+      （实测目标 1.8，出来 1.271）。
+    · 逐顶点改 `v.co`：对**带骨骼**的模型是灾难 —— 顶点动了、骨架没动，
+      蒙皮关系当场错位，Godot 里只剩一条腿在画面里。
+
+    空父级方案把 mesh 和 armature 一起缩放，蒙皮关系天然保持。
+
+    Blender 是 **Z 向上**，glTF 是 **Y 向上**；导入自动转 Z-up，导出 `export_yup`
+    转回去。所以这里的"身高"是 z 方向。
     """
-    lo, hi = world_bounds(meshes)
+    arms = [o for o in bpy.context.scene.objects if o.type == "ARMATURE"]
+    allobjs = list(meshes) + arms
+
+    # **按「主体网格」算身高，不是所有网格的并集。**
+    # AI 产物常带环境球 / 特效球 / 背景板，会撑大包围盒：实测一个 2m 直径的
+    # Icosphere 把包围盒从 1.832 撑到 2.832，按并集归一化后角色只剩 1.27 米。
+    # 主体取顶点数最多的 —— 角色本体总是最密。
+    subject = max(meshes, key=lambda o: len(o.data.vertices))
+    lo, hi = world_bounds([subject])
     size = hi - lo
-    tallest = max(size.z, size.x, size.y)
-    if tallest <= 0:
+    if max(size.x, size.y, size.z) <= 1e-9:
         fail("包围盒是 0：网格可能是空的")
-    scale = height / size.z if size.z > 0 else (height / tallest)
-    log(f"原始尺寸 {size.x:.3f} × {size.y:.3f} × {size.z:.3f} → 缩放 {scale:.4f}")
+    all_lo, all_hi = world_bounds(meshes)
+    if (all_hi - all_lo).z > size.z * 1.15:
+        log(f"  注意：场景里有比主体更大的物体（主体 z 范围 {size.z:.2f}，"
+            f"全部 {(all_hi - all_lo).z:.2f}）—— 已按主体归一化，可能是特效/环境物")
 
-    for o in meshes:
-        o.scale = [s * scale for s in o.scale]
+    # 若 z 不是最大维度，多半是模型躺倒了（朝向没转过来）。报出来让人判断，
+    # 不默默按 max 缩放 —— 按 max 会把"武器举高"也算成身高，人物比例就小了。
+    if size.z < max(size.x, size.y) * 0.8:
+        log(f"⚠ 垂直方向（z={size.z:.3f}）不是最大维度 "
+            f"(x={size.x:.3f} y={size.y:.3f})：模型可能躺倒，检查输入朝向")
 
-    # 缩放后重新量（bound_box 是本地空间，matrix_world 还没更新）
-    bpy.context.view_layer.update()
-    lo, hi = world_bounds(meshes)
+    scale = height / size.z if size.z > 1e-9 else height / max(size.x, size.y, size.z)
     cx = (lo.x + hi.x) / 2.0
     cy = (lo.y + hi.y) / 2.0
-    dz = -lo.z
-    for o in meshes:
-        o.location.x -= cx
-        o.location.y -= cy
-        o.location.z += dz
+    dz = lo.z
+    log(f"原始尺寸 {size.x:.3f} × {size.y:.3f} × {size.z:.3f} → 缩放 {scale:.4f}"
+        f"{'（含 ' + str(len(arms)) + ' 个骨架）' if arms else ''}")
+
+    root = bpy.data.objects.new("NormRoot", None)
+    bpy.context.scene.collection.objects.link(root)
+    for o in allobjs:
+        mw = o.matrix_world.copy()
+        o.parent = root
+        o.matrix_world = mw          # 先保持视觉位置，缩放由父级统一施加
+    root.scale = (scale, scale, scale)
+    root.location = (-cx * scale, -cy * scale, -dz * scale)
     bpy.context.view_layer.update()
 
-    # 应用变换：不 Apply 的话导出后节点上带缩放，引擎里再叠动作容易出问题
+    # 解除父子（保留变换）后 apply，产物节点上不带缩放 —— 引擎里再叠动作才干净
     bpy.ops.object.select_all(action="DESELECT")
-    for o in meshes:
+    for o in allobjs:
         o.select_set(True)
     bpy.context.view_layer.objects.active = meshes[0]
+    bpy.ops.object.parent_clear(type="CLEAR_KEEP_TRANSFORM")
     bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
-    lo, hi = world_bounds(meshes)
-    log(f"归一化后 高 {hi.z - lo.z:.3f}，底面 z={lo.z:.4f}")
+    bpy.data.objects.remove(root, do_unlink=True)
+
+    lo2, hi2 = world_bounds([subject])
+    log(f"归一化后 主体高 {hi2.z - lo2.z:.3f}，底面 z={lo2.z:.4f}，"
+        f"水平中心 ({(lo2.x + hi2.x) / 2:.3f}, {(lo2.y + hi2.y) / 2:.3f})")
 
 
 def decimate(meshes, ratio: float, target_tris: int) -> None:
@@ -251,7 +287,7 @@ def add_human_rig(meshes) -> bool:
     return True
 
 
-def export_glb(path: str, meshes) -> None:
+def export_glb(path: str, meshes, *, keep_anim: bool = True) -> None:
     """导出。**只导出选中的物体**，避免把多余的空物体/相机带出去。
 
     `export_yup=True` 把 Blender 的 Z-up 转成 glTF 的 Y-up（Godot 用 Y-up）。
@@ -272,7 +308,9 @@ def export_glb(path: str, meshes) -> None:
         export_yup=True,
         export_apply=False,
         export_skins=True,
-        export_animations=False,       # AI 生成的模型没有动画，别导空轨道
+        # **默认保留动画**：AI 生成的模型通常没有动画（所以没影响），
+        # 但如果输入本身带动画（比如先天的走路循环），关掉就是静默丢数据。
+        export_animations=keep_anim,
         export_materials="EXPORT",
         export_image_format="AUTO",    # 保留原贴图格式（webp 就还是 webp）
     )
@@ -295,6 +333,7 @@ def main() -> None:
     ap.add_argument("--no-uv", action="store_true")
     ap.add_argument("--rig", action="store_true", help="自动绑骨（仅人形 T/A-pose）")
     ap.add_argument("--skip-cleanup", action="store_true")
+    ap.add_argument("--no-anim", action="store_true", help="不导出动画（省体积）")
     args = ap.parse_args(argv)
 
     if not os.path.isfile(args.src):
@@ -315,7 +354,7 @@ def main() -> None:
     if args.rig:
         rigged = add_human_rig(meshes)
 
-    export_glb(args.dst, meshes)
+    export_glb(args.dst, meshes, keep_anim=not args.no_anim)
     log(f"完成：{'已绑骨' if rigged else '未绑骨'}，{tri_count(meshes)} 面")
     # 明确告诉调用方结果，别让"以为绑了其实没绑"流到下游
     log(f"RESULT rigged={str(rigged).lower()} tris={tri_count(meshes)}")
