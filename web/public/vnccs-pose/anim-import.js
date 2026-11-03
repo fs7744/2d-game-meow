@@ -73,6 +73,40 @@ async function getLoader(kind) {
 
 /** 当前动作状态 */
 let state = null
+
+/**
+ * 脚底参考高度：脚掌/脚骨世界 y 的最小值（y 向上，越小越靠地）。
+ *
+ * 用骨头而不是网格包围盒：`Box3.setFromObject` 对 SkinnedMesh 用的是**未蒙皮**
+ * 的几何包围盒，摆完姿势后完全不准。
+ */
+function footY(viewer) {
+  const THREE = viewer?.THREE
+  const bones = viewer?.bones
+  if (!THREE || !bones) return null
+  const v = new THREE.Vector3()
+  let min = Infinity
+  for (const n of ['ball_l', 'ball_r', 'foot_l', 'foot_r', 'toe_l', 'toe_r']) {
+    const b = bones[n]
+    if (!b) continue
+    b.getWorldPosition(v)
+    if (v.y < min) min = v.y
+  }
+  return Number.isFinite(min) ? min : null
+}
+
+/**
+ * 人偶的根节点（scene 的直接子节点）。
+ *
+ * 必须平移**它**而不是 pelvis：pelvis 只是根骨，单独挪会让蒙皮网格和骨架错位
+ * （网格挂在 Root 下面）。实测骨盆的父链是 `pelvis → Root → scene`。
+ */
+function characterRoot(viewer) {
+  let o = viewer?.bones?.pelvis
+  if (!o) return null
+  while (o.parent && o.parent !== viewer.scene) o = o.parent
+  return o.parent === viewer.scene ? o : null
+}
 /** 最近一次失败的原因（宿主要拿到具体文案，不能只说"没反应"） */
 let lastError = ''
 
@@ -111,7 +145,13 @@ export async function loadAnimation(buffer, fileName, viewer) {
     const clip = clips[0]
     const mixer = new THREE.AnimationMixer(root)
     mixer.clipAction(clip).play()
-    state = { root, clips, clip, mixer, sourceBones, rig, map, time: 0 }
+    state = {
+      root, clips, clip, mixer, sourceBones, rig, map, time: 0,
+      // 根节点初始 y：脚下对齐时以它为准重算，避免一次次 += 漂走
+      rootY: characterRoot(viewer)?.position.y ?? 0,
+      // 地面高度：**只量一次**（见 applyTimeInner 里的注释）
+      groundY: null,
+    }
     lastError = ''
     return {
       clips: clips.map((c) => ({ name: c.name || '(未命名)', duration: c.duration })),
@@ -188,6 +228,15 @@ async function applyTimeInner(t, viewer) {
   root.updateMatrixWorld(true)
 
   viewer.resetPose()
+  // **脚下对齐的基准只能量一次**。
+  // resetPose 只重置骨骼旋转，**不动根节点的 position** —— 如果每帧都量，
+  // 上一帧已经平移过的根节点会让"地面"跟着漂，越走越低/越高。
+  const rootNode = characterRoot(viewer)
+  if (rootNode) rootNode.position.y = state.rootY
+  viewer.scene?.updateMatrixWorld?.(true)
+  if (state.groundY == null) state.groundY = footY(viewer)
+  const groundY = state.groundY
+
   const kp = buildMixamoWorldKeypoints(state.sourceBones, viewer)
   if (!kp?.worldKps) {
     lastError = '这一帧的关键点算不出来：骨架里缺骨盆或肩，套不到人偶上'
@@ -201,7 +250,116 @@ async function applyTimeInner(t, viewer) {
     dispatchPoseChange: false,
   })
   lastError = ok ? '' : '这一帧套不到人偶上（骨骼映射对不上 MakeHuman 骨架）'
+  if (ok) groundCharacter(viewer, groundY)
   return ok
+}
+
+/**
+ * 把这一帧的脚底对齐到地面高度。
+ *
+ * **为什么必须做**：导入的关键点里骨盆随动作上下起伏（走路的 bob、换支撑脚），
+ * 而相机是固定的 —— 于是**每帧脚底在画面里的高度都不一样**，抽出来的一批帧
+ * 拼成动画就"一下高一下低"。实测 256² 画布上 Walk 的脚底在 228~244 之间跳
+ * （16px，占身高 7%），Run 跳 31px（14%）。
+ *
+ * 对齐之后脚底固定，**身高的变化（抬腿、屈膝、上身起伏）仍然保留** —— 那是
+ * 动作本身，不该被抹平。腾空帧（双脚离地）会被贴回地面，这正是精灵表的惯例：
+ * 垂直位移交给引擎，不烘进帧里。
+ */
+function groundCharacter(viewer, groundY) {
+  if (groundY == null || !state) return
+  const now = footY(viewer)
+  if (now == null) return
+  const root = characterRoot(viewer)
+  if (!root) return
+  root.position.y = state.rootY + (groundY - now)
+  root.updateMatrixWorld(true)
+  state.lastShift = groundY - now
+}
+
+/**
+ * 找出这张图里**最低的一行墨迹**（人偶的脚底）。白底图，按"三通道都接近 255"判空。
+ */
+function lowestRow(dataURL) {
+  return new Promise((resolve) => {
+    const img = new Image()
+    img.onload = () => {
+      try {
+        const c = document.createElement('canvas')
+        c.width = img.width
+        c.height = img.height
+        const g = c.getContext('2d')
+        g.drawImage(img, 0, 0)
+        const d = g.getImageData(0, 0, c.width, c.height).data
+        for (let y = c.height - 1; y >= 0; y--) {
+          for (let x = 0; x < c.width; x++) {
+            const o = (y * c.width + x) * 4
+            if (d[o] < 235 || d[o + 1] < 235 || d[o + 2] < 235) {
+              resolve({ y, w: c.width, h: c.height })
+              return
+            }
+          }
+        }
+        resolve(null)
+      } catch { resolve(null) }
+    }
+    img.onerror = () => resolve(null)
+    img.src = dataURL
+  })
+}
+
+/** 整张图垂直平移 dy 像素（正 = 向下），空出来的补白 */
+function shiftPng(dataURL, dy) {
+  return new Promise((resolve) => {
+    const img = new Image()
+    img.onload = () => {
+      try {
+        const c = document.createElement('canvas')
+        c.width = img.width
+        c.height = img.height
+        const g = c.getContext('2d')
+        g.fillStyle = '#fff'
+        g.fillRect(0, 0, c.width, c.height)
+        g.drawImage(img, 0, dy)
+        resolve(c.toDataURL('image/png'))
+      } catch { resolve(dataURL) }
+    }
+    img.onerror = () => resolve(dataURL)
+    img.src = dataURL
+  })
+}
+
+/**
+ * 帧间「底部对齐」：把所有帧的最低墨迹行压到同一条水平线上。
+ *
+ * **为什么世界空间对齐还不够**：`groundCharacter` 只把脚**骨**的世界 y 对齐了，
+ * 但导出用的是**透视相机** —— 走/跑时脚在前后方向（z）移动，同样的 y 在屏幕上
+ * 落点不同（近大远小）。实测 Walk 对齐骨骼后，画面里的脚底仍在 226~249 之间跳
+ * （23px，占画布 9%）。
+ *
+ * 所以最后一步放在**屏幕空间**：量每帧最低的墨迹行，统一平移到最"低"那一帧的
+ * 位置。纯像素平移，不改渲染方式（保持和单张导出一致的透视外观）。
+ *
+ * 基准取"最低那帧"，但**留出 5% 底边距**：不留的话最矮的那帧会贴到画布边缘
+ * （实测 252/256），看着挤，也怕某些帧真的贴到 256 被裁。
+ */
+export async function alignFrames(frames) {
+  if (!Array.isArray(frames) || frames.length < 2) return frames
+  const boxes = []
+  for (const f of frames) boxes.push(await lowestRow(f.png))
+  const valid = boxes.filter(Boolean)
+  if (!valid.length) return frames
+  const h = valid[0].h || 256
+  const margin = Math.max(4, Math.round(h * 0.05))
+  const base = Math.min(Math.max(...valid.map((b) => b.y)), h - margin - 1)
+  const out = []
+  for (let i = 0; i < frames.length; i++) {
+    const b = boxes[i]
+    if (!b) { out.push(frames[i]); continue }
+    const dy = base - b.y
+    out.push(dy === 0 ? frames[i] : { ...frames[i], png: await shiftPng(frames[i].png, dy) })
+  }
+  return out
 }
 
 /** 清掉当前动作（不删人偶姿势，只是不再按动画驱动） */

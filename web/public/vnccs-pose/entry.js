@@ -594,7 +594,10 @@ window.addEventListener('message', async (e) => {
         }
         // 抽完把时间轴拉回第 0 帧，别让编辑器停在最后一帧
         await m.applyTime(0, v)
-        post({ type: 'animFrames', frames, clip: st.name, yaw: currentYaw })
+        // **最后一步屏幕空间对齐**：世界空间的脚下对齐只能保证骨骼一致，
+        // 透视相机下脚前后移动会让屏幕落点变。这里把每帧的墨迹底边压到同一行。
+        const aligned = await m.alignFrames(frames)
+        post({ type: 'animFrames', frames: aligned, clip: st.name, yaw: currentYaw })
         post({ type: 'pose', pose: v.getPose(), yaw: currentYaw })
       } catch (e) {
         post({ type: 'error', message: String(e?.message || e) })
