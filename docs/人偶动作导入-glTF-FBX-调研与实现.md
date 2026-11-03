@@ -185,6 +185,14 @@ glb 与 fbx 都符合。**非 Mixamo 骨架（如 Quaternius / KayKit 的 CC0 �
   拖动松手同样的语义存进节点（和姿势库一致）。
 - **不能用官方的 `importMixamoFBXAnimation`**：它是「一次性抽 N 帧」语义，
   我们要的是「拖滑块实时改时间点」，必须自己持有 `AnimationMixer`。
+- **脚底必须对齐（两层，缺一层都不行）**：① 世界空间——骨盆随动作起伏，
+  用「resetPose 后的默认站姿脚底」当基准平移**根节点**（不是 pelvis 本身，
+  单独挪根骨会让蒙皮网格和骨架错位），且基准**只能量一次**（resetPose 不动
+  根节点 position，每帧量会跟着漂）；② 屏幕空间——透视相机下脚前后移动会让
+  屏幕落点变，所以抽完帧再统一把墨迹底边压到同一行（`alignFrames()`）。
+  实测 Walk 从 20px 抖动降到 0，对比图 `docs/img/pose-anim-align.png`。
+  **只对齐脚底，不要抹平身高变化**（抬腿、屈膝是动作本身）；腾空帧贴回地面
+  是精灵表惯例——垂直位移交给引擎。
   （**批量入库**是自己循环 `applyTime` + `renderOut`，见 `entry.js` 的 `animSample`；
   不用官方那个是因为它只出 pose、不出缩略图。）
 - **抽帧要避开两端**：`t = duration * (i + 0.5) / count`，不取 0 和 duration ——
