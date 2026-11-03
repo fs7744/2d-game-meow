@@ -111,11 +111,15 @@ def import_glb(path: str):
     return meshes
 
 
-def cleanup(meshes) -> None:
-    """合并重复点 / 删游离面 / 重算法线。
+def cleanup(meshes, weld: bool = False) -> None:
+    """删游离面 / 重算法线。**默认不焊点**（weld=False），原因见下。
 
-    `merge by distance` 的阈值用 0.0001（相对 1.8m 的人约 0.1mm）：太大会把小
-    细节焊掉，太小对 AI 网格没用（它们的重复点通常是完全重合的）。
+    `remove_doubles`（merge by distance）在带 UV 的 AI 网格上是**有害的**：
+    glTF 导出时顶点会按 UV 缝和法线拆分，一个位置本来就有多个顶点。把它们焊
+    回去会制造大量非流形边 —— 实测 TRELLIS 产物焊完有 11.6 万条边被 3 个面共用、
+    10.9 万条被 4 个面共用，随后 Decimate 只能干到 4% → 40%（减不动）。
+
+    只有在确认输入是「同一顶点被拆成几十份的 vertex soup」时才值得开 `--weld`。
     """
     for o in meshes:
         bpy.context.view_layer.objects.active = o
@@ -123,11 +127,13 @@ def cleanup(meshes) -> None:
         o.select_set(True)
         bpy.ops.object.mode_set(mode="EDIT")
         bpy.ops.mesh.select_all(action="SELECT")
-        bpy.ops.mesh.remove_doubles(threshold=0.0001)
+        if weld:
+            # 阈值 0.0001（相对 1.8m 的人约 0.1mm）：太大会把小细节焊掉
+            bpy.ops.mesh.remove_doubles(threshold=0.0001)
         bpy.ops.mesh.delete_loose()
         bpy.ops.mesh.normals_make_consistent(inside=False)
         bpy.ops.object.mode_set(mode="OBJECT")
-    log(f"清理完成，{tri_count(meshes)} 面")
+    log(f"清理完成{'（含焊点）' if weld else ''}，{tri_count(meshes)} 面")
 
 
 def normalize(meshes, height: float) -> None:
@@ -203,6 +209,7 @@ def decimate(meshes, ratio: float, target_tris: int) -> None:
     """Collapse 减面。`ratio` 是保留比例（0.15 = 留 15%）。"""
     if not (0.01 <= ratio <= 1.0):
         fail(f"ratio 要在 0.01~1 之间（收到 {ratio}）")
+    before_all = tri_count(meshes)
     for o in meshes:
         before = tri_count([o])
         mod = o.modifiers.new(name="Decimate", type="DECIMATE")
@@ -215,6 +222,11 @@ def decimate(meshes, ratio: float, target_tris: int) -> None:
         log(f"  {o.name}: {before} → {tri_count([o])} 面")
     total = tri_count(meshes)
     log(f"减面完成，共 {total} 面")
+    expect = int(before_all * ratio)
+    if before_all and total > expect * 1.5:
+        # 减不动的典型原因：网格非流形（焊点造成的），Decimate 找不到可塌陷的边
+        log(f"  ⚠ 只减到 {total}（按 ratio 应约 {expect}）：网格非流形、减不动。"
+            "检查是否传了 --weld，或改用 --ratio 更小的多遍减面")
     if target_tris and total > target_tris:
         log(f"  仍高于目标 {target_tris}，可把 --ratio 再调小")
 
@@ -233,8 +245,26 @@ def unwrap(meshes, angle_limit: float = 66.0, island_margin: float = 0.002) -> N
     log("UV 展开完成")
 
 
-def add_human_rig(meshes):
-    """→ (是否绑成功, 骨架对象或 None)。"""
+def weighted_vertices(meshes) -> int:
+    """有多少顶点真的拿到了权重（>0）。
+
+    **判"绑骨成功"只能看这个数**。`parent_set` 失败时不报错，而且照样会把
+    159 个顶点组建出来 —— 只看 `len(vertex_groups)` 会得出"绑好了"的结论，
+    实际每个顶点权重都是 0，glTF 导出器于是根本不写 skin，Godot 里就是个静态网格。
+    """
+    n = 0
+    for o in meshes:
+        for v in o.data.vertices:
+            if any(g.weight > 0 for g in v.groups):
+                n += 1
+    return n
+
+
+def add_human_rig(meshes, mode: str = "auto"):
+    """→ (是否绑成功, 骨架对象或 None)。
+
+    `mode`：auto（热扩散，失败自动回退 envelope）/ auto（固定）/ envelope。
+    """
     """Rigify 人形元骨架 + 自动权重。
 
     **为什么用 Rigify 而不是 Mixamo**：Mixamo 是网页服务，要人工上传，
@@ -267,24 +297,40 @@ def add_human_rig(meshes):
         # 生成失败也能用 metarig 自己绑（骨数量少，但权重是能算的）
         log(f"Rigify generate 跳过（{exc}），改用元骨架直接绑")
 
-    # 自动权重：网格与骨架同时选中，**骨架必须是激活对象**
-    bpy.ops.object.select_all(action="DESELECT")
-    for o in meshes:
-        o.select_set(True)
-    rig.select_set(True)
-    bpy.context.view_layer.objects.active = rig
-    try:
-        bpy.ops.object.parent_set(type="ARMATURE_AUTO")
-    except Exception as exc:                                  # noqa: BLE001
-        log(f"自动权重失败：{exc}")
+    total = sum(len(o.data.vertices) for o in meshes)
+
+    def bind(kind: str) -> int:
+        bpy.ops.object.select_all(action="DESELECT")
+        for o in meshes:
+            o.select_set(True)
+        rig.select_set(True)
+        bpy.context.view_layer.objects.active = rig
+        try:
+            bpy.ops.object.parent_set(type=kind)
+        except Exception as exc:                              # noqa: BLE001
+            log(f"{kind} 失败：{exc}")
+            return 0
+        return weighted_vertices(meshes)
+
+    got = bind("ARMATURE_AUTO") if mode == "auto" else 0
+    if got < total * 0.5:
+        # **热扩散在 AI 生成的网格上基本必然失败**：TRELLIS 的产物是一堆
+        # 互相穿插的独立壳（裙摆、纱袖、头发各是独立面片），热扩散要求闭合
+        # 流形体积，于是它给每个顶点算出的权重都是 0 —— 日志只有一句
+        # "Bone Heat Weighting: failed to find solution for one or more bones"，
+        # 而 parent_set 依然把 159 个顶点组建好了，看起来像成功。
+        #
+        # envelope 是纯几何判定（顶点到骨的包络体距离），不要求流形，质量粗但可用。
+        log(f"热扩散只覆盖 {got}/{total} 个顶点 → 回退 envelope 权重")
+        got = bind("ARMATURE_ENVELOPE")
+
+    if got < total * 0.5:
+        log(f"绑骨失败：{got}/{total} 个顶点有权重（模型可能不是 T-pose 人形）")
         return False, None
 
-    # 检查是否真的产生了顶点组（失败时 parent_set 不报错但没有组）
-    groups = sum(len(o.vertex_groups) for o in meshes)
-    if groups == 0:
-        log("自动权重没有产生任何顶点组 —— 模型多半不是 T-pose 人形")
-        return False, None
-    log(f"绑定完成，网格上共 {groups} 个顶点组，骨架 {len(rig.data.bones)} 根骨")
+    log(f"绑定完成：{got}/{total} 个顶点有权重，"
+        f"{sum(len(o.vertex_groups) for o in meshes)} 个顶点组，"
+        f"骨架 {len(rig.data.bones)} 根骨")
     return True, rig
 
 
@@ -340,7 +386,12 @@ def main() -> None:
     ap.add_argument("--no-decimate", action="store_true")
     ap.add_argument("--no-uv", action="store_true")
     ap.add_argument("--rig", action="store_true", help="自动绑骨（仅人形 T/A-pose）")
+    ap.add_argument("--rig-mode", choices=("auto", "envelope"), default="auto",
+                    help="auto=热扩散+失败回退 envelope；envelope=直接用包络权重")
     ap.add_argument("--skip-cleanup", action="store_true")
+    ap.add_argument("--weld", action="store_true",
+                    help="清理时做 merge by distance（仅当输入是 vertex soup 时用；"
+                         "带 UV 的网格焊点会挡住减面）")
     ap.add_argument("--no-anim", action="store_true", help="不导出动画（省体积）")
     args = ap.parse_args(argv)
 
@@ -350,18 +401,20 @@ def main() -> None:
     clear_scene()
     meshes = import_glb(args.src)
 
-    if not args.skip_cleanup:
-        cleanup(meshes)
     normalize(meshes, args.height)
+    # **减面必须在 cleanup 之前**。焊点会制造非流形边，Decimate 之后完全减不动
+    # （实测 4% 的请求只能做到 40%）。先减面、再清理，两个目的都能达到。
     if not args.no_decimate:
         decimate(meshes, args.ratio, args.target_tris)
+    if not args.skip_cleanup:
+        cleanup(meshes, weld=args.weld)
     if not args.no_uv:
         unwrap(meshes)
 
     rigged = False
     rig = None
     if args.rig:
-        rigged, rig = add_human_rig(meshes)
+        rigged, rig = add_human_rig(meshes, mode=args.rig_mode)
 
     export_glb(args.dst, meshes, keep_anim=not args.no_anim,
                armatures=[rig] if rig else [])
