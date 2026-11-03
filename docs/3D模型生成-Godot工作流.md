@@ -20,7 +20,9 @@
             → Godot 里是 MeshInstance3D / Skeleton3D / AnimationPlayer
 ```
 
-## 2. 为什么走外部 ComfyUI
+## 2. 怎么在项目里跑（不走 ComfyUI 服务）
+
+### 2.1 官方仓库为什么不能直接用
 
 TRELLIS.2 官方仓库（`microsoft/TRELLIS.2`，**MIT**）自己说了两件事，都卡人：
 
@@ -29,13 +31,67 @@ TRELLIS.2 官方仓库（`microsoft/TRELLIS.2`，**MIT**）自己说了两件事
 | "The code is currently tested only on **Linux**" | Windows 上要自己趟 |
 | 依赖 `flash-attn` / `nvdiffrast` / `nvdiffrec` / `cumesh` / `o-voxel` / `flexgemm` | 多数要编译 CUDA 扩展 |
 
-而 ComfyUI 把 TRELLIS.2 做成了**核心 3D 节点**（不是社区节点），Windows 轮子由它的生态解决。
-所以：**ComfyUI 当生成后端，本项目当编排 + 后处理 + 验证**。
+实测确认（2026-11-03）：
 
-代价：多一个进程、一套 10~12GB 模型、**显存要串行**——
-4090 24GB 上 TRELLIS.2 要 16~24GB，和 Qwen 不能共存，调用前必须先 `engine.unload()`。
+```
+where nvcc                    → 无
+CUDA Toolkit                  → 未安装（只有驱动，CUDA UMD 13.5）
+pip index versions trellis2   → No matching distribution
+pip index versions o-voxel    → No matching distribution
+pip index versions flexgemm   → No matching distribution
+pip index versions nvdiffrast → No matching distribution
+```
 
-配套：`workflows/threed.py` 是 HTTP 客户端（上传/提交/轮询/下载 + 能力探测）。
+**结论：pip 装不上，源码编译要先装 CUDA Toolkit 12.4 + MSVC，而且这些包作者只在 Linux 测过。**
+
+### 2.2 可行路径：把 ComfyUI 的纯 torch 实现 import 进项目
+
+ComfyUI 把 TRELLIS.2 做成了核心节点，但**它没有用微软那套 CUDA 扩展**——
+自己用 PyTorch 重写了 VAE、DiT 和稀疏卷积：
+
+```
+comfy/ldm/trellis2/vae.py       1110 行   SparseTensor / SparseLinear
+comfy/ldm/trellis2/model.py     1163 行   DiT + 三阶段投影
+comfy/ldm/trellis2/flexgemm.py   212 行   纯 torch 的稀疏子流形卷积
+comfy_extras/nodes_trellis2.py   893 行   各阶段的节点封装
+```
+
+依赖全是 `comfy.ldm.*`（ComfyUI 自己的模型基础设施）+ torch，**没有编译期依赖**。
+所以可以：把 ComfyUI 源码 vendor 进项目 → `import comfy.ldm.trellis2.*` →
+自己写推理编排。**不需要启动服务，不需要 ComfyUI 界面，用户无感知。**
+
+实测（本机 Windows / Python 3.13 / torch 2.6.0+cu124）：
+
+```
+from comfy.ldm.trellis2.vae import SparseTensor          → OK
+from comfy.ldm.trellis2.model import build_proj_transform_matrix → OK
+from comfy.ldm.trellis2.flexgemm import sparse_submanifold_conv3d → OK
+```
+
+### 2.3 一个必须打的补丁（`tools/patch_comfy_kitchen.py`）
+
+直接 import 会炸在 `comfy_kitchen`（ComfyUI 的量化算子包，int8 模型要用）：
+
+```
+ValueError: infer_schema(func): Parameter stride has unsupported type list[int]
+```
+
+原因：它注册 torch custom op 时用了 PEP 585 的 `list[int]`，而 **torch 2.6 的
+`infer_schema` 只认 `typing.List[int]`**（torch 2.7+ 才支持内建泛型）。
+报错发生在 import 阶段，整条链路起不来。
+
+修法：把注解换成 `typing.List[...]`（语义等价，不动算子逻辑）。包内 16 个文件、
+共 40 处，`tools/patch_comfy_kitchen.py` 一键完成，**幂等**。
+升级 `comfy_kitchen` 后要重跑。
+
+**为什么不直接升 torch**：升到 2.7+ 会牵动 Qwen 产线（本项目 2D 生成的主力），
+先在注解层解决更安全。
+
+### 2.4 显存必须串行
+
+4090 24GB 上 TRELLIS.2 要 16~24GB，和 Qwen 不能共存。
+3D 生成前必须 `engine.unload()`，跑完再装回来——**这段时间 2D 产线是停的**，
+做节点时要按串行设计，不能假设两个能并行。
 
 ## 3. 已实测通过的部分
 
@@ -88,35 +144,52 @@ VERIFY_ANIM Walk len=1.033 tracks=88
 
 ## 4. 尚未完成（依赖环境安装）
 
-| 项 | 状态 | 阻塞 |
+| 项 | 状态 | 说明 |
 |---|---|---|
-| ComfyUI 本体 | 下载中（GitHub codeload，约 30MB） | 网络慢 |
-| TRELLIS.2 模型 | 未下载（10~12GB） | 走 hf-mirror |
-| Blender | 未装（350MB，阿里云镜像可下） | 待下 |
-| `tools/blender_postprocess.py` | **已写，未实测** | 等 Blender |
-| TRELLIS.2 的 API prompt | **未写** | 必须对着 `/object_info` 写，不能猜 |
+| ComfyUI 源码 | ✅ 已下（13MB）+ 依赖已装进项目 venv | 只当**库**用，不起服务 |
+| `comfy_kitchen` 注解补丁 | ✅ 已做（`tools/patch_comfy_kitchen.py`） | 幂等，升版本后要重跑 |
+| `comfy.ldm.trellis2.*` import | ✅ 实测通过 | 纯 torch，无编译依赖 |
+| **TRELLIS.2 权重** | ⏳ **下载中（8GB）** | **这是唯一硬阻塞**，见 4.1 |
+| Blender | ⏳ 未装（350MB） | 后处理要用 |
+| `tools/blender_postprocess.py` | ⚠️ 已写，**未实测** | 等 Blender |
+| 推理编排（把三个阶段串起来） | 未写 | 等权重下完才能调 |
 | 项目内节点 / API 端点 | 未做 | 等生成层跑通 |
 
-### 4.1 为什么 prompt 不能凭猜写
+### 4.1 权重下载是唯一的硬阻塞
 
-ComfyUI 的 `/prompt` 要的是 `{node_id: {class_type, inputs}}`，字段名必须和节点定义
-完全一致。写错的后果**不是报错**，而是节点用默认值——生成出莫名其妙的结果，
-排查时根本不知道是自己填错了。
+`Comfy-Org/TRELLIS.2` 的文件与大小（实测 API）：
 
-官方模板（`3d_pixal3d_trellis2_image_to_model`）是 66 个节点、45 种类型的**UI 格式**，
-要靠 `/object_info` 的 `input_order` 才能准确转成 API 格式。
-`workflows/threed.py::node_signature()` 就是干这个的探查工具。
+| 文件 | 大小 |
+|---|---|
+| `diffusion_models/trellis_2_int8_convrot.safetensors` | **5010 MB** |
+| `clip_vision/dino_v3_vit_l.safetensors` | 1156 MB |
+| `vae/trellis_2_shape_vae_bf16.safetensors` | 1045 MB |
+| `vae/trellis_2_texture_vae_bf16.safetensors` | 905 MB |
 
-已确认的关键参数（从模板读出）：
+（另有 `trellis_2_bf16.safetensors` 9859 MB 的未量化版，24GB 卡上用 int8 就够了。
+背景移除 `birefnet` 不在这个仓库，需要另找。）
+
+**测速实测（2026-11-03 21:25）**：
+
+| 源 | 速度 | 8GB 需要 |
+|---|---|---|
+| hf-mirror.com 直连 | 45 KB/s | ~50 小时 |
+| huggingface.co + 代理 7897 | 159 KB/s | ~14 小时 |
+| 代理 + 6 并发 | **502 Bad Gateway**（代理不支持多隧道） | — |
+
+所以：**模型必须由用户用更快的线路下**，或者挂着慢慢下。
+纯代码部分（推理编排、后处理、验证）不依赖权重，可以先写完。
+
+### 4.2 已确认的模型参数（从官方工作流模板读出）
 
 | 节点 | 值 |
 |---|---|
 | UNETLoader | `trellis_2_int8_convrot.safetensors` |
 | VAELoader ×2 | `trellis_2_shape_vae_bf16` / `trellis_2_texture_vae_bf16` |
-| CLIPVisionLoader | `dino_v3_L_naf_fp32.safetensors` |
+| CLIPVisionLoader | `dino_v3_L_naf_fp32`（仓库里是 `dino_v3_vit_l`） |
 | KSampler（shape） | steps 12 / cfg 7.5 / euler / normal |
 | Trellis2UpsampleStage | 1536 |
-| Save3DAdvanced | `3d/ComfyUI`，1024×1024 |
+| Save3DAdvanced | 1024 × 1024 |
 
 ## 5. Blender 后处理脚本（`tools/blender_postprocess.py`）
 
