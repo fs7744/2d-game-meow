@@ -233,7 +233,8 @@ def unwrap(meshes, angle_limit: float = 66.0, island_margin: float = 0.002) -> N
     log("UV 展开完成")
 
 
-def add_human_rig(meshes) -> bool:
+def add_human_rig(meshes):
+    """→ (是否绑成功, 骨架对象或 None)。"""
     """Rigify 人形元骨架 + 自动权重。
 
     **为什么用 Rigify 而不是 Mixamo**：Mixamo 是网页服务，要人工上传，
@@ -246,14 +247,14 @@ def add_human_rig(meshes) -> bool:
         bpy.ops.preferences.addon_enable(module="rigify")
     except Exception as exc:                                  # noqa: BLE001
         log(f"Rigify 插件启用失败：{exc}")
-        return False
+        return False, None
 
     bpy.ops.object.select_all(action="DESELECT")
     bpy.ops.object.armature_human_metarig_add()
     rig = bpy.context.object
     if rig is None or rig.type != "ARMATURE":
         log("元骨架没生成出来")
-        return False
+        return False, None
     rig.name = "Rig"
     log(f"元骨架 {rig.name}，{len(rig.data.bones)} 根骨")
 
@@ -276,27 +277,34 @@ def add_human_rig(meshes) -> bool:
         bpy.ops.object.parent_set(type="ARMATURE_AUTO")
     except Exception as exc:                                  # noqa: BLE001
         log(f"自动权重失败：{exc}")
-        return False
+        return False, None
 
     # 检查是否真的产生了顶点组（失败时 parent_set 不报错但没有组）
     groups = sum(len(o.vertex_groups) for o in meshes)
     if groups == 0:
         log("自动权重没有产生任何顶点组 —— 模型多半不是 T-pose 人形")
-        return False
-    log(f"绑定完成，网格上共 {groups} 个顶点组")
-    return True
+        return False, None
+    log(f"绑定完成，网格上共 {groups} 个顶点组，骨架 {len(rig.data.bones)} 根骨")
+    return True, rig
 
 
-def export_glb(path: str, meshes, *, keep_anim: bool = True) -> None:
+def export_glb(path: str, meshes, *, keep_anim: bool = True,
+               armatures=()) -> None:
     """导出。**只导出选中的物体**，避免把多余的空物体/相机带出去。
 
     `export_yup=True` 把 Blender 的 Z-up 转成 glTF 的 Y-up（Godot 用 Y-up）。
     `export_apply=False`：modifier 已经在前面 apply 过，再 apply 一次会重复。
     """
+    # **只选明确要导的物体**。不能写「选中场景里所有 MESH/ARMATURE」——
+    # Rigify 会生成一堆 WGT-* 控件网格，它们不在 View Layer 里，select_set 直接抛
+    # "Object 'WGT-...' can't be selected because it is not in View Layer"，
+    # 导出中断（绑骨本身已经成功，只是出不了文件）。
     bpy.ops.object.select_all(action="DESELECT")
-    for o in bpy.context.scene.objects:
-        if o.type in ("MESH", "ARMATURE"):
+    for o in list(meshes) + list(armatures):
+        try:
             o.select_set(True)
+        except RuntimeError:
+            pass
     bpy.context.view_layer.objects.active = meshes[0]
     out_dir = os.path.dirname(os.path.abspath(path))
     if out_dir:
@@ -351,10 +359,12 @@ def main() -> None:
         unwrap(meshes)
 
     rigged = False
+    rig = None
     if args.rig:
-        rigged = add_human_rig(meshes)
+        rigged, rig = add_human_rig(meshes)
 
-    export_glb(args.dst, meshes, keep_anim=not args.no_anim)
+    export_glb(args.dst, meshes, keep_anim=not args.no_anim,
+               armatures=[rig] if rig else [])
     log(f"完成：{'已绑骨' if rigged else '未绑骨'}，{tri_count(meshes)} 面")
     # 明确告诉调用方结果，别让"以为绑了其实没绑"流到下游
     log(f"RESULT rigged={str(rigged).lower()} tris={tri_count(meshes)}")

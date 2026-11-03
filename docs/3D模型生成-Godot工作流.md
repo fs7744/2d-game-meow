@@ -207,6 +207,17 @@ blender --background --python tools/blender_postprocess.py -- \
 4. `unwrap`：Smart UV Project（减面之后再展，否则 UV 会扭曲）；
 5. `add_human_rig`（可选）：Rigify 人形元骨架 + `ARMATURE_AUTO` 自动权重。
 
+**已实测通过**（`tools/make_test_human.py` 造 T-pose 人形 → `--rig`）：
+
+```
+导入 1 个网格、2184 面 → 减面(ratio 1.0 不减) → UV
+元骨架 Rig，159 根骨 → Rigify 生成后 159 根骨
+绑定完成，网格上共 159 个顶点组，骨架 159 根骨
+RESULT rigged=true tris=2184
+Godot：Skeleton3D bones=160，1 个 MeshInstance3D
+转上臂骨 70° → 网格跟着弯曲（docs/img/rig-auto-pose.png）
+```
+
 **绑骨的前提，不满足就别加 `--rig`**：
 
 - 人形、**T-pose 或 A-pose**（自然站姿的手臂贴身体，热扩散会把手臂权重算给躯干，一动就撕开）；
@@ -216,6 +227,17 @@ blender --background --python tools/blender_postprocess.py -- \
 脚本结尾会打印 `RESULT rigged=true/false tris=N` ——
 自动权重失败时 `parent_set` 不报错但不产生顶点组，脚本会检查顶点组数并如实返回 false，
 不让"以为绑了其实没绑"流到下游。
+
+### 5.1 绑骨这条路上踩的三个坑
+
+| 现象 | 原因 | 修法 |
+|---|---|---|
+| 导出报 `Object 'WGT-RIG-Rig_eye.L' can't be selected because it is not in View Layer` | 写「选中场景里所有 MESH/ARMATURE」时把 Rigify 的 `WGT-*` 控件网格也选了，它们不在 View Layer | 只选明确要导的主体网格 + 骨架 |
+| 转骨骼后 `get_aabb()` 尺寸不变，以为权重没生效 | **`MeshInstance3D.get_aabb()` 返回绑定姿势的包围盒，不随蒙皮变** | 判断权重必须比较**渲染图**（本文用像素差 + 目视） |
+| Blender 里 `o.bound_box` 拿到旧值 | `transform_apply()` 后不刷新 | 逐顶点算（见 §5 的 normalize 注释） |
+
+前者和后两个是同一类：**包围盒/尺寸这类"缓存值"在变形之后都不可信**。
+验证蒙皮永远看渲染，不看数值。
 
 ## 6. 复现命令
 
