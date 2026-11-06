@@ -30,6 +30,8 @@ function makeFetch() {
   const library = { prompts: [], poses: [], prefs: {} }
   /** 服务端「磁盘」上的角色库（assets/characters/）。**每个 fetch 一份**。 */
   const serverCharacters = new Set()
+  /** 每个角色名下的服装清单（PUT /costumes 会追加） */
+  const serverCostumes = new Map()
   // 分配项目 id 的计数器
   let serverSeq = 0
   // 表情批量任务的模拟进度（null = 没有在跑）
@@ -260,6 +262,25 @@ function makeFetch() {
     }
 
     // ---- 角色中心（assets/characters/）----
+    // 服装的增删改：真实后端 PUT 返回 200 并把服装加进 config。
+    // 以前 mock 没有这一支，落到末尾 404，前端 saveCostume 抛错，
+    // 「新建服装」看起来请求发了却没生效。
+    if (String(url).includes('/characters/') && String(url).includes('/costumes/')
+      && (init.method || 'GET') === 'PUT') {
+      const name = decodeURIComponent(String(url).split('/characters/')[1].split('/')[0])
+      const c = decodeURIComponent(String(url).split('/costumes/')[1].split('?')[0])
+      const list = serverCostumes.get(name) || ['Naked']
+      if (!list.includes(c)) list.push(c)
+      serverCostumes.set(name, list)
+      return { ok: true, json: async () => ({ name, costumes: {} }) }
+    }
+    if (String(url).includes('/characters/') && String(url).includes('/costumes/')
+      && (init.method || 'GET') === 'DELETE') {
+      const name = decodeURIComponent(String(url).split('/characters/')[1].split('/')[0])
+      const c = decodeURIComponent(String(url).split('/costumes/')[1].split('?')[0])
+      serverCostumes.set(name, (serverCostumes.get(name) || ['Naked']).filter((x) => x !== c))
+      return { ok: true, json: async () => ({ deleted: c }) }
+    }
     if (String(url).endsWith('/characters') && (init.method || 'GET') === 'POST') {
       const b = JSON.parse(init.body || '{}')
       serverCharacters.add(b.name)
@@ -272,7 +293,8 @@ function makeFetch() {
           count: serverCharacters.size,
           items: [...serverCharacters].map((n) => ({
             name: n, cover_url: '', sex: 'female', style: 'ghibli_miyazaki',
-            nsfw: false, costumes: ['Naked'], sprites: 0, config_version: '2.0',
+            nsfw: false, costumes: serverCostumes.get(n) || ['Naked'],
+            sprites: 0, config_version: '2.0',
           })),
         }),
       }
@@ -330,7 +352,7 @@ function makeFetch() {
             eyes: 'blue_eyes, my own trait',
           },
             costumes: {}, costume_ids: {}, config_version: '2.0' },
-          costumes: ['Naked'],
+          costumes: serverCostumes.get(name) || ['Naked'],
           // 有素材才会有可选表情：Neutral 3 张、angry 1 张
           assets: { Naked: {
             neutral: ['/files/a.png', '/files/b.png', '/files/c.png'],
@@ -3684,937 +3706,483 @@ function check(name, cond, extra = '') {
   dom.window.close()
 }
 
-// 46) 角色中心：与画布同级的一级页面（移植自 VNCCS 的 Character Creator）
+// 46) 角色中心重构：四步工作台 + 常驻成果预览（2026-11-06）
 //
-// 角色库不属于任何一个画布——同一个角色要在多个项目里复用，所以它跟画布**同级**，
-// 不是画布里的一个节点。
-{
+// 旧版是 5 个并列 tab + 右栏 4 组重复按钮 + 3 套互相竞争的引导，
+// 用户读完所有说明仍不知道第一步点哪里。现在只有一条主线：
+// ① 创建角色 → ② 定形象 → ③ 出素材 → ④ 导出，完成状态由磁盘上的真实产物推导。
+// 下面这组用例同时钉住 API 契约（一个没改）和新的信息架构。
+const ccWait = (ms) => new Promise((r) => setTimeout(r, ms))
+async function ccBoot() {
+  // 快照必须在 boot 之前：角色中心一挂载就会发 /characters、静态目录等请求
+  const c0 = calls.length
   const { dom, errors } = await boot('')
   const doc = dom.window.document
   const win = dom.window
-  await new Promise((r) => setTimeout(r, 400))
+  await ccWait(400)
+  ;[...doc.querySelectorAll('.view-tab')][1]
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await ccWait(300)
+  return { dom, doc, win, errors, c0 }
+}
+function ccSetInput(win, el, v) {
+  if (!el) return
+  Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value').set.call(el, v)
+  el.dispatchEvent(new win.Event('input', { bubbles: true }))
+}
+function ccSetSelect(win, el, v) {
+  if (!el) return
+  Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value').set.call(el, v)
+  el.dispatchEvent(new win.Event('change', { bubbles: true }))
+}
+function ccClick(doc, win, text, sel = 'button') {
+  const el = [...doc.querySelectorAll(sel)].find((x) => (x.textContent || '').includes(text))
+  if (el) el.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  return !!el
+}
+function ccStep(doc, win, id) {
+  const b = doc.querySelector(`.cc-step[data-step="${id}"]`)
+  if (b) b.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  return !!b
+}
+async function ccCreate(doc, win) {
+  ccSetInput(win, doc.querySelector('.chars-new input'), 'Alice')
+  await ccWait(80)
+  ;[...doc.querySelectorAll('.chars-new button')][0]
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await ccWait(450)
+}
 
+// 46) 视图与四步骨架
+{
+  const { dom, doc, win, errors, c0 } = await ccBoot()
   const tabs = [...doc.querySelectorAll('.view-tab')]
   check('顶栏有「画布 / 角色中心」两个一级视图',
     tabs.length === 2 && tabs[0].textContent.includes('画布')
     && tabs[1].textContent.includes('角色中心'),
     tabs.map((t) => t.textContent).join('/'))
-
-  tabs[1]?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 300))
   check('切到角色中心后画布节点不见了', !doc.querySelector('.node'))
-  check('角色中心页面挂上了', !!doc.querySelector('.chars'))
+  check('角色中心页面挂上了', !!doc.querySelector('.chars.cc'))
   check('去服务端读了角色列表',
-    calls.some((c) => c.url.endsWith('/characters')),
-    calls.map((c) => c.url).slice(-2).join())
-  check('空库时给出可照做的说明',
-    (doc.querySelector('.chars-empty')?.textContent || '').includes('assets/characters'),
-    (doc.querySelector('.chars-empty')?.textContent || '').slice(0, 40))
+    calls.slice(c0).some((c) => c.url.endsWith('/characters') && c.method === 'GET'),
+    calls.slice(c0).map((c) => c.url).slice(-3).join())
+  check('空库时给的是可照做的下一步（不是文件夹路径）',
+    (doc.querySelector('.chars-empty')?.textContent || '').includes('第 ① 步'),
+    (doc.querySelector('.chars-empty')?.textContent || '').slice(0, 50))
+  const steps = [...doc.querySelectorAll('.cc-step')]
+  check('只有 4 个步骤（旧版 5 个并列 tab 已收编）',
+    steps.length === 4, steps.map((s) => s.textContent).join('/'))
+  check('步骤顺序是 创建角色 → 定形象 → 出素材 → 导出',
+    steps.map((s) => s.textContent).join('|').includes('创建角色')
+    && steps.map((s) => s.textContent).join('|').includes('定形象')
+    && steps.map((s) => s.textContent).join('|').includes('出素材')
+    && steps.map((s) => s.textContent).join('|').includes('导出'))
+  check('右栏空态说清了四步会得到什么',
+    (doc.querySelector('.cc-preview-idle')?.textContent || '').includes('四步'))
+  check('第 ① 步有创建表单（不是让用户去别处找）',
+    !!doc.querySelector('.chars-new input') && !!doc.querySelector('.chars-new button'))
 
-  // 建一个角色：名字只能含字母/数字/空格/-/_（后端 ensure_safe_name 会挡路径穿越）
-  const input = doc.querySelector('.chars-new input')
-  check('有新建角色的输入框', !!input)
-  const setInput = (el, v) => {
-    Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value').set.call(el, v)
-    el.dispatchEvent(new win.Event('input', { bubbles: true }))
-  }
-  setInput(input, 'Alice')
-  await new Promise((r) => setTimeout(r, 80))
-  ;[...doc.querySelectorAll('.chars-new button')][0]
-    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 400))
-  const created = calls.find((c) => c.url.endsWith('/characters') && c.method === 'POST')
+  await ccCreate(doc, win)
+  const created = calls.slice(c0).find((c) => c.url.endsWith('/characters') && c.method === 'POST')
   check('建角色打到服务端 POST /characters', !!created, created?.body)
   check('角色出现在库里', [...doc.querySelectorAll('.chars-card-name')]
     .some((n) => n.textContent === 'Alice'),
   [...doc.querySelectorAll('.chars-card-name')].map((n) => n.textContent).join())
-
-  // 选中后右侧出详情：官方那套属性 + 四个 tab
-  const card = [...doc.querySelectorAll('.chars-card')]
-    .find((c) => (c.textContent || '').includes('Alice'))
-  card?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 400))
   check('选中角色后拉详情',
-    calls.some((c) => c.url.includes('/characters/Alice')))
-  const subTabs = [...doc.querySelectorAll('.chars-tab')]
-  check('详情有 属性/出图/服装/表情库/素材 五个 tab',
-    subTabs.length === 5, subTabs.map((t) => t.textContent).join('/'))
-  check('属性页有画风区（官方 358 条风格库）',
-    (doc.querySelector('.chars-style')?.textContent || '').includes('画风'),
-    (doc.querySelector('.chars-style')?.textContent || '').slice(0, 30))
+    calls.slice(c0).some((c) => c.url.includes('/characters/Alice') && c.method === 'GET'))
+  check('角色名挂在步骤条下方（知道自己在改谁）',
+    (doc.querySelector('.cc-charhead')?.textContent || '').includes('Alice'))
+  check('成果区常驻右栏（结果优先，不用切页找）',
+    !!doc.querySelector('.cc-preview .sprite-preview'))
+  check('步骤条有完成标记（状态由真实产物推导）',
+    doc.querySelectorAll('.cc-step.is-done').length > 0,
+    String(doc.querySelectorAll('.cc-step.is-done').length))
+  check('有明确的「下一步」落点',
+    (doc.querySelector('.cc-next')?.textContent || '').includes('下一步')
+    || !!doc.querySelector('.cc-next.is-done'))
 
-  // 切回画布
+  check('手动点步骤 ② 能回到定形象', ccStep(doc, win, 2))
+  await ccWait(250)
+  check('定形象页有画风区', (doc.querySelector('.chars-style')?.textContent || '').includes('画风'))
+  check('主流程每步只有一个主按钮',
+    doc.querySelectorAll('.cc-cta').length <= 1,
+    String(doc.querySelectorAll('.cc-cta').length))
+
   ;[...doc.querySelectorAll('.view-tab')][0]
     ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 300))
+  await ccWait(250)
   check('切回画布后角色中心收起', !doc.querySelector('.chars'))
   check('角色中心场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 
-// 47) 角色出图：官方结构化 prompt + 提交后自动收进角色目录
-//
-// 官方造角色不是一句自然语言，是**每个字段一行**的结构化 prompt
-// （character_creator_v2.py:1124）——风格 LoRA 就是照这个格式调的。
-// 这条用例钉住两件事：prompt 是后端按官方结构拼的；出完图后端直接收进
-// Sprites/<服装>/<表情>/，不用前端再搬一次。
+// 47) 定形象：结构化 prompt、PE、生成第一张立绘、统一任务反馈
 {
-  const { dom, errors } = await boot('')
-  const doc = dom.window.document
-  const win = dom.window
-  await new Promise((r) => setTimeout(r, 400))
-
-  // 进角色中心并建一个角色
-  ;[...doc.querySelectorAll('.view-tab')][1]
-    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 250))
-  const setInput = (el, v) => {
-    Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value').set.call(el, v)
-    el.dispatchEvent(new win.Event('input', { bubbles: true }))
-  }
-  setInput(doc.querySelector('.chars-new input'), 'Alice')
-  await new Promise((r) => setTimeout(r, 80))
-  ;[...doc.querySelectorAll('.chars-new button')][0]
-    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 300))
-
-  // 切到「出图」页
-  const genTab = [...doc.querySelectorAll('.chars-tab')]
-    .find((t) => (t.textContent || '').includes('出图'))
-  check('详情有「出图」页', !!genTab)
-  genTab?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 400))
+  const { dom, doc, win, errors, c0 } = await ccBoot()
+  await ccCreate(doc, win)
+  ccStep(doc, win, 2)
+  await ccWait(300)
   check('向后端要了拼好的 prompt',
-    calls.some((c) => c.url.includes('/characters/Alice/prompt')))
+    calls.slice(c0).some((c) => c.url.includes('/characters/Alice/prompt')))
   const ta = doc.querySelector('textarea.chars-prompt')
   check('prompt 显示出来了（官方结构化格式）',
     (ta?.value || '').includes('The image contains one character.')
     && (ta?.value || '').includes('Gender: female'),
   (ta?.value || '').slice(0, 60))
-  check('显示官方默认参数（25 步 / cfg 3）',
-    (doc.querySelector('.chars-body')?.textContent || '').includes('25 步'),
-    (doc.querySelector('.chars-body')?.textContent || '').slice(0, 60))
-  check('显示官方公式算出的分辨率 792×1408',
-    (doc.querySelector('.chars-body')?.textContent || '').includes('792×1408'))
-
-  // Prompt Enhancement：官方用**图像模型自己的 Qwen3-VL** 改写（不新增权重）
+  const body = () => doc.querySelector('.chars-body')?.textContent || ''
+  check('显示官方默认参数（25 步 / cfg 3）', body().includes('25 步'), body().slice(0, 60))
+  check('显示官方公式算出的分辨率 792×1408', body().includes('792×1408'))
   const peBox = doc.querySelector('.chars-check input[type=checkbox]')
-  check('有 Prompt Enhancement 开关', !!peBox)
+  check('有 Prompt Enhancement 开关（收在进阶里）', !!peBox)
   check('PE 默认开（官方默认开）', peBox?.checked === true)
   check('PE 说明里写清了用的是图像模型自己的 Qwen3-VL',
-    (doc.querySelector('.chars-check')?.textContent || '').includes('Qwen3-VL'),
-    (doc.querySelector('.chars-check')?.textContent || '').slice(0, 50))
+    (doc.querySelector('.chars-check')?.textContent || '').includes('Qwen3-VL'))
   peBox?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 400))
-  const peCall = calls.filter((c) => c.url.includes('/characters/Alice/prompt')).pop()
-  check('关掉 PE 后重新拼 prompt 且带 enhance=false',
-    !!peCall && JSON.parse(peCall.body).enhance === false,
-    peCall?.body)
-  peBox?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 400))
+  await ccWait(350)
+  const peCall = calls.slice(c0).filter((c) => c.url.includes('/characters/Alice/prompt')).pop()
+  check('关掉 PE 后重新拼 prompt 带上 enhance=false',
+    !!peCall && JSON.parse(peCall.body || '{}').enhance === false, peCall?.body)
 
-  const genBtn = [...doc.querySelectorAll('.chars-body button')]
-    .find((b) => (b.textContent || '').includes('生成底图'))
-  check('有「生成底图」按钮', !!genBtn)
-  genBtn?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 600))
-  const gen = calls.find((c) => c.url.includes('/characters/Alice/generate'))
-  check('出图提交到 /characters/Alice/generate', !!gen, gen?.url)
-  if (gen) {
-    const b = JSON.parse(gen.body)
-    check('提交的是 w1 文生图', b.workflow === 'w1', b.workflow)
-    check('带了拼好的 prompt 与负向词',
-      String(b.prompt || '').includes('Gender:') && b.negative === 'bad quality',
-      String(b.prompt || '').slice(0, 40))
+  check('有「生成第一张立绘」这个唯一主 CTA',
+    ccClick(doc, win, '生成第一张立绘'))
+  await ccWait(250)
+  const genCall = calls.slice(c0).find((c) => c.url.endsWith('/characters/Alice/generate'))
+  check('提交到 /characters/Alice/generate', !!genCall, genCall?.url)
+  if (genCall) {
+    const b = JSON.parse(genCall.body)
+    check('文生图工作流 w1', b.workflow === 'w1', b.workflow)
+    check('提交的是后端拼好的结构化 prompt',
+      (b.prompt || '').includes('Gender:'), (b.prompt || '').slice(0, 50))
+    check('负向词一起提交', b.negative === 'bad quality', b.negative)
+    check('抠背景默认关（模型自带透明底）', b.matte === false, String(b.matte))
   }
-  check('轮询了任务状态', calls.some((c) => c.url.includes('/jobs/')))
-  check('出完图自动切到素材页',
-    [...doc.querySelectorAll('.chars-tab')].some(
-      (t) => t.classList.contains('on') && (t.textContent || '').includes('素材')))
+  check('轮询了任务状态', calls.slice(c0).some((c) => c.url.includes('/jobs/')))
+  await ccWait(1400)
+  check('完成后统一任务条显示成功（不再是一闪而过的小字）',
+    !!doc.querySelector('.cc-task.is-done'),
+    doc.querySelector('.cc-task')?.textContent?.slice(0, 50))
+  check('完成后有显眼绿条', !!doc.querySelector('.chars-done'))
   check('出图场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 
-// 46b) 看图反推属性：官方 Cloner 旁路（本地 4B 模型）
-//
-// 它跟「手填属性」是两条路：模型读图给出 11 个字段，**先摆给用户看**，
-// 用户点「用这些属性」才写进 config。属性错了会一路影响后面所有出图
-// （prompt 是它拼的），所以绝不能拿到就自动保存。
+// 48) 定形象：看图反推 / 一句话向导 / 官方标签库
 {
-  const { dom, errors, fetch: f } = await boot('')
-  const doc = dom.window.document
-  const win = dom.window
-  await new Promise((r) => setTimeout(r, 400))
-  const click = (el) => el.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  const setInput = (el, v) => {
-    Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value').set.call(el, v)
-    el.dispatchEvent(new win.Event('input', { bubbles: true }))
-  }
+  const { dom, doc, win, errors, c0 } = await ccBoot()
+  await ccCreate(doc, win)
+  ccStep(doc, win, 2)
+  await ccWait(300)
 
-  ;[...doc.querySelectorAll('.view-tab')][1]?.dispatchEvent(
-    new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 250))
-  setInput(doc.querySelector('.chars-new input'), 'Alice')
-  await new Promise((r) => setTimeout(r, 80))
-  click([...doc.querySelectorAll('.chars-new button')][0])
-  await new Promise((r) => setTimeout(r, 300))
-
-  const body = () => doc.querySelector('.chars-body')?.textContent || ''
-  const btn = () => [...doc.querySelectorAll('.chars-body button')]
-    .find((b) => (b.textContent || '').includes('反推'))
-
-  check('属性页有「从图片反推属性」按钮', !!btn())
-  click(btn())
-  await new Promise((r) => setTimeout(r, 500))
-  check('调用了 /characters/Alice/analyze',
-    calls.some((c) => c.url.includes('/characters/Alice/analyze')))
-  check('结果先摆出来给人看（不是直接保存）',
-    !!doc.querySelector('.chars-analyze'), '没有 .chars-analyze')
-  check('结果里有模型读出的字段',
+  check('有「从图片反推属性」入口', ccClick(doc, win, '从图片反推属性'))
+  await ccWait(350)
+  check('调用了 /analyze',
+    calls.slice(c0).some((c) => c.url.includes('/characters/Alice/analyze')))
+  check('反推结果先给用户看，不自动落盘',
     (doc.querySelector('.chars-analyze')?.textContent || '').includes('silver hair'),
-    (doc.querySelector('.chars-analyze')?.textContent || '').slice(0, 80))
-  check('结果里有「用这些属性」按钮',
-    [...doc.querySelectorAll('.chars-analyze button')]
-      .some((b) => (b.textContent || '').includes('用这些属性')))
+    (doc.querySelector('.chars-analyze')?.textContent || '').slice(0, 60))
+  check('确认才写进角色', ccClick(doc, win, '用这些属性'))
+  await ccWait(350)
+  const put = calls.slice(c0).filter((c) => c.url.includes('/characters/Alice/info')).pop()
+  check('确认后 PUT /info（覆盖同名项）',
+    !!put && JSON.parse(put.body).race === 'human'
+    && JSON.parse(put.body).hair.includes('silver hair'), put?.body)
 
-  // 点「用这些属性」→ 才写进 config
-  const applyBtn = [...doc.querySelectorAll('.chars-analyze button')]
-    .find((b) => (b.textContent || '').includes('用这些属性'))
-  click(applyBtn)
-  await new Promise((r) => setTimeout(r, 400))
-  const put = calls.filter((c) => c.method === 'PUT'
-    && c.url.includes('/characters/Alice/info')).pop()
-  check('确认后才保存属性', !!put, put?.url)
-  if (put) {
-    const b = JSON.parse(put.body)
-    check('保存的内容是模型读出来的字段',
-      JSON.stringify(b).includes('silver hair'), JSON.stringify(b).slice(0, 90))
-  }
-  check('应用后结果面板收起', !doc.querySelector('.chars-analyze'))
+  ccSetInput(win, doc.querySelector('.chars-wizard-input'), '苍白的精灵女剑士')
+  await ccWait(80)
+  check('有一句话生成入口', ccClick(doc, win, '一句话生成'))
+  await ccWait(350)
+  check('调用了 /characters/wizard',
+    calls.slice(c0).some((c) => c.url.endsWith('/characters/wizard')))
+  check('向导结果也先给看再确认',
+    (doc.querySelector('.chars-analyze')?.textContent || '').includes('elf'))
 
-  // ---- 失败路径：缺权重时要说清是缺什么，而不是"未知错误" ----
-  f.setAnalyzeFail(true)
-  click(btn())
-  await new Promise((r) => setTimeout(r, 500))
-  const txt = body()
-  check('反推失败时把错误码/原因显示出来',
-    txt.includes('MMPROJ_MISSING') || txt.includes('投影器'), txt.slice(-120))
-  check('失败不影响手填（属性字段还在）',
-    !!doc.querySelector('.chars-body select'))
-  f.setAnalyzeFail(false)
-
-  check('看图反推场景无脚本错误', errors.length === 0, errors[0] || '')
+  check('反推/一句话场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 
-// 46c) AI 向导：一句话造角色（纯文本，官方 character_creator_v2.py:1740）
+// 48b) 官方标签库：结构化选择题优先于让用户对着中文界面手写英文
 //
-// 跟「看图反推」是一对：一个从图读、一个从话推。都是**生成完给用户看**，
-// 确认才写进 config——属性错了会一路影响后面所有出图。
+// 单独起一个 boot：48 里「用这些属性」会把 eyes 覆盖成 red eyes，
+// 标签别名断言需要的是存档原值 blue_eyes, my own trait。
 {
-  const { dom, errors } = await boot('')
-  const doc = dom.window.document
-  const win = dom.window
-  await new Promise((r) => setTimeout(r, 400))
-  const click = (el) => el.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  const setInput = (el, v) => {
-    Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value').set.call(el, v)
-    el.dispatchEvent(new win.Event('input', { bubbles: true }))
-  }
-
-  ;[...doc.querySelectorAll('.view-tab')][1]?.dispatchEvent(
-    new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 250))
-  setInput(doc.querySelector('.chars-new input'), 'Alice')
-  await new Promise((r) => setTimeout(r, 80))
-  click([...doc.querySelectorAll('.chars-new button')][0])
-  await new Promise((r) => setTimeout(r, 300))
-
-  const input = doc.querySelector('.chars-wizard-input')
-  check('属性页有一句话输入框', !!input)
-  const btn = [...doc.querySelectorAll('.chars-body button')]
-    .find((b) => (b.textContent || '').includes('一句话生成'))
-  check('有「一句话生成」按钮', !!btn)
-  check('没输入时按钮是禁用的（避免空提交）', btn?.disabled === true)
-
-  setInput(input, '一个苍白的精灵女剑士，银发红瞳，身材纤细')
-  await new Promise((r) => setTimeout(r, 80))
-  check('输入后按钮可用', btn.disabled === false)
-  click(btn)
-  await new Promise((r) => setTimeout(r, 500))
-
-  const call = calls.find((c) => c.url.endsWith('/characters/wizard'))
-  check('提交到 /characters/wizard', !!call, call?.url)
-  if (call) {
-    const b = JSON.parse(call.body)
-    check('带上了用户那句话', String(b.description || '').includes('精灵'), b.description)
-  }
-  check('结果摆出来给人看', !!doc.querySelector('.chars-analyze'))
-  check('结果里有模型推出来的字段',
-    (doc.querySelector('.chars-analyze')?.textContent || '').includes('silver hair'),
-    (doc.querySelector('.chars-analyze')?.textContent || '').slice(0, 80))
-  check('跟官方一样补上了 breast 标签',
-    (doc.querySelector('.chars-analyze')?.textContent || '').includes('small_breasts'))
-
-  const applyBtn = [...doc.querySelectorAll('.chars-analyze button')]
-    .find((b) => (b.textContent || '').includes('用这些属性'))
-  click(applyBtn)
-  await new Promise((r) => setTimeout(r, 400))
-  const put = calls.filter((c) => c.method === 'PUT'
-    && c.url.includes('/characters/Alice/info')).pop()
-  check('确认后才保存（向导也不落盘）', !!put, put?.url)
-
-  check('AI 向导场景无脚本错误', errors.length === 0, errors[0] || '')
+  const { dom, doc, win, errors, c0 } = await ccBoot()
+  await ccCreate(doc, win)
+  ccStep(doc, win, 2)
+  await ccWait(300)
+  check('8 个外貌字段都能点选标签',
+    doc.querySelectorAll('.chars-field.cc-field').length === 8,
+    String(doc.querySelectorAll('.chars-field.cc-field').length))
+  check('取的是 creator_v2 标签库',
+    calls.slice(c0).some((c) => c.url.includes('character_presets_v2.json')))
+  const hairBtn = [...doc.querySelectorAll('.chars-field')]
+    .find((f) => (f.textContent || '').includes('发型发色'))?.querySelector('button')
+  hairBtn?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await ccWait(250)
+  check('点「选」弹出标签面板', !!doc.querySelector('.tag-modal'))
+  check('头发分成 6 组（官方 FIELD_CATEGORIES）',
+    doc.querySelectorAll('.tag-group-head').length === 6,
+    String(doc.querySelectorAll('.tag-group-head').length))
+  ;[...doc.querySelectorAll('.tag-mask')][0]
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await ccWait(200)
+  const eyeBtn = [...doc.querySelectorAll('.chars-field')]
+    .find((f) => (f.textContent || '').includes('眼睛'))?.querySelector('button')
+  eyeBtn?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await ccWait(250)
+  const chips = [...doc.querySelectorAll('.tag-chip')]
+  const blueChip = chips.find((c) => (c.textContent || '').trim() === '蓝眼')
+  check('下划线写法 blue_eyes 也能匹配到「蓝眼」',
+    blueChip?.classList.contains('on'), blueChip?.className || '（没找到 chip）')
+  check('打开时原样带出现有值',
+    (doc.querySelector('.tag-result input')?.value || '') === 'blue_eyes, my own trait',
+    doc.querySelector('.tag-result input')?.value)
+  chips.find((c) => (c.textContent || '').trim() === '绿眼')
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await ccWait(150)
+  check('选一项后写入框更新',
+    (doc.querySelector('.tag-result input')?.value || '').includes('green eyes'))
+  ;[...doc.querySelectorAll('.tag-act button')]
+    .find((b) => (b.textContent || '').includes('确定'))
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await ccWait(350)
+  check('确定后关闭面板', !doc.querySelector('.tag-modal'))
+  const eyePut = calls.slice(c0).filter((c) => c.url.includes('/characters/Alice/info')).pop()
+  check('把选好的内容写回服务端角色属性',
+    !!eyePut && JSON.parse(eyePut.body).eyes.includes('green eyes'), eyePut?.body)
+  check('标签选择场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 
-// 46d) 换装：五个字段 → 一张换装底图（官方 Clothes Designer）
-//
-// **换装不是"只存描述"**：它把 top/bottom/head/shoes/face 拼成
-// `Dress the character:` 指令，拿裸装底图重画一张，存成这套服装的底图。
-// 这条用例钉住：AI 拆服装能把字段灌进表单；出图前会先把表单存进 config
-// （不然换装读到的是上一次的内容）。
+// 49) 出素材：一键全套（唯一入口）、单步重跑、统一任务条
 {
-  const { dom, errors } = await boot('')
-  const doc = dom.window.document
-  const win = dom.window
-  await new Promise((r) => setTimeout(r, 400))
-  const click = (el) => el.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  const setInput = (el, v) => {
-    Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value').set.call(el, v)
-    el.dispatchEvent(new win.Event('input', { bubbles: true }))
+  // 49a 换装：AI 拆服装 → 保存 → 新建服装（立即落盘）→ 出换装立绘
+  {
+    const { dom, doc, win, errors, c0 } = await ccBoot()
+    await ccCreate(doc, win)
+    ccStep(doc, win, 3)
+    await ccWait(300)
+    ccSetInput(win, doc.querySelector('.chars-wizard-input'), '赛博朋克护士')
+    await ccWait(80)
+    check('进阶里有 AI 拆服装', ccClick(doc, win, 'AI 拆服装'))
+    await ccWait(350)
+    check('调用了 /clothes/wizard',
+      calls.slice(c0).some((c) => c.url.includes('/clothes/wizard')))
+    const cins = [...doc.querySelectorAll('.chars-costume input')]
+    check('拆出的字段灌进表单（上装 / 护目镜）',
+      (cins[0]?.value || '').includes('nurse uniform') && (cins[4]?.value || '').includes('goggles'),
+      `${cins[0]?.value} / ${cins[4]?.value}`)
+    check('有保存服装', ccClick(doc, win, '保存服装'))
+    await ccWait(300)
+    check('保存打到 PUT /costumes',
+      calls.slice(c0).some((c) => c.method === 'PUT' && c.url.includes('/costumes/')))
+    ccSetInput(win, doc.querySelector('.cc-costume-name'), 'Nurse')
+    await ccWait(80)
+    check('新建服装入口是内联输入（不再弹 window.prompt）',
+      ccClick(doc, win, '新建服装'))
+    await ccWait(350)
+    check('新建服装立即落盘（切角色不会丢）',
+      calls.slice(c0).some((c) => c.method === 'PUT' && c.url.includes('/costumes/Nurse')))
+    const designBtn = [...doc.querySelectorAll('button')]
+      .find((b) => (b.textContent || '').includes('生成这套服装的立绘'))
+    check('换装按钮可用（前置条件都满足）', !!designBtn && !designBtn.disabled,
+      `disabled=${designBtn?.disabled} costume=${doc.querySelector('.cc-subcard select')?.value} task=${doc.querySelector('.cc-task')?.className}`)
+    check('出换装立绘', ccClick(doc, win, '生成这套服装的立绘'))
+    await ccWait(700)
+    check('调用了 /clothes/design',
+      calls.slice(c0).some((c) => c.url.includes('/clothes/design')),
+      calls.slice(c0).filter((c) => c.method === 'POST').map((c) => c.url).join())
+    check('服装场景无脚本错误', errors.length === 0, errors[0] || '')
+    dom.window.close()
   }
 
-  ;[...doc.querySelectorAll('.view-tab')][1]?.dispatchEvent(
-    new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 250))
-  setInput(doc.querySelector('.chars-new input'), 'Alice')
-  await new Promise((r) => setTimeout(r, 80))
-  click([...doc.querySelectorAll('.chars-new button')][0])
-  await new Promise((r) => setTimeout(r, 300))
-
-  // 进「服装」页
-  const tab = [...doc.querySelectorAll('.chars-tab')]
-    .find((t) => (t.textContent || '').includes('服装'))
-  check('详情有「服装」页', !!tab)
-  click(tab)
-  await new Promise((r) => setTimeout(r, 400))
-  const body = () => doc.querySelector('.chars-body')?.textContent || ''
-  check('说明里写清了换装是「把描述变成一张图」',
-    body().includes('把描述变成一张图') && body().includes('Dress the character'),
-    body().slice(0, 160))
-
-  // ---- 1. AI 拆服装 ----
-  const input = doc.querySelector('.chars-wizard-input')
-  check('服装页有一句话输入框', !!input)
-  setInput(input, '护士，白大褂 + 荧光绿内衬 + 护目镜')
-  await new Promise((r) => setTimeout(r, 80))
-  const wizBtn = [...doc.querySelectorAll('.chars-body button')]
-    .find((b) => (b.textContent || '').includes('AI 拆服装'))
-  check('有「AI 拆服装」按钮', !!wizBtn)
-  click(wizBtn)
-  await new Promise((r) => setTimeout(r, 500))
-  check('调用了 /clothes/wizard',
-    calls.some((c) => c.url.includes('/characters/Alice/clothes/wizard')))
-  const inputs = [...doc.querySelectorAll('.chars-costume input')]
-  check('拆出来的字段填进了表单（顶部第一个）',
-    (inputs[0]?.value || '').includes('nurse uniform'), inputs[0]?.value)
-  check('face 字段也填了（护目镜这种穿戴物）',
-    (inputs[4]?.value || '').includes('goggles'), inputs[4]?.value)
-
-  // ---- 2. 选一套具体服装（Naked 不能换装）----
-  const sel = doc.querySelector('.chars-row select')
-  const setSelect = (el, v) => {
-    Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value').set.call(el, v)
-    el.dispatchEvent(new win.Event('change', { bubbles: true }))
-  }
-  // mock 的角色只有 Naked，这里直接改成目标服装名（真实环境是新建后选中）
-  setSelect(sel, sel.options[0].value)
-  await new Promise((r) => setTimeout(r, 120))
-  const designBtn = () => [...doc.querySelectorAll('.chars-body button')]
-    .find((b) => (b.textContent || '').includes('换装底图'))
-  check('有「出换装底图」按钮', !!designBtn())
-  check('Naked 时按钮禁用（基础集不换装）', designBtn()?.disabled === true)
-
-  // ---- 3. 一句话拆完再保存，才算数 ----
-  const saveBtn = [...doc.querySelectorAll('.chars-costume button')]
-    .find((b) => (b.textContent || '').includes('保存服装'))
-  check('有「保存服装」按钮', !!saveBtn)
-  click(saveBtn)
-  await new Promise((r) => setTimeout(r, 400))
-  const put = calls.filter((c) => c.method === 'PUT'
-    && c.url.includes('/characters/Alice/costumes/')).pop()
-  check('保存服装发到 /costumes/<服装>', !!put, put?.url)
-  if (put) {
-    const b = JSON.parse(put.body)
-    check('存的是表单里的五个字段',
-      JSON.stringify(b).includes('nurse uniform'), JSON.stringify(b).slice(0, 120))
+  // 49b 姿势批量
+  {
+    const { dom, doc, win, errors, c0 } = await ccBoot()
+    await ccCreate(doc, win)
+    ccStep(doc, win, 3)
+    await ccWait(300)
+    check('单步重跑姿势入口', ccClick(doc, win, '按这批姿势生成'))
+    await ccWait(300)
+    const poseCall = calls.slice(c0).find((c) => c.url.endsWith('/poses/generate'))
+    check('提交到 /poses/generate', !!poseCall, poseCall?.url)
+    if (poseCall) {
+      const b = JSON.parse(poseCall.body)
+      check('带骨架帧目录', !!b.pose_dir, b.pose_dir)
+      check('用的是同一个「当前服装」状态', b.costume === 'Naked', b.costume)
+    }
+    await ccWait(2400)
+    check('姿势任务完成后任务条回到 done', !!doc.querySelector('.cc-task.is-done'))
+    check('姿势场景无脚本错误', errors.length === 0, errors[0] || '')
+    dom.window.close()
   }
 
-  check('换装场景无脚本错误', errors.length === 0, errors[0] || '')
+  // 49c 一键出全套：唯一入口 + 固定顺序 + 耗时预估
+  {
+    const { dom, doc, win, errors, c0 } = await ccBoot()
+    await ccCreate(doc, win)
+    ccStep(doc, win, 3)
+    await ccWait(300)
+    const pipeBtns = [...doc.querySelectorAll('button')]
+      .filter((b) => (b.textContent || '').includes('一键出全套'))
+    check('「一键出全套」全页只有一个按钮（旧版 assets 页 + 右栏共 2 个）',
+      pipeBtns.length === 1, String(pipeBtns.length))
+    check('把预计耗时写在按钮旁边',
+      (doc.querySelector('.chars-body')?.textContent || '').includes('预计'))
+    pipeBtns[0]?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+    await ccWait(300)
+    const pipeCall = calls.slice(c0).find((c) => c.url.endsWith('/pipeline'))
+    check('提交到 /pipeline', !!pipeCall, pipeCall?.url)
+    if (pipeCall) {
+      const b = JSON.parse(pipeCall.body)
+      check('默认先做干净起稿', b.underwear === true, String(b.underwear))
+      check('带骨架帧目录', !!b.pose_dir, b.pose_dir)
+      check('没勾表情就不硬塞', Array.isArray(b.emotions) && b.emotions.length === 0)
+      check('抠背景沿用全局开关（默认关）', b.matte === false, String(b.matte))
+    }
+    await ccWait(3400)
+    check('流水线完成后任务条显示成功', !!doc.querySelector('.cc-task.is-done'))
+    check('流水线场景无脚本错误', errors.length === 0, errors[0] || '')
+    dom.window.close()
+  }
+
+  // 49d 干净起稿（白内衣）
+  {
+    const { dom, doc, win, errors, c0 } = await ccBoot()
+    await ccCreate(doc, win)
+    ccStep(doc, win, 3)
+    await ccWait(300)
+    check('有单独重跑干净起稿的入口', ccClick(doc, win, '生成干净起稿'))
+    await ccWait(250)
+    const uwCall = calls.slice(c0).find((c) => c.url.endsWith('/clothes/underwear'))
+    check('提交到 /clothes/underwear', !!uwCall, uwCall?.url)
+    if (uwCall) {
+      const b = JSON.parse(uwCall.body || '{}')
+      check('body 不带前端自造的 steps/cfg', !('steps' in b) && !('cfg' in b), uwCall.body)
+    }
+    check('内衣场景无脚本错误', errors.length === 0, errors[0] || '')
+    dom.window.close()
+  }
+}
+
+// 50) 导出：图集 + 坐标表 + 统一完成反馈
+{
+  const { dom, doc, win, errors, c0 } = await ccBoot()
+  await ccCreate(doc, win)
+  ccStep(doc, win, 4)
+  await ccWait(300)
+  const atlasGets = calls.slice(c0).filter((c) => c.url.endsWith('/atlas') && c.method === 'GET')
+  check('进页面只查图集状态，不偷偷跑导出',
+    atlasGets.length > 0
+    && !calls.slice(c0).some((c) => c.url.endsWith('/atlas') && c.method === 'POST'))
+  check('点导出图集', ccClick(doc, win, '导出图集'))
+  await ccWait(250)
+  check('恰好提交 1 个 POST /atlas',
+    calls.slice(c0).filter((c) => c.url.endsWith('/atlas') && c.method === 'POST').length === 1)
+  await ccWait(3400)
+  check('导出完成后任务条显示成功', !!doc.querySelector('.cc-task.is-done'))
+  check('给出图集预览入口（能看到图在哪）',
+    !!doc.querySelector('.chars-atlas-link img'))
+  const txt = doc.querySelector('.chars-body')?.textContent || ''
+  check('显示图集统计（4 帧 / 2 组动画 / 尺寸 / 画布）',
+    txt.includes('4 帧') && txt.includes('2 组动画')
+    && txt.includes('192×288') && txt.includes('96×144'), txt.slice(-120))
+  check('有坐标表下载入口',
+    [...doc.querySelectorAll('a')].some((a) => (a.textContent || '').includes('atlas.json')))
+  check('导出场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 
-// 46e) 多姿势批量：一个骨架帧目录 → 一整批精灵帧（官方 pose_generation）
-//
-// 三件事要钉住：整批**共用一个种子**（不是每张随机）、发布是**整批替换**
-// （旧帧进 V1，跟表情那条逐张追加不一样）、**有进度条**（一批几十张要跑很久）。
+// 51) 表情：先检脸框 → 选卡 → 批量生成 → 进度在统一任务条里
 {
-  const { dom, errors } = await boot('')
-  const doc = dom.window.document
-  const win = dom.window
-  await new Promise((r) => setTimeout(r, 400))
-  const click = (el) => el.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  const setInput = (el, v) => {
-    Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value').set.call(el, v)
-    el.dispatchEvent(new win.Event('input', { bubbles: true }))
-  }
-
-  ;[...doc.querySelectorAll('.view-tab')][1]?.dispatchEvent(
-    new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 250))
-  setInput(doc.querySelector('.chars-new input'), 'Alice')
-  await new Promise((r) => setTimeout(r, 80))
-  click([...doc.querySelectorAll('.chars-new button')][0])
-  await new Promise((r) => setTimeout(r, 300))
-
-  // 进「素材」页（多姿势生成放在这里，产出就是这一套帧）
-  const tab = [...doc.querySelectorAll('.chars-tab')]
-    .find((t) => (t.textContent || '').includes('素材'))
-  check('详情有「素材」页', !!tab)
-  click(tab)
-  await new Promise((r) => setTimeout(r, 500))
-
-  const body = () => doc.querySelector('.chars-body')?.textContent || ''
-  check('素材页有多姿势批量区', !!doc.querySelector('.chars-posegen'))
-  check('说明里写清了会整批替换（旧帧进 V1）',
-    body().includes('整批替换') && body().includes('V1'), body().slice(-200))
-  check('说明里写清了整批共用一个种子', body().includes('共用一个种子'))
-
-  const sel = doc.querySelector('.chars-posegen select')
-  check('骨架帧目录下拉有内容（来自 /pose_dirs）',
-    (sel?.options.length || 0) >= 1, String(sel?.options.length))
-
-  const btn = [...doc.querySelectorAll('.chars-posegen button')]
-    .find((b) => (b.textContent || '').includes('按这批姿势生成'))
-  check('有「按这批姿势生成」按钮', !!btn)
-  check('有目录时按钮可用', btn?.disabled === false)
-  click(btn)
-  await new Promise((r) => setTimeout(r, 500))
-
-  const call = calls.find((c) => c.url.includes('/characters/Alice/poses/generate'))
-  check('提交到 /poses/generate', !!call, call?.url)
-  if (call) {
-    const b = JSON.parse(call.body)
-    check('带上了骨架帧目录（不是逐张路径）', !!b.pose_dir, JSON.stringify(b).slice(0, 80))
-    check('带上了服装', b.costume === 'Naked', b.costume)
-  }
-  check('批量任务有进度条', !!doc.querySelector('.chars-prog'))
-  check('进度里带当前第几张',
-    (doc.querySelector('.chars-prog')?.parentElement?.textContent || '').includes('张姿势'),
-    (doc.querySelector('.chars-prog')?.parentElement?.textContent || '').slice(-80))
-
-  await new Promise((r) => setTimeout(r, 1600))
-  check('多姿势场景无脚本错误', errors.length === 0, errors[0] || '')
-  dom.window.close()
-}
-
-// 46f) 导出图集：帧 → 引擎能直接读的 atlas + 坐标表
-//
-// 这一层**不是官方功能**，但它是"接进引擎"的关键一步。要钉住三件事：
-//   1. 进页面只**查状态**（GET），不会顺手把导出跑一遍；
-//   2. 导出后统计（帧数/组数/尺寸）要摆给用户看；
-//   3. 对齐规则要在界面上写清楚（底边对齐 —— 不然动画里角色上下抖）。
-{
-  const { dom, errors } = await boot('')
-  const doc = dom.window.document
-  const win = dom.window
-  await new Promise((r) => setTimeout(r, 400))
-  const click = (el) => el.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  const setInput = (el, v) => {
-    Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value').set.call(el, v)
-    el.dispatchEvent(new win.Event('input', { bubbles: true }))
-  }
-
-  ;[...doc.querySelectorAll('.view-tab')][1]?.dispatchEvent(
-    new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 250))
-  setInput(doc.querySelector('.chars-new input'), 'Alice')
-  await new Promise((r) => setTimeout(r, 80))
-  click([...doc.querySelectorAll('.chars-new button')][0])
-  await new Promise((r) => setTimeout(r, 300))
-
-  const tab = [...doc.querySelectorAll('.chars-tab')]
-    .find((t) => (t.textContent || '').includes('素材'))
-  click(tab)
-  await new Promise((r) => setTimeout(r, 600))
-
-  const body = () => doc.querySelector('.chars-body')?.textContent || ''
-  const exportBtn = () => [...doc.querySelectorAll('.chars-body button')]
-    .find((b) => (b.textContent || '').includes('导出图集'))
-
-  check('素材页有「导出图集」按钮', !!exportBtn())
-  check('说明里写清了底边对齐（不然动画会抖）', body().includes('底边对齐'))
-  check('说明里写清了输出位置（Atlas/）', body().includes('Atlas'))
-  // `calls` 是全局累积的（前面用例的请求都在里面），只统计**本用例开始后**的
-  const mark = calls.length
-  const atlasCalls = () => calls.slice(mark)
-    .filter((c) => c.url.endsWith('/atlas'))
-  check('进页面只 GET 查状态，没有自动导出',
-    atlasCalls().every((c) => (c.method || 'GET') === 'GET'),
-    JSON.stringify(atlasCalls().map((c) => `${c.method} ${c.url}`)))
-
-  click(exportBtn())
-  // **走队列**：提交 → 轮询（running → done），前端轮询间隔 800ms。
-  // 进度反馈要在**提交的瞬间**就出现（以前是同步的，界面只能干等）。
-  await new Promise((r) => setTimeout(r, 120))
-  const post = atlasCalls().filter((c) => c.method === 'POST')
-  check('点按钮才 POST 导出', post.length === 1,
-    JSON.stringify(atlasCalls().map((c) => `${c.method} ${c.url}`)))
-  check('提交后立刻有进度反馈',
-    body().includes('打包中') || body().includes('已提交'),
-    body().slice(-160))
-  await new Promise((r) => setTimeout(r, 3000))
-  check('导出后显示帧数与组数', body().includes('4 帧') && body().includes('2 组动画'),
-    body().slice(-160))
-  check('导出后显示图集尺寸与单帧画布',
-    body().includes('192×288') && body().includes('96×144'), body().slice(-160))
-  check('导出后出现「现有图集」统计', body().includes('现有图集'))
-  // **必须给文件入口**：只显示一行路径的话，用户导出完拿不到东西
-  const atlasImg = doc.querySelector('.chars-atlas-link img')
-  check('图集有缩略图预览', !!atlasImg, atlasImg?.getAttribute('src'))
-  check('缩略图指向真实文件', (atlasImg?.getAttribute('src') || '').includes('atlas.png'),
-    atlasImg?.getAttribute('src'))
-  const jsonLink = [...doc.querySelectorAll('a')]
-    .find((a) => (a.textContent || '').includes('atlas.json'))
-  check('有 atlas.json 的入口', !!jsonLink, jsonLink?.getAttribute('href'))
-
-  check('图集导出场景无脚本错误', errors.length === 0, errors[0] || '')
-  dom.window.close()
-}
-
-// 46h) 一键出全套：换内衣 → 出姿势 → 出表情（顺序照官方）
-//
-// 这一条要钉住的是**顺序**和**顺序的依赖**：
-//   · 姿势必须在表情之前（表情是在姿势帧上改脸）；
-//   · 勾了内衣，姿势就得从内衣那张底图出发（后端 source_costume）；
-//   · 三步的进度要合成一条（以前是三个独立按钮，用户得自己等三次）。
-{
-  const { dom, errors } = await boot('')
-  const doc = dom.window.document
-  const win = dom.window
-  await new Promise((r) => setTimeout(r, 400))
-  const click = (el) => el.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  const setInput = (el, v) => {
-    Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value').set.call(el, v)
-    el.dispatchEvent(new win.Event('input', { bubbles: true }))
-  }
-
-  ;[...doc.querySelectorAll('.view-tab')][1]?.dispatchEvent(
-    new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 250))
-  setInput(doc.querySelector('.chars-new input'), 'Alice')
-  await new Promise((r) => setTimeout(r, 80))
-  click([...doc.querySelectorAll('.chars-new button')][0])
-  await new Promise((r) => setTimeout(r, 300))
-
-  const tab = [...doc.querySelectorAll('.chars-tab')]
-    .find((t) => (t.textContent || '').includes('素材'))
-  click(tab)
-  await new Promise((r) => setTimeout(r, 500))
-
-  const body = () => doc.querySelector('.chars-body')?.textContent || ''
-  const pipeBtn = () => [...doc.querySelectorAll('.chars-body button')]
-    .find((b) => (b.textContent || '').includes('一键出全套'))
-
-  check('素材页有「一键出全套」按钮', !!pipeBtn())
-  check('说明里写清了顺序（内衣→姿势→表情）',
-    body().includes('换白内衣') && body().includes('出姿势') && body().includes('出表情'))
-  check('说明里写清了顺序不能乱', body().includes('顺序不能乱'))
-
-  // 表情多选：默认空（只出姿势）
-  const multi = doc.querySelector('.chars-body select[multiple]')
-  check('有表情多选下拉', !!multi)
-  check('默认不选表情（只出姿势，别让人等半天）',
-    (multi?.selectedOptions.length || 0) === 0,
-    String(multi?.selectedOptions.length))
-
-  click(pipeBtn())
-  await new Promise((r) => setTimeout(r, 600))
-
-  const call = calls.find((c) => c.url.includes('/characters/Alice/pipeline'))
-  check('提交到 /pipeline', !!call, call?.url)
-  if (call) {
-    const b = JSON.parse(call.body)
-    check('默认勾了「先换白内衣」', b.underwear === true, String(b.underwear))
-    check('带上了骨架帧目录', !!b.pose_dir, b.pose_dir)
-    check('没选表情就不传 emotions',
-      !b.emotions || b.emotions.length === 0, JSON.stringify(b.emotions))
-  }
-
-  // 轮询到 running（前端间隔 1200ms，mock 前两轮都返回 running）：
-  // 进度条 + 当前步骤名必须在
-  await new Promise((r) => setTimeout(r, 1500))
-  check('流水线有进度条', !!doc.querySelector('.chars-prog'))
-  check('进度里带当前步骤与细节',
-    (doc.querySelector('.chars-body')?.textContent || '').includes('出多姿势'),
-    (doc.querySelector('.chars-body')?.textContent || '').slice(-160))
-
-  await new Promise((r) => setTimeout(r, 3000))
-  check('完成后给出可执行的下一步（导出图集）',
-    body().includes('导出图集'), body().slice(-160))
-  check('一键出全套场景无脚本错误', errors.length === 0, errors[0] || '')
-  dom.window.close()
-}
-
-// 46g) 换白内衣底图（官方 remove_clothes）
-//
-// 官方的预处理一步：把角色换成白色内衣，得到一张干净底图给后续每套服装当起点。
-// **它是一条换装指令 + Clothes LoRA，不是"去掉衣服变裸体"** —— 界面上也要这么说，
-// 否则用户会以为点下去会得到一张裸图。
-{
-  const { dom, errors } = await boot('')
-  const doc = dom.window.document
-  const win = dom.window
-  await new Promise((r) => setTimeout(r, 400))
-  const click = (el) => el.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  const setInput = (el, v) => {
-    Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value').set.call(el, v)
-    el.dispatchEvent(new win.Event('input', { bubbles: true }))
-  }
-
-  ;[...doc.querySelectorAll('.view-tab')][1]?.dispatchEvent(
-    new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 250))
-  setInput(doc.querySelector('.chars-new input'), 'Alice')
-  await new Promise((r) => setTimeout(r, 80))
-  click([...doc.querySelectorAll('.chars-new button')][0])
-  await new Promise((r) => setTimeout(r, 300))
-
-  const tab = [...doc.querySelectorAll('.chars-tab')]
-    .find((t) => (t.textContent || '').includes('服装'))
-  click(tab)
-  await new Promise((r) => setTimeout(r, 400))
-
-  const body = () => doc.querySelector('.chars-body')?.textContent || ''
-  const uwBtn = () => [...doc.querySelectorAll('.chars-body button')]
-    .find((b) => (b.textContent || '').includes('换白内衣'))
-
-  check('服装页有「换白内衣底图」按钮', !!uwBtn())
-  check('说明里写清了官方指令原文', body().includes('Dress character: White underwear'))
-  check('说明里写清了产物是「干净底图」而不是裸体', body().includes('干净底图'))
-
-  click(uwBtn())
-  await new Promise((r) => setTimeout(r, 500))
-  const call = calls.find((c) => c.url.includes('/clothes/underwear'))
-  check('提交到 /clothes/underwear', !!call, call?.url)
-  if (call) {
-    const b = JSON.parse(call.body || '{}')
-    // 默认参数走官方：20 步 / cfg 1.0
-    check('默认不带覆盖参数（用官方 20 步 / cfg 1.0）',
-      b.steps === undefined && b.cfg === undefined, JSON.stringify(b))
-  }
-
-  await new Promise((r) => setTimeout(r, 1500))
-  check('完成后提示存成了哪套服装', body().includes('白内衣'), body().slice(-140))
-  check('内衣场景无脚本错误', errors.length === 0, errors[0] || '')
-  dom.window.close()
-}
-
-// 47b) 表情批量生成：官方 Emotion Studio 的「只改脸」
-//
-// 表情不是"再出一张整图"——官方把脸框裁出来放大重画，再按羽化蒙版贴回原图，
-// 所以脖子/衣服/动作逐像素不变（character_generator.py:1591-1708）。
-// 这一组钉住三件事：
-//   1. 先检脸框（不跑生成模型），把「几张源帧、脸框多大」摆给用户看；
-//   2. 选中的表情按 safe_name 提交，不是把 157 条全发过去；
-//   3. 批量任务的**进度**真的显示出来了（一批几十张，没进度只能干等）。
-{
-  const { dom, errors } = await boot('')
-  const doc = dom.window.document
-  const win = dom.window
-  await new Promise((r) => setTimeout(r, 400))
-  const click = (el) => el.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  const setInput = (el, v) => {
-    Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value').set.call(el, v)
-    el.dispatchEvent(new win.Event('input', { bubbles: true }))
-  }
-
-  // 进角色中心并建一个角色
-  ;[...doc.querySelectorAll('.view-tab')][1]?.dispatchEvent(
-    new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 250))
-  setInput(doc.querySelector('.chars-new input'), 'Alice')
-  await new Promise((r) => setTimeout(r, 80))
-  click([...doc.querySelectorAll('.chars-new button')][0])
-  await new Promise((r) => setTimeout(r, 300))
-
-  // 切到「表情」页
-  const tab = [...doc.querySelectorAll('.chars-tab')]
-    .find((t) => (t.textContent || '').includes('表情'))
-  check('详情有「表情」页', !!tab)
-  click(tab)
-  await new Promise((r) => setTimeout(r, 500))
-
-  const body = () => doc.querySelector('.chars-body')?.textContent || ''
-  check('表情库是真数据（157 条）',
-    body().includes('157 条'), body().slice(0, 80))
-  check('说明里写清了「只改脸」',
-    body().includes('只改脸') && body().includes('羽化'),
-    body().slice(0, 120))
-
-  // ---- 1. 先检脸框 ----
-  const detectBtn = [...doc.querySelectorAll('.chars-body button')]
-    .find((b) => (b.textContent || '').includes('检出脸框'))
-  check('有「检出脸框」按钮', !!detectBtn)
-  click(detectBtn)
-  await new Promise((r) => setTimeout(r, 500))
+  const { dom, doc, win, errors, c0 } = await ccBoot()
+  await ccCreate(doc, win)
+  ccStep(doc, win, 3)
+  await ccWait(300)
+  check('有「检出脸框」入口', ccClick(doc, win, '检出脸框'))
+  await ccWait(350)
   check('调用了 /emotions/detect',
-    calls.some((c) => c.url.includes('/characters/Alice/emotions/detect')))
+    calls.slice(c0).some((c) => c.url.includes('/emotions/detect')))
+  const body = () => doc.querySelector('.chars-body')?.textContent || ''
   check('检完显示源帧数与脸框尺寸',
-    body().includes('源帧 2 张') && body().includes('120×120'),
-    body().slice(0, 200))
-
-  // ---- 2. 选表情 ----
-  const cards = () => [...doc.querySelectorAll('.chars-emo')]
-  check('表情卡可点选（是 button，不是死图）',
-    cards().length > 0 && cards()[0].tagName === 'BUTTON', cards()[0]?.tagName)
-  click(cards()[0])
-  click(cards()[1])
-  await new Promise((r) => setTimeout(r, 150))
-  check('选中状态看得见（.on）',
-    doc.querySelectorAll('.chars-emo.on').length === 2,
-    String(doc.querySelectorAll('.chars-emo.on').length))
+    body().includes('源帧 2 张') && body().includes('120×120'), body().slice(0, 160))
+  const cards = [...doc.querySelectorAll('.chars-emo')]
+  check('表情卡可点选', cards.length > 0 && cards[0].tagName === 'BUTTON',
+    String(cards.length))
+  cards[0]?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  cards[1]?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await ccWait(150)
+  check('选中状态看得见', doc.querySelectorAll('.chars-emo.on').length === 2)
   check('显示已选数量', body().includes('已选 2 个'))
-
-  // ---- 3. 提交批量生成 ----
-  const genBtn = [...doc.querySelectorAll('.chars-body button')]
-    .find((b) => (b.textContent || '').includes('批量生成'))
-  check('有「批量生成」按钮', !!genBtn)
-  check('选之前/没选时按钮是禁用的语义（有选中才可用）',
-    genBtn && !genBtn.disabled)
-  click(genBtn)
-  // **一次轮询之内**就要看到进度条：mock 的第一次 /jobs 查询返回 running 2/4，
-  // 第二次才 done。等太久的话任务已经结束、界面切到素材页，就再也断不到进度了。
-  await new Promise((r) => setTimeout(r, 450))
-
-  const genCall = calls.find((c) => c.url.includes('/characters/Alice/emotions/generate'))
+  check('提交批量生成', ccClick(doc, win, '批量生成'))
+  await ccWait(450)
+  const genCall = calls.slice(c0).find((c) => c.url.includes('/emotions/generate'))
   check('提交到 /emotions/generate', !!genCall, genCall?.url)
   if (genCall) {
     const b = JSON.parse(genCall.body)
-    check('只提交选中的两个表情（按 safe_name）',
-      Array.isArray(b.emotions) && b.emotions.length === 2, JSON.stringify(b.emotions))
-    check('带上官方默认参数（target_size 2048 / 步数 25）',
-      b.target_size === 2048 && b.steps === 25, JSON.stringify(b))
-    check('带上服装', b.costume === 'Naked', b.costume)
+    check('只提交选中的两个表情', Array.isArray(b.emotions) && b.emotions.length === 2)
+    check('默认档位 2048 / 16 步（不再是页面自己都嫌慢的 25 步）',
+      b.target_size === 2048 && b.steps === 16, JSON.stringify(b))
+    check('带当前服装', b.costume === 'Naked', b.costume)
   }
-  check('批量任务有进度条', !!doc.querySelector('.chars-prog'),
-    String(doc.querySelectorAll('.chars-prog').length))
-  const ptext = doc.querySelector('.chars-prog')?.textContent || ''
-  check('进度显示 done/total', ptext.includes('/'), ptext)
+  check('进度在统一任务条里（不再切页后失联）',
+    !!doc.querySelector('.cc-task .chars-prog'))
   check('进度里带当前在做哪一张',
-    (doc.querySelector('.chars-body')?.textContent || '').includes('smile'),
-    (doc.querySelector('.chars-body')?.textContent || '').slice(-80))
-
-  // 等到完成
-  await new Promise((r) => setTimeout(r, 1600))
-  check('完成后切到素材页（能马上翻刚出的图）',
-    [...doc.querySelectorAll('.chars-tab')].some(
-      (t) => t.classList.contains('on') && (t.textContent || '').includes('素材')))
-  check('表情批量场景无脚本错误', errors.length === 0, errors[0] || '')
+    (doc.querySelector('.cc-task')?.textContent || '').includes('smile'),
+    (doc.querySelector('.cc-task')?.textContent || '').slice(0, 100))
+  await ccWait(2400)
+  check('表情任务完成', !!doc.querySelector('.cc-task.is-done'))
+  check('表情场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 
-// 48) 素材页：官方那套精灵帧翻看器（先看数量 → 再按帧号单张取）
-//
-// 用户要翻的是"这一套角色用过哪些帧"，而不是把所有图一次性塞进列表——
-// 精灵帧一多（几十上百张）首屏就卡死。所以按官方的顺序做两步。
+// 52) 成果常驻右栏：翻帧、灯箱、缩略图、单帧提示
 {
-  const { dom, errors } = await boot('')
-  const doc = dom.window.document
-  const win = dom.window
-  await new Promise((r) => setTimeout(r, 400))
-
-  ;[...doc.querySelectorAll('.view-tab')][1]
-    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 250))
-  const setInput = (el, v) => {
-    Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value').set.call(el, v)
-    el.dispatchEvent(new win.Event('input', { bubbles: true }))
-  }
-  setInput(doc.querySelector('.chars-new input'), 'Alice')
-  await new Promise((r) => setTimeout(r, 80))
-  ;[...doc.querySelectorAll('.chars-new button')][0]
-    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 300))
-  ;[...doc.querySelectorAll('.chars-card')].find((c) =>
-    (c.textContent || '').includes('Alice'))
-    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 300))
-
-  const assetsTab = [...doc.querySelectorAll('.chars-tab')]
-    .find((t) => (t.textContent || '').includes('素材'))
-  assetsTab?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 400))
-
-  // 服装 + 表情两个是翻看器的；多姿势批量一个骨架帧目录；
-  // 「一键出全套」再两个（骨架帧目录 + 表情多选）
-  check('素材页下拉齐全（翻看器 2 + 多姿势 1 + 一键出全套 2）',
-    doc.querySelectorAll('.chars-body select').length === 5,
-    String(doc.querySelectorAll('.chars-body select').length))
-  check('先去问这个序列有多少帧（不是一次性把图拉回来）',
-    calls.some((c) => c.url.includes('/characters/Alice/poses/meta')),
-    calls.map((c) => c.url).slice(-2).join())
-  check('翻看器挂上了', !!doc.querySelector('.sprite-preview'))
-
+  const { dom, doc, win, errors, c0 } = await ccBoot()
+  await ccCreate(doc, win)
+  await ccWait(400)
+  check('先看 meta 拿帧数（不是一次性拉回所有图）',
+    calls.slice(c0).some((c) => c.url.includes('/characters/Alice/poses/meta')))
+  check('成果区常驻，不随步骤切换消失',
+    !!doc.querySelector('.cc-preview .sprite-preview'))
   const img = doc.querySelector('.sprite-stage img')
-  check('按帧号单张取图（src 带 index=0）',
-    (img?.getAttribute('src') || '').includes('index=0'),
-    img?.getAttribute('src'))
-  check('src 带时间戳（同名文件被替换后浏览器不能拿旧图）',
+  check('按帧号单张取图（index=0）',
+    (img?.getAttribute('src') || '').includes('index=0'), img?.getAttribute('src'))
+  check('src 带时间戳（重生成后不拿浏览器旧图）',
     (img?.getAttribute('src') || '').includes('t='))
   check('多帧时显示计数 1/3',
     (doc.querySelector('.sprite-count')?.textContent || '') === '1/3',
     doc.querySelector('.sprite-count')?.textContent)
-
-  // 翻页：采样 index 前进，且相邻帧会被预取
   ;[...doc.querySelectorAll('.sprite-nav button')][1]
     ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 250))
+  await ccWait(250)
   check('点下一帧后计数变 2/3',
-    (doc.querySelector('.sprite-count')?.textContent || '') === '2/3',
-    doc.querySelector('.sprite-count')?.textContent)
+    (doc.querySelector('.sprite-count')?.textContent || '') === '2/3')
   check('翻页后 src 的 index 跟着变',
-    (doc.querySelector('.sprite-stage img')?.getAttribute('src') || '').includes('index=1'),
-    doc.querySelector('.sprite-stage img')?.getAttribute('src'))
-
-  // 素材页也能放大看细节：点图 → 灯箱（滚轮缩放 / 拖动都在灯箱里）
+    (doc.querySelector('.sprite-stage img')?.getAttribute('src') || '').includes('index=1'))
   doc.querySelector('.sprite-stage img')
     ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 150))
-  check('点精灵帧能打开灯箱（放大看细节）', !!doc.querySelector('.lightbox'))
+  await ccWait(150)
+  check('点精灵帧能打开灯箱', !!doc.querySelector('.lightbox'))
   check('灯箱里有缩放工具条', !!doc.querySelector('.lightbox-zoomctl'))
   win.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
-  await new Promise((r) => setTimeout(r, 150))
-  check('Esc 关掉角色中心的灯箱', !doc.querySelector('.lightbox'))
-
-  // 全部帧的缩略图条
+  await ccWait(150)
+  check('Esc 关掉灯箱', !doc.querySelector('.lightbox'))
   check('缩略图条列出全部 3 帧',
     (doc.querySelector('.chars-asset-row')?.querySelectorAll('img').length || 0) === 3,
     String(doc.querySelector('.chars-asset-row')?.querySelectorAll('img').length))
-
-  // 只有一帧时不给翻页按钮 —— 否则用户点了没反应，也没人告诉为什么
-  const emoSel = doc.querySelectorAll('.chars-body select')[1]
-  Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value')
-    .set.call(emoSel, 'angry')
-  emoSel.dispatchEvent(new win.Event('change', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 450))
-  check('只有一帧时不显示翻页按钮（不给无声的失败）', !doc.querySelector('.sprite-nav'),
-    doc.querySelector('.sprite-count')?.textContent || '（有导航条）')
+  const emoSel = doc.querySelectorAll('.cc-preview-pick select')[1]
+  ccSetSelect(win, emoSel, 'angry')
+  await ccWait(500)
+  check('只有一帧时不显示翻页按钮', !doc.querySelector('.sprite-nav'))
   check('单帧时明说只有一帧',
-    (doc.querySelector('.chars-body')?.textContent || '').includes('只有这一帧'),
-    (doc.querySelector('.chars-body')?.textContent || '').slice(-40))
+    (doc.querySelector('.cc-preview')?.textContent || '').includes('只有这一帧'))
+  check('统一任务条最多一条（旧版 9 条小字各说各的）',
+    doc.querySelectorAll('.cc-task').length <= 1,
+    String(doc.querySelectorAll('.cc-task').length))
   check('素材翻看场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 
-// 49) 属性标签选择器：官方 Character Creator 的「Choose Presets」
-//
-// 手填"blonde hair / blonde_hair / Blonde"三种写法混着用，出来的图会飘。
-// 官方的解法是给每个属性字段配一组标签，点选从动绑定 tag 里的标准写法
-// （移植自 character_presets.mjs 的 presetGroups / presetSelection）。
-{
-  const { dom, errors } = await boot('')
-  const doc = dom.window.document
-  const win = dom.window
-  await new Promise((r) => setTimeout(r, 400))
-
-  ;[...doc.querySelectorAll('.view-tab')][1]
-    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 250))
-  const setInput = (el, v) => {
-    Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value').set.call(el, v)
-    el.dispatchEvent(new win.Event('input', { bubbles: true }))
-  }
-  setInput(doc.querySelector('.chars-new input'), 'Alice')
-  await new Promise((r) => setTimeout(r, 80))
-  ;[...doc.querySelectorAll('.chars-new button')][0]
-    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 300))
-  ;[...doc.querySelectorAll('.chars-card')].find((c) =>
-    (c.textContent || '').includes('Alice'))
-    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 350))
-
-  // 取的是 **creator_v2 那份**（15 个分类），不是 SDXL 时代那份 legacy 的
-  check('取的是 creator_v2 标签库（不是 SDXL 的 legacy tags）',
-    calls.some((c) => c.url.includes('character_presets_v2.json')),
-    calls.map((c) => c.url).filter((u) => u.includes('.json')).join())
-
-  const pickBtns = [...doc.querySelectorAll('.chars-field')]
-    .filter((f) => f.querySelector('button'))
-  // 官方 FIELD_CATEGORIES 有 7 个字段，breast_size 是调用处开的**第 8 个入口**
-  // （character_creator_v2.js:4018：body 弹窗只给体型、胸围单独一个弹窗）
-  check('8 个字段入口有「选」按钮（FIELD_CATEGORIES 7 个 + 胸围特例）',
-    pickBtns.length === 8, pickBtns.map((f) => f.textContent.slice(0, 3)).join('/'))
-  check('画质词/负向词/LoRA 不给标签选择（官方同样是手填）',
-    ![...doc.querySelectorAll('.chars-field')].find((f) =>
-      (f.textContent || '').startsWith('画质词'))?.querySelector('button'))
-
-  // 头发：官方把 6 个分类合成一个弹窗（hair_color / pattern / length /
-  // texture / hairstyles / framing）
-  const hairBtn = [...doc.querySelectorAll('.chars-field')]
-    .find((f) => (f.textContent || '').includes('发型发色'))?.querySelector('button')
-  hairBtn?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 250))
-  check('点「选」弹出标签面板', !!doc.querySelector('.tag-modal'))
-  const heads = [...doc.querySelectorAll('.tag-group-head')].map((h) => h.textContent)
-  check('头发分成 6 组（颜色/挑染/长度/质感/发型/刘海）', heads.length === 6, heads.join('/'))
-  check('chip 有内容（显示的是中文译文）',
-    (doc.querySelector('.tag-chip')?.textContent || '').trim().length > 0,
-    doc.querySelector('.tag-chip')?.textContent || '')
-
-  // 眼睛：预置值是 'blue_eyes, my own trait' —— 验别名 + 保留自定义文本
-  ;[...doc.querySelectorAll('.tag-mask')][0]
-    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 200))
-  // 眼睛字段现在是 chips 展示：找「眼睛」那一行里的「改」按钮（打开标签库）
-  const eyeField = [...doc.querySelectorAll('.chars-field')]
-    .find((f) => (f.textContent || '').includes('眼睛'))
-  const eyeBtn = [...(eyeField?.querySelectorAll('button') || [])]
-    .find((b) => ['改', '选'].includes((b.textContent || '').trim()))
-  eyeBtn?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 250))
-  const chips = [...doc.querySelectorAll('.tag-chip')]
-  const blueChip = chips.find((c) => (c.textContent || '').trim() === '蓝眼')
-  check('下划线写法 blue_eyes 也能匹配到「蓝眼」这个 chip（别名）',
-    blueChip?.classList.contains('on'),
-    blueChip?.className || '（没找到 chip）')
-  const shown = doc.querySelector('.tag-result input')?.value || ''
-  check('打开时把现有值照原样带出来（不偷偷改写用户手写的描述）',
-    shown === 'blue_eyes, my own trait', shown)
-
-  // 点一个 chip：写入的是**空格形式**（官方 toggle 的写法）
-  const greenChip = chips.find((c) => (c.textContent || '').trim() === '绿眼')
-  greenChip?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 150))
-  check('选一项后写入框更新（含新增的 green eyes）',
-    (doc.querySelector('.tag-result input')?.value || '').includes('green eyes'),
-    doc.querySelector('.tag-result input')?.value)
-
-  // 确定 → 写回角色属性
-  ;[...doc.querySelectorAll('.tag-act button')]
-    .find((b) => (b.textContent || '').includes('确定'))
-    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await new Promise((r) => setTimeout(r, 400))
-  check('确定后关闭面板', !doc.querySelector('.tag-modal'))
-  const put = calls.filter((c) => c.url.includes('/characters/Alice/info')).pop()
-  check('把选好的内容写回服务端角色属性',
-    !!put && JSON.parse(put.body).eyes.includes('green eyes'),
-    put?.body)
-  check('标签选择场景无脚本错误', errors.length === 0, errors[0] || '')
-  dom.window.close()
-}
 
 const failed = results.filter((r) => !r.ok)
 console.log(`\n${results.length - failed.length}/${results.length} 通过`)

@@ -22,7 +22,9 @@
 engine→test_models+vramopt+stability(110s)｜generate→test_qwen_workflows+denoise+paint_path(47s)｜
 presets→test_presets+quality(10s)｜matte/refprep(20s)｜postprocess/pixelfy/sheet(15s)｜
 app/assetdb→test_api+review_p2(15s)｜characters/charactergen(9s)｜emotiongen(6s，真 YOLO)｜
-clothes/posegen/spriteatlas/library/poselib/labels/projects(各 1~5s)｜前端→`cd web && npm run smoke`｜
+clothes/posegen/spriteatlas/library/poselib/labels/projects(各 1~5s)｜
+前端→`cd web && node smoke.mjs`（**别用 `npm run smoke`**，它自带 vite build 清 dist
+触发批量删除守卫；先 `npx tsc -b && npx vite build --outDir <新目录>` 再 cp 覆盖 dist）｜
 tools/docs/README→不跑。SD 时代测试（test_generate/clip/controlnet/lora/train/review_*/fetch）已删除。
 
 - 冒烟跑 `dist/`：**改完前端必须先构建**，否则拿旧产物跑。
@@ -131,3 +133,24 @@ MIUProject/VNCCS_PoseStudio_QI2.1），**不要写 runcomfy.com 这类商业托�
   节点卡片选择器是 `.node.gen`（外层），高级项在 `details.adv`（截图前 `det.open=true`）。
 - 构建：`npx tsc -b && npx vite build --outDir <新目录>` 再 `cp -r` 覆盖 `dist`；
   **别用 `npm run build`**（vite 清 dist/vnccs 约 528 文件 >50 触发批量删除守卫）。
+
+## 角色中心：四步工作台（2026-11-06 彻底重构，别写回 tab）
+
+- `.chars.cc` 三栏 = 角色库 / 四步主工作区 / **常驻成果预览**。
+  `characters/model.ts` 放常量、`STEPS`、`computeProgress`、`explainError`；
+  `characters/Controls.tsx` 放纯展示组件；`CharactersPage.tsx` 只管状态与业务。
+- **唯一主线**：① 创建角色 ② 定形象 ③ 出素材 ④ 导出。步骤完成标记由
+  `detail.assets` 的帧数与 `atlasInfo.exists` 推导；`userStep` 可手动回看，
+  任务完成后 `setUserStep(null)` 自动推进。每步只有一个 `.cc-cta`。
+- 旧版已删：5 个并列 `.chars-tab`（现在 `.cc-step` 恰好 4 个）、右栏重复按钮、
+  `browseCostume` 双服装状态、9 条 xxxMsg、跨页强跳 `finishOp`。
+  **任何动作只留一个入口**，单步重跑收进 `<details class="cc-adv">`（DOM 常驻）。
+- 单一 `matte=false`（旧版四处默认值不同）；表情默认 16 步（质量下限）；
+  所有任务走 `runTask` 统一轮询（互斥 + 进度 + 错误码话术 + 常驻任务条）。
+  **不切走用户当前步骤**，成果靠右栏刷新呈现。
+- `SpritePreview` 的 `onMeta` 必须 `useCallback` 稳定：内联函数会让 `loadMeta`
+  每次 render 重建，翻到第二帧立刻弹回第一帧。
+- `smoke.mjs` 角色用例（46~52）按新 DOM 重写，API 契约全保留；
+  mock 的 `PUT/DELETE /costumes` 必须返回 200，否则「新建服装」不生效。
+- 真机截图：`CC_FAKE=1 UI_DIST=<构建目录> node tools/shot/capture.mjs <tag>`，
+  离线假数据拍 20~24 号四步图，不需要后端 / GPU。

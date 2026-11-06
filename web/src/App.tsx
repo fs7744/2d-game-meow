@@ -1726,7 +1726,7 @@ export default function App() {
               的唯一提示；视图 tab 只是加在旁边，不能把它挤出 brand。 */}
           <span className="sub">
             {view === 'characters'
-              ? '角色中心 · 与官方 VNCCS 同一套目录与配置'
+              ? '角色中心 · 四步做出一整套角色素材'
               : `${projectMeta.find((p) => p.id === currentId)?.name ?? '画布'} · 文生图 / 图生图`}
           </span>
         </div>
@@ -1741,7 +1741,7 @@ export default function App() {
           <button
             className={`view-tab${view === 'characters' ? ' on' : ''}`}
             onClick={() => setView('characters')}
-            title="角色中心：造角色 / 换装 / 表情，素材在 assets/characters/"
+            title="角色中心：创建角色 → 定形象 → 出素材 → 导出图集"
           >
             角色中心
           </button>

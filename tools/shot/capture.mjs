@@ -45,6 +45,17 @@ async function serve(port) {
       res.end(body)
       return
     }
+    // CC_FAKE：精灵帧 / 图集是 <img src> 直接发的请求，不走页面里的假 fetch，
+    // 这里用本地图标顶上，好真机验证「成果常驻右栏」这一块的排版。
+    if (process.env.CC_FAKE === '1'
+      && (pathname.endsWith('/poses') || pathname.startsWith('/files/'))) {
+      const icon = join(DIST, 'icon.png')
+      if (existsSync(icon)) {
+        res.writeHead(200, { 'Content-Type': 'image/png' })
+        res.end(readFileSync(icon))
+        return
+      }
+    }
     // 反代后端（含 query string）
     try {
       const headers = { ...req.headers }
@@ -230,6 +241,83 @@ async function main() {
   await rp.screenshot({ path: join(OUT, '13-node-result-again.png') })
   console.log('  ✓ 11/12/13 节点结果视图', JSON.stringify(resultDiag))
   await rp.close()
+
+  // 角色中心四步工作台：CC_FAKE=1 时用页面内假接口铺一个「有素材的角色」，
+  // 不接后端 / 不占 GPU，专拍重构后的四个步骤与常驻成果区。
+  if (process.env.CC_FAKE === '1') {
+    const fp = await browser.newPage()
+    await fp.setViewport({ width: 1600, height: 950, deviceScaleFactor: 1 })
+    await fp.evaluateOnNewDocument(() => {
+      const real = window.fetch.bind(window)
+      const json = (o) => new Response(JSON.stringify(o), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      })
+      const NAME = '白色猫骑士'
+      window.fetch = async (url, init = {}) => {
+        const u = String(url)
+        const m = init.method || 'GET'
+        if (u.endsWith('/health')) return json({ ok: true, engine: { device: '离线预览' } })
+        if (u.endsWith('/characters') && m === 'GET') return json({
+          count: 1,
+          items: [{ name: NAME, cover_url: '', sex: 'female', style: 'anime',
+            nsfw: false, costumes: ['Naked', 'Knight'], sprites: 12, config_version: '2.0' }],
+        })
+        if (u.includes('/characters/') && u.endsWith('/prompt')) return json({
+          name: NAME, style: 'anime',
+          prompt: 'The image contains one character.\nGender: female\nHair: silver hair\nEyes: red eyes',
+          negative: 'blurry', resolution: [792, 1408],
+          defaults: { steps: 25, cfg: 3, sampler: 'euler', scheduler: 'simple' },
+        })
+        if (u.includes('/characters/') && u.endsWith('/atlas')) return json({
+          character: NAME, exists: true, frames: 12, animations: 3,
+          size: [512, 768], canvas: [128, 192], bytes: 82000, image: '/icon.png',
+        })
+        if (u.includes('/poses/meta')) return json({
+          count: 3, files: ['/icon.png', '/icon.png', '/icon.png'],
+        })
+        if (u.includes('/poses?')) return real('/icon.png')
+        if (u.endsWith('/pose_dirs')) return json({ items: [
+          { path: 'D:/x/walk', name: '步行循环', count: 4, sample: [] },
+        ] })
+        if (u.includes('/characters/') && m === 'GET') return json({
+          name: NAME,
+          config: { character_info: { name: NAME, sex: 'female', age: 18,
+            race: 'human', eyes: 'red eyes', hair: 'silver hair', style: 'anime' },
+          costumes: {}, costume_ids: {}, config_version: '2.0' },
+          costumes: ['Naked', 'Knight'],
+          assets: { Naked: { neutral: ['/icon.png', '/icon.png', '/icon.png'],
+            angry: ['/icon.png'] }, Knight: { neutral: ['/icon.png'] } },
+          cover_url: '',
+        })
+        if (u.startsWith('/files/')) return real('/icon.png')
+        return real(url, init)
+      }
+    })
+    await fp.goto('http://127.0.0.1:8123/index.html',
+      { waitUntil: 'networkidle2', timeout: 60000 })
+    await sleep(900)
+    const fshot = async (name, wait = 700) => {
+      await sleep(wait)
+      await fp.screenshot({ path: join(OUT, name + '.png') })
+      console.log('  ✓', name)
+    }
+    await fp.evaluate(() => [...document.querySelectorAll('.view-tab')]
+      .find((b) => (b.textContent || '').includes('角色中心'))?.click())
+    await fshot('20-cc-step1')
+    await fp.evaluate(() => document.querySelector('.chars-card')?.click())
+    await sleep(600)
+    await fp.evaluate(() => document.querySelector('.cc-step[data-step="2"]')?.click())
+    await fshot('21-cc-step2')
+    await fp.evaluate(() => document.querySelector('.cc-step[data-step="3"]')?.click())
+    await fshot('22-cc-step3')
+    await fp.evaluate(() => {
+      document.querySelectorAll('.cc-adv').forEach((d) => { d.open = true })
+    })
+    await fshot('23-cc-step3-adv')
+    await fp.evaluate(() => document.querySelector('.cc-step[data-step="4"]')?.click())
+    await fshot('24-cc-step4')
+    await fp.close()
+  }
 
   await browser.close()
   srv.close()

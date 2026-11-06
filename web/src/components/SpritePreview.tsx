@@ -119,9 +119,9 @@ export default function SpritePreview({ character, costume, emotion, onMeta }: P
       <div className="sprite-stage">
         {state === 'empty' ? (
           <p className="sprite-missing">
-            这个角色还没有精灵帧素材。
+            这个角色还没有立绘。
             <br />
-            去「出图」页生成一张，收编后就能在这儿翻。
+            在第 ② 步「定形象」生成第一张，这里就能翻看了。
           </p>
         ) : state === 'idle' || !src ? (
           <p className="sprite-missing">读取素材…</p>
