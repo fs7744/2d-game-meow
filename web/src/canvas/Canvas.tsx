@@ -553,7 +553,22 @@ export default function Canvas({
               从左侧节点列表拖入「图生成」或「图生图」，或点它右边的 <b>+</b> 放到原点。
             </p>
             <p className="dim" data-bg="1">
-              拖空白处平移</p>
+              拖空白处平移 · 滚轮缩放 · 点节点选中</p>
+            {/* 空画布上原来只有一句说明，用户还得自己回侧栏找「+」。
+                这里给一步到位的入口；坐标要扣掉侧栏宽度，否则新节点又藏在侧栏后面。 */}
+            <button
+              className="empty-cta"
+              data-bg="1"
+              onClick={() => {
+                const railW = document.querySelector<HTMLElement>('.rail')?.offsetWidth ?? 0
+                onDropType('gen', {
+                  x: (railW + (window.innerWidth - railW) / 2 - viewport.x) / viewport.z - 150,
+                  y: (window.innerHeight / 2 - viewport.y) / viewport.z - 160,
+                })
+              }}
+            >
+              + 新建「图生成」节点
+            </button>
           </div>
         </div>
       )}

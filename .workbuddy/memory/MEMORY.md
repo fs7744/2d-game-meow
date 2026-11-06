@@ -222,3 +222,21 @@ UI 层面色数/像素块已删（学业界），`custom` 只作旧存档只读�
 写原理/科普、引用截图时只归开源上游（AHEKOT/ComfyUI_VNCCS、
 AHEKOT/ComfyUI_VNCCS_Utils、MIUProject/VNCCS_PoseStudio_QI2.1），
 **不要写 runcomfy.com 这类商业托管站**——用户明确要求不替商业公司宣传。
+
+## UI 设计系统（2026-11-06 起）
+
+- `web/src/styles.css` 的 `:root` 是**唯一**配色/字体来源；文件末尾有
+  「UI 视觉刷新」override 层。改组件外观优先在 override 层加，
+  别回头改前 2000 行里散落的定位规则。
+- 不再引用 `Press Start 2P` / `Silkscreen`（从来没加载过）：中文走系统
+  中文字体栈，数字/英文走 `--mono`。强调色 = 绿 `#4ade9b` / 青 `#6cc4ef` /
+  粉 `#ff7a90` / 黄 `#f5c65a`；背景按 `--bg`→`--bg-4` 明度分层。
+- **`--rail-w:252px` 必须与 `App.tsx`、`store/projects.ts` 的初始 viewport
+  `x:300,y:96` 同步**，否则节点又被侧栏盖住。`smoke.mjs` 的落点/平移
+  断言已从实际 transform 推导，不再写死 120/90。
+- `.chars` 是 `position:absolute; inset:0`（父 `.stage` 不是 flex，`flex:1`
+  不生效）；`.chars-ops` 必须是 `.chars` 的直属第三列，别塞回 `.chars-detail`。
+- 真机截图：`node tools/shot/capture.mjs <tag>`（后端需在 8000），
+  `UI_DIST` 指定构建目录，默认 `web/dist`；图在 `tests/_out/ui_review/`。
+- 改前端后构建：`npx tsc -b && npx vite build --outDir <新目录>`，
+  再 `cp -r` 覆盖 `dist`；**别用 `npm run build`**（清 dist 触发批量删除守卫）。

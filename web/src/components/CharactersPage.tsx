@@ -888,12 +888,15 @@ export default function CharactersPage({ onNotice }: Props) {
             {cloneMsg && <p className="chars-sub">{cloneMsg}</p>}
           </div>
         )}
-        {loading && <p className="chars-empty">正在读角色库…</p>}
+        {loading && <p className="chars-empty is-loading">正在读角色库…</p>}
         {!loading && items.length === 0 && (
-          <p className="chars-empty">
-            还没有角色。右上角新建一个，或者把官方工作流产出的角色目录直接拷进
-            <code>assets/characters/</code>——结构是同一套，能直接读。
-          </p>
+          <div className="chars-empty">
+            <h3>角色库还是空的</h3>
+            <p>
+              还没有角色。右上角新建一个，或者把官方工作流产出的角色目录直接拷进
+              <code>assets/characters/</code>——结构是同一套，能直接读。
+            </p>
+          </div>
         )}
         <div className="chars-grid">
           {items.map((c) => (
@@ -926,10 +929,35 @@ export default function CharactersPage({ onNotice }: Props) {
       <div className="chars-detail">
         {err && <div className="chars-err">⚠ {err}</div>}
         {!sel && (
-          <p className="chars-empty">
-            左边选一个角色。这里是官方 Character Creator 的那套属性——
-            性别/年龄/种族/发色/瞳色/身材 + 358 条画风 + 服装 + 157 条表情库。
-          </p>
+          <>
+            <div className="chars-empty">
+              <h3>从左边选一个角色开始</h3>
+              <p>
+                左边选一个角色。这里是官方 Character Creator 的那套属性——
+                性别/年龄/种族/发色/瞳色/身材 + 358 条画风 + 服装 + 157 条表情库。
+              </p>
+              <ol>
+                <li>在左侧 <b>新建角色</b>，或从参考图一键反推属性。</li>
+                <li>在中间的页签里补服装、画风、表情，再批量出图。</li>
+                <li>右侧是这套角色的 <b>快捷操作</b> 与素材导出。</li>
+              </ol>
+            </div>
+            {/* 首屏不再是一整片黑：把这套工具能做什么摆出来，纯展示、无交互副作用。 */}
+            <div className="chars-welcome">
+              <div className="chars-welcome-card">
+                <i>01 · 造角色</i><b>属性 + 画风</b>
+                <span>结构化角色配置，358 条画风与 157 条表情库，和官方同一套目录与配置。</span>
+              </div>
+              <div className="chars-welcome-card">
+                <i>02 · 出素材</i><b>换装 / 表情 / 姿势</b>
+                <span>按服装 × 表情 × 姿势批量出图，产物自动落到角色目录下，随时重跑某一步。</span>
+              </div>
+              <div className="chars-welcome-card">
+                <i>03 · 进游戏</i><b>图集与精灵帧</b>
+                <span>拼图集、翻看精灵帧、导出 Godot 4 工程，透明底与脚底对齐都在产线里。</span>
+              </div>
+            </div>
+          </>
         )}
 
         {sel && detail && (
@@ -1743,8 +1771,28 @@ export default function CharactersPage({ onNotice }: Props) {
             )}
           </>
         )}
+      </div>
+      {/* /chars-detail 。右栏以前写在详情列**内部**，导致 grid 第三列永远空着，
+          操作按钮堆在详情下方。这里先关掉详情列，让 ops 成为真正的第三列。 */}
 
         {/* ---------- 右：操作流水线（官方把生成阶段分组，这里照做） ---------- */}
+        {/* 没选角色时右栏以前整个不渲染，三列布局只剩两列、右边一整块黑。
+            这里保留同一栏位，改成静态流程说明。 */}
+        {!sel && (
+          <div className="chars-ops">
+            <div className="chars-ops-head">生成流水线</div>
+            <div className="chars-ops-idle">
+              <p>选中角色后，这里会出现每一步的按钮：</p>
+              <ol>
+                <li>干净底图</li>
+                <li>换装 / 姿势 / 表情</li>
+                <li>一键出全套</li>
+                <li>拼图集并导出</li>
+              </ol>
+              <p>每一步都按官方目录结构落盘，可以单独重跑。</p>
+            </div>
+          </div>
+        )}
         {sel && detail && (
           <div className="chars-ops">
             <div className="chars-ops-head">生成流水线</div>
@@ -1811,7 +1859,6 @@ export default function CharactersPage({ onNotice }: Props) {
             void saveInfo({ [k]: v })
           }}
         />
-      </div>
     </div>
   )
 }

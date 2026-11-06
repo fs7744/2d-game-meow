@@ -247,7 +247,9 @@ export default function App() {
     }
     return []
   })
-  const [viewport, setViewport] = useState<Viewport>({ x: 120, y: 90, z: 1 })
+  // 初始平移必须让世界原点落在侧栏**右边**（--rail-w 252 + 48 留白）。
+  // 以前是 120，节点一上来就被 236px 侧栏盖掉左半张，看起来像卡片被裁了。
+  const [viewport, setViewport] = useState<Viewport>({ x: 300, y: 96, z: 1 })
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [device, setDevice] = useState<string>('')
   const [lib, setLib] = useState<Library>({ prompts: [], poses: [], prefs: {} })
@@ -400,7 +402,7 @@ export default function App() {
             created: full.created || meta.created,
             updated: full.updated || meta.updated,
             nodes: (full.nodes || []) as GenNode[],
-            viewport: (full.viewport || { x: 120, y: 90, z: 1 }) as Viewport,
+            viewport: (full.viewport || { x: 300, y: 96, z: 1 }) as Viewport,
           })
         }
       }
@@ -1719,17 +1721,28 @@ export default function App() {
             角色中心
           </button>
         </div>
+        {/* 资料库在侧栏最底部（18 个节点条目之后），以前只能滚到底才找得到。 */}
+        <button
+          className="top-action"
+          onClick={() => openLibrary('prompt')}
+          title="浏览提示词收藏与官方姿势库"
+        >
+          ☆ 资料库
+        </button>
         <div className="spacer" />
         <span className={`gpu ${device && !device.includes('未连接') ? 'ok' : 'bad'}`} title={device}>
           {device || '连接中…'}
         </span>
-        <div className="zoom-group" style={view === 'characters' ? { visibility: 'hidden' } : undefined}>
-          <button onClick={() => zoomTo(Math.max(0.2, viewport.z / 1.2))}>−</button>
-          <span className="zoom-val">{zoomLabel}</span>
-          <button onClick={() => zoomTo(Math.min(2.4, viewport.z * 1.2))}>+</button>
-          <button onClick={() => zoomTo(1)} title="回到 100%">1:1</button>
-          <button onClick={fit} title="适应全部节点">适应</button>
-        </div>
+        {/* 角色中心没有画布，缩放组不该占着位置（以前只是 visibility:hidden） */}
+        {view === 'canvas' && (
+          <div className="zoom-group">
+            <button onClick={() => zoomTo(Math.max(0.2, viewport.z / 1.2))}>−</button>
+            <span className="zoom-val">{zoomLabel}</span>
+            <button onClick={() => zoomTo(Math.min(2.4, viewport.z * 1.2))}>+</button>
+            <button onClick={() => zoomTo(1)} title="回到 100%">1:1</button>
+            <button onClick={fit} title="适应全部节点">适应</button>
+          </div>
+        )}
       </header>
 
       <main className="stage">

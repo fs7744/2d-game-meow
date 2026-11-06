@@ -38,7 +38,8 @@ export type ProjectMeta = {
   count: number
 }
 
-const DEFAULT_VIEWPORT: Viewport = { x: 120, y: 90, z: 1 }
+/** 新建项目的初始平移：世界原点要落在侧栏右边（--rail-w 252 + 48 留白）。 */
+const DEFAULT_VIEWPORT: Viewport = { x: 300, y: 96, z: 1 }
 
 let seq = 0
 const newId = () => `p${Date.now().toString(36)}${(seq++).toString(36)}`

@@ -179,7 +179,7 @@ export default function Sidebar({
   return (
     <aside className="rail">
       <div className="rail-head">
-        <span className="rail-brand">面板</span>
+        <span className="rail-brand">工作台</span>
         <span className="spacer" />
         <button className="rail-toggle" title="收起侧栏" onClick={() => setCollapsed(true)}>
           «
@@ -187,6 +187,30 @@ export default function Sidebar({
       </div>
 
       <div className="rail-scroll">
+        {/* 常用入口固定在最上面：展开的「节点」段有 18 条，往下翻才能看到
+            资料库 / 设置，第一次用根本不知道怎么开工。这里给两个一步到位
+            的按钮，且**不是** Section —— 侧栏分组数量与顺序保持不变。 */}
+        <div className="rail-quick">
+          <h3>开始创作</h3>
+          <p>从一句话生成角色，或拿现成的图继续改。</p>
+          <div className="rail-quick-row">
+            <button
+              className="rail-quick-btn"
+              onClick={() => onAddNode('gen')}
+              title="新建一个文生图节点"
+            >
+              + 图生成
+            </button>
+            <button
+              className="rail-quick-btn ghost"
+              onClick={() => onAddNode('img2img')}
+              title="新建一个图生图节点"
+            >
+              + 图生图
+            </button>
+          </div>
+        </div>
+
         <Section icon="▤" title="项目" count={projects.length}>
           {projects.map((p) => (
             <ProjectRow

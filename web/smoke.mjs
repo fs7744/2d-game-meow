@@ -1063,9 +1063,15 @@ function check(name, cond, extra = '') {
   await new Promise((r) => setTimeout(r, 120))
   const node = doc.querySelector('.node')
   check('拖拽后新建节点', !!node)
-  // 默认视口 {x:120,y:90,z:1}，jsdom 里 canvas 矩形为 0 点
-  check('落点换算正确 (280,210)', node?.style.left === '280px' && node?.style.top === '210px',
-        `${node?.style.left},${node?.style.top}`)
+  // 期望值从**真实初始视口**推导。以前把默认平移 {x:120,y:90} 写死，
+  // 初始平移一改（为了让节点不被侧栏挡住）用例就红，但功能其实是对的。
+  // jsdom 里 canvas 矩形为 0 点，所以落点 = clientX/Y - 视口平移。
+  const initial = /translate\((-?[\d.]+)px,\s*(-?[\d.]+)px\)/
+    .exec(doc.querySelector('.canvas-world')?.style.transform || '')
+  const [vx, vy] = initial ? [Number(initial[1]), Number(initial[2])] : [300, 96]
+  check('落点换算正确（clientX/Y 减去视口平移）',
+        node?.style.left === `${400 - vx}px` && node?.style.top === `${300 - vy}px`,
+        `${node?.style.left},${node?.style.top} / 视口 ${vx},${vy}`)
   check('拖拽无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
@@ -1229,7 +1235,11 @@ function check(name, cond, extra = '') {
   await new Promise((r) => setTimeout(r, 80))
   const after = world().style.transform
   check('拖空白可平移', before !== after, `${before} -> ${after}`)
-  check('平移量正确 (+60,+50)', /translate\(180px, 140px\)/.test(after), after)
+  // 同上：起点从实际 transform 读，只断言「相对位移是 +60,+50」。
+  const start = /translate\((-?[\d.]+)px,\s*(-?[\d.]+)px\)/.exec(before)
+  const [sx, sy] = start ? [Number(start[1]), Number(start[2])] : [300, 96]
+  check('平移量正确 (+60,+50)',
+        after.includes(`translate(${sx + 60}px, ${sy + 50}px)`), after)
 
   ptr(vp, 'pointerup', 560, 450)
   await new Promise((r) => setTimeout(r, 60))
