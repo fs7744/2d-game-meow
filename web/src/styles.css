@@ -3043,10 +3043,12 @@ input:disabled, select:disabled, textarea:disabled { opacity: 0.42; }
   border: 1px solid var(--line-strong); border-radius: var(--r-sm);
   background: var(--bg-3); color: var(--white); font-size: 11.5px;
 }
-.cc-inline-field select[multiple] { height: 96px; min-height: 96px; padding: 4px; }
+.chars.cc .cc-inline-field select[multiple] {
+  height: 112px; min-height: 112px; padding: 4px;
+}
 /* 原生 multiple 的行高在深色主题下会挤成一团，逐项给点呼吸 */
 .chars.cc .cc-inline-field select[multiple] option {
-  padding: 3px 6px; line-height: 1.6; background: var(--bg-3);
+  padding: 5px 6px; line-height: 1.8; background: var(--bg-3);
 }
 .cc-inline-field input[type=number] { flex: 0 0 76px; min-width: 76px; }
 .cc-fields {
@@ -3280,4 +3282,204 @@ input:disabled, select:disabled, textarea:disabled { opacity: 0.42; }
 @media (max-width: 1020px) {
   .chars.cc { grid-template-columns: 170px minmax(0, 1fr); }
   .chars.cc .cc-preview { display: none; }
+}
+
+/* ==========================================================================
+   像素风味（2026-11-06 第三轮）
+   --------------------------------------------------------------------------
+   仓库最初就是「近黑底 + 1px 硬边框 + 硬投影 + 四色点缀」的像素风，
+   视觉刷新为了可读性把它磨圆了。这层把**几何感**加回来，但不推翻配色，
+   也不改任何类名 / DOM / 数据流 —— 冒烟与真机诊断都不依赖这些视觉属性。
+
+   ⚠️ **不给中文上像素字体**：仓库里从来没有可用的中文点阵字体，
+   外链字体在离线环境也加载不到；强行用 image-rendering 或 letter-spacing
+   只会让中文糊成一团。像素感来自方块角、1px 硬边、阶梯硬投影、像素网格、
+   分格进度条、8-bit 硬阴影文字和按下去的位移，而不是字体。
+   数字 / 英文（--mono）才加 1px 硬阴影，中文正文一字不动。
+   ========================================================================== */
+
+/* ---------------- 设计令牌：方块角 + 阶梯硬投影 ----------------
+   重定义变量比逐个选择器覆盖更可靠：前面 3000 行里几十处 var(--r) /
+   var(--shadow-hard) 会一次性统一，不会漏掉某一张卡片。
+   圆形元素（状态灯、连线端口）用的是 50% / 999px 硬编码，不受影响。 */
+:root {
+  --r: 2px;
+  --r-sm: 2px;
+  --shadow-hard: 3px 3px 0 rgba(0, 0, 0, 0.55);
+  --shadow-soft: 2px 2px 0 rgba(0, 0, 0, 0.40);
+  --px-edge: rgba(233, 238, 247, 0.20);
+  --px-ink: rgba(0, 0, 0, 0.85);
+}
+
+/* ---------------- 全局：像素底纹、滚动条、焦点、硬阴影文字 ---------------- */
+/* 画布：24px 方格 + 格心像素点。比原来的 120px 大格更像真正的像素画布。 */
+.canvas-grid {
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.045) 1px, transparent 1px),
+    radial-gradient(rgba(255, 255, 255, 0.09) 1px, transparent 1px);
+  background-size: 24px 24px, 24px 24px, 24px 24px;
+}
+/* 角色中心主工作区：8px 淡点阵，让大片留白也有「画布」质感 */
+.chars.cc .chars-body.cc-panel {
+  background-image: radial-gradient(rgba(255, 255, 255, 0.028) 1px, transparent 1px);
+  background-size: 8px 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  border-radius: 0;
+  border: 2px solid var(--bg-1);
+  background: var(--bg-4);
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background: #45536b; background-clip: padding-box; }
+
+button:focus-visible, input:focus-visible, textarea:focus-visible,
+select:focus-visible, summary:focus-visible, a:focus-visible {
+  outline: 2px dashed var(--green);
+  outline-offset: 2px;
+}
+/* 焦点光晕换成一圈实色阶梯，别再是柔光 */
+input:focus, textarea:focus, select:focus {
+  box-shadow: 2px 2px 0 rgba(74, 222, 155, 0.25);
+}
+
+/* 数字 / 英文专用：1px 硬阴影是 8-bit 文字的经典做法，中文不加 */
+.chars-count, .chars-card-meta, .sprite-count, .cc-cost, .cc-step-no,
+.cc-stephead-kicker, .cc-kicker, .badge-count, .node-result-meta,
+.cc-preview-stats b, .chars-prog span, .zoom-val,
+.chars.cc .chars-card-del, .chars.cc .chars-tag {
+  text-shadow: 1px 1px 0 var(--px-ink);
+}
+/* 品牌名与步骤大标题：中文只加一层很轻的硬阴影做立体感，不动字形 */
+.brand .title, .cc-stephead-title { text-shadow: 2px 2px 0 rgba(0, 0, 0, 0.45); }
+
+/* ---------------- 顶栏：四色像素分段条 + 方块 logo ---------------- */
+.topbar {
+  box-shadow: 0 3px 0 rgba(0, 0, 0, 0.45);
+}
+.topbar::after {
+  content: '';
+  position: absolute; left: 0; right: 0; bottom: -1px; height: 3px;
+  pointer-events: none; opacity: 0.55;
+  /* 四色各 24px 一段，硬边无渐变 —— 像 8-bit UI 的状态条 */
+  background: repeating-linear-gradient(90deg,
+    var(--green) 0 24px, var(--cyan) 24px 48px,
+    var(--pink) 48px 72px, var(--yellow) 72px 96px);
+}
+.brand .logo {
+  border-radius: 2px;
+  border: 1px solid var(--px-edge);
+  box-shadow: 2px 2px 0 var(--pink);
+  image-rendering: auto;   /* 见文件顶部注释：下采样不要 pixelated */
+}
+
+/* ---------------- 一级容器：硬边 + 阶梯投影 ---------------- */
+.node, .node.selected, .cc-card, .cc-subcard, .chars-card, .modal,
+.lib-card, .empty-card, .chars.cc .chars-analyze, .lightbox-bar {
+  border-color: var(--px-edge);
+}
+.node { border-width: 1px; box-shadow: var(--shadow-hard); }
+.node.selected { box-shadow: var(--shadow-hard), 0 0 0 2px var(--green); }
+.cc-card, .cc-subcard, .chars.cc .chars-card, .modal, .lib-card, .empty-card {
+  box-shadow: var(--shadow-hard);
+}
+/* 卡片标题前的 2×2 像素角标：纯 CSS，不引图片、不影响排版 */
+.cc-card-title::before, .cc-stephead-title::before {
+  content: '';
+  display: inline-block; width: 6px; height: 6px;
+  margin-right: 9px; vertical-align: middle;
+  background: var(--cyan);
+  box-shadow: 8px 0 0 rgba(108, 196, 239, 0.5),
+              0 8px 0 rgba(108, 196, 239, 0.28);
+}
+.cc-card.is-primary .cc-card-title::before { background: var(--green);
+  box-shadow: 8px 0 0 rgba(74, 222, 155, 0.5),
+              0 8px 0 rgba(74, 222, 155, 0.28); }
+.empty-card { position: relative; }
+.empty-card::after {
+  content: ''; position: absolute; right: 10px; top: 10px;
+  width: 6px; height: 6px; background: var(--pink);
+  box-shadow: -8px 0 0 rgba(255, 122, 144, 0.5),
+              0 8px 0 rgba(255, 122, 144, 0.28);
+  pointer-events: none;
+}
+
+/* ---------------- 控件：方块角、硬边、按下去的位移 ---------------- */
+.cc-btn, .mini, .view-tab, .chars-tab, .rail-tab, .icon-btn,
+.node-result-btn, .top-action, .chars.cc .chars-field input,
+.chars.cc .chars-field textarea, .chars.cc .cc-inline-field select,
+.chars.cc .cc-inline-field input, .chars.cc .chars-new.cc-create input,
+.chars.cc .chars-wizard-input, .chars.cc .chars-style-search {
+  border-radius: 2px;
+}
+.cc-btn, .mini, .view-tab, .chars-tab, .rail-tab, .icon-btn,
+.node-result-btn, .top-action {
+  border-color: var(--px-edge);
+  box-shadow: 2px 2px 0 rgba(0, 0, 0, 0.45);
+}
+.cc-btn.primary, .node-result-btn.primary, .cc-btn.danger {
+  box-shadow: 2px 2px 0 rgba(0, 0, 0, 0.55);
+}
+/* 8-bit 按钮的手感：按下时整个块向右下挪 2px、投影收掉 */
+.cc-btn:active:not(:disabled), .mini:active:not(:disabled),
+.view-tab:active, .chars-tab:active, .rail-tab:active,
+.icon-btn:active, .node-result-btn:active, .top-action:active {
+  transform: translate(2px, 2px);
+  box-shadow: none;
+}
+/* 选中态用实心阶梯，不用发光 */
+.view-tab.on, .chars-tab.cc-step.is-on, .rail-tab.on {
+  box-shadow: inset 0 -3px 0 var(--green);
+}
+.chars.cc .chars-card.on {
+  box-shadow: inset 3px 0 0 var(--green), 2px 2px 0 rgba(0, 0, 0, 0.5);
+}
+.cc-style-chip, .chars.cc .chars-tag, .chars.cc .chars-count,
+.cc-stephead-result, .gpu, .node-state {
+  border-radius: 2px;
+}
+.cc-style-chip.on, .chars-tab.cc-step.is-on { border-color: var(--cyan); }
+
+/* ---------------- 角色中心细节 ---------------- */
+/* 步骤号前面是 `.chars-tab.cc-step .cc-step-no`（特异性 0,3,0），
+   只写 `.cc-step-no` 会被它压回去，必须带上完整前缀。 */
+.cc-step-no, .chars-tab.cc-step .cc-step-no,
+.cc-task-dot, .cc-blocker-icon { border-radius: 2px; }
+.cc-preview .sprite-stage, .chars.cc .chars-atlas-link img {
+  image-rendering: pixelated;
+}
+/* 精灵帧透明底用棋盘格，是像素画工具的标准语言 */
+.sprite-stage {
+  background-color: #1a1a20;
+  background-image:
+    linear-gradient(45deg, #26262e 25%, transparent 25%, transparent 75%, #26262e 75%),
+    linear-gradient(45deg, #26262e 25%, transparent 25%, transparent 75%, #26262e 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 8px 8px;
+}
+/* 进度条切成一格一格，而不是一条平滑色带 */
+.chars.cc .chars-prog { border-radius: 2px; border: 1px solid var(--px-edge); }
+.chars.cc .chars-prog-bar {
+  background-image: repeating-linear-gradient(90deg,
+    transparent 0 6px, rgba(0, 0, 0, 0.32) 6px 8px);
+}
+.chars.cc .chars-done.cc-done, .chars.cc .cc-task {
+  border-radius: 2px;
+  box-shadow: 2px 2px 0 rgba(0, 0, 0, 0.4);
+}
+/* 展开的进阶区：左侧一条像素刻度线，暗示「折进去的机器」 */
+.cc-adv[open] > .cc-adv-body {
+  border-left: 3px solid rgba(108, 196, 239, 0.35);
+}
+.cc-adv > summary::before { content: '▪ '; }
+
+/* ---------------- 弹窗 / 灯箱：同样硬投影 ---------------- */
+.modal-mask { background: rgba(6, 8, 12, 0.72); }
+.modal { border-radius: 2px; }
+.lightbox-bar, .lightbox-zoomctl { border-radius: 2px; box-shadow: var(--shadow-hard); }
+
+/* 窄屏时别让点阵抢内容 */
+@media (max-width: 1020px) {
+  .chars.cc .chars-body.cc-panel { background-image: none; }
 }

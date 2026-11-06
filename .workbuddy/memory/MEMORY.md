@@ -154,3 +154,14 @@ MIUProject/VNCCS_PoseStudio_QI2.1），**不要写 runcomfy.com 这类商业托�
   mock 的 `PUT/DELETE /costumes` 必须返回 200，否则「新建服装」不生效。
 - 真机截图：`CC_FAKE=1 UI_DIST=<构建目录> node tools/shot/capture.mjs <tag>`，
   离线假数据拍 20~24 号四步图，不需要后端 / GPU。
+
+## 像素风味（2026-11-06 第四轮，styles.css 最后一层）
+
+- 方块角与阶梯硬投影靠**重定义 `--r`/`--r-sm`/`--shadow-hard`/`--shadow-soft`**
+  一次覆盖前面几千行，别逐个选择器改；另有顶栏四色像素分段条、画布 24px 方格、
+  主区 8px 点阵、2×2 像素角标、按钮按下位移、进度条分格、精灵帧棋盘格。
+- **中文绝不上像素字体**（没有中文点阵字体，离线外链也加载不到，强行只会糊）；
+  只给数字/英文 `--mono` 加 1px 硬阴影。logo 是 512→26px 下采样，
+  `image-rendering: pixelated` 只给放大显示的精灵帧，别给 logo。
+- CSS 特异性坑：改 `.cc-step-no` 这类被 `.chars-tab.cc-step .cc-step-no`
+  定义的圆角，必须带全前缀才生效。
