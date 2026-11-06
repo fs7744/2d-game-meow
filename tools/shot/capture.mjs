@@ -133,6 +133,29 @@ async function main() {
   }
   await shot('04-library', 1200)
 
+  // 侧栏重构后的四个一级面板 + 搜索 + 收起态
+  await page.keyboard.press('Escape')   // 关掉资料库抽屉，别挡住侧栏
+  await sleep(300)
+  const clickTab = async (label) => {
+    await page.evaluate((t) => {
+      const b = [...document.querySelectorAll('.rail-tab')]
+        .find((x) => (x.textContent || '').includes(t))
+      b?.click()
+    }, label)
+  }
+  for (const [name, label] of [
+    ['05-tab-projects', '项目'],
+    ['06-tab-library', '资料库'],
+    ['07-tab-settings', '设置'],
+    ['08-tab-nodes', '节点'],
+  ]) {
+    await clickTab(label)
+    await shot(name, 500)
+  }
+  await page.click('.rail-search-input')
+  await page.type('.rail-search-input', '抠图')
+  await shot('09-node-search', 600)
+
   // 诊断：字体是否真的加载、层级颜色、主要元素尺寸
   const diag = await page.evaluate(() => {
     const cs = (sel) => {
@@ -157,12 +180,57 @@ async function main() {
         railItems: document.querySelectorAll('.rail-item').length,
         buttons: document.querySelectorAll('button').length,
         details: document.querySelectorAll('details').length,
+        tabs: document.querySelectorAll('.rail-tab').length,
+        sections: document.querySelectorAll('.rail-sec').length,
+        nodeEntries: document.querySelectorAll('[data-page="nodes"] .rail-item').length,
+      },
+      sidebar: {
+        activeTab: document.querySelector('.rail-tab.on')?.textContent,
+        activePage: [...document.querySelectorAll('.rail-page')]
+          .filter((p) => !p.classList.contains('is-hidden'))
+          .map((p) => p.dataset.page),
+        searchValue: document.querySelector('.rail-search-input')?.value,
+        visibleNodeItems: [...document.querySelectorAll('[data-page="nodes"] .rail-item')]
+          .filter((x) => !x.classList.contains('filtered-out')).length,
+        favChips: document.querySelectorAll('.rail-fav-chip').length,
       },
       scroll: { w: document.documentElement.scrollWidth, h: document.documentElement.scrollHeight },
     }
   })
   writeFileSync(join(OUT, 'diagnostics.json'), JSON.stringify({ diag, errors }, null, 2))
-  console.log('诊断:', JSON.stringify(diag.counts), '错误', errors.length, '条')
+  console.log('诊断:', JSON.stringify(diag.counts), JSON.stringify(diag.sidebar), '错误', errors.length, '条')
+
+  // 收起态放最后拍，避免影响上面的诊断（收起后 tab 不在 DOM 里）
+  await page.evaluate(() => document.querySelector('.rail-toggle')?.click())
+  await shot('10-collapsed', 500)
+
+  // 结果优先视图：另开一页加载 ?demo=result（前端假数据，不跑生成）。
+  // 依次验证「默认只看结果 → 展开参数 → 收回结果」这条闭环。
+  const rp = await browser.newPage()
+  await rp.setViewport({ width: 1600, height: 950, deviceScaleFactor: 1 })
+  await rp.goto('http://127.0.0.1:8123/index.html?demo=result',
+    { waitUntil: 'networkidle2', timeout: 60000 })
+  await sleep(1100)
+  const resultDiag = await rp.evaluate(() => ({
+    hasResultPanel: !!document.querySelector('.node-result'),
+    focusMode: !!document.querySelector('.node.result-focus'),
+    paramsStillInDom: !!document.querySelector('.node .prompt'),
+    actions: [...document.querySelectorAll('.node-result-btn')].map((b) => b.textContent?.trim()),
+  }))
+  await rp.screenshot({ path: join(OUT, '11-node-result.png') })
+  await rp.evaluate(() => {
+    const b = [...document.querySelectorAll('.node-result-btn')]
+      .find((x) => (x.textContent || '').includes('参数'))
+    b?.click()
+  })
+  await sleep(400)
+  await rp.screenshot({ path: join(OUT, '12-node-params.png') })
+  await rp.evaluate(() => document.querySelector('.icon-btn.result-toggle')?.click())
+  await sleep(400)
+  await rp.screenshot({ path: join(OUT, '13-node-result-again.png') })
+  console.log('  ✓ 11/12/13 节点结果视图', JSON.stringify(resultDiag))
+  await rp.close()
+
   await browser.close()
   srv.close()
 }

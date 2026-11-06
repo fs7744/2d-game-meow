@@ -34,7 +34,7 @@ import type { PoseDir } from './api'
 import type { ModelCaps } from './api'
 import type {
   FavoritePrompt, GenNode, GenParams, ModelRecommend, NodeImage, NodeCharSource,
-  NodeKind, NodeSource, PosePreset, Viewport,
+  NodeKind, NodeSource, NodeView, PosePreset, Viewport,
 } from './types'
 import type { NodePatch } from './nodes/GenNodeCard'
 import { POSE_NAME_LABEL, zh } from './labels'
@@ -223,7 +223,11 @@ function matchesRec(p: GenParams, rec?: ModelRecommend): boolean {
 function migrate(n: GenNode): GenNode {
   // 旧存档兼容：'animepixel'（早期只做动漫人物）改名为 'topixel'（通用）
   const kind = (n.kind as string) === 'animepixel' ? 'topixel' : (n.kind ?? 'gen')
-  return { ...n, kind: kind as NodeKind, params: { ...DEFAULT_PARAMS, ...n.params } }
+  // 老存档里已经有结果的节点，打开时直接给结果视图；一张画布上十几张图，
+  // 每张开一屏参数会把注意力全吃掉。要看参数点节点上的「⚙ 参数」。
+  const done = n.job?.status === 'done' && !!n.job.url
+  const view: NodeView = done && n.view === 'expanded' ? 'result' : (n.view ?? 'expanded')
+  return { ...n, kind: kind as NodeKind, params: { ...DEFAULT_PARAMS, ...n.params }, view }
 }
 
 // 仅供截图/联调：?demo=1 铺一个示例节点，?demo=gen 同时触发一次生成
@@ -240,10 +244,25 @@ export default function App() {
   const [projectMeta, setProjectMeta] = useState<ProjectMeta[]>([])
   const [nodes, setNodes] = useState<GenNode[]>(() => {
     if (DEMO) {
-      return [{
+      const base: GenNode = {
         id: newId(), kind: 'gen', x: 0, y: 0, view: 'expanded',
         params: { ...DEFAULT_PARAMS, prompt: '白色猫骑士，红披风，武士刀，正面全身' },
-      }]
+      }
+      // ?demo=result：铺一个「已经出图」的节点，用来真机截图验证结果优先视图。
+      // 纯前端假数据，不提交生成任务、不占 GPU（真机跑一次要 20s+ 显存）。
+      if (DEMO === 'result') {
+        return [{
+          ...base,
+          view: 'result',
+          job: {
+            id: 'demo-result', status: 'done',
+            url: '/icon.png', path: 'assets/demo/white_cat_knight.png',
+            seed: 1234567, seconds: 24.8,
+            candidates: 2, frames: 4, gatePassed: 3,
+          },
+        }]
+      }
+      return [base]
     }
     return []
   })
@@ -1456,7 +1475,13 @@ export default function App() {
           const r = results[idx]
           if (r.status === 'fulfilled') {
             failCount.delete(n.id)
-            return { ...n, job: { ...n.job!, ...r.value, startedAt: n.job?.startedAt } }
+            const done = r.value.status === 'done' && !!r.value.url
+            return {
+              ...n,
+              job: { ...n.job!, ...r.value, startedAt: n.job?.startedAt },
+              // 出图即收起参数：画布上结果优先。用户主动选了「只看图」就不动他。
+              view: done && n.view !== 'image' ? 'result' : n.view,
+            }
           }
           // 查询失败：连续 3 次（约 2 秒）就判定失败，不再无限等
           const c = (failCount.get(n.id) || 0) + 1

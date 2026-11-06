@@ -408,6 +408,10 @@ export default function GenNodeCard({
   const busy = job?.status === 'queued' || job?.status === 'running'
   const hasImage = !!job?.url
   const imageMode = node.view === 'image' && hasImage
+  /** 结果优先视图：出图后默认只给结果与一行摘要，参数全部收起。
+   *  对照 ComfyUI 的折叠节点（双击只留标题）和 n8n 的画布节点（只显示状态，
+   *  参数进 Node Detail View）——画布是看结果的地方，不是表单。 */
+  const resultMode = node.view === 'result' && hasImage
   const isI2I = node.kind === 'img2img'
   const isImg = node.kind === 'image'
   const isBg = node.kind === 'bg'
@@ -435,7 +439,7 @@ export default function GenNodeCard({
   /** 换装/换脸：都是「两图 + 结构化指令」，共用一套正文 */
   const isSwap = isOutfit || isFaceSwap
   /** 是否锁了高度（只有参数视图能锁；图片等比显示，锁高会拉伸） */
-  const lockH = !isImg && !imageMode && !!node.h
+  const lockH = !isImg && !imageMode && !resultMode && !!node.h
   /**
    * 卡头上显示的文件名。
    *
@@ -444,7 +448,7 @@ export default function GenNodeCard({
    * 由正文的提示词与状态说明身份，卡头不再重复。
    */
   const headFilePath = isImg || isPoseEdit ? node.image?.path || ''
-    : imageMode ? job?.path || '' : ''
+    : imageMode || resultMode ? job?.path || '' : ''
   const headFile = headFilePath ? fileNameOf(headFilePath) : ''
   /** 本节点跑的工作流名（和 /models 的 caps.workflows 同一套词） */
   const wf = WORKFLOW_OF[node.kind] || ''
@@ -617,7 +621,7 @@ export default function GenNodeCard({
     const sx = e.clientX
     const sy = e.clientY
     const el = (e.currentTarget as HTMLElement).closest('.node') as HTMLElement | null
-    if (isImg || imageMode) {
+    if (isImg || imageMode || resultMode) {
       const sw = isImg ? node.image?.w ?? NODE_W : node.w ?? NODE_W
       const move = (ev: PointerEvent) => {
         const next = sw + (ev.clientX - sx) / zoom
@@ -783,7 +787,7 @@ export default function GenNodeCard({
     <div
       className={`node gen${selected ? ' selected' : ''}${imageMode ? ' image-mode' : ''}${
         isImg ? ' is-img' : ''
-      }${lockH ? ' fixed-h' : ''}${linkTarget ? ' link-target' : ''}`}
+      }${resultMode ? ' result-focus' : ''}${lockH ? ' fixed-h' : ''}${linkTarget ? ' link-target' : ''}`}
       data-node-id={node.id}
       style={{
         left: node.x,
@@ -872,6 +876,20 @@ export default function GenNodeCard({
             {imageMode ? '▤ 参数' : '▣'}
           </button>
         )}
+        {/* 参数视图里给一个「回到结果」的入口：看完参数/改完设置能一键收起，
+            不用再手动滚回顶部找折叠开关。 */}
+        {hasImage && !resultMode && !imageMode && (
+          <button
+            className="icon-btn result-toggle"
+            title="只看结果，收起参数"
+            onClick={(e) => {
+              e.stopPropagation()
+              onPatch({ view: 'result' })
+            }}
+          >
+            ⤡ 结果
+          </button>
+        )}
         {/* 图片视图下不给预览按钮：正文里的图本身就点得开全屏，
             省下的 22px 让给卡头的文件名（名字比"多一个入口"更值钱） */}
         {previewUrl && !imageMode && (
@@ -916,6 +934,92 @@ export default function GenNodeCard({
           }}
         />
       </div>
+
+      {/* 结果优先视图：出图后画布上只留「图 + 一行摘要 + 三个动作」。
+          参数区仍在 DOM 里，只是被 CSS 收起——展开时不重新挂载、不丢焦点，
+          已有连线也不因为控件消失而断掉。 */}
+      {resultMode && (
+        <div className="node-result">
+          {/*
+            只给「已有入边」的节点保留输入端口。Canvas 靠 [data-port] 实测
+            位置画连线，端口凭空消失会让连线端点掉到写死的 fallback 偏移。
+            没有入边就不需要端口；要新连线就点「⚙ 参数」展开参数区。
+          */}
+          {node.source?.nodeId && (
+            <span
+              className="conn in src result-port"
+              data-port="source"
+              title="源图 / 动作参考输入（展开参数可断开或改源）"
+            />
+          )}
+          {node.charSource?.nodeId && (
+            <span
+              className="conn in char result-port"
+              data-port="char"
+              title="角色图输入（展开参数可断开或改源）"
+            />
+          )}
+
+          <button
+            className="node-result-img"
+            title="点击全屏预览 / 下载"
+            onClick={(e) => {
+              e.stopPropagation()
+              onPreview?.(job!.url!, previewName)
+            }}
+          >
+            <img src={job!.url} alt={p.prompt || '生成结果'} draggable={false} />
+            <span className="node-result-zoom">⤢ 全屏</span>
+          </button>
+
+          <div className="node-result-summary">
+            <div className="node-result-prompt" title={p.prompt}>
+              {p.prompt || '（无提示词）'}
+            </div>
+            <div className="node-result-chips">
+              <span>{p.width}×{p.height}</span>
+              <span>{p.steps} 步</span>
+              <span>{GEN_STYLES.find((x) => x.v === styleOf(p))?.label ?? '自定义档位'}</span>
+            </div>
+            <div className="node-result-meta">
+              种子 {job!.seed ?? p.seed}
+              {typeof job!.seconds === 'number' ? ` · ${job!.seconds}s` : ''}
+              {typeof sCand === 'number' && sCand > 1 ? ` · 候选 ${sCand}/帧` : ''}
+              {typeof sGate === 'number' && typeof sFrames === 'number'
+                ? ` · 闸门 ${sGate}/${sFrames}` : ''}
+            </div>
+          </div>
+
+          <div className="node-result-actions">
+            <button
+              className="node-result-btn primary"
+              title="查看 / 修改全部参数（重做、学习参数、连线都在这里）"
+              onClick={(e) => {
+                e.stopPropagation()
+                onPatch({ view: 'expanded' })
+              }}
+            >
+              ⚙ 参数
+            </button>
+            <button
+              className="node-result-btn"
+              disabled={busy}
+              title="用当前参数重跑一次"
+              onClick={(e) => { e.stopPropagation(); onGenerate() }}
+            >
+              {busy ? '生成中…' : '↻ 重做'}
+            </button>
+            <button
+              className="node-result-btn"
+              title="以此图为源新建图生图节点"
+              onClick={(e) => { e.stopPropagation(); onSpawnImg2Img() }}
+            >
+              ↳ 图生图
+            </button>
+          </div>
+          <div className="node-result-foot">连线、改提示词、调参数 → 点「⚙ 参数」展开</div>
+        </div>
+      )}
 
       {/*
         底模：**节点级选择**。放在正文最前面（不是塞进「更多设置」）。
@@ -2860,13 +2964,13 @@ export default function GenNodeCard({
           图片/图片视图不锁高——那是等比显示，硬拉会变形。 */}
       <div
         className="node-corner"
-        title={isImg || imageMode
+        title={isImg || imageMode || resultMode
           ? '拖动等比缩放（高度跟着原图比例）'
           : '拖动改变大小（宽 × 高；拉矮后正文可滚动；双击恢复自适应高度）'}
         onPointerDown={startCorner}
         onDoubleClick={(e) => {
           e.stopPropagation()
-          if (!isImg && !imageMode) onPatch({ h: undefined })  // 恢复自适应高度
+          if (!isImg && !imageMode && !resultMode) onPatch({ h: undefined })  // 恢复自适应高度
         }}
       />
     </div>

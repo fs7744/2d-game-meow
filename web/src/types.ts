@@ -293,7 +293,9 @@ export type JobState = {
   result?: Record<string, unknown>
 }
 
-export type NodeView = 'expanded' | 'image'
+/** 节点视图。'result' = 出图后默认的结果优先视图：只给结果与摘要，
+ *  参数收起来（ComfyUI 折叠节点 / n8n 画布节点只显示状态，参数进详情）。 */
+export type NodeView = 'expanded' | 'image' | 'result'
 
 export type GenNode = {
   id: string

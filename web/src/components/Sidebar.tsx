@@ -1,4 +1,4 @@
-import { useRef, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { FavoritePrompt } from '../types'
 import type { QwenLora, ActiveLora } from '../api'
 import type { TemplateInfo } from '../api'
@@ -56,20 +56,192 @@ const MATTE_LABEL: Record<string, string> = {
   color: '纯色键控 · 极快',
 }
 
+/* ==========================================================================
+   侧栏信息架构：Activity Bar（图标 tab）+ 每 tab 独立面板
+   --------------------------------------------------------------------------
+   以前是 6 个分组全部默认展开、堆在一条滚动条里：18 个节点条目把「资料库」
+   「设置」挤到屏幕外，找东西只能靠翻。业界同类产品的共识不是这样：
+
+   - ComfyUI：左侧是 Nodes / Workflows / Models / Queue 等**图标 tab**；
+     节点库面板里有 Essentials（按用途分组的精选）、All nodes、搜索框、
+     Bookmarked 收藏置顶，节点靠拖到画布或点一下添加。
+   - n8n：`Tab` 或 `Cmd/Ctrl+K` 唤起节点面板，面板顶部有搜索框，
+     `Enter` 插入所选节点、`Esc` 关闭。
+   - VS Code / Figma：Activity Bar 图标导航，每个面板独立滚动，
+     面板底部有状态条，不把「资源」和「设置」混在一条长列表里。
+
+   这里取同一个骨架：4 个一级 tab（节点 / 项目 / 资料库 / 设置），
+   节点 tab 内做「常用置顶 → 搜索 → 分类列表」，并支持 Ctrl+K 聚焦搜索、
+   Enter 添加第一个匹配、Esc 清空。
+   ========================================================================== */
+type RailTab = 'nodes' | 'projects' | 'library' | 'settings'
+const RAIL_TABS: { id: RailTab; icon: string; label: string; hint: string }[] = [
+  { id: 'nodes', icon: '▣', label: '节点', hint: '节点库：搜索、分类、拖到画布' },
+  { id: 'projects', icon: '▤', label: '项目', hint: '项目与模板' },
+  { id: 'library', icon: '☆', label: '资料库', hint: '提示词收藏与姿势库' },
+  { id: 'settings', icon: '⚙', label: '设置', hint: 'LoRA 与全局选项' },
+]
+
+/** 节点清单。以前是 16 段复制粘贴的 JSX，改一个标题要动 16 处。
+ *  **顺序不能随便重排**：下游冒烟用 `.rail-add` 的索引取「图生图」，
+ *  其它用例按节点名查找。分类只是在这个顺序上插小标题。 */
+type NodeKindArg = NonNullable<Parameters<Props['onAddNode']>[0]>
+type NodeEntry = {
+  kind: NodeKindArg
+  name: string
+  desc: string
+  title: string
+  /** 搜索别名：中文说法、英文 kind、用户可能输入的同义词 */
+  keys: string
+  group: 0 | 1 | 2
+  addTitle?: string
+  /** 是否进「常用」区（ComfyUI 的 Essentials / Bookmarked） */
+  fav?: boolean
+}
+const NODE_GROUPS = ['生成与改写', '角色 · 姿势 · 序列', '修图与像素化'] as const
+const NODE_ENTRIES: NodeEntry[] = [
+  {
+    kind: 'gen', name: '图生成', desc: '文生图 · 提示词 → 精灵', group: 0, fav: true,
+    title: '拖到画布任意位置，或点 + 放到原点',
+    keys: 'text2img t2i 文生图 出图 新建 一句话',
+  },
+  {
+    kind: 'img2img', name: '图生图', desc: '拿已有图改内容 / 改画风', group: 0, fav: true,
+    title: '拖到画布任意位置，或点 + 放到原点',
+    keys: 'i2i 改图 参考图 画风 重绘',
+  },
+  {
+    kind: 'outpaint', name: '扩图', desc: '场景/背景延展', group: 0,
+    title: '扩图：把图往左/右/上/下/四周扩展，新区域按场景连续性补全',
+    keys: 'outpaint 外扩 画布 背景延展',
+  },
+  {
+    kind: 'outfit', name: '换装', desc: '同角色不同装备', group: 1,
+    title: '换装：把服装图的衣服穿到人物图上，保留身份与姿势',
+    keys: 'outfit 服装 衣服 装备',
+  },
+  {
+    kind: 'faceswap', name: '换脸', desc: '换主角 / 捏脸落图', group: 1,
+    title: '换脸：把身份图的脸与发型换到场景人物上，保留姿势与场景',
+    keys: 'face 换脸 捏脸 身份',
+  },
+  {
+    kind: 'poseedit', name: '人偶姿势', desc: '3D 人偶 · 摆姿势导出', group: 1, fav: true,
+    title: '人偶姿势：官方 VNCCS PoseStudio 的 3D 人偶，拖关节摆姿势、选朝向，导出白底灰人偶图（姿态 LoRA 的训练分布）',
+    keys: 'mannequin 人偶 3d 骨骼 摆姿势 朝向',
+  },
+  {
+    kind: 'poseclone', name: '角色迁移', desc: '参考动作 · 换角色', group: 1, fav: true,
+    title: '角色迁移：动作参考图定姿态 + 角色图定身份',
+    keys: 'poseclone 姿态迁移 动作 换角色',
+  },
+  {
+    kind: 'posebatch', name: '姿态批量', desc: '姿势集 · 整套换角色', group: 1,
+    title: '姿态批量：选一个姿势集（人偶编辑器抽帧存下来的整套），一次出完整套精灵帧；每帧保留所有候选，不满意单独重生成，旧的那张随时选回来',
+    keys: '批量 姿势集 整套 帧 候选',
+  },
+  {
+    kind: 'spriteswap', name: '序列帧替换', desc: '精灵图 · 逐帧换角色', group: 1,
+    title: '序列帧替换：把一段游戏动画（精灵图）里的角色换成目标角色，动作保持不变',
+    keys: '序列帧 精灵图 动画 逐帧',
+  },
+  {
+    kind: 'poseswap', name: '姿态序列', desc: '骨架帧 · 逐帧生成全身', group: 1,
+    title: '姿态序列：从一组骨架图逐帧生成（多候选择优 + 质量闸门），自动对齐脚底并打包成精灵图',
+    keys: 'w4 骨架帧 走路帧 逐帧生成',
+  },
+  {
+    kind: 'pixelify', name: '像素转换', desc: '网格对齐 · 每格一色', group: 2,
+    title: '完美像素转换：任意图 → 每格一色、边界对齐的像素画',
+    keys: 'pixel 网格 每格一色 完美像素',
+  },
+  {
+    kind: 'topixel', name: '转像素', desc: '任意图 · 一键像素化', group: 2, fav: true,
+    title: '转像素：任意图（动漫/照片/插画/3D）→ 像素画。没源图就先出图再转',
+    keys: 'pixel art 像素化 像素风',
+  },
+  {
+    kind: 'airepaint', name: '局部AI重绘', desc: '裁剪重画 · 支持 LoRA', group: 2,
+    title: '局部 AI 重绘：裁剪选区交给通用模型重画，能挂 LoRA、选区外逐点不变',
+    keys: '局部重绘 ai 选区 lora 裁剪',
+  },
+  {
+    kind: 'inpaint', name: '局部重绘', desc: '笔刷选区 · 选区外不变', group: 2,
+    title: '局部重绘：用笔刷涂出要重绘的区域，只改选区',
+    keys: 'inpaint 笔刷 蒙版 mask',
+  },
+  {
+    kind: 'bg', name: '抠图', desc: '去背景 / 换背景 · 不用模型', group: 2, fav: true,
+    title: '抠图去背景 / 换背景；源图用连线接过来，或直接拖图片上去',
+    keys: 'matte 去背景 透明底 换背景 键控',
+  },
+  {
+    kind: 'image', name: '图片', desc: '本地图 · 可当图生图的源', group: 2,
+    title: '拖一张本机图片进画布，或点 + 选择文件',
+    keys: '本地 上传 素材 文件',
+    addTitle: '选择本机图片',
+  },
+]
+const FAV_ENTRIES = NODE_ENTRIES.filter((e) => e.fav)
+
+function nodeMatches(e: NodeEntry, q: string): boolean {
+  const s = q.trim().toLowerCase()
+  if (!s) return true
+  return `${e.name} ${e.desc} ${e.kind} ${e.keys}`.toLowerCase().includes(s)
+}
+
+/** 一个节点条目：DOM 结构、类名、拖拽协议都与重构前一致。
+ *  搜索只是给它加 `filtered-out` class（CSS 隐藏），**不从 DOM 移除**——
+ *  这样键盘/无障碍能保留顺序，已有冒烟用例也不受影响。 */
+function NodeItem(
+  { entry, hidden, onAdd }:
+  { entry: NodeEntry; hidden: boolean; onAdd: Props['onAddNode'] },
+) {
+  return (
+    <div
+      className={`rail-item${hidden ? ' filtered-out' : ''}`}
+      draggable
+      data-node-kind={entry.kind}
+      onDragStart={(ev) => {
+        ev.dataTransfer.setData('application/x-node-type', entry.kind)
+        ev.dataTransfer.effectAllowed = 'copy'
+      }}
+      title={entry.title}
+    >
+      <span className="rail-item-main">
+        <b>{entry.name}</b>
+        <em>{entry.desc}</em>
+      </span>
+      <button
+        className="rail-add"
+        title={entry.addTitle ?? '放到画布原点'}
+        onClick={() => onAdd(entry.kind)}
+      >
+        +
+      </button>
+    </div>
+  )
+}
+
+/** forceOpen：搜索时强制展开节点分组，避免「搜到了却因为折叠看不见」。 */
 function Section(
-  { icon, title, count, children, defaultOpen = true }:
-  { icon: string; title: string; count?: number; children: ReactNode; defaultOpen?: boolean },
+  { icon, title, count, children, defaultOpen = true, forceOpen }:
+  {
+    icon: string; title: string; count?: number; children: ReactNode;
+    defaultOpen?: boolean; forceOpen?: boolean
+  },
 ) {
   const [open, setOpen] = useState(defaultOpen)
+  const shown = !!forceOpen || open
   return (
-    <div className={`rail-sec${open ? ' open' : ''}`}>
-      <button className="rail-sec-head" onClick={() => setOpen(!open)}>
-        <span className="rail-sec-arrow">{open ? '▾' : '▸'}</span>
+    <div className={`rail-sec${shown ? ' open' : ''}`}>
+      <button className="rail-sec-head" onClick={() => setOpen(!shown)}>
+        <span className="rail-sec-arrow">{shown ? '▾' : '▸'}</span>
         <span className="rail-sec-icon">{icon}</span>
         <span className="rail-sec-title">{title}</span>
         {count ? <span className="rail-count">{count}</span> : null}
       </button>
-      {open && <div className="rail-sec-body">{children}</div>}
+      {shown && <div className="rail-sec-body">{children}</div>}
     </div>
   )
 }
@@ -138,10 +310,12 @@ function ProjectRow({
 }
 
 /**
- * 左边栏：菜单式层级，可整条收起。
+ * 左边栏：一级 tab 导航 + 独立面板，整条可收起成图标条。
  *
- * 之前节点列表和提示词收藏是两个各自浮在左上角的卡片，节点一多就把画布左上角
- * 占满、互相挤压。改成一条可收起的侧栏后，画布的可视区域稳定了，也能放下设置。
+ * **兼容性约定**：6 个 `.rail-sec` 的 DOM 顺序仍是
+ * 「项目 / 模板 / 节点 / 资料库 / LoRA / 设置」。切 tab 只用 class 控制
+ * `display:none`，不条件卸载——jsdom 冒烟用例仍能在任何 tab 下查询和点击
+ * 面板里的按钮（真实浏览器里不可见，但 DOM 始终完整）。
  */
 export default function Sidebar({
   favs, onAddNode, canApply, onApplyFav, onRemoveFav, onOpenLibrary,
@@ -152,32 +326,61 @@ export default function Sidebar({
   templates, onUseTemplate, onDeleteTemplate,
 }: Props) {
   const [collapsed, setCollapsed] = useState(false)
+  const [tab, setTab] = useState<RailTab>('nodes')
+  const [query, setQuery] = useState('')
   const importRef = useRef<HTMLInputElement | null>(null)
+  const searchRef = useRef<HTMLInputElement | null>(null)
+
+  /** Ctrl/⌘+K 唤起节点搜索（n8n Command Bar / ComfyUI 节点库搜索的通行做法）。
+   *  用 setTimeout 而不是 requestAnimationFrame：jsdom 里 rAF 可能不存在。 */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey)) return
+      if (String(e.key ?? '').toLowerCase() !== 'k') return
+      e.preventDefault()
+      setCollapsed(false)
+      setTab('nodes')
+      window.setTimeout(() => searchRef.current?.focus(), 0)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
+  const matchedKinds = useMemo(
+    () => new Set(NODE_ENTRIES.filter((e) => nodeMatches(e, query)).map((e) => e.kind)),
+    [query],
+  )
+  const matchCount = matchedKinds.size
+  const current = projects.find((p) => p.id === currentProject)
+  const searching = query.trim().length > 0
 
   if (collapsed) {
     return (
-      <aside className="rail collapsed">
+      <aside className="rail collapsed" data-tab={tab}>
         <button className="rail-toggle" title="展开侧栏" onClick={() => setCollapsed(false)}>
           »
         </button>
-        <button className="rail-icon" title="图生成" onClick={() => { setCollapsed(false); onAddNode('gen') }}>
-          ▣
+        <button className="rail-icon" title="新建图生成节点" onClick={() => onAddNode('gen')}>
+          +
         </button>
-        <button className="rail-icon" title="图生图" onClick={() => { setCollapsed(false); onAddNode('img2img') }}>
-          ↳
-        </button>
-        <button className="rail-icon" title={`提示词收藏 ${favs.length}`} onClick={() => setCollapsed(false)}>
-          ☆{favs.length ? <sup>{favs.length}</sup> : null}
-        </button>
-        <button className="rail-icon" title="设置" onClick={() => setCollapsed(false)}>
-          ⚙
-        </button>
+        {RAIL_TABS.map((t) => (
+          <button
+            key={t.id}
+            className={`rail-icon${tab === t.id ? ' on' : ''}`}
+            title={t.hint}
+            onClick={() => { setTab(t.id); setCollapsed(false) }}
+          >
+            {t.icon}
+          </button>
+        ))}
       </aside>
     )
   }
 
+  const pageClass = (id: RailTab) => `rail-page${tab === id ? '' : ' is-hidden'}`
+
   return (
-    <aside className="rail">
+    <aside className="rail" data-tab={tab}>
       <div className="rail-head">
         <span className="rail-brand">工作台</span>
         <span className="spacer" />
@@ -186,471 +389,329 @@ export default function Sidebar({
         </button>
       </div>
 
+      {/* 一级导航：Activity Bar。每个 tab 一块独立面板，不再共用一条长滚动条。 */}
+      <div className="rail-tabs" role="tablist">
+        {RAIL_TABS.map((t) => (
+          <button
+            key={t.id}
+            role="tab"
+            aria-selected={tab === t.id}
+            className={`rail-tab${tab === t.id ? ' on' : ''}`}
+            title={t.hint}
+            onClick={() => setTab(t.id)}
+          >
+            <span className="rail-tab-icon">{t.icon}</span>
+            <span className="rail-tab-label">{t.label}</span>
+            {t.id === 'library' && favs.length > 0
+              ? <span className="rail-tab-badge">{favs.length}</span>
+              : null}
+          </button>
+        ))}
+      </div>
+
+      {/* 节点搜索：常驻 DOM（其它 tab 只是 CSS 隐藏），Ctrl+K 才能稳定聚焦。 */}
+      <div className={`rail-search${tab === 'nodes' ? '' : ' is-hidden'}`}>
+        <span className="rail-search-icon" aria-hidden="true">⌕</span>
+        <input
+          ref={searchRef}
+          className="rail-search-input"
+          type="search"
+          value={query}
+          placeholder="搜索节点…"
+          aria-label="搜索节点"
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              const first = NODE_ENTRIES.find((it) => nodeMatches(it, query))
+              if (first) {
+                onAddNode(first.kind)
+                setQuery('')
+                e.currentTarget.blur()
+              }
+            }
+            if (e.key === 'Escape') { setQuery(''); e.currentTarget.blur() }
+          }}
+        />
+        {searching
+          ? <button className="rail-search-clear" title="清空搜索" onClick={() => setQuery('')}>✕</button>
+          : <kbd className="rail-search-kbd">Ctrl K</kbd>}
+      </div>
+
       <div className="rail-scroll">
-        {/* 常用入口固定在最上面：展开的「节点」段有 18 条，往下翻才能看到
-            资料库 / 设置，第一次用根本不知道怎么开工。这里给两个一步到位
-            的按钮，且**不是** Section —— 侧栏分组数量与顺序保持不变。 */}
-        <div className="rail-quick">
-          <h3>开始创作</h3>
-          <p>从一句话生成角色，或拿现成的图继续改。</p>
-          <div className="rail-quick-row">
-            <button
-              className="rail-quick-btn"
-              onClick={() => onAddNode('gen')}
-              title="新建一个文生图节点"
-            >
-              + 图生成
+        {/* ---------- 面板 1：项目 + 模板（保持 Section 顺序第一、第二） ---------- */}
+        <div className={pageClass('projects')} data-page="projects">
+          <Section icon="▤" title="项目" count={projects.length}>
+            {projects.map((p) => (
+              <ProjectRow
+                key={p.id}
+                p={p}
+                current={p.id === currentProject}
+                onSwitch={() => onSwitchProject(p.id)}
+                onRename={(name) => onRenameProject(p.id, name)}
+                onDelete={() => onDeleteProject(p.id)}
+                onExport={() => onExportProject(p.id)}
+                onTemplate={() => onSaveTemplate(p.id)}
+                onReveal={() => onRevealProject(p.id)}
+              />
+            ))}
+            <button className="rail-new" onClick={onCreateProject} title="新建一个空画布">
+              + 新建项目
             </button>
             <button
-              className="rail-quick-btn ghost"
-              onClick={() => onAddNode('img2img')}
-              title="新建一个图生图节点"
+              className="rail-new"
+              onClick={() => importRef.current?.click()}
+              title="导入 .mproj 归档（别人发来的项目 / 换台机器继续做）"
             >
-              + 图生图
+              ↑ 导入项目
             </button>
-          </div>
+            <input
+              ref={importRef}
+              type="file"
+              accept=".mproj"
+              style={{ display: 'none' }}
+              onChange={(e) => {
+                const f = e.target.files?.[0]
+                // **清空 value**：同一个文件连续选两次不会触发 change，
+                // 用户会以为「导入没反应」。
+                e.target.value = ''
+                if (f) onImportProject(f)
+              }}
+            />
+            <p className="rail-tip">每个项目是一套独立的画布，互不干涉。</p>
+          </Section>
+
+          <Section icon="★" title="模板" count={templates.length}>
+            {templates.length === 0 ? (
+              <p className="rail-tip">
+                在项目上点 <b>★</b> 存成模板。之后点模板就能一键开一个
+                同样的新项目——同一套产线要开好几个项目时用得上。
+              </p>
+            ) : (
+              templates.map((t) => (
+                <div className="rail-item" key={t.id}>
+                  <button
+                    className="rail-item-main"
+                    onClick={() => onUseTemplate(t.id)}
+                    title={`从「${t.name}」新建一个项目`}
+                  >
+                    <b>{t.name}</b>
+                    <em>{t.nodes} 个节点</em>
+                  </button>
+                  <button className="rail-del" title="删除模板" onClick={() => onDeleteTemplate(t.id)}>
+                    ✕
+                  </button>
+                </div>
+              ))
+            )}
+          </Section>
         </div>
 
-        <Section icon="▤" title="项目" count={projects.length}>
-          {projects.map((p) => (
-            <ProjectRow
-              key={p.id}
-              p={p}
-              current={p.id === currentProject}
-              onSwitch={() => onSwitchProject(p.id)}
-              onRename={(name) => onRenameProject(p.id, name)}
-              onDelete={() => onDeleteProject(p.id)}
-              onExport={() => onExportProject(p.id)}
-              onTemplate={() => onSaveTemplate(p.id)}
-              onReveal={() => onRevealProject(p.id)}
-            />
-          ))}
-          <button className="rail-new" onClick={onCreateProject} title="新建一个空画布">
-            + 新建项目
-          </button>
-          <button
-            className="rail-new"
-            onClick={() => importRef.current?.click()}
-            title="导入 .mproj 归档（别人发来的项目 / 换台机器继续做）"
+        {/* ---------- 面板 2：节点库（常用置顶 → 搜索结果 → 分类列表） ---------- */}
+        <div className={pageClass('nodes')} data-page="nodes">
+          <Section
+            icon="▣"
+            title="节点"
+            count={NODE_ENTRIES.length}
+            forceOpen={searching}
           >
-            ↑ 导入项目
-          </button>
-          <input
-            ref={importRef}
-            type="file"
-            accept=".mproj"
-            style={{ display: 'none' }}
-            onChange={(e) => {
-              const f = e.target.files?.[0]
-              // **清空 value**：同一个文件连续选两次不会触发 change，
-              // 用户会以为「导入没反应」。
-              e.target.value = ''
-              if (f) onImportProject(f)
-            }}
-          />
-          <p className="rail-tip">每个项目是一套独立的画布，互不干涉。</p>
-        </Section>
-
-        <Section icon="★" title="模板" count={templates.length}>
-          {templates.length === 0 ? (
-            <p className="rail-tip">
-              在项目上点 <b>★</b> 存成模板。之后点模板就能一键开一个
-              同样的新项目——同一套产线要开好几个项目时用得上。
-            </p>
-          ) : (
-            templates.map((t) => (
-              <div className="rail-item" key={t.id}>
-                <button
-                  className="rail-item-main"
-                  onClick={() => onUseTemplate(t.id)}
-                  title={`从「${t.name}」新建一个项目`}
-                >
-                  <b>{t.name}</b>
-                  <em>{t.nodes} 个节点</em>
-                </button>
-                <button className="rail-del" title="删除模板" onClick={() => onDeleteTemplate(t.id)}>
-                  ✕
-                </button>
+            {/* ComfyUI 的 Essentials / Bookmarked：高频节点不用往下翻。 */}
+            {/* 搜索时只给结果：常用区与底部长说明都收起来，否则「搜到了 1 个」
+                却仍铺着 6 个常用按钮，看起来像搜索没生效。 */}
+            <div className={`rail-fav${searching ? ' is-hidden' : ''}`}>
+              <div className="rail-group-label">常用<span className="rail-group-count">{FAV_ENTRIES.length}</span></div>
+              <div className="rail-fav-grid">
+                {FAV_ENTRIES.map((e) => (
+                  <button
+                    key={e.kind}
+                    className="rail-fav-chip"
+                    title={`${e.name}：${e.desc}（点一下添加）`}
+                    onClick={() => onAddNode(e.kind)}
+                  >
+                    <span className="rail-fav-dot" aria-hidden="true" />
+                    {e.name}
+                  </button>
+                ))}
               </div>
-            ))
-          )}
-        </Section>
-
-        <Section icon="▣" title="节点">
-          <div
-            className="rail-item"
-            draggable
-            onDragStart={(e) => {
-              e.dataTransfer.setData('application/x-node-type', 'gen')
-              e.dataTransfer.effectAllowed = 'copy'
-            }}
-            title="拖到画布任意位置，或点 + 放到原点"
-          >
-            <span className="rail-item-main">
-              <b>图生成</b>
-              <em>文生图 · 提示词 → 精灵</em>
-            </span>
-            <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('gen')}>+</button>
-          </div>
-          <div
-            className="rail-item"
-            draggable
-            onDragStart={(e) => {
-              e.dataTransfer.setData('application/x-node-type', 'img2img')
-              e.dataTransfer.effectAllowed = 'copy'
-            }}
-            title="拖到画布任意位置，或点 + 放到原点"
-          >
-            <span className="rail-item-main">
-              <b>图生图</b>
-              <em>拿已有图改内容 / 改画风</em>
-            </span>
-            <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('img2img')}>+</button>
-          </div>
-          <div
-            className="rail-item"
-            draggable
-            onDragStart={(e) => {
-              e.dataTransfer.setData('application/x-node-type', 'outpaint')
-              e.dataTransfer.effectAllowed = 'copy'
-            }}
-            title="扩图：把图往左/右/上/下/四周扩展，新区域按场景连续性补全"
-          >
-            <span className="rail-item-main">
-              <b>扩图</b>
-              <em>场景/背景延展</em>
-            </span>
-            <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('outpaint')}>+</button>
-          </div>
-          <div
-            className="rail-item"
-            draggable
-            onDragStart={(e) => {
-              e.dataTransfer.setData('application/x-node-type', 'outfit')
-              e.dataTransfer.effectAllowed = 'copy'
-            }}
-            title="换装：把服装图的衣服穿到人物图上，保留身份与姿势"
-          >
-            <span className="rail-item-main">
-              <b>换装</b>
-              <em>同角色不同装备</em>
-            </span>
-            <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('outfit')}>+</button>
-          </div>
-          <div
-            className="rail-item"
-            draggable
-            onDragStart={(e) => {
-              e.dataTransfer.setData('application/x-node-type', 'faceswap')
-              e.dataTransfer.effectAllowed = 'copy'
-            }}
-            title="换脸：把身份图的脸与发型换到场景人物上，保留姿势与场景"
-          >
-            <span className="rail-item-main">
-              <b>换脸</b>
-              <em>换主角 / 捏脸落图</em>
-            </span>
-            <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('faceswap')}>+</button>
-          </div>
-          <div
-            className="rail-item"
-            draggable
-            onDragStart={(e) => {
-              e.dataTransfer.setData('application/x-node-type', 'poseedit')
-              e.dataTransfer.effectAllowed = 'copy'
-            }}
-            title="人偶姿势：官方 VNCCS PoseStudio 的 3D 人偶，拖关节摆姿势、
-选朝向，导出白底灰人偶图（姿态 LoRA 的训练分布）"
-          >
-            <span className="rail-item-main">
-              <b>人偶姿势</b>
-              <em>3D 人偶 · 摆姿势导出</em>
-            </span>
-            <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('poseedit')}>+</button>
-          </div>
-          <div
-            className="rail-item"
-            draggable
-            onDragStart={(e) => {
-              e.dataTransfer.setData('application/x-node-type', 'poseclone')
-              e.dataTransfer.effectAllowed = 'copy'
-            }}
-            title="角色迁移：动作参考图定姿态 + 角色图定身份"
-          >
-            <span className="rail-item-main">
-              <b>角色迁移</b>
-              <em>参考动作 · 换角色</em>
-            </span>
-            <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('poseclone')}>+</button>
-          </div>
-          <div
-            className="rail-item"
-            draggable
-            onDragStart={(e) => {
-              e.dataTransfer.setData('application/x-node-type', 'posebatch')
-              e.dataTransfer.effectAllowed = 'copy'
-            }}
-            title="姿态批量：选一个姿势集（人偶编辑器抽帧存下来的整套），
-一次出完整套精灵帧；每帧保留所有候选，不满意单独重生成，旧的那张随时选回来"
-          >
-            <span className="rail-item-main">
-              <b>姿态批量</b>
-              <em>姿势集 · 整套换角色</em>
-            </span>
-            <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('posebatch')}>+</button>
-          </div>
-          <div
-            className="rail-item"
-            draggable
-            onDragStart={(e) => {
-              e.dataTransfer.setData('application/x-node-type', 'spriteswap')
-              e.dataTransfer.effectAllowed = 'copy'
-            }}
-            title="序列帧替换：把一段游戏动画（精灵图）里的角色换成目标角色，动作保持不变"
-          >
-            <span className="rail-item-main">
-              <b>序列帧替换</b>
-              <em>精灵图 · 逐帧换角色</em>
-            </span>
-            <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('spriteswap')}>+</button>
-          </div>
-          <div
-            className="rail-item"
-            draggable
-            onDragStart={(e) => {
-              e.dataTransfer.setData('application/x-node-type', 'poseswap')
-              e.dataTransfer.effectAllowed = 'copy'
-            }}
-            title="姿态序列：从一组骨架图逐帧生成（多候选择优 + 质量闸门），自动对齐脚底并打包成精灵图"
-          >
-            <span className="rail-item-main">
-              <b>姿态序列</b>
-              <em>骨架帧 · 逐帧生成全身</em>
-            </span>
-            <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('poseswap')}>+</button>
-          </div>
-          <div
-            className="rail-item"
-            draggable
-            onDragStart={(e) => {
-              e.dataTransfer.setData('application/x-node-type', 'pixelify')
-              e.dataTransfer.effectAllowed = 'copy'
-            }}
-            title="完美像素转换：任意图 → 每格一色、边界对齐的像素画"
-          >
-            <span className="rail-item-main">
-              <b>像素转换</b>
-              <em>网格对齐 · 每格一色</em>
-            </span>
-            <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('pixelify')}>+</button>
-          </div>
-          <div
-            className="rail-item"
-            draggable
-            onDragStart={(e) => {
-              e.dataTransfer.setData('application/x-node-type', 'topixel')
-              e.dataTransfer.effectAllowed = 'copy'
-            }}
-            title="转像素：任意图（动漫/照片/插画/3D）→ 像素画。没源图就先出图再转"
-          >
-            <span className="rail-item-main">
-              <b>转像素</b>
-              <em>任意图 · 一键像素化</em>
-            </span>
-            <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('topixel')}>+</button>
-          </div>
-          <div
-            className="rail-item"
-            draggable
-            onDragStart={(e) => {
-              e.dataTransfer.setData('application/x-node-type', 'airepaint')
-              e.dataTransfer.effectAllowed = 'copy'
-            }}
-            title="局部 AI 重绘：裁剪选区交给通用模型重画，能挂 LoRA、选区外逐点不变"
-          >
-            <span className="rail-item-main">
-              <b>局部AI重绘</b>
-              <em>裁剪重画 · 支持 LoRA</em>
-            </span>
-            <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('airepaint')}>+</button>
-          </div>
-          <div
-            className="rail-item"
-            draggable
-            onDragStart={(e) => {
-              e.dataTransfer.setData('application/x-node-type', 'inpaint')
-              e.dataTransfer.effectAllowed = 'copy'
-            }}
-            title="局部重绘：用笔刷涂出要重绘的区域，只改选区"
-          >
-            <span className="rail-item-main">
-              <b>局部重绘</b>
-              <em>笔刷选区 · 选区外不变</em>
-            </span>
-            <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('inpaint')}>+</button>
-          </div>
-          <div
-            className="rail-item"
-            draggable
-            onDragStart={(e) => {
-              e.dataTransfer.setData('application/x-node-type', 'bg')
-              e.dataTransfer.effectAllowed = 'copy'
-            }}
-            title="抠图去背景 / 换背景；源图用连线接过来，或直接拖图片上去"
-          >
-            <span className="rail-item-main">
-              <b>抠图</b>
-              <em>去背景 / 换背景 · 不用模型</em>
-            </span>
-            <button className="rail-add" title="放到画布原点" onClick={() => onAddNode('bg')}>+</button>
-          </div>
-          <div
-            className="rail-item"
-            draggable
-            onDragStart={(e) => {
-              e.dataTransfer.setData('application/x-node-type', 'image')
-              e.dataTransfer.effectAllowed = 'copy'
-            }}
-            title="拖一张本机图片进画布，或点 + 选择文件"
-          >
-            <span className="rail-item-main">
-              <b>图片</b>
-              <em>本地图 · 可当图生图的源</em>
-            </span>
-            <button className="rail-add" title="选择本机图片" onClick={() => onAddNode('image')}>+</button>
-          </div>
-          <p className="rail-tip">
-            拖这一项到画布任意位置，也能在那里新建节点。图生图要先有源图：
-            在生成节点下方点「↳ 图生图」会自动接上。
-            <br />
-            把本机图片<b>直接拖进画布</b>会变成图片节点；拖到图生图节点上则直接当它的源。
-          </p>
-        </Section>
-
-        <Section icon="☆" title="资料库" count={favs.length}>
-          <div className="rail-lib">
-            <button className="rail-item-main" onClick={() => onOpenLibrary('prompt')}>
-              提示词收藏 <b>{favs.length}</b>
-              <em>浏览 / 搜索 / 填入选中节点</em>
-            </button>
-            <button className="rail-item-main" onClick={() => onOpenLibrary('pose')}>
-              姿势库
-              <em>复用官方 3D 人偶姿势</em>
-            </button>
-          </div>
-          {favs.length === 0 ? (
-            <p className="rail-tip">
-              在节点的提示词框点 <b>☆</b> 收藏。收藏后可以在这里填回选中的节点。
-            </p>
-          ) : (
-            favs.slice(0, 4).map((f) => (
-              <div className="rail-item" key={f.id}>
-                <button
-                  className="rail-item-main"
-                  disabled={!canApply}
-                  title={canApply
-                    ? '填入选中节点（正向与负向都会覆盖）'
-                    : '先在画布上选中一个节点'}
-                  onClick={() => onApplyFav(f)}
-                >
-                  {f.text}
-                  {/* 负向词跟着正向一起收、一起填；缩成第二行灰字，
-                      不抢正向的位置。没有负向就不占行。 */}
-                  {f.negative ? <em>− {f.negative}</em> : null}
-                </button>
-                <button className="rail-del" title="删除" onClick={() => onRemoveFav(f.id)}>
-                  ✕
-                </button>
-              </div>
-            ))
-          )}
-          {favs.length > 4 && (
-            <button className="rail-new" onClick={() => onOpenLibrary('prompt')}>
-              看全部 {favs.length} 条 →
-            </button>
-          )}
-        </Section>
-
-        <Section icon="◈" title="LoRA" count={loras.length}>
-          <label className="lora-row fast-toggle">
-            <input
-              type="checkbox"
-              checked={fastMode}
-              onChange={(e) => onFastMode(e.target.checked)}
-            />
-            <span className="lora-name">快速模式（少步蒸馏）</span>
-            <span className="lora-size">-46%</span>
-          </label>
-          <div className="src-note">
-            挂 Lightning 少步蒸馏 LoRA，步数压到 8。实测 24 步 17.3s → 8 步 9.3s，
-            画质几乎不掉。逐帧路线（姿态序列 / 序列帧替换）建议开着。
-          </div>
-          {loras.length === 0 ? (
-            <div className="src-note">
-              没有可用的 LoRA。Qwen 的 LoRA 要**diffusers 原生格式**
-              （ComfyUI 格式挂上去会静默不生效）。
-              转换：<code>python tools/convert_lora.py in.safetensors out.safetensors</code>
             </div>
-          ) : (
-            <>
-              {loras.map((l) => {
-                const act = activeLoras.find((a) => a.name === l.name)
-                return (
-                  <div className="lora-item" key={l.name}>
-                    <label className="lora-row">
-                      <input
-                        type="checkbox"
-                        checked={!!act}
-                        onChange={(e) => {
-                          const next = e.target.checked
-                            ? [...activeLoras.filter((a) => a.name !== l.name),
-                              { name: l.name, scale: act?.scale ?? 0.8 }]
-                            : activeLoras.filter((a) => a.name !== l.name)
-                          onLorasChange(next.map((x) => ({ name: x.name, scale: x.scale })))
-                        }}
-                      />
-                      <span className="lora-name" title={l.file}>{l.name}</span>
-                      <span className="lora-size">{l.size_mb}MB</span>
-                    </label>
-                    {act && (
-                      <label className="lora-scale">
-                        <span>强度</span>
+
+            {searching && matchCount === 0 && (
+              <div className="rail-no-result">
+                没有匹配「{query}」的节点。<br />
+                试试「抠图」「姿势」「像素」，或直接输英文 kind（如 inpaint）。
+              </div>
+            )}
+            {/* n8n 的 Enter 插入：不写出来的话没人知道这个入口存在。 */}
+            {searching && matchCount > 0 && (
+              <div className="rail-search-hint">
+                找到 {matchCount} 个节点 · 按 <kbd>↵</kbd> 添加第一个
+              </div>
+            )}
+
+            {NODE_GROUPS.map((label, gi) => {
+              const items = NODE_ENTRIES.filter((e) => e.group === gi)
+              const shown = items.filter((e) => matchedKinds.has(e.kind)).length
+              return (
+                <div key={label} className={`rail-group${shown ? '' : ' filtered-out'}`}>
+                  <div className="rail-group-label">
+                    {label}<span className="rail-group-count">{shown}</span>
+                  </div>
+                  {items.map((e) => (
+                    <NodeItem
+                      key={e.kind}
+                      entry={e}
+                      hidden={!matchedKinds.has(e.kind)}
+                      onAdd={onAddNode}
+                    />
+                  ))}
+                </div>
+              )
+            })}
+
+            <p className={`rail-tip${searching ? ' is-hidden' : ''}`}>
+              拖这一项到画布任意位置，也能在那里新建节点。图生图要先有源图：
+              在生成节点下方点「↳ 图生图」会自动接上。
+              <br />
+              把本机图片<b>直接拖进画布</b>会变成图片节点；拖到图生图节点上则直接当它的源。
+            </p>
+          </Section>
+        </div>
+
+        {/* ---------- 面板 3：资料库 ---------- */}
+        <div className={pageClass('library')} data-page="library">
+          <Section icon="☆" title="资料库" count={favs.length}>
+            <div className="rail-lib">
+              <button className="rail-item-main" onClick={() => onOpenLibrary('prompt')}>
+                提示词收藏 <b>{favs.length}</b>
+                <em>浏览 / 搜索 / 填入选中节点</em>
+              </button>
+              <button className="rail-item-main" onClick={() => onOpenLibrary('pose')}>
+                姿势库
+                <em>复用官方 3D 人偶姿势</em>
+              </button>
+            </div>
+            {favs.length === 0 ? (
+              <p className="rail-tip">
+                在节点的提示词框点 <b>☆</b> 收藏。收藏后可以在这里填回选中的节点。
+              </p>
+            ) : (
+              favs.slice(0, 4).map((f) => (
+                <div className="rail-item" key={f.id}>
+                  <button
+                    className="rail-item-main"
+                    disabled={!canApply}
+                    title={canApply
+                      ? '填入选中节点（正向与负向都会覆盖）'
+                      : '先在画布上选中一个节点'}
+                    onClick={() => onApplyFav(f)}
+                  >
+                    {f.text}
+                    {/* 负向词跟着正向一起收、一起填；缩成第二行灰字，
+                        不抢正向的位置。没有负向就不占行。 */}
+                    {f.negative ? <em>− {f.negative}</em> : null}
+                  </button>
+                  <button className="rail-del" title="删除" onClick={() => onRemoveFav(f.id)}>
+                    ✕
+                  </button>
+                </div>
+              ))
+            )}
+            {favs.length > 4 && (
+              <button className="rail-new" onClick={() => onOpenLibrary('prompt')}>
+                看全部 {favs.length} 条 →
+              </button>
+            )}
+          </Section>
+        </div>
+
+        {/* ---------- 面板 4：LoRA + 设置（保持 Section 顺序第五、第六） ---------- */}
+        <div className={pageClass('settings')} data-page="settings">
+          <Section icon="◈" title="LoRA" count={loras.length}>
+            <label className="lora-row fast-toggle">
+              <input
+                type="checkbox"
+                checked={fastMode}
+                onChange={(e) => onFastMode(e.target.checked)}
+              />
+              <span className="lora-name">快速模式（少步蒸馏）</span>
+              <span className="lora-size">-46%</span>
+            </label>
+            <div className="src-note">
+              挂 Lightning 少步蒸馏 LoRA，步数压到 8。实测 24 步 17.3s → 8 步 9.3s，
+              画质几乎不掉。逐帧路线（姿态序列 / 序列帧替换）建议开着。
+            </div>
+            {loras.length === 0 ? (
+              <div className="src-note">
+                没有可用的 LoRA。Qwen 的 LoRA 要**diffusers 原生格式**
+                （ComfyUI 格式挂上去会静默不生效）。
+                转换：<code>python tools/convert_lora.py in.safetensors out.safetensors</code>
+              </div>
+            ) : (
+              <>
+                {loras.map((l) => {
+                  const act = activeLoras.find((a) => a.name === l.name)
+                  return (
+                    <div className="lora-item" key={l.name}>
+                      <label className="lora-row">
                         <input
-                          type="range" min={0.1} max={1.5} step={0.05}
-                          value={act.scale}
+                          type="checkbox"
+                          checked={!!act}
                           onChange={(e) => {
-                            const sc = Number(e.target.value)
-                            onLorasChange(activeLoras.map((x) =>
-                              x.name === l.name ? { name: x.name, scale: sc } : x))
+                            const next = e.target.checked
+                              ? [...activeLoras.filter((a) => a.name !== l.name),
+                                { name: l.name, scale: act?.scale ?? 0.8 }]
+                              : activeLoras.filter((a) => a.name !== l.name)
+                            onLorasChange(next.map((x) => ({ name: x.name, scale: x.scale })))
                           }}
                         />
-                        <b>{act.scale.toFixed(2)}</b>
+                        <span className="lora-name" title={l.file}>{l.name}</span>
+                        <span className="lora-size">{l.size_mb}MB</span>
                       </label>
-                    )}
+                      {act && (
+                        <label className="lora-scale">
+                          <span>强度</span>
+                          <input
+                            type="range" min={0.1} max={1.5} step={0.05}
+                            value={act.scale}
+                            onChange={(e) => {
+                              const sc = Number(e.target.value)
+                              onLorasChange(activeLoras.map((x) =>
+                                x.name === l.name ? { name: x.name, scale: sc } : x))
+                            }}
+                          />
+                          <b>{act.scale.toFixed(2)}</b>
+                        </label>
+                      )}
+                    </div>
+                  )
+                })}
+                {activeLoras.length > 0 && (
+                  <div className="src-note">
+                    每个 LoRA 单独调强度；挂上的 LoRA 对**所有**生成生效（全局状态），
+                    直到在这里取消。
                   </div>
-                )
-              })}
-              {activeLoras.length > 0 && (
-                <div className="src-note">
-                  每个 LoRA 单独调强度；挂上的 LoRA 对**所有**生成生效（全局状态），
-                  直到在这里取消。
-                </div>
-              )}
-            </>
-          )}
-        </Section>
+                )}
+              </>
+            )}
+          </Section>
 
-        <Section icon="⚙" title="设置">
-          <label className="block">
-            抠图方式
-            <select value={matteBackend} onChange={(e) => onMatteBackend(e.target.value)}>
-              {Object.keys(MATTE_LABEL).map((k) => (
-                <option key={k} value={k}>{MATTE_LABEL[k]}</option>
-              ))}
-            </select>
-          </label>
+          <Section icon="⚙" title="设置">
+            <label className="block">
+              抠图方式
+              <select value={matteBackend} onChange={(e) => onMatteBackend(e.target.value)}>
+                {Object.keys(MATTE_LABEL).map((k) => (
+                  <option key={k} value={k}>{MATTE_LABEL[k]}</option>
+                ))}
+              </select>
+            </label>
+          </Section>
+        </div>
+      </div>
 
-        </Section>
+      {/* 状态条：一眼看到「我现在在哪个项目」，以及 Ctrl+K 这个入口。 */}
+      <div className="rail-status">
+        <span className="rail-status-dot" aria-hidden="true" />
+        <span className="rail-status-name" title={current?.name}>{current?.name ?? '未命名项目'}</span>
+        <span className="rail-status-count">{current?.count ?? 0} 节点</span>
       </div>
     </aside>
   )
