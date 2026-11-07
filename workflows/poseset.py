@@ -153,6 +153,16 @@ def _exists_name(root: Path, name: str) -> bool:
 # ---------------------------------------------------------------- 姿势集
 
 
+#: 编辑器可以在每帧额外带的构图 / 场景字段。后端只负责原样透传，
+#: 内容的解释权在前端 —— 别在这里解析或校验，免得前端改结构还要动后端。
+EXTRA_FRAME_KEYS = ("camera", "characters", "scene")
+
+
+def _frame_extras(item: Dict[str, Any]) -> Dict[str, Any]:
+    """帧里的额外字段原样取出：只认键在不在，不解析、不校验、不填默认值。"""
+    return {k: item[k] for k in EXTRA_FRAME_KEYS if k in item}
+
+
 def save_pose_set(project: str, name: str, frames: List[Dict[str, Any]],
                   source: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """新建一个姿势集文件夹（**同名直接报错，不覆盖**）。
@@ -178,6 +188,8 @@ def save_pose_set(project: str, name: str, frames: List[Dict[str, Any]],
             "yaw": int(item.get("yaw") or 0),
             "pose": item.get("pose"),
             "png": _decode_png(item.get("png")),
+            # 额外字段先原样收着，写 set.json 时展开到帧表里
+            "extras": _frame_extras(item),
         })
 
     with _LOCK:
@@ -197,6 +209,7 @@ def save_pose_set(project: str, name: str, frames: List[Dict[str, Any]],
                     "yaw": item["yaw"],
                     "pose": item["pose"],
                     "file": fn,
+                    **item["extras"],
                 })
             if target.exists():
                 shutil.rmtree(target, ignore_errors=True)
@@ -249,6 +262,7 @@ def list_pose_sets(project: str) -> List[Dict[str, Any]]:
 def load_pose_set(project: str, name: str) -> Dict[str, Any]:
     """一个姿势集的帧表（带 URL）。**不回传 pose JSON**：前端只用来出图和翻看，
     一份 17 根骨的 JSON 乘 30 帧会把响应撑到几百 KB，而它只在重新编辑时才需要。
+    但 `camera`/`characters`/`scene` 这类额外字段会原样回传（存什么读什么）。
     """
     folder = _sub(project, POSES_DIR, name)
     doc = _read_json(folder / SET_FILE)
@@ -261,6 +275,8 @@ def load_pose_set(project: str, name: str) -> Dict[str, Any]:
             "t": float(f.get("t") or 0),
             "yaw": int(f.get("yaw") or 0),
             "url": _url(folder / str(f.get("file") or "")),
+            # 存时原样透传的字段，读回也原样带出；不解析不校验，解释权在前端
+            **_frame_extras(f),
         })
     out = _set_summary(folder, doc)
     out["frames"] = frames

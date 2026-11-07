@@ -15,11 +15,44 @@ export type NodeKind =
  * 会差一点。官方 `getPose()` 给的是骨骼欧拉角 + IK effector + 极点，
  * `setPose()` 能精确到弧度地还原。
  */
+
+/** 一个整角色的放置状态（位置 + 缩放 + 绕骨盆旋转，角度单位度） */
+export type PosePlacement = {
+  x: number; y: number; z: number; zoom: number
+  rotation: [number, number, number]
+}
+
+/** 场景里的一个角色 */
+export type PoseCharacter = {
+  id: string
+  name: string
+  color: string
+  pose?: unknown            // 官方 getPose() JSON，不透明
+  placement: PosePlacement
+}
+
+/** 多角色场景：每个「姿势 tab」下每个角色有独立位置 */
+export type PoseScene = {
+  characters: PoseCharacter[]
+  activeId: string
+  tabs: string[]
+  activeTab: string
+  /** tab id → 角色 id → 该 tab 下的放置 */
+  placements: Record<string, Record<string, PosePlacement>>
+  mode: 'pose' | 'move' | 'rotate'
+  space: 'world' | 'local'
+  linkAll: boolean
+  /** 官方姿势库带来的构图参数（zoom/offset_x/offset_y/yaw_deg/pitch_deg） */
+  cameraParams?: Record<string, number> | null
+}
+
 export type PoseStudioState = {
   /** 官方 getPose() 的 JSON（不透明：格式归官网，我们不解析也不改） */
   pose?: unknown
   /** 导出机位（度）：0 正面 / 90 右侧 / 180 背面 / 270 左侧 */
   yaw: number
+  /** 多角色同框的场景状态；缺省即老的单角色存档，保持兼容 */
+  scene?: PoseScene
 }
 
 /**
@@ -333,13 +366,23 @@ export type GenNode = {
   pose?: unknown
   /** 导出机位（度）。和 pose 一块存，重开时能还原当时选的朝向 */
   yaw?: number
+  /** 多角色场景（各 tab 下每角色的放置/构图）；老节点没有，缺省即单角色 */
+  poseScene?: PoseScene
   /** 「从图片」提好的 2D 关节点，投递给 iframe 用（收完就被 pose 取代） */
   poseImport?: PoseImportRequest | null
   /**
    * 外部（姿势库）套过来的姿势。**带目标 nodeId**：一次只给一个节点，
    * 别的人偶节点必须忽略它。`tick` 变化才触发应用（避免重复套用）。
    */
-  poseApply?: { nodeId: string; pose: unknown; yaw: number; tick: number } | null
+  poseApply?: {
+    nodeId: string; pose: unknown; yaw: number; tick: number
+    /** 官方库姿势带的构图参数（zoom / offset_x / offset_y） */
+    cameraParams?: Record<string, number> | null
+    /** 官方库姿势里自带的多个角色与各自位置 */
+    characters?: PoseCharacter[]
+    /** 合并后的完整场景（App 算好，直接落盘 + 灌给 iframe） */
+    scene?: PoseScene
+  } | null
   /**
    * 角色迁移批量：当前在看的成片集名字（服务端 `pose_frames/<名字>/`）。
    * 帧候选与"选了哪一张"都在服务端的 render.json 里，这里只记名字。
@@ -381,4 +424,8 @@ export type PosePreset = {
   /** 缩略图（dataURL，可选）。没有也能存，只是浏览面板里没有预览 */
   preview?: string
   at: number
+  /** 官方姿势库带来的构图参数（数值键），套用时连机位一起还原 */
+  cameraParams?: Record<string, number> | null
+  /** 官方姿势 JSON 里的多角色放置，App 按它初始化多角色场景 */
+  characters?: PoseCharacter[]
 }

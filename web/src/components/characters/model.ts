@@ -84,7 +84,8 @@ export type TaskState = {
   label: string
   status: 'running' | 'done' | 'failed'
   message: string
-  progress?: { done: number; total: number; current?: string }
+  /** step：一键出全套的阶段键（underwear|poses|emotions），由后端 pipeline.py 发布 */
+  progress?: { done: number; total: number; current?: string; step?: string }
   startedAt: number
 }
 

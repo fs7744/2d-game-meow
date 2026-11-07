@@ -51,6 +51,7 @@
 import { PoseViewerCore } from './pose_studio/core.js'
 import { loadMorphPack, solveMorph, buildStaticModelData } from './pose_studio/morph_runtime.js'
 import { convertOpenPoseToPose } from './pose_studio/imports/openpose.js'
+import { createSceneController } from './scene.js'
 
 const EMBED = new URLSearchParams(location.search).get('embed') === '1'
 
@@ -81,6 +82,19 @@ const STAND = [
 let viewerPromise = null
 let viewer = null
 let currentYaw = 0
+
+/**
+ * 多角色场景（整角色 Move/Rotate、World/Local、联动、每 tab 独立位置、
+ * 撤销里带放置）。宿主只发一条 `type:'scene'` 消息，状态全在这里。
+ * 依赖的三个函数都是声明式（hoisted），所以可以在文件前面就建好。
+ */
+const sceneCtl = createSceneController({
+  getViewer: () => getViewer(),
+  canvas,
+  post: (m) => post(m),
+  getYaw: () => currentYaw,
+  measure: () => measure(),
+})
 
 /* ------------------------------------------------------------------ *
  * 画布尺寸
@@ -163,7 +177,14 @@ async function getViewer() {
       ikEnabled: true,
       // 'end' = 拖动过程中不打扰宿主，松手才算一次变更（宿主据此存档）
       syncMode: 'end',
-      onPoseChange: (pose) => post({ type: 'pose', pose, yaw: currentYaw }),
+      // 撤销栈里连「每个角色的放置 + 姿势」一起记（引擎预留的扩展点）：
+      // 否则一次 Ctrl+Z 只退骨骼，整角色位移还停在原地，看着像撤销坏了。
+      captureHistoryContext: () => sceneCtl.captureHistoryContext(),
+      onHistoryRestore: (pose) => sceneCtl.onHistoryRestore(pose),
+      onPoseChange: (pose) => {
+        sceneCtl.notePose(pose)
+        post({ type: 'pose', pose, yaw: currentYaw })
+      },
     })
     await v.init()
     // **方向天穹（彩虹网格球）在嵌入模式下一律关掉**，理由有两条：
@@ -183,10 +204,17 @@ async function getViewer() {
   return viewerPromise
 }
 
-/** 官方姿势 JSON → 人偶。`{}` 会把所有骨归零（= 初始站姿）。 */
-function applyPose(v, pose) {
+/** 官方姿势 JSON → 人偶。`{}` 会把所有骨归零（= 初始站姿）。
+ *  `preserveCamera=false` 时才还原 pose.camera：那是用户自己摆的视角，
+ *  官方库自带的 camera 是作者编辑时的机位，别拿它盖掉我们当前的构图。 */
+function applyPose(v, pose, preserveCamera = true) {
   if (!pose || typeof pose !== 'object') return
-  v.setPose(pose, true)
+  // setPose(..., false) 在 pose 没有 camera 时会强行把相机摆到官方默认
+  // (0,0.5,4)，而我们的人偶尺度是 center+20 —— 会突然变得极小。只在
+  // 真的带了 camera 时才允许还原视角。
+  const keepCamera = preserveCamera || !pose.camera
+  v.setPose(pose, keepCamera)
+  sceneCtl.notePose(pose)
   v.updateMarkers?.()
   v.jointMarkers?.forEach((m) => { m.visible = true })
   v.requestRender()
@@ -248,6 +276,9 @@ function renderOut(size) {
   const prevAspect = cam ? cam.aspect : null
   try {
     viewer.setDirectionalSkydomeVisible?.(false)
+    // 整角色 gizmo 的手柄只在编辑相机里出现，出图必须藏掉（viewport:true
+    // 用的是同一个相机，官方那套 layer 过滤对我们不生效）。
+    sceneCtl.hideForCapture()
     // 导出是正方形，把导航相机 aspect 临时对齐到 1:1，避免编辑器非方形时拉伸
     if (cam) {
       cam.aspect = 1
@@ -261,6 +292,7 @@ function renderOut(size) {
       cam.updateProjectionMatrix?.()
     }
     viewer.setDirectionalSkydomeVisible?.(prevSky)
+    sceneCtl.showAfterCapture()
   }
 }
 
@@ -375,6 +407,12 @@ function frameView(v) {
 
 function post(msg) { window.parent?.postMessage(msg, '*') }
 
+function postPose(v) {
+  const pose = v.getPose?.()
+  sceneCtl.notePose(pose)
+  post({ type: 'pose', pose, yaw: currentYaw })
+}
+
 /**
  * 动作播放：从头播到尾。
  *
@@ -402,7 +440,7 @@ function stopPlay(v, restore = true) {
       const m = await import('./anim-import.js')
       await m.applyTime(t, v)
       post({ type: 'animTick', t })
-      post({ type: 'pose', pose: v.getPose(), yaw: currentYaw })
+      postPose(v)
     } catch { /* 播放结束时的收尾失败不影响用户 */ }
   })()
 }
@@ -430,7 +468,7 @@ async function startPlay(v, from = 0) {
       try {
         await m.applyTime(dur, v)
         post({ type: 'animTick', t: dur })
-        post({ type: 'pose', pose: v.getPose(), yaw: currentYaw })
+        postPose(v)
       } catch { /* 尾帧失败就在这儿收 */ }
       self.stopped = true
       playing = null
@@ -508,28 +546,32 @@ window.addEventListener('message', async (e) => {
       viewer = v
       syncViewerSize()
       if (typeof msg.yaw === 'number') setYaw(msg.yaw)
-      if (msg.pose) applyPose(v, msg.pose)
+      if (msg.pose) applyPose(v, msg.pose, msg.restoreCamera !== true)
       else if (Array.isArray(msg.joints) && msg.joints.length >= 18) {
         applyPoints(v, msg.joints.map((p) => [p.x, p.y]), { reprojected: !!msg.reprojected })
       }
       post({ type: 'ready', yaw: currentYaw })
+      // 宿主还没发 scene 之前先给一份默认场景，省得界面空白
+      await sceneCtl.emit(true)
       return
     }
     // 下面这些都要 viewer：还没就绪就排队等，别丢消息
     const v = await getViewer()
     viewer = v
-    if (msg.type === 'setPose') {
+    if (msg.type === 'scene') {
+      await sceneCtl.handle(msg)
+    } else if (msg.type === 'setPose') {
       applyPose(v, msg.pose)
     } else if (msg.type === 'joints') {
       applyPoints(v, msg.points, { reprojected: !!msg.reprojected })
     } else if (msg.type === 'setYaw') {
       setYaw(msg.yaw)
-      post({ type: 'pose', pose: v.getPose(), yaw: currentYaw })
+      postPose(v)
     } else if (msg.type === 'getPose') {
-      post({ type: 'pose', pose: v.getPose(), yaw: currentYaw })
+      postPose(v)
     } else if (msg.type === 'resetPose') {
       applyPose(v, { bones: {}, bonePositions: {} })
-      post({ type: 'pose', pose: v.getPose(), yaw: currentYaw })
+      postPose(v)
     } else if (msg.type === 'resetView') {
       resetCamera()
     } else if (msg.type === 'snap') {
@@ -553,14 +595,14 @@ window.addEventListener('message', async (e) => {
       const m = await import('./anim-import.js')
       if (m.selectClip(msg.index || 0)) {
         const ok = await m.applyTime(0, v)
-        if (ok) post({ type: 'pose', pose: v.getPose(), yaw: currentYaw })
+        if (ok) postPose(v)
       }
     } else if (msg.type === 'animTime') {
       const m = await import('./anim-import.js')
       const ok = await m.applyTime(msg.t, v)
       if (ok) {
         // 每帧都回一次 pose：宿主拿它当存档点（和拖动松手的语义一致）
-        post({ type: 'pose', pose: v.getPose(), yaw: currentYaw })
+        postPose(v)
       } else {
         post({ type: 'error', message: m.errorState() || '这一帧套不到人偶上' })
       }
@@ -598,7 +640,7 @@ window.addEventListener('message', async (e) => {
         // 透视相机下脚前后移动会让屏幕落点变。这里把每帧的墨迹底边压到同一行。
         const aligned = await m.alignFrames(frames)
         post({ type: 'animFrames', frames: aligned, clip: st.name, yaw: currentYaw })
-        post({ type: 'pose', pose: v.getPose(), yaw: currentYaw })
+        postPose(v)
       } catch (e) {
         post({ type: 'error', message: String(e?.message || e) })
       }

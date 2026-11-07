@@ -311,8 +311,11 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
         setTask({
           label, status: 'running', startedAt,
           message: j.progress?.current || '正在生成…',
+          // 一键出全套会带 step（underwear|poses|emotions），手工展开 progress
+          // 时必须一起带上，否则 Controls 那边无从显示当前阶段。
           progress: j.progress
-            ? { done: j.progress.done, total: j.progress.total, current: j.progress.current }
+            ? { done: j.progress.done, total: j.progress.total,
+                current: j.progress.current, step: j.progress.step }
             : undefined,
         })
         await sleep(1000)

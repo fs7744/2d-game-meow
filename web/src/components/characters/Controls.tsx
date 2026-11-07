@@ -59,6 +59,19 @@ export function StepHead({ step, sub }: { step: StepId; sub?: string }) {
 
 /* ------------------------------------------------------------ 统一任务状态 */
 
+/** 一键出全套的阶段键（顺序即执行顺序），中文只在渲染处映射，值一律用原样。 */
+const STEP_ORDER = ['underwear', 'poses', 'emotions']
+const STEP_LABEL: Record<string, string> = {
+  underwear: '底图', poses: '姿势', emotions: '表情',
+}
+
+/** 已知阶段给「第几步/共几步 · 阶段名」；后端若加了新键就原样显示，不猜序号也不翻译。 */
+function stageText(step: string): string {
+  const i = STEP_ORDER.indexOf(step)
+  if (i < 0) return step
+  return `阶段 ${i + 1}/${STEP_ORDER.length} · ${STEP_LABEL[step]}`
+}
+
 export function TaskBar({ task, onDismiss }: {
   task: TaskState | null
   /** 任务条默认常驻（结果要看得见）；给了关闭回调才渲染 ✕ */
@@ -67,11 +80,13 @@ export function TaskBar({ task, onDismiss }: {
   if (!task) return null
   const pct = task.progress && task.progress.total > 0
     ? Math.min(100, Math.round((task.progress.done / task.progress.total) * 100)) : 0
+  const stage = task.progress?.step ? stageText(task.progress.step) : ''
   return (
     <div className={`cc-task is-${task.status}`} data-state={task.status}>
       <div className="cc-task-head">
         <span className="cc-task-dot" />
         <b>{task.label}</b>
+        {stage && <span className="cc-task-step">{stage}</span>}
         {onDismiss && (
           <button type="button" className="cc-task-x" onClick={onDismiss} title="收起">✕</button>
         )}

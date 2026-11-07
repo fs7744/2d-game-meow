@@ -50,6 +50,27 @@
 - 动作导入 glb/fbx 取帧：本地 three r160 + importmap；FBX 另有 4 个依赖，缺一个会悄悄回落 CDN。不改官方 `mixamo.js`，`anim-skeleton.js` 只登记别名（结构优先、名字兜底）。抽出的帧走 `assets/projects/<项目>/poses/`，同名 409。
   **脚底对齐两层**：世界空间以 resetPose 脚底为基准平移根节点 + 屏幕空间 `alignFrames()`；候选只增不删，舞台「有源帧就渲染」。
 - 「从图片提姿势」：COCO_TO_OP `13`→`L_ANK` 必须双射；官方 `convertOpenPoseToPose` 只有 2D，改用 MediaPipe `pose_world_landmarks` 拿 3D，前端 `joints` 带 `reprojected` 归零旋转。
+- **内嵌的是 Utils 0.7.1/0.7.2 基线，别整包升级到 0.7.3+**：新版 `core.js` 会
+  `import { normalizeCaptureLens } from "./animation.mjs"`，而我们的 `animation.mjs`
+  没这个导出且 import 了不存在的 `../shared/custom_select.mjs`（死代码），
+  覆盖后 iframe 直接崩。比版本要用 `git hash-object` 比 blob（文件 SHA1 口径不同）。
+  我们导出走 `capture(...,{viewport:true})`，官方 0.7.3 的 FOV/Distance 只作用于
+  captureCamera 路径，**照搬也影响不到出图**。官方 UI 层 gizmo/Radar/Undo 属第二套
+  编辑器，与「iframe 只留画布」冲突；SAM/BiRefNet/weights_only 均无落点
+  （0 处 `torch.load`，唯一 .pt 由 ultralytics 加载）。
+  ⚠️ 官方库 191 个 JSON 的 `prompt`/`pose_prompts` **全是空串**，别做「保留 prompt」。
+- **2026-11-08 已落地（用户明确要支持多角色同框，别再说「只做单主体」）**：
+  `vnccs-pose/scene.js` 是唯一的场景状态机（`{type:'scene',action}` + `sceneState` 回执），
+  `PoseScenePanel.tsx` 是宿主 UI；状态只在 iframe 一份，`commit=false` 不写 project.json。
+  引擎 0.7.2 基线本来就有 `passiveCharacters`，只补了 `setPassiveCharacterPlacement`；
+  官方 175 行纯函数 vendored 成 **`character_transform.js`**（`.mjs` 会被 Python
+  静态服务当 `text/plain` 而拒载模块 —— web/public 下 ESM 一律用 `.js`）。
+  撤销用 `options.captureHistoryContext/onHistoryRestore` 把多角色放置一起记进 history；
+  出图前 `hideForCapture()` 藏 gizmo（我们走 viewport:true，官方 layer 过滤不生效）。
+  `PoseScene` 落 `project.json.poseScene`；`app.py::PoseSetFrameReq` 必须显式声明
+  scene/camera/characters（Pydantic 默认吞多余字段）。
+- **仍未做**（性价比排序，别当已完成）：`matte._AI_SESSIONS` 学 `qwen_llm` 加用完释放、
+  动作采样失败还原 viewer pose、`pipeline.step` 已透传到 TaskBar 但只做了三段文字。
 
 ## UI 设计系统（改外观只改末尾统一层）
 - `styles.css` 顶部 `:root` 是**唯一**配色/字体来源（只定义一次）。末尾「全站样式统一层」是最终权威层，

@@ -18,7 +18,8 @@
  * 协议见 web/public/vnccs-pose/entry.js 头注释。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { PosePreset } from '../types'
+import type { PosePreset, PoseScene } from '../types'
+import PoseScenePanel from './PoseScenePanel'
 import { BUILTIN_POSES, uniquePoseName } from '../store/poses'
 import { clipLabel } from '../fileName'
 import {
@@ -83,6 +84,10 @@ type Props = {
   projectId?: string
   /** 双击帧墙里的某一帧 → 全屏放大（灯箱在 App 那边） */
   onPreview?: (url: string, name: string) => void
+  /** 多角色场景（存在 project.json 的 poseScene；重开节点要原样灌回去） */
+  scene?: PoseScene | null
+  /** 场景变化 → App 写回节点存档 */
+  onScene?: (scene: PoseScene) => void
   /** 把一个动作抽出来的 N 帧存成项目里的姿势集（同名会被后端拒绝） */
   onSavePoseSet?: (name: string, frames: PoseSetFrameIn[]) => Promise<boolean> | boolean
 }
@@ -93,16 +98,22 @@ export type PoseSetFrameIn = {
   yaw: number
   pose: unknown
   png: string
+  /** 抽帧那一刻的多角色场景（位置按 tab 独立存） */
+  scene?: PoseScene | null
 }
 
 export default function PoseStudio({
   pose, yaw, onPose, onYaw, onExport, exporting,
   onImportImage, importing, importPoints, importReprojected, poses,
   poseApply, onSavePose, onOpenPoseLibrary, projectId, onSavePoseSet, onPreview,
+  scene, onScene,
 }: Props) {
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const [status, setStatus] = useState('正在加载人偶模型（37MB，首次约十几秒）…')
   const [ready, setReady] = useState(false)
+  /** 多角色场景与撤销状态：唯一来源是 iframe 回推，组件自己不改 */
+  const [sceneState, setSceneState] = useState<PoseScene | null>(scene ?? null)
+  const [history, setHistory] = useState({ canUndo: false, canRedo: false })
   const [expanded, setExpanded] = useState(false)
   const [err, setErr] = useState('')
   const [saving, setSaving] = useState(false)
@@ -158,10 +169,33 @@ export default function PoseStudio({
   const lastApplyRef = useRef<number>(0)
   const askPoseRef = useRef<((p: unknown) => void) | null>(null)
   const askPreviewRef = useRef<((d: string) => void) | null>(null)
+  const sceneRef = useRef<PoseScene | null>(scene ?? null)
+  const onSceneRef = useRef(onScene)
+  onSceneRef.current = onScene
 
   const post = useCallback((msg: Record<string, unknown>) => {
     iframeRef.current?.contentWindow?.postMessage(msg, '*')
   }, [])
+
+  /** 所有多角色操作都走一条消息通道，状态由 iframe 回推，避免两套 state */
+  const sceneAction = useCallback((action: string, payload?: Record<string, unknown>) => {
+    post({ type: 'scene', action, ...(payload || {}) })
+  }, [post])
+
+  /** Ctrl/⌘+Z 撤销、Ctrl/⌘+Shift+Z（或 Ctrl+Y）重做。
+   *  输入框里不抢快捷键 —— 那是文本框自己的撤销。 */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey)) return
+      const el = e.target as HTMLElement | null
+      if (el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) return
+      const k = String(e.key).toLowerCase()
+      if (k === 'z') { e.preventDefault(); sceneAction(e.shiftKey ? 'redo' : 'undo') }
+      else if (k === 'y') { e.preventDefault(); sceneAction('redo') }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [sceneAction])
 
   /** 向子窗要当前姿势（存库要最新的，不能拿过期引用） */
   const askPose = useCallback(() => new Promise<unknown>((resolve) => {
@@ -200,9 +234,25 @@ export default function PoseStudio({
         clip?: string
         t?: number
         on?: boolean
+        /** 多角色场景回执（iframe 的 scene.js 推） */
+        scene?: PoseScene
+        history?: { canUndo: boolean; canRedo: boolean }
+        /** false = 拖动中间态，只刷界面别写 project.json */
+        commit?: boolean
       } | null
       if (!d || typeof d.type !== 'string') return
-      if (d.type === 'ready') {
+      if (d.type === 'sceneState') {
+        const next = d.scene as PoseScene | undefined
+        if (next) {
+          sceneRef.current = next
+          setSceneState(next)
+        }
+        if (d.history) setHistory({
+          canUndo: !!d.history.canUndo, canRedo: !!d.history.canRedo,
+        })
+        // commit=false 是拖动中间态：只刷界面，别写穿 project.json
+        if (d.commit && next) onSceneRef.current?.(next)
+      } else if (d.type === 'ready') {
         setReady(true)
         setErr('')
         setStatus('就绪：拖橙色关节标记摆姿势，右键拖动转视角')
@@ -286,7 +336,13 @@ export default function PoseStudio({
   // 回头再 setPose 会和正在进行的拖动打架。
   useEffect(() => {
     if (!ready) return
-    post({ type: 'init', pose: poseRef.current ?? null, yaw: yawRef.current })
+    post({
+      type: 'init', pose: poseRef.current ?? null, yaw: yawRef.current,
+      // 存档里的 camera 是我们自己摆的视角；官方库自带 camera 由下面的
+      // scene.cameraParams 用官方 snapToCaptureCamera 覆盖，不会互相打架
+      restoreCamera: true,
+    })
+    post({ type: 'scene', action: 'load', scene: sceneRef.current ?? null })
   }, [ready, post])
 
   // ---- 「从图片」提好的 2D 点 → 官方转换器（真 3D 骨骼） ----
@@ -306,6 +362,23 @@ export default function PoseStudio({
     const n = ((Math.round(poseApply.yaw) % 360) + 360) % 360
     onYaw(n)
     post({ type: 'setYaw', yaw: n })
+    // 官方库 JSON 里的 cameraParams（zoom 0.5~4.17 / offset）决定构图，
+    // characters[] 决定有几个角色、各自站哪 —— 以前两者全被丢掉。
+    const extras = poseApply as typeof poseApply & {
+      cameraParams?: Record<string, number> | null
+      characters?: PoseScene['characters']
+    }
+    if (extras.cameraParams || extras.characters?.length) {
+      const base = sceneRef.current
+      const cs = extras.characters?.length ? extras.characters : base?.characters
+      const next = base && cs ? {
+        ...base,
+        characters: cs,
+        activeId: cs.some((c) => c.id === base.activeId) ? base.activeId : cs[0].id,
+        cameraParams: extras.cameraParams ?? base.cameraParams ?? null,
+      } : null
+      post({ type: 'scene', action: 'load', scene: next })
+    }
   }, [ready, poseApply, post, onYaw])
 
   // ---- 加载兜底：脚本没起来时给明确提示，而不是让用户盯着黑框 ----
@@ -726,6 +799,7 @@ export default function PoseStudio({
                     if (!projectId) { setErr('没有项目 id，存不了（先保存项目）'); return }
                     const items: PoseSetFrameIn[] = pickedFrames.map((p) => ({
                       t: p.frame.t, yaw: yawRef.current, pose: p.frame.pose, png: p.frame.png,
+                      scene: sceneRef.current,
                     }))
                     setSavingSet(true)
                     Promise.resolve(onSavePoseSetRef.current?.(name, items))
@@ -841,6 +915,12 @@ export default function PoseStudio({
           {exporting ? '导出中…' : '导出人偶图'}
         </button>
       </div>
+
+      <PoseScenePanel
+        scene={sceneState}
+        history={history}
+        disabled={!ready}
+        onAction={sceneAction} />
 
       <input
         ref={fileRef}

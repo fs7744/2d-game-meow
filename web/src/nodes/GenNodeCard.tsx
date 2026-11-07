@@ -8,6 +8,7 @@ import type { ModelCaps, PoseDir } from '../api'
 import { fileNameOf } from '../fileName'
 import {
   MAX_CHAR_SOURCES, type GenNode, type GenParams, type PosePreset,
+  type PoseCharacter, type PoseScene,
 } from '../types'
 import { GEN_STYLES, SIZE_PRESETS, sizePresetKey, styleFromParams } from '../genStyles'
 
@@ -221,7 +222,7 @@ export type NodePatch = Partial<
   Pick<GenNode,
     'x' | 'y' | 'w' | 'h' | 'params' | 'view' | 'job' | 'source' | 'image'
     | 'charSource' | 'charSources' | 'pose' | 'yaw' | 'poseImport' | 'poseApply'
-    | 'poseRender'>
+    | 'poseScene' | 'poseRender'>
 >
 
 /**
@@ -273,7 +274,12 @@ type Props = {
   /** 姿势库（跨节点共享，落在服务端磁盘）；列表变化时子组件要跟着重 render */
   poses?: PosePreset[]
   /** 外部（姿势库）套过来的姿势；只认 nodeId 是本节点的 */
-  poseApply?: { nodeId: string; pose: unknown; yaw: number; tick: number } | null
+  poseApply?: {
+    nodeId: string; pose: unknown; yaw: number; tick: number
+    cameraParams?: Record<string, number> | null
+    characters?: PoseCharacter[]
+    scene?: PoseScene
+  } | null
   /** 把当前姿势存进库（缩略图一并提交，浏览面板要用） */
   onSavePose?: (name: string, pose: unknown, yaw: number, preview: string) => void
   /** 把一个动作抽出来的 N 帧存成**项目里**的姿势集（`poses/<名字>/`） */
@@ -982,6 +988,8 @@ export default function GenNodeCard({
             importReprojected={node.poseImport?.reprojected}
             poses={poses ?? []}
             poseApply={poseApply?.nodeId === node.id ? poseApply : null}
+            scene={node.poseScene ?? null}
+            onScene={(s) => onPatch({ poseScene: s })}
             onSavePose={onSavePose}
             onOpenPoseLibrary={onOpenPoseLibrary}
             projectId={projectId}

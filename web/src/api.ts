@@ -683,7 +683,11 @@ export function fetchProjectPoseSets(project: string): Promise<{ count: number; 
 export function createProjectPoseSet(
   project: string,
   name: string,
-  frames: { t: number; yaw: number; pose: unknown; png: string }[],
+  frames: {
+    t: number; yaw: number; pose: unknown; png: string
+    /** 抽帧那一刻的多角色场景（每 tab 独立位置也要跟着姿势集存下来） */
+    scene?: unknown; camera?: unknown; characters?: unknown
+  }[],
   source: Record<string, unknown> = {},
 ): Promise<{ set: ProjectPoseSet; items: ProjectPoseSet[] }> {
   return req(`/projects/${encodeURIComponent(project)}/pose_sets`, {
@@ -1305,6 +1309,10 @@ export type PresetPose = {
   json: string
   /** 预览图 URL；没有预览的条目是空串 */
   preview: string
+  /** 官方 json 里的数值构图键（zoom/offset_x/offset_y/yaw_deg/pitch_deg） */
+  cameraParams?: Record<string, number> | null
+  /** 精简后的角色放置（transform/rotation）；用 unknown[] 避免依赖 types.ts 的场景类型 */
+  characters?: unknown[]
 }
 
 /** 随项目发行的 VNCCS 官方姿势库清单（191 个）。目录内容不变时后端有缓存。 */
@@ -1713,8 +1721,11 @@ type ApiJob = {
   status: string
   error?: string
   result?: { file?: string; meta?: Record<string, unknown> } & Record<string, unknown>
-  /** 批量任务的进度（表情批量生成） */
-  progress?: { done: number; total: number; current?: string }
+  /**
+   * 批量任务的进度。`step` 由后端 pipeline.py 在「一键出全套」里发：
+   * underwear|poses|emotions 三个阶段键，前端据此显示当前阶段。
+   */
+  progress?: { done: number; total: number; current?: string; step?: string }
 }
 
 /** meta 里的值类型是 unknown；只要数字，别把字符串混进去。 */
@@ -1748,7 +1759,8 @@ export async function fetchJob(jobId: string): Promise<JobState> {
     attempts: num(meta.attempts),
     gatePassed: num(meta.gate_passed),
     frames: num(meta.frames),
-    // 批量任务：进度 + 结果摘要（表情批量生成用；普通工作流这两个是空的）
+    // 批量任务：进度整体透传，别拆开重构造 —— 后端 pipeline.py 发的
+    // step（underwear|poses|emotions）也在里面，手工展开会把它丢掉。
     progress: j.progress,
     result: j.result as Record<string, unknown> | undefined,
   }

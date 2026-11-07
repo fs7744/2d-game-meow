@@ -13,7 +13,7 @@
  * 数据全部在服务端磁盘（workflows/library.py），这里只负责翻和应用。
  */
 import { useEffect, useMemo, useState } from 'react'
-import type { FavoritePrompt, PosePreset } from '../types'
+import type { FavoritePrompt, PoseCharacter, PosePreset } from '../types'
 import type { PresetPose } from '../api'
 import { fetchPoseBody } from '../api'
 import { filterPrompts } from '../store/prompts'
@@ -27,6 +27,59 @@ export type PoseSource = 'mine' | 'official'
 const YAW_LABEL: Record<number, string> = {
   0: '正面', 45: '右前', 90: '右侧', 135: '右后',
   180: '背面', 225: '左后', 270: '左侧', 315: '左前',
+}
+
+/** 官方 cameraParams 里带构图信息的数值键；其余字段与全是空串的 prompt 不带进场景。 */
+const CAMERA_KEYS = ['zoom', 'offset_x', 'offset_y', 'yaw_deg', 'pitch_deg'] as const
+/** 一条姿势最多带几个角色，和后端 poselib.py 的清单上限对齐 */
+const MAX_CHARS = 8
+
+function asRecord(v: unknown): Record<string, unknown> {
+  return v !== null && typeof v === 'object' && !Array.isArray(v)
+    ? v as Record<string, unknown> : {}
+}
+function finite(v: unknown, fallback = 0): number {
+  return typeof v === 'number' && Number.isFinite(v) ? v : fallback
+}
+function transformOf(v: unknown): { x: number; y: number; z: number; zoom: number } {
+  const t = asRecord(v)
+  return { x: finite(t.x), y: finite(t.y), z: finite(t.z), zoom: finite(t.zoom, 1) }
+}
+function rotationOf(v: unknown): [number, number, number] {
+  const a = Array.isArray(v) ? v : []
+  return [finite(a[0]), finite(a[1]), finite(a[2])]
+}
+
+/**
+ * 从官方 pose JSON 里摘出构图参数与角色放置。body 是官网的不透明格式，
+ * 逐字段收窄、坏值回退：缺字段/坏字段一律给空对象/空数组，别让一条老姿势
+ * 把整套「应用」流程抛错。transform 的位移/缩放与 rotation 的欧拉角合并成
+ * PosePreset.characters 要的 placement，App 按它直接初始化多角色场景。
+ */
+function poseExtras(body: unknown): {
+  cameraParams: Record<string, number>
+  characters: PoseCharacter[]
+} {
+  const doc = asRecord(body)
+  const cameraParams: Record<string, number> = {}
+  const cam = asRecord(doc.cameraParams)
+  for (const k of CAMERA_KEYS) {
+    const v = cam[k]
+    if (typeof v === 'number' && Number.isFinite(v)) cameraParams[k] = v
+  }
+  const raw = Array.isArray(doc.characters) ? doc.characters.slice(0, MAX_CHARS) : []
+  const characters: PoseCharacter[] = raw.map((c, i) => {
+    const o = asRecord(c)
+    const transform = transformOf(o.transform)
+    const rotation = rotationOf(o.rotation)
+    return {
+      id: typeof o.id === 'string' && o.id ? o.id : `ch_${i + 1}`,
+      name: typeof o.name === 'string' && o.name ? o.name : `角色 ${i + 1}`,
+      color: '',
+      placement: { ...transform, rotation },
+    }
+  })
+  return { cameraParams, characters }
 }
 
 type Props = {
@@ -313,10 +366,15 @@ export default function LibraryDrawer({
                           try {
                             const body = await fetchPoseBody(p.json)
                             // 官方 json 是 PoseStudio 原生格式，直接当 pose 套，
-                            // 同时把它变成一条 PosePreset 交给 App 落 patch
+                            // 同时把它变成一条 PosePreset 交给 App 落 patch。
+                            // 构图参数与角色放置也从同一份 body 里摘出来一起带上，
+                            // App 按 PosePreset 接时才能还原多角色场景的机位与站位。
+                            const extras = poseExtras(body)
                             onApplyPose({
                               id: p.id, name: p.name, pose: body,
                               yaw: p.yaw, preview: p.preview, at: 0,
+                              cameraParams: extras.cameraParams,
+                              characters: extras.characters,
                             })
                           } catch (e) {
                             window.alert(`取姿势失败：${e instanceof Error ? e.message : e}`)

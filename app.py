@@ -2481,6 +2481,11 @@ class PoseSetFrameReq(BaseModel):
     pose: Any = None
     #: 人偶图，dataURL 或裸 base64（宿主手里就是 dataURL，不用再转一次）
     png: str
+    #: 抽帧那一刻的多角色场景快照。**不解析、不校验**，原样交给 poseset
+    #: 写进 set.json；姿势集回放时才能连每个角色的位置一起还原。
+    scene: Optional[Dict[str, Any]] = None
+    camera: Optional[Dict[str, Any]] = None
+    characters: Optional[List[Any]] = None
 
 
 class PoseSetCreateReq(BaseModel):

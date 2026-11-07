@@ -74,6 +74,63 @@ def _guess_yaw(tags: List[str]) -> int:
     return 0
 
 
+#: cameraParams 里真正带构图信息的数值键。官方 json 里还混着 prompt /
+#: pose_prompts（实测全是空串）和一堆非数值字段，整对象塞进 191 条清单
+#: 只会让响应白白变大，所以只挑这五个数值键。
+_CAMERA_NUM_KEYS = ("zoom", "offset_x", "offset_y", "yaw_deg", "pitch_deg")
+#: 一条清单最多带几个角色，避免多角色姿势把清单撑爆
+_MAX_CHARS = 8
+
+
+def _as_dict(v: Any) -> Dict[str, Any]:
+    return v if isinstance(v, dict) else {}
+
+
+def _as_num(v: Any, default: float = 0.0) -> float:
+    """只收真正的数值；官方 json 偶尔混着字符串/None/布尔，别让它们进清单。"""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return default
+    return float(v)
+
+
+def _camera_params(doc: Any) -> Dict[str, float]:
+    """从该姿势 json 的 cameraParams 只摘数值构图键，缺失就给空 dict。"""
+    cam = _as_dict(_as_dict(doc).get("cameraParams"))
+    out: Dict[str, float] = {}
+    for k in _CAMERA_NUM_KEYS:
+        v = cam.get(k)
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            continue
+        out[k] = float(v)
+    return out
+
+
+def _pose_characters(doc: Any) -> List[Dict[str, Any]]:
+    """从官方 characters[] 派生精简放置：transform 缺省全 0/zoom=1，
+    rotation 缺省 [0,0,0]，最多 8 个。id/name 缺失时给个稳定兜底。"""
+    raw = _as_dict(doc).get("characters")
+    if not isinstance(raw, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    for i, c in enumerate(raw[:_MAX_CHARS], 1):
+        c = _as_dict(c)
+        t = _as_dict(c.get("transform"))
+        rot_raw = c.get("rotation")
+        rot = rot_raw if isinstance(rot_raw, (list, tuple)) else []
+        out.append({
+            "id": str(c.get("id") or f"ch_{i}"),
+            "name": str(c.get("name") or f"角色 {i}"),
+            "transform": {
+                "x": _as_num(t.get("x")),
+                "y": _as_num(t.get("y")),
+                "z": _as_num(t.get("z")),
+                "zoom": _as_num(t.get("zoom"), 1.0),
+            },
+            "rotation": [_as_num(rot[j]) if j < len(rot) else 0.0 for j in range(3)],
+        })
+    return out
+
+
 def _walk() -> List[Dict[str, Any]]:
     root = pose_library_dir()
     if not root.is_dir():
@@ -101,6 +158,7 @@ def _walk() -> List[Dict[str, Any]]:
                     prev = root.joinpath(*parts).with_suffix(".webp")
             category = ""
             tags: List[str] = []
+            doc: Any = None                # try 外先占位：读失败时下面的提取也要用到它
             try:
                 doc = json.loads(p.read_text(encoding="utf-8"))
                 if isinstance(doc, dict):
@@ -116,9 +174,13 @@ def _walk() -> List[Dict[str, Any]]:
                 "name": stem,
                 "category": category,
                 "tags": tags,
+                # 官方 cameraParams.yaw_deg 几乎全是 0，拍摄角度写在 tags 里，
+                # 所以机位仍按标签猜，不改成读 cameraParams。
                 "yaw": _guess_yaw(tags),
                 "json": _rel(p),
                 "preview": _rel(prev) if prev.is_file() else "",
+                "cameraParams": _camera_params(doc),
+                "characters": _pose_characters(doc),
             })
     items.sort(key=lambda x: (x["category"], x["name"].lower()))
     return items

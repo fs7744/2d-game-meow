@@ -65,6 +65,76 @@
 ⚙ 弹窗；39 新增「每个 LoRA 都有自己的强度滑块 / 未挂载置灰」）。
 真机截图 `sx_ui`：侧栏只剩三个页签、状态条有 ⚙，弹窗里每行都有强度条。
 
+## 2026-11-08 · 多角色同框 + 整角色变换 + 撤销/构图/阶段进度
+
+用户明确说「我们也要支持多角色同框」，于是把上一轮按「单主体」前提否掉的
+整角色 Move/Rotate、World/Local、Move & Rotate All、每 tab 独立位置、
+精确 XYZ / Radar 全部做了，连同撤销重做、姿势构图还原、分阶段进度一起落地。
+
+### 关键判断：引擎不用换，死代码不用激活
+
+盘点后发现**内嵌的 0.7.2 基线引擎本来就有多角色能力**：
+`passiveCharacters` Map、`upsertPassiveCharacterFromActive()`、
+`setPassiveCharacterState()`，`capture()` 连 passive mesh 一起渲染。
+官方 0.7.4 多出来的只是「状态 + UI」，纯算法是 175 行零 UI 依赖的
+`character_transform.mjs`。`TransformControls.js` 也早已在 vendor 里。
+所以：
+
+- 只给 `core.js` 补一个 12 行的 `setPassiveCharacterPlacement()`（原样对应官方）；
+- 把官方纯函数模块原样 vendored（**扩展名改 `.js`**：Python 静态服务把
+  `.mjs` 猜成 `text/plain`，浏览器会拒载模块，实测会让
+  `tools/verify_pose_editor.py` 报「脚本加载失败 entry.js」）；
+- 其余全写在自写宿主里，官方那套 `animation.mjs` / `characters.mjs` /
+  `video.mjs`（约 4000 行死代码、绑死自己的 DOM）一行没碰。
+
+### 新增 `web/public/vnccs-pose/scene.js`（iframe 状态机）
+统一 `{type:'scene', action}` 协议：load / select / add / remove / mode /
+space / linkAll / tab / addTab / transform / camera / undo / redo，回执
+`sceneState{scene, pose, yaw, history, commit}`（commit=false 是拖动中间态，
+宿主只刷界面不写 project.json）。
+
+- 每个姿势 tab 有独立的 `placements[tab][角色 id]`；切换 tab 从当前复制一份，
+  不会让用户以为刚摆的位置丢了。
+- 联动移动用官方 `translateCharacterPosition`（到边界时整组一起停），
+  联动旋转用 `rotateCharacterAboutPivot` 绕各自骨盆补偿位置。
+- **撤销栈复用引擎预留的扩展点**：`options.captureHistoryContext()` 把每个
+  角色的放置与姿势一起写进 history，`onHistoryRestore()` 再取回 ——
+  一次 Ctrl+Z 会同时退骨骼和整角色位移，不是只退一半。
+- 出图前 `hideForCapture()` 把 gizmo 手柄藏掉（我们用 `viewport:true`，
+  官方那套 editor-layer 过滤不生效）。
+
+### 宿主 UI（`PoseScenePanel.tsx`）
+角色 chip（选 / 删 / 加，最多 12）、摆姿势/移动/旋转三态、世界/本地轴、
+联动开关、姿势位 tab（最多 16）、XYZ + 缩放 + 三轴旋转共 7 个数值框、
+可拖的 X/Y Radar、撤销/重做按钮 + Ctrl/⌘+Z / Shift+Z / Ctrl+Y。
+数值框失焦或回车才提交，避免每敲一个字符写一次存档和撤销栈。
+状态**只在 iframe 里一份**，宿主只发消息、收回执。
+
+### 数据契约
+- `poselib.py` 清单带 `cameraParams`（zoom 117 个非 1、范围 0.5~4.17；
+  offset_x/y 各 70 个非零）和精简的 `characters[]`。
+  ⚠️ 官方库 191 个 JSON 的 `prompt`/`pose_prompts` **全是空串**，不做「保留 prompt」。
+- `LibraryDrawer` → `PosePreset` → `App.applyPose` 把构图参数与多角色合成
+  `PoseScene`，落进 `project.json` 的 `poseScene`，并用官方
+  `snapToCaptureCamera(zoom, offset…)` 还原构图（不再靠 tags 猜）。
+- 节点重开时 `restoreCamera` 还原自己摆的视角；pose 没带 camera 时不会
+  被官方默认 `(0,0.5,4)` 把人偶缩成一点。
+- `poseset.py` 帧表原样透传 `scene/camera/characters`，`app.py` 的
+  `PoseSetFrameReq` 补上三个可选字段（Pydantic 默认吞多余字段，不补就全丢）。
+- 分阶段进度：后端 `pipeline.py` 早就发 `step`，只是 `ApiJob.progress` 少
+  这个类型 → 补上后 TaskBar 显示「阶段 2/3 · 姿势」。
+
+### 验证
+`tsc -b` / `vite build` ✓、`check-hints` 34/34、**`node smoke.mjs` 721/721**
+（新增用例 61 覆盖 2 角色 chip / 三态 / World-Local / 联动 / 姿势位 /
+7 个数值框 / Radar / 失焦提交 X=4.5 / 撤销快捷键 / 静态产物契约）。
+**真实浏览器** `tools/verify_pose_scene.py`（无头 Edge + SwiftShader）：
+载入 2 角色 → X=4.5 → 撤销退回 0 → 加第 3 个角色 → 导出白底 PNG，**5/5 通过**；
+基线 `tools/verify_pose_editor.py` 恢复通过（768² 白底灰人偶）。
+后端 `test_pose_scene_contract + test_poseset` **18 passed**、
+`test_api` **35 passed**、新增契约单测覆盖姿势库字段、姿势集 extras 往返、
+Pydantic 不吞字段。
+
 ## 2026-11-07 · LoRA 列表改成「扫描目录」：刷新 + 待转换 + 就地转换
 
 ### 起因：截图骗人 + 静默过滤

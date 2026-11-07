@@ -37,7 +37,7 @@ import type { PoseDir } from './api'
 import type { ModelCaps } from './api'
 import type {
   FavoritePrompt, GenNode, GenParams, ModelRecommend, NodeImage, NodeCharSource,
-  NodeKind, NodeSource, NodeView, PosePreset, Viewport,
+  NodeKind, NodeSource, NodeView, PosePreset, Viewport, PoseScene,
 } from './types'
 import type { NodePatch } from './nodes/GenNodeCard'
 import { POSE_NAME_LABEL, zh } from './labels'
@@ -1721,16 +1721,45 @@ export default function App() {
       .catch(() => setPresets([]))
   }, [])
 
-  /** 把姿势套到选中节点：连同朝向一起还原。 */
+  /** 把姿势套到选中节点：连同朝向、官方构图参数、多角色一起还原。 */
   const applyPose = useCallback((p: PosePreset) => {
     const n = nodesRef.current.find((x) => x.id === selectedId)
     if (!n || n.kind !== 'poseedit') return
+    // 官方库 JSON 里带 cameraParams(zoom/offset) 与 characters[]；以前这两样
+    // 全被丢掉，载入后人物忽大忽小、双人姿势只剩一个。这里合成一份完整场景。
+    const prev = n.poseScene
+    const cs = p.characters?.length ? p.characters : prev?.characters
+    let built: PoseScene | undefined = prev
+    if (cs) {
+      const base: PoseScene = prev ?? {
+        characters: cs, activeId: cs[0].id, tabs: ['t1'], activeTab: 't1',
+        placements: {}, mode: 'pose', space: 'world', linkAll: false,
+        cameraParams: null,
+      }
+      const EMPTY = { x: 0, y: 0, z: 0, zoom: 1, rotation: [0, 0, 0] as [number, number, number] }
+      const placements: PoseScene['placements'] = {}
+      for (const t of base.tabs) {
+        placements[t] = { ...(base.placements[t] || {}) }
+        for (const c of cs) if (!placements[t][c.id]) placements[t][c.id] = c.placement ?? EMPTY
+      }
+      built = {
+        ...base, characters: cs,
+        activeId: cs.some((c) => c.id === base.activeId) ? base.activeId : cs[0].id,
+        placements, cameraParams: p.cameraParams ?? base.cameraParams ?? null,
+      }
+    }
     patchNode(n.id, {
       pose: p.pose,
       yaw: p.yaw,
+      ...(built ? { poseScene: built } : {}),
       // tick 变化才能让节点里的编辑器知道「外面换姿势了」——它只在 ready 时
       // 灌一次存档姿势，之后是单向往外推的。带 nodeId：别的人偶节点不能跟着动。
-      poseApply: { nodeId: n.id, pose: p.pose, yaw: p.yaw, tick: Date.now() },
+      poseApply: {
+        nodeId: n.id, pose: p.pose, yaw: p.yaw, tick: Date.now(),
+        cameraParams: p.cameraParams ?? null,
+        characters: p.characters ?? undefined,
+        scene: built,
+      },
     })
     setNotice(`已把「${zh(POSE_NAME_LABEL, p.name)}」套到选中节点（含 ${p.yaw}° 朝向）`)
     window.setTimeout(() => setNotice(''), 3000)

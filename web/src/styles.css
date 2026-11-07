@@ -3834,3 +3834,82 @@ button:disabled, .mini.wide:disabled, .cc-btn:disabled,
   font-size: 11px; line-height: 1; cursor: pointer;
 }
 .rail-settings:hover { color: var(--cyan); border-color: var(--cyan); }
+
+/* ---------------- 多角色 / 整角色变换面板（统一层内） ----------------
+   节点卡只有 280px 宽，所以这块用「小 chip + 三列数字框 + 迷你 Radar」，
+   放大到整屏时同一套样式照样能用。所有控件沿用 .mini / 设计令牌。 */
+.pose-scene {
+  display: flex; flex-direction: column; gap: 6px;
+  margin-top: 8px; padding: 8px;
+  border: 1px solid var(--px-edge); border-radius: var(--r-sm);
+  background: var(--bg-1);
+}
+.pose-scene-head { display: flex; align-items: center; gap: 5px; }
+.pose-scene-head b {
+  flex: 1; font-family: var(--sans); font-size: 11px; font-weight: 600;
+  letter-spacing: .2px; color: var(--cyan);
+}
+.pose-scene-head .mini { height: 22px; padding: 0 6px; font-size: 10.5px; }
+.pose-scene-chars { display: flex; flex-wrap: wrap; gap: 4px; }
+.pose-char {
+  display: inline-flex; align-items: center;
+  border: 1px solid var(--px-edge); border-radius: var(--r-sm);
+  background: var(--bg-3);
+}
+.pose-char.on { border-color: var(--green); }
+.pose-char-pick {
+  display: inline-flex; align-items: center; gap: 4px;
+  height: 22px; padding: 0 6px; border: 0; background: transparent;
+  color: var(--white); font-size: 10.5px; cursor: pointer;
+}
+.pose-char-pick i { width: 7px; height: 7px; border-radius: 2px; display: inline-block; }
+.pose-char-del {
+  width: 18px; height: 22px; padding: 0; border: 0; border-left: 1px solid var(--px-edge);
+  background: transparent; color: var(--muted-2); font-size: 11px; cursor: pointer;
+}
+.pose-char-del:hover { color: var(--pink); }
+.pose-scene-modes { display: flex; flex-wrap: wrap; gap: 4px; }
+.pose-mode, .pose-toggle, .pose-tab {
+  height: 22px; padding: 0 7px;
+  border: 1px solid var(--px-edge); border-radius: var(--r-sm);
+  background: var(--bg-3); color: var(--muted); font-size: 10.5px; cursor: pointer;
+}
+.pose-mode.on, .pose-toggle.on, .pose-tab.on {
+  border-color: var(--cyan); background: var(--bg-1); color: var(--cyan);
+}
+.pose-toggle.on { border-color: var(--green); color: var(--green); }
+.pose-scene-tabs { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+.pose-scene-kicker { margin-right: 2px; font-size: 10px; color: var(--muted-2); }
+.pose-tab { min-width: 22px; padding: 0 5px; font-family: var(--mono); }
+.pose-scene-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; }
+.pose-num { display: flex; align-items: center; gap: 2px; min-width: 0; }
+.pose-num span { flex: 0 0 auto; font-size: 9.5px; color: var(--muted-2); }
+.pose-num input {
+  width: 100%; min-width: 0; height: 22px; padding: 0 3px;
+  border: 1px solid var(--px-edge); border-radius: var(--r-sm);
+  background: var(--bg-3); color: var(--white);
+  font-family: var(--mono); font-size: 10px;
+}
+.pose-num input:focus { border-color: var(--cyan); }
+.pose-scene-grid > .mini { width: 100%; height: 22px; padding: 0; font-size: 10.5px; }
+.pose-radar-wrap { display: flex; align-items: center; gap: 8px; }
+.pose-radar {
+  position: relative; width: 76px; height: 76px; flex: 0 0 auto;
+  border: 1px solid var(--px-edge); border-radius: var(--r-sm);
+  background:
+    linear-gradient(var(--line) 1px, transparent 1px) 0 0 / 100% 25%,
+    linear-gradient(90deg, var(--line) 1px, transparent 1px) 0 0 / 25% 100%,
+    var(--bg-3);
+  cursor: crosshair; touch-action: none;
+}
+.pose-radar.is-off { opacity: .42; cursor: default; }
+.pose-radar-axis { position: absolute; background: var(--px-edge); }
+.pose-radar-axis.x { left: 0; right: 0; top: 50%; height: 1px; }
+.pose-radar-axis.y { top: 0; bottom: 0; left: 50%; width: 1px; }
+.pose-radar-dot {
+  position: absolute; width: 8px; height: 8px; margin: -4px 0 0 -4px;
+  border: 1px solid var(--bg-1); border-radius: 2px;
+  background: var(--green); box-shadow: 1px 1px 0 rgba(0, 0, 0, .34);
+}
+.pose-radar-legend { font-size: 9.5px; line-height: 1.6; color: var(--muted-2); }
+.pose-scene-hint { font-size: 10px; line-height: 1.6; color: var(--muted-2); }

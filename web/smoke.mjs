@@ -4753,6 +4753,143 @@ async function ccCreate(doc, win) {
   dom.window.close()
 }
 
+// 61) 多角色同框：整角色 Move/Rotate、World/Local、联动、每 tab 独立位置、
+//     精确 XYZ / Radar、撤销重做，以及场景状态写回节点存档
+{
+  const { dom, errors } = await boot('')
+  const doc = dom.window.document
+  const win = dom.window
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms))
+  const add = [...doc.querySelectorAll('.rail-add')].find((b) =>
+    (b.closest('.rail-item')?.textContent || '').includes('人偶姿势'))
+  add?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await wait(250)
+  const node = () => [...doc.querySelectorAll('.node')].find((n) =>
+    (n.querySelector('.node-kind')?.textContent || '').includes('人偶姿势'))
+  check('建出人偶节点用于多角色场景', !!node())
+
+  // jsdom 不加载 iframe：用假 contentWindow 收下所有父→子消息，再手动喂回执
+  const sent = []
+  const fakeWin = { postMessage: (m) => sent.push(m) }
+  const frame = node()?.querySelector('.pose-stage iframe')
+  if (frame) Object.defineProperty(frame, 'contentWindow', { value: fakeWin, configurable: true })
+  const feed = (m) => win.dispatchEvent(new win.MessageEvent('message', { data: m, source: fakeWin }))
+  feed({ type: 'ready' })
+  await wait(180)
+
+  const P = (x, y, z, rot) => ({
+    x, y, z, zoom: 1, rotation: rot || [0, 0, 0],
+  })
+  const scene = {
+    characters: [
+      { id: 'c1', name: '角色 1', color: '#e8eaf2', pose: null, placement: P(0, 0, 0) },
+      { id: 'c2', name: '角色 2', color: '#6cc4ef', pose: null, placement: P(3, 0, 0) },
+    ],
+    activeId: 'c1', tabs: ['t1'], activeTab: 't1',
+    placements: { t1: { c1: P(0, 0, 0), c2: P(3, 0, 0) } },
+    mode: 'move', space: 'world', linkAll: false, cameraParams: { zoom: 1.8 },
+  }
+  feed({ type: 'sceneState', scene, history: { canUndo: false, canRedo: false }, commit: true })
+  await wait(220)
+
+  const panel = () => node()?.querySelector('.pose-scene')
+  check('多角色面板渲染出来了', !!panel())
+  check('两个角色各有可选中的 chip', panel()?.querySelectorAll('.pose-char').length === 2,
+    String(panel()?.querySelectorAll('.pose-char').length))
+  check('显示当前选中的角色', !!panel()?.querySelector('.pose-char.on .pose-char-pick'))
+  const modes = [...(panel()?.querySelectorAll('.pose-mode') || [])].map((b) => b.textContent)
+  check('有 摆姿势 / 移动 / 旋转 三种模式',
+    modes.join('|') === '摆姿势|移动|旋转', modes.join('|'))
+  check('移动模式高亮（状态来自 iframe 回执）',
+    panel()?.querySelector('.pose-mode.on')?.textContent === '移动')
+  check('World/Local 切换按钮在', !!panel()?.querySelector('.pose-toggle'))
+  check('联动按钮在', [...(panel()?.querySelectorAll('.pose-toggle') || [])]
+    .some((b) => (b.textContent || '').includes('联动')))
+  check('姿势位 tab 在（每 tab 独立位置）',
+    (panel()?.querySelector('.pose-scene-tabs')?.textContent || '').includes('姿势位'))
+  const nums = [...(panel()?.querySelectorAll('.pose-num input') || [])]
+  check('精确 XYZ / 缩放 / 旋转共 7 个数值框', nums.length === 7, String(nums.length))
+  check('Radar 在', !!panel()?.querySelector('.pose-radar'))
+
+  // 点「＋角色」→ 父页发 scene/add；不自己改 state（等 iframe 回推）
+  ;[...(panel()?.querySelectorAll('button') || [])]
+    .find((b) => (b.textContent || '').includes('＋角色'))
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await wait(120)
+  check('加角色走 scene/add 消息', sent.some((m) => m.type === 'scene' && m.action === 'add'),
+    JSON.stringify(sent.slice(-2)))
+
+  // World → Local
+  ;[...(panel()?.querySelectorAll('.pose-toggle') || [])]
+    .find((b) => (b.textContent || '').includes('世界'))
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await wait(100)
+  check('切本地轴走 scene/space',
+    sent.some((m) => m.action === 'space' && m.value === 'local'),
+    JSON.stringify(sent.slice(-2)))
+
+  // 联动
+  ;[...(panel()?.querySelectorAll('.pose-toggle') || [])]
+    .find((b) => (b.textContent || '').includes('联动'))
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await wait(100)
+  check('联动走 scene/linkAll', sent.some((m) => m.action === 'linkAll' && m.value === true))
+
+  // 新增姿势位（每 tab 独立位置）
+  ;[...(panel()?.querySelectorAll('.pose-tab') || [])]
+    .find((b) => (b.textContent || '').trim() === '＋')
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await wait(100)
+  check('新姿势位走 scene/addTab', sent.some((m) => m.action === 'addTab'))
+
+  // 精确 X 输入：失焦才提交，patch 要带 x
+  const xInput = nums[0]
+  const setter = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value').set
+  setter.call(xInput, '4.5')
+  xInput.dispatchEvent(new win.Event('input', { bubbles: true }))
+  await wait(80)
+  check('输入中间态不提交（别每敲一下写一次存档）',
+    !sent.some((m) => m.action === 'transform'))
+  // React 17+ 的 onBlur 走原生 focusout 委托，派发 blur 不会触发它
+  xInput.dispatchEvent(new win.Event('focusout', { bubbles: true }))
+  await wait(120)
+  const tf = sent.filter((m) => m.action === 'transform').pop()
+  check('失焦提交 scene/transform 且带 X=4.5',
+    !!tf && Number(tf.patch?.x) === 4.5, JSON.stringify(tf))
+
+  // 撤销 / 重做按钮（history 由 iframe 回执控制）
+  feed({ type: 'sceneState', scene, history: { canUndo: true, canRedo: true }, commit: true })
+  await wait(150)
+  const undoBtn = [...(panel()?.querySelectorAll('button') || [])].find((b) => b.textContent === '↶')
+  const redoBtn = [...(panel()?.querySelectorAll('button') || [])].find((b) => b.textContent === '↷')
+  check('撤销/重做按钮在且可用', !!undoBtn && !undoBtn.disabled && !!redoBtn && !redoBtn.disabled)
+  undoBtn?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await wait(100)
+  check('撤销走 scene/undo', sent.some((m) => m.action === 'undo'))
+  // Ctrl+Z 快捷键
+  win.dispatchEvent(new win.KeyboardEvent('keydown',
+    { key: 'z', ctrlKey: true, bubbles: true }))
+  await wait(100)
+  check('Ctrl+Z 也发 scene/undo',
+    sent.filter((m) => m.action === 'undo').length >= 2,
+    String(sent.filter((m) => m.action === 'undo').length))
+
+  // 静态契约：新增的引擎能力必须随构建产物发布
+  check('scene.js 随包发布', existsSync(resolve(dist, 'vnccs-pose/scene.js')))
+  check('官方纯函数变换模块随包发布',
+    existsSync(resolve(dist, 'vnccs-pose/pose_studio/character_transform.js')))
+  const coreText = readFileSync(resolve(dist, 'vnccs-pose/pose_studio/core.js'), 'utf8')
+  check('引擎补上了被动角色的整角色放置',
+    coreText.includes('setPassiveCharacterPlacement'))
+  const entryText = readFileSync(resolve(dist, 'vnccs-pose/entry.js'), 'utf8')
+  check('撤销栈会连多角色放置一起记',
+    entryText.includes('captureHistoryContext') && entryText.includes('hideForCapture'))
+  check('官方姿势库清单带构图参数（后端契约）',
+    readFileSync(resolve('src/api.ts'), 'utf8').includes('cameraParams?: Record<string, number>'))
+  check('多角色场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
 const failed = results.filter((r) => !r.ok)
 console.log(`\n${results.length - failed.length}/${results.length} 通过`)
 process.exit(failed.length ? 1 : 0)

@@ -4542,6 +4542,17 @@ export class PoseViewerCore {
         return true;
     }
 
+    /** 整角色 Move / Rotate 用：只改位置与旋转，不重建骨架（拖动时每帧都要走）。
+     *  原样对应官方 0.7.4 的同名方法；`transform` 是 {x,y,z,zoom}，
+     *  `rotation` 是**度**的 [x,y,z]。 */
+    setPassiveCharacterPlacement(id, { transform, rotation }) {
+        const mesh = this.passiveCharacters?.get(String(id))?.mesh;
+        if (!mesh) return;
+        if (rotation) mesh.rotation.set(...rotation.map(value => value * Math.PI / 180));
+        if (transform) this._applyCharacterTransform(mesh, transform);
+        this.requestRender();
+    }
+
     setPassiveCharacterState(id, { pose = {}, color, transform } = {}) {
         const entry = this.passiveCharacters?.get(String(id || ""));
         if (!entry) return false;
