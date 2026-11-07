@@ -38,10 +38,12 @@
 
   --nav-h: 58px;
   --rail-w: 252px;
-  --r: 8px;
-  --r-sm: 5px;
-  --shadow-hard: 0 12px 30px rgba(0, 0, 0, 0.45);
-  --shadow-soft: 0 2px 10px rgba(0, 0, 0, 0.28);
+  /* 设计令牌只在这里定义一次；末尾各 override 层只引用 var()，不再重定义。 */
+  --r: 4px;
+  --r-sm: 3px;
+  --shadow-hard: 2px 2px 0 rgba(0, 0, 0, 0.34);
+  --shadow-soft: 1px 1px 0 rgba(0, 0, 0, 0.28);
+  --px-edge: rgba(233, 238, 247, 0.16);
 }
 
 * { box-sizing: border-box; }
@@ -1134,16 +1136,6 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
 }
 .pose-batch-btn:hover:not(:disabled) { border-color: var(--green); color: var(--green); }
 .pose-batch-btn:disabled { opacity: 0.55; cursor: not-allowed; }
-/* 文字按钮**不能**用 .mini（那是 28×28 的图标按钮，四个字会被挤成竖排并裁掉）。
-   `white-space: nowrap` 是关键：卡片只有 280px，换行就溢出边框。 */
-.pose-batch-btn {
-  flex: 0 0 auto; height: 22px; padding: 0 8px;
-  background: var(--bg); color: var(--muted);
-  border: 1px solid var(--line); border-radius: 2px;
-  font: inherit; font-size: 10px; white-space: nowrap; cursor: pointer;
-}
-.pose-batch-btn:hover:not(:disabled) { border-color: var(--green); color: var(--green); }
-.pose-batch-btn:disabled { opacity: 0.55; cursor: not-allowed; }
 .pose-batch-out {
   flex: 1; min-width: 0; height: 22px;
   background: var(--bg-3); color: var(--white);
@@ -1263,37 +1255,6 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
 /* 单栏时框跟着图走，别留一条 168px 高的空白带 */
 .pose-batch-pair.single .pose-batch-empty { height: 260px; }
 
-/* 舞台：播放翻的就是这块大图。没出图时只有左边「原始」一栏，也要够大 ——
-   38px 的缩略格看不出动作，那正是上一版"点播什么都不动"的根因。 */
-.pose-batch-stage { display: flex; flex-direction: column; gap: 3px; }
-.pose-batch-stage-bar {
-  display: flex; align-items: center; gap: 6px;
-  font-size: 9px; color: var(--muted);
-}
-.pose-batch-stage-bar b {
-  color: var(--white); font-weight: 500; font-family: var(--mono);
-  white-space: nowrap;
-}
-.pose-batch-stage-bar > span {
-  color: var(--muted-2); font-family: var(--mono);
-}
-.pose-batch-stage-bar .pose-batch-toggle { margin-left: auto; }
-.pose-batch-pair.single img { height: 260px; }
-/* 单栏时框跟着图走，别留一条 168px 高的空白带 */
-.pose-batch-pair.single .pose-batch-empty { height: 260px; }
-/* 导出行：GIF / Godot 两个按钮 + 帧率 */
-.pose-batch-export {
-  display: flex; align-items: center; gap: 5px; flex-wrap: wrap; margin-top: 4px;
-}
-/* 导出结果链接：文件名可能很长（.tres/.tscn），整行可换行不撑破卡片 */
-.pose-batch-gif {
-  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
-  font-size: 9px; color: var(--muted-2); font-family: var(--mono);
-  padding: 2px 0; min-width: 0;
-}
-.pose-batch-gif a { color: var(--cyan); text-decoration: none; white-space: nowrap; }
-.pose-batch-gif a:hover { text-decoration: underline; }
-.pose-batch-gif span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 /* 导出行：GIF / Godot 两个按钮 + 帧率 */
 .pose-batch-export {
   display: flex; align-items: center; gap: 5px; flex-wrap: wrap; margin-top: 4px;
@@ -1356,53 +1317,6 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
   font-weight: 700; font-family: var(--mono);
 }
 
-/* ---- 抽帧后挑帧（照 pixelforge「拆解帧 · 挑帧」的版式） ---- */
-.pose-frames .pose-batch-btn { flex: 1; min-width: 0; }
-.anim-filters { display: flex; flex-direction: column; gap: 5px; margin-top: 2px; }
-.anim-slider { display: block; font-size: 10px; color: var(--muted); }
-.anim-slider > span { display: flex; align-items: baseline; gap: 5px; flex-wrap: wrap; }
-.anim-slider b { color: var(--white); font-weight: 600; }
-.anim-slider em { font-style: normal; opacity: 0.65; font-size: 9px; }
-.anim-slider input[type='range'] { width: 100%; margin: 2px 0 0; height: 14px; }
-.anim-toolbar { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; margin-top: 4px; }
-.anim-showall {
-  margin-left: auto; display: inline-flex; align-items: center; gap: 3px;
-  font-size: 9px; color: var(--muted); cursor: pointer;
-}
-.anim-count {
-  margin-top: 4px; font-size: 10px; color: var(--muted);
-  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
-}
-.anim-count b { color: var(--white); }
-.anim-stat { font-size: 9px; padding: 0 4px; line-height: 14px;
-  border: 1px solid var(--line); color: var(--muted); font-family: var(--mono); }
-.anim-stat.warn { color: #d98a2b; border-color: rgba(217, 138, 43, 0.5); }
-/* 帧墙：小格子 + 自滚动。max-height 是给节点卡片留地方 —— 24 帧铺开会把
-   「存为姿势集」挤出可视区，用户找不到保存按钮。 */
-.anim-wall {
-  margin-top: 4px; display: grid; gap: 3px;
-  grid-template-columns: repeat(auto-fill, minmax(48px, 1fr));
-  max-height: 260px; overflow-y: auto; padding: 3px;
-  border: 1px solid var(--line); background: rgba(0, 0, 0, 0.28);
-}
-.anim-cell {
-  position: relative; padding: 0; border: 1px solid transparent;
-  background: #16181f; cursor: pointer; overflow: hidden; line-height: 0;
-}
-.anim-cell img { width: 100%; aspect-ratio: 1 / 1; object-fit: contain; display: block; }
-.anim-cell:hover { border-color: var(--line); }
-.anim-cell.on { border-color: var(--green); box-shadow: inset 0 0 0 1px var(--green); }
-.anim-cell:not(.on) img { opacity: 0.45; }
-.anim-idx {
-  position: absolute; left: 1px; bottom: 0; font-size: 8px; line-height: 11px;
-  padding: 0 3px; color: #cfd3e0; background: rgba(0, 0, 0, 0.62);
-  font-family: var(--mono);
-}
-.anim-order {
-  position: absolute; right: 1px; top: 1px; font-size: 8px; line-height: 12px;
-  min-width: 12px; text-align: center; color: #08160f; background: var(--green);
-  font-weight: 700; font-family: var(--mono);
-}
 .pose-yaw-val { font-family: var(--mono); font-weight: 400; color: var(--cyan); min-width: 30px; text-align: right; }
 .pose-cam-hint-row { font-size: 9px; color: var(--muted-2); line-height: 1.4; }
 .pose-save input {
@@ -1882,13 +1796,6 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
   padding: 4px 6px; font-family: var(--mono); font-size: 10.5px;
 }
 
-/* AI 向导的一句话输入：够长才放得下一句中文描述 */
-.chars-wizard-input {
-  flex: 1 1 340px; max-width: 520px;
-  background: var(--bg-3); color: var(--white);
-  border: 1px solid var(--line-strong); border-radius: 2px;
-  padding: 4px 6px; font-family: var(--mono); font-size: 10.5px;
-}
 
 /* 看图反推的结果表：一行一个属性，让用户逐条核对再决定要不要 */
 .chars-analyze {
@@ -2040,32 +1947,21 @@ svg.links path.link.pending { stroke-dasharray: 5 4; opacity: 1; }
   display: flex; align-items: center; justify-content: center;
   padding: 0; line-height: 1;
   font-size: 12px;
-  background: rgba(0, 0, 0, 0.62);
-  border: 1px solid var(--line);
-  color: var(--muted-2);
+  /* 不用 opacity 做低调：近黑画布上整个按钮会一起隐形（实测 0.45 看不见）。
+     改成实心深底 + 灰白边框/图标，hover 才转绿。 */
+  background: rgba(0, 0, 0, 0.86);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  color: rgba(255, 255, 255, 0.68);
   cursor: pointer;
   transition: color 0.12s, border-color 0.12s, background 0.12s;
 }
 .pzoom:hover:not(:disabled) {
   color: var(--green);
   border-color: var(--green);
-  background: rgba(74, 222, 155, 0.12);
+  background: rgba(74, 222, 155, 0.16);
 }
 .pzoom:disabled { opacity: 0.3; cursor: not-allowed; }
 
-/* **不要用 opacity 做"低调"**：整个按钮（含图标和边框）一起变半透明，
-   在近黑画布上等于隐形（实测 0.45 时完全看不见）。改成实心 + 低调配色：
-   深底、灰白边框、灰白图标，hover 才转绿。 */
-.pzoom {
-  background: rgba(0, 0, 0, 0.86);
-  border-color: rgba(255, 255, 255, 0.3);
-  color: rgba(255, 255, 255, 0.68);
-}
-.pzoom:hover:not(:disabled) {
-  background: rgba(74, 222, 155, 0.16);
-  border-color: var(--green);
-  color: var(--green);
-}
 
 /* prompt-wrap 里右上角已经有一个「收藏」星标（right:4px），放大按钮排在它左边 */
 .prompt-wrap > .pzoom { top: 4px; right: 28px; }
@@ -3299,19 +3195,10 @@ input:disabled, select:disabled, textarea:disabled { opacity: 0.42; }
 
    原则：像素感来自「边界清晰、可点按、像素图按最近邻放大」，不来自贴上去的
    装饰图形。中文一律不用像素字体（仓库没有中文点阵字体，离线也加载不到）。
+   设计令牌统一在文件顶部 :root 定义一次，这里不再二次定义。
    配色 / 字体 / 类名 / DOM / 数据流仍然一个不改。
    ========================================================================== */
 
-/* ---------------- 设计令牌：略微方一点 + 很轻的阶梯投影 ----------------
-   仍是重定义变量一次覆盖前面几千行；但幅度收小：8px→4px 而不是 2px，
-   柔和扩散→2px 淡影而不是 3px 黑块。圆形元素用 50%/999px 硬编码，不受影响。 */
-:root {
-  --r: 4px;
-  --r-sm: 3px;
-  --shadow-hard: 2px 2px 0 rgba(0, 0, 0, 0.34);
-  --shadow-soft: 1px 1px 0 rgba(0, 0, 0, 0.28);
-  --px-edge: rgba(233, 238, 247, 0.16);
-}
 
 /* ---------------- 全局：疏网格、方块滚动条、虚线焦点 ---------------- */
 /* 48px 疏方格，透明度压到只在空画布上隐约可见。
