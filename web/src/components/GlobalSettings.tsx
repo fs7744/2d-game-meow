@@ -15,7 +15,7 @@
 import { useRef, useState, type ChangeEvent } from 'react'
 import { createPortal } from 'react-dom'
 import type { QwenLora, ActiveLora, LoraInspect } from '../api'
-import { inspectLora, commitLora, deleteLora } from '../api'
+import { inspectLora, commitLora, deleteLora, convertLora } from '../api'
 
 /** 抠图方式的可选值。值原样传给后端（`matte.matte_auto` 的 backend 参数）。 */
 export const MATTE_LABEL: Record<string, string> = {
@@ -30,19 +30,50 @@ export type LoraSettingsProps = {
   onLorasChange: (items: { name: string; scale: number }[]) => void
   fastMode: boolean
   onFastMode: (on: boolean) => void
-  /** 导入 / 删除之后刷新列表（App 的 reloadLoras） */
+  /** 导入 / 删除 / 转换之后刷新列表（App 的 reloadLoras） */
   onLorasChanged?: () => void
+  /** 目录里存在但格式不对的（需要转换） */
+  skipped?: QwenLora[]
+  /** 目录里一共扫到几个文件 */
+  count?: number
+  /** 扫描目录（给用户看，免得他不知道往哪拷） */
+  dir?: string
+  /** 重新扫描目录（App 的 reloadLoras） */
+  onRefresh?: () => void | Promise<void>
 }
 
 export function LoraSettings({
   loras, activeLoras, onLorasChange, fastMode, onFastMode, onLorasChanged,
+  skipped = [], count, dir = '', onRefresh,
 }: LoraSettingsProps) {
+  const [refreshing, setRefreshing] = useState(false)
+  const [converting, setConverting] = useState('')
   const [importBusy, setImportBusy] = useState(false)
   const [importMsg, setImportMsg] = useState('')
   /** 需要转换、等用户点确认的检测结果 */
   const [pendingConvert, setPendingConvert] = useState<LoraInspect | null>(null)
   const [pendingDelete, setPendingDelete] = useState('')
   const fileRef = useRef<HTMLInputElement | null>(null)
+
+  const refresh = async () => {
+    if (!onRefresh) return
+    setRefreshing(true)
+    try { await onRefresh() } finally { setRefreshing(false) }
+  }
+
+  /** 目录里格式不对的那个，就地转（后端会先备份原文件）。 */
+  const convertOne = async (name: string) => {
+    setConverting(name); setImportMsg('')
+    try {
+      const out = await convertLora(name)
+      setImportMsg(out.converted
+        ? `已把「${out.item.name}」转成 diffusers 格式，现在可以挂了`
+        : `「${out.item.name}」本来就是 diffusers 格式，刷新即可`)
+      await onRefresh?.()
+    } catch (err) {
+      setImportMsg(`转换失败：${err instanceof Error ? err.message : '未知错误'}`)
+    } finally { setConverting('') }
+  }
 
   const onPick = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
@@ -89,8 +120,25 @@ export function LoraSettings({
     }
   }
 
+  const shortDir = dir ? dir.split(/[\\/]/).slice(-2).join('/') : 'models/lora'
+  const total = count ?? (loras.length + skipped.length)
+
   return (
     <>
+      {/* 目录是权威：用户把文件拷进 models/lora/ 后点这里刷新即可，不用重启 */}
+      <div className="lora-head">
+        <span className="lora-head-info">
+          扫到 <b>{total}</b> 个 · 可挂 <b>{loras.length}</b>
+          {skipped.length > 0 && <> · 待转换 <b className="warn">{skipped.length}</b></>}
+        </span>
+        <button type="button" className="lora-refresh" disabled={refreshing}
+          onClick={() => void refresh()}
+          title={`重新扫描 ${dir || 'models/lora/'}`}>
+          {refreshing ? '扫描中…' : '↻ 刷新'}
+        </button>
+      </div>
+      <div className="lora-dir" title={dir || 'models/lora/'}>目录：{shortDir}/</div>
+
       <label className="lora-row fast-toggle">
         <input
           type="checkbox"
@@ -119,8 +167,8 @@ export function LoraSettings({
 
       {loras.length === 0 ? (
         <div className="src-note">
-          还没有导入 LoRA。点上面的「导入」选一个 .safetensors；
-          ComfyUI 格式会在你确认之后自动转成 diffusers 原生格式。
+          这个目录里还没有可挂的 LoRA。点上面的「导入」选一个 .safetensors，
+          或者直接把文件拷进 <code>{shortDir}/</code> 再点「↻ 刷新」。
         </div>
       ) : (
         <>
@@ -178,6 +226,36 @@ export function LoraSettings({
             </div>
           )}
         </>
+      )}
+
+      {/* 格式不对的文件也要露出来：以前被后端静默过滤，用户只会觉得「少了几个」 */}
+      {skipped.length > 0 && (
+        <div className="lora-skip">
+          <div className="lora-skip-head">
+            目录里还有 {skipped.length} 个不能直接挂的（格式不对）
+          </div>
+          {skipped.map((sk) => (
+            <div className="lora-skip-item" key={sk.name}>
+              <span className="lora-skip-name" title={sk.file}>{sk.name}</span>
+              <span className="lora-skip-meta">
+                {sk.size_mb}MB · {sk.format === 'comfyui' ? 'ComfyUI 格式' : '格式未知'}
+              </span>
+              {sk.convertible ? (
+                <button type="button" className="lora-convert-one"
+                  disabled={converting === sk.name}
+                  onClick={() => void convertOne(sk.name)}>
+                  {converting === sk.name ? '转换中…' : '转换'}
+                </button>
+              ) : (
+                <span className="lora-skip-no" title={sk.reason}>无法转换</span>
+              )}
+            </div>
+          ))}
+          <div className="src-note">
+            转换只改键名与张量布局，不改权重；原文件会备份到
+            <code>library/lora_backup/</code>。
+          </div>
+        </div>
       )}
 
       {/* 格式不符时先问用户：直接挂 ComfyUI 格式会「静默不生效」，比报错更难查。

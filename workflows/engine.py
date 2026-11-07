@@ -301,11 +301,13 @@ class Engine:
         """
         return self.root / "lora"
 
-    def available_loras(self) -> List[Dict[str, Any]]:
-        """列出可用的 Qwen LoRA。
+    def scan_loras(self) -> List[Dict[str, Any]]:
+        """**扫一遍 `models/lora/`，把目录里所有 .safetensors 都列出来**。
 
-        **只认 diffusers 原生格式**（key 前缀 `transformer.`）——ComfyUI 格式
-        挂上去会静默不生效（`load_lora_weights` 匹配不到任何层），比报错更坏。
+        跟 `available_loras()` 的区别是「不藏东西」：格式不对的文件也返回，
+        带 `format` / `need_convert` / `convertible` / `reason`。
+        以前这里直接 `continue` 掉，用户把 ComfyUI 格式的 LoRA 拷进目录后
+        **界面上完全看不到**，只会觉得「怎么少了一大半」——静默过滤比报错难查。
         """
         out: List[Dict[str, Any]] = []
         d = self.lora_dir()
@@ -313,10 +315,16 @@ class Engine:
             return out
         for f in sorted(d.glob("*.safetensors")):
             try:
-                info = lora_format(_lora_keys(f))
-            except Exception:                 # noqa: BLE001
-                continue
-            if info["format"] != "diffusers":
+                keys = _lora_keys(f)
+                info = lora_format(keys)
+            except Exception as exc:          # noqa: BLE001
+                out.append({
+                    "name": f.stem, "file": str(f),
+                    "size_mb": round(f.stat().st_size / 1024 / 1024, 1),
+                    "tensors": 0, "format": "unknown", "need_convert": True,
+                    "convertible": False,
+                    "reason": f"读不出 safetensors 头：{exc}",
+                })
                 continue
             out.append({
                 "name": f.stem,
@@ -324,8 +332,20 @@ class Engine:
                 "size_mb": round(f.stat().st_size / 1024 / 1024, 1),
                 "tensors": info["tensors"],
                 "format": info["format"],
+                "need_convert": info["need_convert"],
+                "convertible": info["convertible"],
+                "reason": info["reason"],
             })
         return out
+
+    def available_loras(self) -> List[Dict[str, Any]]:
+        """**可直接挂载**的 LoRA（只认 diffusers 原生格式）。
+
+        ComfyUI 格式挂上去会静默不生效（`load_lora_weights` 匹配不到任何层），
+        比报错更坏，所以不能出现在「可勾选」的列表里；它们由
+        `scan_loras()` 单独报出来，前端显示为「需要转换」。
+        """
+        return [x for x in self.scan_loras() if x["format"] == "diffusers"]
 
     def restore_loras(self, specs: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """从全局设置恢复用户挂载的 LoRA，**不加载模型、不占显存**。

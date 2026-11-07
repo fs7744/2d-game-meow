@@ -36,10 +36,12 @@ def lora_env(tmp_path, monkeypatch):
     from workflows import lorastore, metadb, paths
 
     monkeypatch.setattr(paths, "LORA_DIR", tmp_path / "lora")
+    monkeypatch.setattr(paths, "LIBRARY_DIR", tmp_path / "library")
     monkeypatch.setattr(lorastore, "STAGE_DIR", tmp_path / "stage")
     monkeypatch.setattr(metadb, "DB_PATH", tmp_path / "meta.sqlite3")
     (tmp_path / "lora").mkdir()
     (tmp_path / "stage").mkdir()
+    (tmp_path / "library").mkdir()
     return tmp_path
 
 
@@ -191,3 +193,57 @@ def test_engine_restore_drops_missing_files(lora_env):
     kept = eng.restore_loras([{"name": "not_there", "scale": 1.0}])
     assert kept == []
     assert eng.active_loras() == []
+
+
+# ---------------- 目录扫描 / 就地转换 ----------------
+
+def test_scan_lists_every_file(lora_env):
+    """目录里格式不对的文件也要报出来，不能静默过滤（用户会以为丢了）。"""
+    from workflows.engine import Engine
+
+    _write(lora_env / "lora" / "good.safetensors", DIFF_KEYS)
+    _write(lora_env / "lora" / "comfy.safetensors", COMFY_KEYS)
+    _write(lora_env / "lora" / "other.safetensors", OTHER_KEYS)
+
+    eng = Engine(lora_env)
+    scan = eng.scan_loras()
+    assert {x["name"]: x["format"] for x in scan} == {
+        "good": "diffusers", "comfy": "comfyui", "other": "unknown"}
+    assert [x["name"] for x in eng.available_loras()] == ["good"], \
+        "可挂列表只能有 diffusers 格式的"
+
+
+def test_convert_in_place_keeps_name_and_backs_up(lora_env):
+    """把已经在目录里的 ComfyUI LoRA 就地转换：原名不变，原文件先备份。"""
+    from workflows import lorastore, paths
+    from workflows.engine import Engine, _lora_keys, lora_format
+
+    target = _write(lora_env / "lora" / "comfy.safetensors", COMFY_KEYS)
+    out = lorastore.convert_in_place("comfy")
+
+    assert out["converted"] is True
+    assert out["item"]["name"] == "comfy", "文件名不该被改掉"
+    assert out["item"]["format"] == "diffusers"
+    assert lora_format(_lora_keys(target))["format"] == "diffusers"
+    backup = paths.LIBRARY_DIR / "lora_backup" / "comfy.safetensors"
+    assert backup.is_file(), "转换前必须备份原文件"
+    # 转换后引擎就能挂它了
+    assert "comfy" in [x["name"] for x in Engine(lora_env).available_loras()]
+
+
+def test_convert_in_place_is_noop_for_diffusers(lora_env):
+    from workflows import lorastore
+
+    _write(lora_env / "lora" / "already.safetensors", DIFF_KEYS)
+    out = lorastore.convert_in_place("already")
+    assert out["converted"] is False
+
+
+def test_convert_in_place_refuses_other_architectures(lora_env):
+    from workflows import lorastore
+
+    _write(lora_env / "lora" / "sdxl.safetensors", OTHER_KEYS)
+    with pytest.raises(ValueError, match="没找到|不是本底模"):
+        lorastore.convert_in_place("sdxl")
+    # 原文件一个字节都不该动
+    assert (lora_env / "lora" / "sdxl.safetensors").is_file()

@@ -22,6 +22,52 @@
 
 ---
 
+## 2026-11-07 · LoRA 列表改成「扫描目录」：刷新 + 待转换 + 就地转换
+
+### 起因：截图骗人 + 静默过滤
+
+用户看到界面上只有 2 个 LoRA，实际 `models/lora/` 里有 **11 个**。查下来两个原因：
+
+1. **上一轮的真机截图用的是离线假数据**（`CC_FAKE=1` 的 mock 只写了 2 条），
+   不是程序只认出 2 个 —— 这个锅得截图背；
+2. 但程序里确实埋着同类问题：`available_loras()` 对格式不对的文件**直接
+   `continue` 掉**，用户把 ComfyUI 格式的权重拷进 `models/lora/` 后，
+   界面上根本看不到，只会觉得「怎么少了一大半」。静默过滤比报错难查。
+
+### 改法
+
+后端：
+
+- `Engine.scan_loras()`：**列出目录里所有 `.safetensors`**，带
+  `format / need_convert / convertible / reason`；读不出头的也不吞，报成
+  `unknown` 并附原因。
+- `available_loras()` 收窄成「scan 里 format == diffusers 的那些」，
+  语义更准确（可直接挂载），行为对挂载/恢复不变。
+- `GET /loras` 返回 `{items, active, skipped, count, dir}` ——
+  `skipped` 是格式不对的，`count/dir` 让界面能显示「扫到 11 个 · 目录 models/lora」。
+- 新增 `POST /loras/convert`（`lorastore.convert_in_place`）：把已经在目录里的
+  ComfyUI 文件**就地**转成 diffusers，原名不变；**转换前先把原始字节备份到
+  `library/lora_backup/`**（不在 models/lora 下，不会被当成另一个 LoRA 扫出来），
+  失败时原文件一个字节都没动。
+- 不提供「扫描入库」这种中间层：目录就是权威，扫一次就是一次真实读取。
+
+前端（`GlobalSettings` 的 LoRA 段）：
+
+- 头部一行：`扫到 N 个 · 可挂 M · 待转换 K` + `↻ 刷新`，下面一行显示
+  `目录：models/lora/`（title 里是绝对路径）。拷完文件点一下就行，不用重启。
+- **待转换分组**：格式不对的文件逐条列出（名字 / 体积 / ComfyUI 格式），
+  能转的给「转换」按钮，不是本底模的明确写「无法转换」并附原因。
+- 转换成功后自动刷新，条目从「待转换」移到「可挂」列表；提示里说明已备份。
+
+### 验证
+
+`tsc -b` / `vite build` ✓、`check-hints` 34/34、**`node smoke.mjs` 687/687**
+（新增 60：头部数量与目录 → 待转换 2 条 → 点刷新重新 GET → 点转换打到
+`POST /loras/convert` → 自动刷新后可挂从 2 变 3、待转换只剩 1）、
+`pytest test_lora_import` **17 passed**（新增 4 条：扫描不隐藏、就地转换保名字+备份、
+已是 diffusers 不重复转、其它架构拒绝且不动原文件）。
+截图假数据也改成 8 个可挂 + 2 个待转换（`count: 10`），不再用两条骗自己。
+
 ## 2026-11-07 · 全局设置提升为全站入口（角色中心也能改、也生效）
 
 上一轮把底模 / 抠图方式 / LoRA 收到了 SQLite，但它们的**界面**还长在画布侧栏里：

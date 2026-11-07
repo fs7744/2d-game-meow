@@ -187,3 +187,48 @@ def delete(name: str) -> str:
         raise FileNotFoundError(f"没有这个 LoRA：{target.stem}")
     target.unlink()
     return target.stem
+
+
+def convert_in_place(name: str) -> Dict[str, Any]:
+    """把 `models/lora/` 里一个**已经在目录里**的 LoRA 就地转成 diffusers 格式。
+
+    场景：用户把 ComfyUI 格式的权重直接拷进了 `models/lora/`——它不会出现在
+    「可挂载」列表里，但也不该逼用户重新走一遍上传。这里直接就地转换，
+    原名不变，`/loras` 刷新后就能挂。
+
+    **先备份**：原始字节复制到 `library/lora_backup/`（不在 models/lora/ 下，
+    不会被当成另一个 LoRA 扫出来）。转换失败时原文件一个字节都没动。
+    """
+    target = _final_path(safe_name(name))
+    if not target.is_file():
+        raise FileNotFoundError(f"没有这个 LoRA：{target.stem}")
+    info = lora_format(read_keys(target))
+    if info["format"] == "diffusers":
+        return {"item": item_of(target), "converted": False, "backup": ""}
+    if not info["convertible"]:
+        raise ValueError(f"{info['reason']}，转换也生成不了可用权重")
+
+    backup_dir = paths.LIBRARY_DIR / "lora_backup"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup = backup_dir / target.name
+    shutil.copyfile(target, backup)
+
+    tmp = target.with_name(f".{target.stem}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        from safetensors.torch import load_file, save_file
+        conv = _converter()
+        out, skipped = conv.convert_weights(load_file(str(target)))
+        if not out:
+            raise ValueError("转换后没有任何可用张量，这个文件可能不是 Qwen-Image LoRA")
+        if lora_format(list(out))["format"] != "diffusers":
+            raise ValueError("转换结果仍不是 diffusers 格式，已中止")
+        save_file(out, str(tmp), metadata={"format": "pt"})
+        os.replace(tmp, target)
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+    return {"item": item_of(target), "converted": True,
+            "backup": str(backup), "skipped": len(skipped)}

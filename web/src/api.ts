@@ -1343,7 +1343,7 @@ export async function extractPose(path: string): Promise<PoseExtract> {
   return r.json() as Promise<PoseExtract>
 }
 
-/** /loras 返回的一个 Qwen LoRA（只含 diffusers 原生格式的） */
+/** /loras 返回的一个 LoRA 文件（`items` 里的保证能挂，`skipped` 里的要转换） */
 export type QwenLora = {
   name: string
   file: string
@@ -1351,6 +1351,10 @@ export type QwenLora = {
   tensors: number
   /** 新增字段是可选的：老后端的 /loras 不带它 */
   format?: string
+  /** 下面三个只有 `skipped` 里的条目才有意义 */
+  need_convert?: boolean
+  convertible?: boolean
+  reason?: string
 }
 
 /** 全局设置（SQLite 里的权威副本，重开应用不丢）。 */
@@ -1406,13 +1410,31 @@ export type ActiveLora = { name: string; scale: number; adapter?: string }
  * （`diffusion_model.` + `lora_A/B`）挂上去会**静默不生效**，比报错更坏。
  * 转换：`python tools/convert_lora.py in.safetensors out.safetensors`
  */
-export async function fetchLoras(): Promise<{ items: QwenLora[]; active: ActiveLora[] }> {
+export type LoraList = {
+  /** 可直接挂载的（diffusers 原生格式） */
+  items: QwenLora[]
+  active: ActiveLora[]
+  /** 目录里存在但格式不对的（ComfyUI 等），要转换后才能挂 */
+  skipped: QwenLora[]
+  /** 目录里一共扫到几个 .safetensors */
+  count: number
+  /** 扫的是哪个目录（给用户看，免得他不知道该往哪拷） */
+  dir: string
+}
+
+export async function fetchLoras(): Promise<LoraList> {
+  const empty: LoraList = { items: [], active: [], skipped: [], count: 0, dir: '' }
   const r = await fetch(`${base}/loras`)
-  if (!r.ok) return { items: [], active: [] }
+  if (!r.ok) return empty
   const j = await r.json()
+  const items = Array.isArray(j.items) ? j.items : []
+  const skipped = Array.isArray(j.skipped) ? j.skipped : []
   return {
-    items: Array.isArray(j.items) ? j.items : [],
+    items,
     active: Array.isArray(j.active) ? j.active : [],
+    skipped,
+    count: typeof j.count === 'number' ? j.count : items.length + skipped.length,
+    dir: typeof j.dir === 'string' ? j.dir : '',
   }
 }
 
@@ -1503,6 +1525,26 @@ export async function commitLora(
     throw new Error(msg)
   }
   return r.json() as Promise<LoraCommit>
+}
+
+/**
+ * 把一个**已经躺在 models/lora/ 里**的 LoRA 就地转成 diffusers 格式。
+ * 原名不变，后端会先把原始字节备份到 `library/lora_backup/`。
+ */
+export async function convertLora(name: string): Promise<{
+  item: QwenLora; converted: boolean; backup?: string; skipped?: number
+}> {
+  const r = await fetch(`${base}/loras/convert`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  })
+  if (!r.ok) {
+    let msg = `HTTP ${r.status}`
+    try { const j = await r.json(); if (j?.detail) msg = String(j.detail) } catch { /* 非 JSON */ }
+    throw new Error(msg)
+  }
+  return r.json()
 }
 
 export async function deleteLora(name: string): Promise<{ ok: boolean; name: string }> {

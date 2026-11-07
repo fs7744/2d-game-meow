@@ -51,8 +51,14 @@ type Props = {
   onFastMode: (on: boolean) => void
   /** 全局底模（只读展示：节点里不再提供选择） */
   baseModel: string
-  /** 导入 / 删除 LoRA 之后刷新列表 */
+  /** 导入 / 删除 / 转换 LoRA 之后刷新列表 */
   onLorasChanged?: () => void
+  /** 目录里存在但格式不对的（显示为「待转换」） */
+  lorasSkipped?: QwenLora[]
+  lorasDir?: string
+  lorasCount?: number
+  /** 重新扫描 models/lora/ */
+  onRefreshLoras?: () => void | Promise<void>
 }
 
 /* ==========================================================================
@@ -321,6 +327,7 @@ export default function Sidebar({
   matteBackend, onMatteBackend,
   loras, activeLoras, onLorasChange, fastMode, onFastMode,
   baseModel, onLorasChanged,
+  lorasSkipped, lorasDir, lorasCount, onRefreshLoras,
   projects, currentProject, onSwitchProject, onCreateProject, onRenameProject, onDeleteProject,
   onExportProject, onRevealProject, onSaveTemplate, onImportProject,
   templates, onUseTemplate, onDeleteTemplate,
@@ -633,7 +640,11 @@ export default function Sidebar({
               onLorasChange={onLorasChange}
               fastMode={fastMode}
               onFastMode={onFastMode}
-              onLorasChanged={onLorasChanged} />
+              onLorasChanged={onLorasChanged}
+              skipped={lorasSkipped}
+              count={lorasCount}
+              dir={lorasDir}
+              onRefresh={onRefreshLoras} />
           </Section>
 
           <Section icon="⚙" title="设置">

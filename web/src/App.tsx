@@ -316,13 +316,21 @@ export default function App() {
   // Qwen LoRA：全局状态（挂上后对所有生成生效）
   const [loras, setLoras] = useState<QwenLora[]>([])
   const [activeLoras, setActiveLoras] = useState<ActiveLora[]>([])
+  /** 目录里存在但格式不对的（ComfyUI 等），界面上显示为「待转换」 */
+  const [lorasSkipped, setLorasSkipped] = useState<QwenLora[]>([])
+  const [lorasDir, setLorasDir] = useState('')
+  const [lorasCount, setLorasCount] = useState(0)
 
   // LoRA 列表：启动时拉一次
+  /** 重新扫一遍 models/lora/（导入、删除、转换、手动刷新都走这里）。 */
   const reloadLoras = useCallback(() => {
-    fetchLoras().then((r) => {
+    return fetchLoras().then((r) => {
       setLoras(r.items)
       setActiveLoras(r.active)
-    }).catch(() => setLoras([]))
+      setLorasSkipped(r.skipped)
+      setLorasDir(r.dir)
+      setLorasCount(r.count)
+    }).catch(() => { setLoras([]); setLorasSkipped([]) })
   }, [])
 
   /** 快速模式（少步蒸馏）：挂 Lightning + 步数压到 8。 */
@@ -1830,6 +1838,10 @@ export default function App() {
         fastMode={fastMode}
         onFastMode={(on) => void changeFastMode(on)}
         onLorasChanged={reloadLoras}
+        skipped={lorasSkipped}
+        count={lorasCount}
+        dir={lorasDir}
+        onRefresh={reloadLoras}
       />
 
       <main className="stage">
@@ -1872,6 +1884,10 @@ export default function App() {
           onMatteBackend={changeMatteBackend}
           baseModel={model}
           onLorasChanged={reloadLoras}
+          lorasSkipped={lorasSkipped}
+          lorasDir={lorasDir}
+          lorasCount={lorasCount}
+          onRefreshLoras={reloadLoras}
           loras={loras}
           activeLoras={activeLoras}
           onLorasChange={(items) => void changeLoras(items)}

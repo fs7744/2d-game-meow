@@ -65,6 +65,22 @@ function makeFetch() {
     sample_keys: ['diffusion_model.transformer_blocks.0.attn.to_q.lora_A.weight'],
   }
   let lastLoraCommit = null
+  // 目录里的 LoRA：items = 可挂，skipped = 格式不对（转换后移动）
+  let loraItems = [
+    { name: 'qwen21_anyangle', file: 'models/lora/qwen21_anyangle.safetensors',
+      size_mb: 114, tensors: 384, format: 'diffusers' },
+    { name: 'qwen21_lightning', file: 'models/lora/qwen21_lightning.safetensors',
+      size_mb: 64, tensors: 256, format: 'diffusers' },
+  ]
+  let loraSkipped = [
+    { name: 'comfy_style', file: 'models/lora/comfy_style.safetensors',
+      size_mb: 96, tensors: 384, format: 'comfyui',
+      need_convert: true, convertible: true,
+      reason: '这是 ComfyUI 格式（diffusion_model. + lora_A/B）' },
+    { name: 'sdxl_thing', file: 'models/lora/sdxl_thing.safetensors',
+      size_mb: 120, tensors: 300, format: 'unknown',
+      need_convert: true, convertible: false, reason: '没找到 Qwen-Image 的 LoRA 键' },
+  ]
   const fetchFn = async (url, init = {}) => {
     calls.push({ url: String(url), method: init.method || 'GET', body: init.body })
     if (String(url).endsWith('/health')) {
@@ -737,18 +753,33 @@ function makeFetch() {
       }
     }
     if (String(url).endsWith('/loras')) {
-      // Qwen LoRA：只列 diffusers 原生格式的（engine.available_loras）
       return {
         ok: true,
         json: async () => ({
-          items: [
-            { name: 'qwen21_anyangle', file: 'models/lora/qwen21_anyangle.safetensors',
-              size_mb: 114, tensors: 384 },
-            { name: 'qwen21_lightning', file: 'models/lora/qwen21_lightning.safetensors',
-              size_mb: 64, tensors: 256 },
-          ],
+          items: loraItems,
           // 服务端会把「已持久化但还没加载管线」的挂载也报成 active（懒恢复）
           active: settings.loras,
+          skipped: loraSkipped,
+          count: loraItems.length + loraSkipped.length,
+          dir: 'D:/x/models/lora',
+        }),
+      }
+    }
+    if (String(url).endsWith('/loras/convert')) {
+      const nm = String(JSON.parse(init.body || '{}').name || '')
+      const hit = loraSkipped.find((x) => x.name === nm)
+      if (!hit) return { ok: false, json: async () => ({ detail: '没有这个 LoRA' }) }
+      if (!hit.convertible) {
+        return { ok: false, json: async () => ({ detail: hit.reason }) }
+      }
+      loraSkipped = loraSkipped.filter((x) => x.name !== nm)
+      loraItems = [...loraItems, { ...hit, format: 'diffusers', need_convert: false }]
+      return {
+        ok: true,
+        json: async () => ({
+          item: { ...hit, format: 'diffusers', need_convert: false },
+          converted: true, backup: 'library/lora_backup/comfy_style.safetensors',
+          skipped: 3,
         }),
       }
     }
@@ -4626,6 +4657,65 @@ async function ccCreate(doc, win) {
   check('画布侧栏显示同一份抠图方式（跨视图共享状态）',
     doc.querySelector('.rail .matte-backend-select')?.value === 'u2net',
     doc.querySelector('.rail .matte-backend-select')?.value)
+  dom.window.close()
+}
+
+// 60) LoRA 目录扫描：显示扫到几个 / 刷新 / 格式不对的列出来且能就地转换
+{
+  const { dom } = await boot('')
+  const doc = dom.window.document
+  const win = dom.window
+  await ccWait(450)
+  ;[...doc.querySelectorAll('.rail-tab')]
+    .find((t) => (t.textContent || '').includes('设置'))
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await ccWait(250)
+
+  const headInfo = doc.querySelector('.lora-head-info')
+  check('显示扫到几个 / 可挂几个',
+    (headInfo?.textContent || '').includes('扫到')
+    && (headInfo?.textContent || '').includes('可挂'),
+    headInfo?.textContent)
+  check('显示扫描目录（知道文件该放哪）',
+    (doc.querySelector('.lora-dir')?.textContent || '').includes('models/lora'),
+    doc.querySelector('.lora-dir')?.textContent)
+  check('列出可挂的 2 个',
+    doc.querySelectorAll('.lora-row:not(.fast-toggle)').length === 2,
+    String(doc.querySelectorAll('.lora-row:not(.fast-toggle)').length))
+
+  // **格式不对的文件必须露出来**（以前后端直接过滤，用户以为丢了）
+  const skipItems = () => [...doc.querySelectorAll('.lora-skip-item')]
+  check('待转换分组列出 2 个格式不对的', skipItems().length === 2, String(skipItems().length))
+  check('能转换的那个有「转换」按钮',
+    !!skipItems().find((it) => (it.textContent || '').includes('转换')
+      && it.querySelector('.lora-convert-one')))
+  check('转不了的那个明确写「无法转换」',
+    skipItems().some((it) => (it.textContent || '').includes('无法转换')))
+
+  // 刷新：重新扫目录
+  const before = calls.filter((c) => c.method === 'GET' && c.url.endsWith('/loras')).length
+  doc.querySelector('.lora-refresh')
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await ccWait(400)
+  const after = calls.filter((c) => c.method === 'GET' && c.url.endsWith('/loras')).length
+  check('点刷新会重新扫目录', after > before, `${before} → ${after}`)
+
+  // 就地转换：调 POST /loras/convert，转换后自动刷新并变成可挂
+  const convBtn = skipItems()
+    .find((it) => it.querySelector('.lora-convert-one'))
+    ?.querySelector('.lora-convert-one')
+  convBtn?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await ccWait(500)
+  const conv = calls.filter((c) => c.url.endsWith('/loras/convert')).pop()
+  check('转换请求打到 POST /loras/convert',
+    !!conv && JSON.parse(conv.body).name === 'comfy_style', conv?.body)
+  check('转换后自动刷新，可挂列表变 3 个',
+    doc.querySelectorAll('.lora-row:not(.fast-toggle)').length === 3,
+    String(doc.querySelectorAll('.lora-row:not(.fast-toggle)').length))
+  check('待转换只剩转不了的那个', skipItems().length === 1, String(skipItems().length))
+  check('给出转换结果提示',
+    (doc.querySelector('.lora-import-msg')?.textContent || '').includes('diffusers'),
+    doc.querySelector('.lora-import-msg')?.textContent)
   dom.window.close()
 }
 

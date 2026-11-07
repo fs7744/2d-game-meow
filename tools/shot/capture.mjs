@@ -302,14 +302,40 @@ async function main() {
           if (m === 'PUT') Object.assign(gsettings, JSON.parse(init.body || '{}'))
           return json({ ...gsettings })
         }
+        // 假数据刻意贴近真实目录（8 个可挂 + 2 个格式不对），
+        // 别只放两条——上一版截图让人以为程序只认出了 2 个 LoRA。
         if (u.endsWith('/loras') && m === 'GET') return json({
           items: [
-            { name: 'qwen21_anyangle', file: 'models/lora/qwen21_anyangle.safetensors',
-              size_mb: 114, tensors: 384, format: 'diffusers' },
-            { name: 'vnccs_pose', file: 'models/lora/vnccs_pose.safetensors',
-              size_mb: 152, tensors: 320, format: 'diffusers' },
+            { name: 'qwen21_anyangle', size_mb: 120.1, tensors: 448, format: 'diffusers',
+              file: 'models/lora/qwen21_anyangle.safetensors' },
+            { name: 'qwen21_lightning', size_mb: 64.0, tensors: 256, format: 'diffusers',
+              file: 'models/lora/qwen21_lightning.safetensors' },
+            { name: 'qwen21_outpaint', size_mb: 160.1, tensors: 448, format: 'diffusers',
+              file: 'models/lora/qwen21_outpaint.safetensors' },
+            { name: 'vnccs_pose', size_mb: 160.1, tensors: 448, format: 'diffusers',
+              file: 'models/lora/vnccs_pose.safetensors' },
+            { name: 'vnccs_pose_v2', size_mb: 160.1, tensors: 448, format: 'diffusers',
+              file: 'models/lora/vnccs_pose_v2.safetensors' },
+            { name: 'VNCCS_QI2_ClothesCoreV2.6', size_mb: 160.1, tensors: 448,
+              format: 'diffusers', file: 'models/lora/VNCCS_QI2_ClothesCoreV2.6.safetensors' },
+            { name: 'VNCCS_QI2_AnimeOverhaulV2', size_mb: 160.1, tensors: 448,
+              format: 'diffusers', file: 'models/lora/VNCCS_QI2_AnimeOverhaulV2.safetensors' },
+            { name: 'style_lora_v3', size_mb: 96.4, tensors: 448, format: 'diffusers',
+              file: 'models/lora/style_lora_v3.safetensors' },
           ],
           active: gsettings.loras,
+          skipped: [
+            { name: 'comfy_style_v1', size_mb: 120, tensors: 384, format: 'comfyui',
+              need_convert: true, convertible: true,
+              reason: '这是 ComfyUI 格式（diffusion_model. + lora_A/B）',
+              file: 'models/lora/comfy_style_v1.safetensors' },
+            { name: 'sdxl_style_x', size_mb: 144, tensors: 300, format: 'unknown',
+              need_convert: true, convertible: false,
+              reason: '没找到 Qwen-Image 的 LoRA 键（可能不是本底模的权重）',
+              file: 'models/lora/sdxl_style_x.safetensors' },
+          ],
+          count: 10,
+          dir: 'D:/code/2d-game-meow/models/lora',
         })
         if (u.includes('/loras/inspect')) return json({
           token: 'previewtoken01', name: 'my_style',

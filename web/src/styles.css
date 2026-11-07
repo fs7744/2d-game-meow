@@ -3769,3 +3769,54 @@ button:disabled, .mini.wide:disabled, .cc-btn:disabled,
 .lora-convert-acts {
   display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px;
 }
+
+/* ---------------- LoRA 目录扫描 / 待转换 ---------------- */
+.lora-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 2px 0 1px;
+}
+.lora-head-info { flex: 1; font-size: 10.5px; color: var(--muted-2); }
+.lora-head-info b { color: var(--white); font-weight: 600; }
+.lora-head-info b.warn { color: var(--yellow); }
+.lora-refresh {
+  height: 26px; padding: 0 9px;
+  border: 1px solid var(--px-edge); border-radius: var(--r-sm);
+  background: var(--bg-3); color: var(--white);
+  font-family: var(--sans); font-size: 11px; cursor: pointer;
+}
+.lora-refresh:hover:not(:disabled) { border-color: var(--cyan); color: var(--cyan); }
+.lora-refresh:disabled { opacity: .42; cursor: default; }
+.lora-dir {
+  padding-bottom: 6px;
+  font-family: var(--mono); font-size: 9.5px; color: var(--muted-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* 目录里存在、但格式不能直接挂的：必须露出来，以前被后端静默过滤掉 */
+.lora-skip {
+  margin-top: 10px; padding-top: 8px;
+  border-top: 1px dashed var(--line);
+}
+.lora-skip-head {
+  margin-bottom: 5px;
+  font-size: 10.5px; color: var(--yellow);
+}
+.lora-skip-item {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 0; font-size: 10.5px; color: var(--muted);
+}
+.lora-skip-name {
+  flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--mono); font-size: 10px;
+}
+.lora-skip-meta { flex: 0 0 auto; color: var(--muted-2); font-size: 9.5px; }
+.lora-convert-one {
+  flex: 0 0 auto; height: 24px; padding: 0 8px;
+  border: 1px solid var(--px-edge); border-radius: var(--r-sm);
+  background: var(--bg-3); color: var(--cyan);
+  font-size: 10.5px; cursor: pointer;
+}
+.lora-convert-one:hover:not(:disabled) { border-color: var(--cyan); }
+.lora-convert-one:disabled { opacity: .42; cursor: default; }
+.lora-skip-no { flex: 0 0 auto; font-size: 9.5px; color: var(--muted-2); }

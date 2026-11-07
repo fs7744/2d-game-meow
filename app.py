@@ -23,6 +23,7 @@
   GET  /loras              可用 LoRA；POST /loras/apply、/loras/unload
   POST /loras/inspect      导入第一步：暂存 + 只读格式检测（是否需要转换）
   POST /loras/commit       导入第二步：用户确认后落盘（必要时先转格式）
+  POST /loras/convert      把已在 models/lora/ 里的格式不对的文件就地转换
   DELETE /loras/{name}     删除已导入的 LoRA
   GET  /projects/{id}/pose_sets            项目里的姿势集（动作抽帧存下来的）
   POST /projects/{id}/pose_sets            新建一个姿势集文件夹（同名拒绝）
@@ -423,12 +424,19 @@ class LoraReq(BaseModel):
 
 @app.get("/loras")
 def list_loras() -> Dict[str, Any]:
-    """可用的 **Qwen** LoRA（只列 diffusers 原生格式的）。
+    """扫一遍 `models/lora/`，返回**全部** .safetensors + 当前挂载状态。
 
-    ComfyUI 格式（`diffusion_model.` + `lora_A/B`）要先转：
-    `python tools/convert_lora.py in.safetensors out.safetensors`
+    - `items`：可直接挂载的（diffusers 原生格式）
+    - `skipped`：目录里存在但格式不对的（ComfyUI / 其它架构），前端显示为
+      「需要转换」，可以调 `POST /loras/convert` 就地转换
+    - `dir` / `count`：扫的是哪个目录、一共几个文件（用户加完文件点刷新即可）
     """
-    return {"items": engine.available_loras(), "active": engine.active_loras()}
+    scan = engine.scan_loras()
+    items = [x for x in scan if x["format"] == "diffusers"]
+    skipped = [x for x in scan if x["format"] != "diffusers"]
+    return {"items": items, "active": engine.active_loras(),
+            "skipped": skipped, "count": len(scan),
+            "dir": str(engine.lora_dir())}
 
 
 @app.post("/loras/apply")
@@ -560,6 +568,27 @@ def lora_commit(req: LoraCommitReq) -> Dict[str, Any]:
         raise HTTPException(500, f"导入 LoRA 失败：{exc}") from exc
     # 同名重导入：清掉内存里旧的挂载规格，再按磁盘上的新文件重新恢复。
     engine.forget_lora(out["name"])
+    engine.restore_loras(metadb.get_settings().get("loras") or [])
+    return out
+
+
+class LoraConvertReq(BaseModel):
+    """就地转换一个已经在 models/lora/ 里的 LoRA。"""
+
+    name: str
+
+
+@app.post("/loras/convert")
+def lora_convert(req: LoraConvertReq) -> Dict[str, Any]:
+    """把目录里格式不对的 LoRA 就地转成 diffusers（原名不变，先备份）。"""
+    try:
+        out = lorastore.convert_in_place(req.name)
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:                  # noqa: BLE001
+        raise HTTPException(500, f"转换 LoRA 失败：{exc}") from exc
+    # 转换后重新评估挂载规格（原来因为格式不对被 restore 丢掉的条目会回来）
+    engine.forget_lora(out["item"]["name"])
     engine.restore_loras(metadb.get_settings().get("loras") or [])
     return out
 
