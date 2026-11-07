@@ -3438,3 +3438,202 @@ button:disabled, .mini.wide:disabled, .cc-btn:disabled,
 /* 原生 multiple 的 option 在深色主题下行距偏紧 */
 .chars.cc .cc-inline-field select[multiple] { font-size: 12px; }
 .chars.cc .cc-inline-field select[multiple] option { line-height: 2; }
+
+/* ==========================================================================
+   角色库首页 + 工作台两栏（2026-11-07）
+   --------------------------------------------------------------------------
+   角色中心不再是「左侧一条 220px 窄角色库 + 一堆表单」：默认整个页面就是
+   角色库，点卡片才进入某个角色的四步工作台。工作台因此只剩两栏
+   （主工作区 / 常驻成果），CSS 全部仍在这一层，对齐基准同统一层。
+   ========================================================================== */
+.charlib {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column; gap: 14px;
+  padding: 20px 24px 28px; overflow: auto;
+  background: var(--bg);
+}
+.charlib-head { display: flex; align-items: center; gap: 16px; flex: none; }
+.charlib-head-title { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.charlib-head h1 { margin: 0; font-size: 22px; font-weight: 700; color: var(--white); }
+.charlib-count { font-family: var(--mono); font-size: 11px; color: var(--muted-2); }
+.charlib-head-sub { font-size: 11.5px; color: var(--muted-2); }
+.charlib-new { margin-left: auto; min-height: 34px; }
+
+.charlib-tools { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; flex: none; }
+.charlib-search {
+  flex: 1 1 320px; max-width: 520px; height: 34px; padding: 0 12px;
+  border: 1px solid var(--px-edge); border-radius: var(--r-sm);
+  background: var(--bg-2); color: var(--white); font-size: 12.5px;
+}
+.charlib-sort { display: flex; align-items: center; gap: 7px; font-size: 11px; color: var(--muted); }
+.charlib-sort select {
+  height: 32px; padding: 0 8px; font-size: 11.5px;
+  border: 1px solid var(--px-edge); border-radius: var(--r-sm);
+  background: var(--bg-2); color: var(--white);
+}
+.charlib-result { margin-left: auto; font-family: var(--mono); font-size: 10.5px; color: var(--muted-2); }
+
+.charlib-filters {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap; flex: none;
+  padding-bottom: 10px; border-bottom: 1px solid var(--line);
+}
+.charlib-filter-label { margin-right: 4px; font-size: 11px; color: var(--muted-2); }
+.charlib-filter {
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 26px; padding: 0 9px; font-size: 11px;
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--bg-2); color: var(--muted);
+}
+.charlib-filter i { font-style: normal; font-family: var(--mono); font-size: 9.5px; color: var(--muted-2); }
+.charlib-filter:hover { border-color: var(--cyan); color: var(--white); }
+.charlib-filter.on {
+  border-color: var(--cyan); background: rgba(108, 196, 239, 0.12);
+  color: var(--cyan); box-shadow: inset 0 -2px 0 var(--cyan);
+}
+.charlib-filter.clear { border-color: var(--pink); color: var(--pink); }
+
+.charlib-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 14px; align-content: start;
+}
+.charlib-card {
+  display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 8px;
+  border: 1px solid var(--px-edge); border-radius: var(--r);
+  background: var(--bg-2); box-shadow: var(--shadow-hard); cursor: pointer;
+}
+.charlib-card:hover { border-color: var(--cyan); transform: translateY(-2px); }
+.charlib-thumb {
+  position: relative; aspect-ratio: 3 / 4; overflow: hidden;
+  border-radius: var(--r-sm); background: var(--bg-4);
+}
+.charlib-thumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.charlib-nocover {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 8px; height: 100%; font-size: 11px; color: var(--muted-2);
+}
+.charlib-nocover span { font-size: 34px; color: var(--line-strong); }
+/* 标签贴在图片上：数量可能很多，底部渐变保证小字仍可读 */
+.charlib-tagwrap {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  display: flex; flex-wrap: wrap; gap: 4px; padding: 20px 6px 6px;
+  background: linear-gradient(transparent, rgba(6, 8, 12, 0.88));
+  pointer-events: none;
+}
+.charlib-tag {
+  max-width: 100%; padding: 1px 6px; border-radius: 2px;
+  font-size: 9.5px; line-height: 1.5; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+  background: rgba(11, 14, 20, 0.82);
+  border: 1px solid var(--line-strong); color: var(--white);
+}
+.charlib-tag.is-more { color: var(--cyan); border-color: var(--cyan); }
+/* 编辑 / 删除常驻可见（不用 opacity 隐藏：近黑底上等于没有） */
+.charlib-quick { position: absolute; right: 6px; top: 6px; display: flex; gap: 4px; }
+.charlib-quick button {
+  width: 24px; height: 24px; font-size: 11px;
+  border: 1px solid var(--line-strong); border-radius: var(--r-sm);
+  background: rgba(11, 14, 20, 0.88); color: var(--muted);
+}
+.charlib-quick .charlib-edit:hover { color: var(--cyan); border-color: var(--cyan); }
+.charlib-quick .charlib-remove:hover { color: var(--pink); border-color: var(--pink); }
+.charlib-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.charlib-name {
+  font-size: 13.5px; color: var(--white);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.charlib-sub { font-family: var(--mono); font-size: 10px; color: var(--muted-2); }
+.charlib-time { font-size: 10px; color: var(--muted-2); }
+.charlib-note { margin: 0; font-size: 10.5px; line-height: 1.5; color: var(--muted); }
+
+/* 空库：唯一的主入口要足够大，别让用户找「新建」在哪 */
+.charlib-empty {
+  flex: 1; display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 12px; text-align: center;
+}
+.charlib-empty-art { display: grid; grid-template-columns: repeat(2, 22px); gap: 6px; }
+.charlib-empty-art span {
+  width: 22px; height: 22px; background: var(--bg-4);
+  border: 1px solid var(--line-strong);
+}
+.charlib-empty h2 { margin: 6px 0 0; font-size: 20px; color: var(--white); }
+.charlib-empty p { margin: 0; font-size: 12.5px; color: var(--muted); }
+.charlib-big-create {
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  margin-top: 14px; padding: 22px 54px;
+  border: 1px dashed var(--green); border-radius: var(--r);
+  background: rgba(74, 222, 155, 0.07); color: var(--white);
+}
+.charlib-big-create b { font-size: 30px; line-height: 1; color: var(--green); }
+.charlib-big-create span { font-size: 16px; font-weight: 700; }
+.charlib-big-create i { font-style: normal; font-size: 11px; color: var(--muted); }
+.charlib-big-create:hover { background: rgba(74, 222, 155, 0.14); border-style: solid; }
+.charlib-loading, .charlib-noresult {
+  flex: 1; display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 10px; color: var(--muted); font-size: 12.5px;
+}
+.charlib-noresult b { color: var(--white); font-size: 15px; }
+.charlib-noresult p { margin: 0; }
+
+/* 创建 / 编辑元数据的弹窗：走 fixed 覆盖层，不受卡片 overflow 影响 */
+.charlib-mask {
+  position: fixed; inset: 0; z-index: 200; display: grid; place-items: center;
+  background: rgba(5, 7, 11, 0.78);
+}
+.charlib-create {
+  width: min(440px, 90vw); display: flex; flex-direction: column; gap: 12px;
+  padding: 20px; border: 1px solid var(--px-edge); border-radius: var(--r);
+  background: var(--bg-2); box-shadow: var(--shadow-hard);
+}
+.charlib-create h2 { margin: 0; font-size: 16px; color: var(--white); }
+.charlib-create > p { margin: 0; font-size: 11.5px; line-height: 1.6; color: var(--muted); }
+.charlib-field { display: flex; flex-direction: column; gap: 5px; font-size: 11px; color: var(--muted); }
+.charlib-field input, .charlib-field textarea {
+  width: 100%; padding: 8px 10px; font-size: 12px;
+  border: 1px solid var(--px-edge); border-radius: var(--r-sm);
+  background: var(--bg-3); color: var(--white);
+}
+.charlib-field textarea { min-height: 76px; resize: vertical; }
+.charlib-clone-preview { max-height: 140px; object-fit: contain; border-radius: var(--r-sm); }
+.charlib-err { margin: 0; font-size: 11.5px; color: var(--pink); }
+.charlib-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.charlib-confirm {
+  position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+  z-index: 210; display: flex; align-items: center; gap: 10px;
+  padding: 10px 14px; border: 1px solid var(--pink); border-radius: var(--r);
+  background: var(--bg-2); box-shadow: var(--shadow-hard); font-size: 11.5px;
+}
+
+/* 工作台：返回条 + 两栏（不再有左侧角色库） */
+.chars.cc.is-workspace { grid-template-columns: minmax(0, 1fr) 300px; }
+.cc-backbar {
+  display: flex; align-items: center; gap: 10px; flex: none;
+  padding: 8px 18px; border-bottom: 1px solid var(--line);
+  background: var(--bg-1); font-size: 11.5px; color: var(--muted-2);
+}
+.cc-backbar b { color: var(--white); }
+.cc-backbar-meta { font-family: var(--mono); font-size: 10.5px; }
+.cc-profile { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; }
+.cc-profile > div {
+  display: flex; flex-direction: column; gap: 3px; min-width: 0;
+  padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--bg-1);
+}
+.cc-profile span { font-size: 10px; color: var(--muted-2); }
+.cc-profile b { font-size: 12px; font-weight: 600; color: var(--white); word-break: break-word; }
+.cc-profile b.cc-profile-tags { font-weight: 400; line-height: 1.6; }
+.cc-profile-note { margin: 0; font-size: 11.5px; color: var(--muted); line-height: 1.6; }
+
+/* 画布编辑器顶部的「← 画布库」：浮动小条，不占文档流。
+   .stage 里的 Sidebar / Canvas 都是 absolute 定位，加普通块会挤掉它们的锚点。 */
+.canvas-backbar {
+  position: absolute; top: 8px; left: calc(var(--rail-w) + 12px); z-index: 25;
+  width: auto; padding: 5px 10px;
+  border: 1px solid var(--px-edge); border-radius: var(--r);
+  background: var(--bg-1); box-shadow: var(--shadow-hard);
+}
+
+@media (max-width: 1020px) {
+  .chars.cc.is-workspace { grid-template-columns: minmax(0, 1fr); }
+  .chars.cc.is-workspace .cc-preview { display: none; }
+  .charlib-grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); }
+}

@@ -786,8 +786,55 @@ def list_pose_preview_files(name: str, costume: Optional[str] = None,
     return files
 
 
+def _character_tags(info: Dict[str, Any], costumes: List[str]) -> List[str]:
+    """角色库卡片上的标签：从官方 character_info 派生。
+
+    ⚠️ **值保持原样英文** —— 这些字段同时是 prompt 内容和目录名，
+    中文只在前端渲染处映射（labels.ts 的 TAG_LABEL / STYLE_LABEL / COSTUME_LABEL）。
+    逗号分隔的字段（如 hair = "black hair, long hair"）拆成多个标签；
+    标签可能很多，最多给 16 个，前端卡片只铺前几个 + "+N"。
+    """
+    out: List[str] = []
+    seen = set()
+
+    def add(value: Any) -> None:
+        for part in str(value or "").split(","):
+            tag = part.strip()
+            if not tag or tag.lower() in seen:
+                continue
+            seen.add(tag.lower())
+            out.append(tag)
+
+    for key in ("style", "race", "sex", "skin_color", "hair", "eyes",
+                "body", "face", "additional_details"):
+        add(info.get(key))
+    for costume in costumes:
+        add(costume)
+    return out[:16]
+
+
+def _character_timestamps(name: str) -> tuple[float, float]:
+    """创建 / 最后编辑时间（epoch 秒），给角色库排序用。
+
+    不往官方 config 里塞字段：直接从文件系统取，官方工作流产出的角色目录
+    也能读到。Windows 的 st_ctime 是创建时间；最后编辑取 config 与目录
+    mtime 里较新的一个（只加素材、没改 config 时目录 mtime 也会变）。
+    """
+    try:
+        cd = character_dir(name)
+        created = os.path.getctime(cd)
+        dir_mtime = os.path.getmtime(cd)
+    except (OSError, ValueError):
+        return 0.0, 0.0
+    try:
+        config_mtime = os.path.getmtime(config_path(name))
+    except (OSError, ValueError):
+        config_mtime = 0.0
+    return created, max(created, dir_mtime, config_mtime)
+
+
 def character_summary(name: str) -> Dict[str, Any]:
-    """列表用的一条：名字 + 封面 + 服装 + 表情 + 各类图的数量。"""
+    """列表用的一条：名字 + 封面 + 服装 + 表情 + 各类图的数量 + 标签 + 时间。"""
     cfg = load_config(name) or {}
     info = cfg.get("character_info") or {}
     costumes = list_costumes(name)
@@ -800,6 +847,7 @@ def character_summary(name: str) -> Dict[str, Any]:
             if os.path.isdir(os.path.join(d, sub)) and not ARCHIVE_DIR_RE.match(sub):
                 sprites += len(_images_in(os.path.join(d, sub)))
     cover = cover_image(name)
+    created_at, updated_at = _character_timestamps(name)
     return {
         "name": name,
         "cover": cover or "",
@@ -809,6 +857,9 @@ def character_summary(name: str) -> Dict[str, Any]:
         "costumes": costumes,
         "sprites": sprites,
         "config_version": cfg.get("config_version") or "",
+        "tags": _character_tags(info, costumes),
+        "created_at": created_at,
+        "updated_at": updated_at,
     }
 
 

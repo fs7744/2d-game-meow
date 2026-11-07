@@ -77,7 +77,7 @@ const MATTE_LABEL: Record<string, string> = {
 type RailTab = 'nodes' | 'projects' | 'library' | 'settings'
 const RAIL_TABS: { id: RailTab; icon: string; label: string; hint: string }[] = [
   { id: 'nodes', icon: '▣', label: '节点', hint: '节点库：搜索、分类、拖到画布' },
-  { id: 'projects', icon: '▤', label: '项目', hint: '项目与模板' },
+  { id: 'projects', icon: '▤', label: '画布', hint: '画布与模板' },
   { id: 'library', icon: '☆', label: '资料库', hint: '提示词收藏与姿势库' },
   { id: 'settings', icon: '⚙', label: '设置', hint: 'LoRA 与全局选项' },
 ]
@@ -291,7 +291,7 @@ function ProjectRow({
         <>
           <button
             className="rail-act"
-            title="在文件管理器里打开项目文件夹（产物、上传、蒙版都在里面）"
+            title="在文件管理器里打开画布文件夹（产物、上传、蒙版都在里面）"
             onClick={onReveal}
           >
             ⌂
@@ -299,10 +299,10 @@ function ProjectRow({
           <button className="rail-act" title="导出为 .mproj 单文件（含引用的素材）" onClick={onExport}>
             ↧
           </button>
-          <button className="rail-act" title="存为预设模板（可反复新建项目）" onClick={onTemplate}>
+          <button className="rail-act" title="存为预设模板（可反复新建画布）" onClick={onTemplate}>
             ★
           </button>
-          <button className="rail-del" title="删除项目" onClick={onDelete}>✕</button>
+          <button className="rail-del" title="删除画布" onClick={onDelete}>✕</button>
         </>
       )}
     </div>
@@ -440,7 +440,7 @@ export default function Sidebar({
       <div className="rail-scroll">
         {/* ---------- 面板 1：项目 + 模板（保持 Section 顺序第一、第二） ---------- */}
         <div className={pageClass('projects')} data-page="projects">
-          <Section icon="▤" title="项目" count={projects.length}>
+          <Section icon="▤" title="画布" count={projects.length}>
             {projects.map((p) => (
               <ProjectRow
                 key={p.id}
@@ -455,14 +455,14 @@ export default function Sidebar({
               />
             ))}
             <button className="rail-new" onClick={onCreateProject} title="新建一个空画布">
-              + 新建项目
+              + 新建画布
             </button>
             <button
               className="rail-new"
               onClick={() => importRef.current?.click()}
-              title="导入 .mproj 归档（别人发来的项目 / 换台机器继续做）"
+              title="导入 .mproj 归档（别人发来的画布 / 换台机器继续做）"
             >
-              ↑ 导入项目
+              ↑ 导入画布
             </button>
             <input
               ref={importRef}
@@ -477,14 +477,14 @@ export default function Sidebar({
                 if (f) onImportProject(f)
               }}
             />
-            <p className="rail-tip">每个项目是一套独立的画布，互不干涉。</p>
+            <p className="rail-tip">每张画布是一套独立的节点与参数，互不干涉。</p>
           </Section>
 
           <Section icon="★" title="模板" count={templates.length}>
             {templates.length === 0 ? (
               <p className="rail-tip">
-                在项目上点 <b>★</b> 存成模板。之后点模板就能一键开一个
-                同样的新项目——同一套产线要开好几个项目时用得上。
+                在画布上点 <b>★</b> 存成模板。之后点模板就能一键开一张
+                同样的新画布——同一套产线要开好几张画布时用得上。
               </p>
             ) : (
               templates.map((t) => (
@@ -492,7 +492,7 @@ export default function Sidebar({
                   <button
                     className="rail-item-main"
                     onClick={() => onUseTemplate(t.id)}
-                    title={`从「${t.name}」新建一个项目`}
+                    title={`从「${t.name}」新建一张画布`}
                   >
                     <b>{t.name}</b>
                     <em>{t.nodes} 个节点</em>
@@ -710,7 +710,7 @@ export default function Sidebar({
       {/* 状态条：一眼看到「我现在在哪个项目」，以及 Ctrl+K 这个入口。 */}
       <div className="rail-status">
         <span className="rail-status-dot" aria-hidden="true" />
-        <span className="rail-status-name" title={current?.name}>{current?.name ?? '未命名项目'}</span>
+        <span className="rail-status-name" title={current?.name}>{current?.name ?? '未命名画布'}</span>
         <span className="rail-status-count">{current?.count ?? 0} 节点</span>
       </div>
     </aside>

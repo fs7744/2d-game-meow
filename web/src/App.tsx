@@ -30,6 +30,7 @@ import ConfirmDialog from './components/ConfirmDialog'
 import Lightbox from './components/Lightbox'
 import LibraryDrawer, { type LibraryTab } from './components/LibraryDrawer'
 import CharactersPage from './components/CharactersPage'
+import CanvasLibrary from './components/CanvasLibrary'
 import type { PoseDir } from './api'
 import type { ModelCaps } from './api'
 import type {
@@ -276,6 +277,10 @@ export default function App() {
   const [libraryOpen, setLibraryOpen] = useState(false)
   /** 一级视图：**画布** 与 **角色中心** 同级（角色库不属于任何一个画布） */
   const [view, setView] = useState<'canvas' | 'characters'>('canvas')
+  /** 画布侧同样先看到全屏列表，点卡片才进节点编辑器。
+   *  `?editor=1` 是直接打开编辑器的深链（分享 / 恢复上次画布 / 冒烟用）。 */
+  const [canvasView, setCanvasView] = useState<'library' | 'editor'>(() =>
+    new URLSearchParams(window.location.search).has('editor') ? 'editor' : 'library')
   const [libraryTab, setLibraryTab] = useState<LibraryTab>('prompt')
   const openLibrary = useCallback((t: LibraryTab) => {
     setLibraryTab(t)
@@ -399,7 +404,7 @@ export default function App() {
       if (!alive) return
       if (!reachable) {
         if (!DEMO) {
-          setNotice('后端未连接：项目无法读取，请先启动服务')
+          setNotice('后端未连接：画布无法读取，请先启动服务')
           window.setTimeout(() => setNotice(''), 6000)
         }
         return
@@ -430,7 +435,7 @@ export default function App() {
       // 一个项目都没有 → 建一个空的（id 由服务端分配，避免撞上已有项目）
       if (loaded.length === 0) {
         const sid = await allocateProjectId()
-        const fresh = makeProject('我的项目', [], undefined, sid || undefined)
+        const fresh = makeProject('我的画布', [], undefined, sid || undefined)
         await persistProject(fresh, { create: true })
         loaded.push(fresh)
       }
@@ -621,11 +626,11 @@ export default function App() {
     // 覆盖先保存的——用户的画布无声消失。服务端分配保证唯一。
     const sid = await allocateProjectId()
     if (!sid) {
-      setUploadMsg('新建失败：连不上后端，无法分配项目 id')
+      setUploadMsg('新建失败：连不上后端，无法分配画布 id')
       window.setTimeout(() => setUploadMsg(''), 6000)
       return
     }
-    const p = makeProject(name?.trim() || `项目 ${projects.length + 1}`, [], undefined, sid)
+    const p = makeProject(name?.trim() || `画布 ${projects.length + 1}`, [], undefined, sid)
     const next = [...projects, p]
     storeRef.current = { current: p.id, projects: next }
     setProjectMeta(next.map(metaOf))
@@ -667,7 +672,7 @@ export default function App() {
     // 服务端也要删：否则刷新后项目又从磁盘冒出来了
     void deleteServerProject(id, hard)
     let next = projects.filter((p) => p.id !== id)
-    if (next.length === 0) next = [makeProject('我的项目')]   // 至少留一个空项目
+    if (next.length === 0) next = [makeProject('我的画布')]   // 至少留一个空项目
     const wasCurrent = currentIdRef.current === id
     const current = wasCurrent ? next[0].id : currentIdRef.current
     storeRef.current = { current, projects: next }
@@ -1727,14 +1732,16 @@ export default function App() {
           <span className="sub">
             {view === 'characters'
               ? '角色中心 · 四步做出一整套角色素材'
-              : `${projectMeta.find((p) => p.id === currentId)?.name ?? '画布'} · 文生图 / 图生图`}
+              : canvasView === 'library'
+                ? `画布库 · ${projectMeta.length} 张画布`
+                : `${projectMeta.find((p) => p.id === currentId)?.name ?? '画布'} · 节点编辑器`}
           </span>
         </div>
         <div className="view-tabs">
           <button
             className={`view-tab${view === 'canvas' ? ' on' : ''}`}
-            onClick={() => setView('canvas')}
-            title="节点画布：把生成 / 抠图 / 转像素串成一条线"
+            onClick={() => { setView('canvas'); if (view !== 'canvas') setCanvasView('library') }}
+            title="画布库：所有画布，点一张进入节点编辑器"
           >
             画布
           </button>
@@ -1759,7 +1766,7 @@ export default function App() {
           {device || '连接中…'}
         </span>
         {/* 角色中心没有画布，缩放组不该占着位置（以前只是 visibility:hidden） */}
-        {view === 'canvas' && (
+        {view === 'canvas' && canvasView === 'editor' && (
           <div className="zoom-group">
             <button onClick={() => zoomTo(Math.max(0.2, viewport.z / 1.2))}>−</button>
             <span className="zoom-val">{zoomLabel}</span>
@@ -1773,8 +1780,19 @@ export default function App() {
       <main className="stage">
         {view === 'characters' ? (
           <CharactersPage onNotice={setNotice} />
+        ) : canvasView === 'library' ? (
+          <CanvasLibrary
+            onOpen={(id) => { switchProject(id); setCanvasView('editor') }}
+            onCreate={async (name) => { await createProject(name); setCanvasView('editor') }}
+            onDelete={async (id) => { await deleteProject(id, true) }}
+            onNotice={setNotice} />
         ) : (
         <>
+        <div className="cc-backbar canvas-backbar">
+          <button type="button" className="cc-btn ghost"
+            onClick={() => setCanvasView('library')}>← 画布库</button>
+          <span>画布库 / <b>{projectMeta.find((p) => p.id === currentId)?.name ?? '未命名画布'}</b></span>
+        </div>
         <Sidebar
           favs={lib.prompts}
           onOpenLibrary={openLibrary}

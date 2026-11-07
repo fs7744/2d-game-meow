@@ -547,6 +547,33 @@ export type CharacterSummary = {
   costumes: string[]
   sprites: number
   config_version: string
+  /** 从属性 config 派生的标签值（**原样英文**，中文只在渲染处映射） */
+  tags: string[]
+  /** 用户自己加的标签，只存在 SQLite 元数据里 */
+  custom_tags?: string[]
+  /** 备注，只存在 SQLite 元数据里 */
+  note?: string
+  /** epoch 秒：以 SQLite 元数据为准（首次由文件系统导入后固定） */
+  created_at?: number
+  updated_at?: number
+}
+
+/** 写角色元数据（自定义标签 / 备注）；只存元数据，不碰任何文件 */
+export function updateCharacterMeta(name: string, patch: {
+  custom_tags?: string[]
+  note?: string
+}): Promise<Record<string, unknown>> {
+  return req(`/characters/${encodeURIComponent(name)}/meta`, {
+    method: 'PATCH', body: JSON.stringify(patch),
+  })
+}
+
+/** 最近生成任务摘要（状态 / 耗时，不含任何文件路径） */
+export function fetchCharacterTasks(limit = 50): Promise<{
+  items: Array<{ job_id: string; character: string; workflow: string
+    status: string; seconds: number; error: string; created_at: number }>
+}> {
+  return req(`/character-tasks?limit=${limit}`)
 }
 
 export type CharacterDetail = {
@@ -1831,13 +1858,32 @@ export async function deleteTemplate(tid: string): Promise<void> {
 // 项目定义存在**服务端磁盘**：`assets/projects/<id>/project.json`。
 // 换机器、换浏览器、清缓存都不丢。**浏览器里不留任何项目内容。**
 
-/** 服务端返回的项目摘要（不带节点）。 */
+/** 服务端返回的画布摘要（不带节点）。UI 上叫「画布」，内部 id 仍是项目 scope。 */
 export type ServerProjectMeta = {
   id: string
   name: string
   created: string
   updated: string
   count: number
+  /** 封面 URL（图片本体在磁盘，DB 只记路径字符串） */
+  cover_url?: string
+  /** 从节点类型派生的标签（原样英文，中文只在渲染处映射） */
+  tags?: string[]
+  custom_tags?: string[]
+  note?: string
+  /** epoch 秒，以 SQLite 元数据为准，用于排序 */
+  created_ts?: number
+  updated_ts?: number
+}
+
+/** 写画布元数据（自定义标签 / 备注）；只存元数据，不碰 project.json */
+export function updateCanvasMeta(scope: string, patch: {
+  custom_tags?: string[]
+  note?: string
+}): Promise<Record<string, unknown>> {
+  return req(`/projects/${encodeURIComponent(scope)}/meta`, {
+    method: 'PATCH', body: JSON.stringify(patch),
+  })
 }
 
 /** 服务端返回的项目定义。 */

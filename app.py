@@ -78,6 +78,7 @@ from workflows import pipeline
 from workflows import emotiongen
 from workflows import qwen_llm
 from workflows import library
+from workflows import metadb
 from workflows import matte_screen
 from workflows import paths
 from workflows import poselib
@@ -291,6 +292,19 @@ def _run(job_id: str, workflow: str, params: Dict[str, Any]) -> None:
     finally:
         job["finished"] = time.time()
         job["elapsed"] = round(job["finished"] - job["started"], 2)
+        # 任务历史只记摘要（状态 / 耗时），绝不记图片、精灵帧或模型路径。
+        # 索引写失败不能反过来影响生成任务本身 —— 主流程已经在上面收尾了。
+        try:
+            metadb.record_task(
+                job_id,
+                character=str(params.get("character") or ""),
+                workflow=workflow,
+                status=str(job.get("status") or "failed"),
+                seconds=float(job.get("elapsed") or 0),
+                error=str(job.get("error") or ""),
+            )
+        except Exception:  # noqa: BLE001
+            logging.getLogger(__name__).warning("记录任务历史失败", exc_info=True)
 
 
 def _worker() -> None:
@@ -993,11 +1007,51 @@ class CostumeReq(BaseModel):
 
 @app.get("/characters")
 def list_characters_api() -> Dict[str, Any]:
-    """角色库列表（扫目录，无索引文件）。"""
+    """角色库列表：磁盘文件 + SQLite 元数据。
+
+    磁盘负责封面 / 服装 / 帧数与生成所需的属性；标签、时间、自定义标签、
+    备注以 metadb 为准（磁盘 config 里没有、也不该塞进 prompt 的信息）。
+    每次列目录都同步一次索引，新建 / 删除的角色会自动进 / 出元数据表。
+    """
+    metadb.sync_characters()
     items = characters.list_character_summaries()
+    meta = metadb.list_meta()
     for it in items:
+        m = meta.get(it["name"]) or {}
         it["cover_url"] = _asset_url(it.pop("cover", "") or "")
+        it["tags"] = m.get("tags", it.get("tags") or [])
+        it["custom_tags"] = m.get("custom_tags", [])
+        it["note"] = m.get("note", "")
+        it["created_at"] = m.get("created_at", it.get("created_at") or 0)
+        it["updated_at"] = m.get("updated_at", it.get("updated_at") or 0)
     return {"count": len(items), "items": items}
+
+
+@app.patch("/characters/{name}/meta")
+def update_character_meta_api(name: str, req: Dict[str, Any]) -> Dict[str, Any]:
+    """写角色元数据（自定义标签 / 备注）。只存元数据，不碰任何文件。"""
+    try:
+        safe = characters.ensure_safe_name(name, "角色名")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not characters.character_exists(safe):
+        raise HTTPException(404, f"没有这个角色：{safe}")
+    custom = req.get("custom_tags")
+    note = req.get("note")
+    try:
+        return metadb.update_meta(
+            safe,
+            [str(t) for t in custom] if isinstance(custom, list) else None,
+            str(note) if note is not None else None,
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.get("/character-tasks")
+def recent_character_tasks_api(limit: int = 50) -> Dict[str, Any]:
+    """最近生成任务摘要（只记状态与耗时，不记文件 / 模型路径）。"""
+    return {"items": metadb.recent_tasks(max(1, min(limit, 200)))}
 
 
 @app.post("/characters")
@@ -2099,13 +2153,43 @@ def _persist_imported(scope: str, meta: Dict[str, Any],
 
 @app.get("/projects")
 def list_projects() -> Dict[str, Any]:
-    """磁盘上所有项目（摘要，不带节点）。
+    """磁盘上所有画布（摘要，不带节点）+ SQLite 元数据。
 
-    前端启动时拉这个列表来决定侧栏显示什么。
+    「项目」这个内部 id 在界面上一律叫「画布」；磁盘目录名 / API 路径保持
+    不变（改路径会牵动几十处调用）。封面只给 URL，图片本体仍在磁盘。
     """
     items = projectstore.list_projects()
+    try:
+        metadb.sync_canvases()
+        meta = metadb.list_canvas_meta()
+    except Exception:  # 索引不可用时列表仍要能打开
+        logging.getLogger(__name__).warning("同步画布元数据失败", exc_info=True)
+        meta = {}
+    for it in items:
+        m = meta.get(str(it.get("id") or "")) or {}
+        it["cover_url"] = _asset_url(m.get("cover_path") or "")
+        it["tags"] = m.get("tags", [])
+        it["custom_tags"] = m.get("custom_tags", [])
+        it["note"] = m.get("note", "")
+        it["created_ts"] = m.get("created_at", 0)
+        it["updated_ts"] = m.get("updated_at", 0)
     ws = projectstore.load_workspace()
     return {"count": len(items), "items": items, "current": ws.get("current", "")}
+
+
+@app.patch("/projects/{scope}/meta")
+def update_canvas_meta_api(scope: str, req: Dict[str, Any]) -> Dict[str, Any]:
+    """写画布元数据（自定义标签 / 备注）。只存元数据，不碰 project.json 的节点。"""
+    custom = req.get("custom_tags")
+    note = req.get("note")
+    try:
+        return metadb.update_canvas_meta(
+            scope,
+            [str(t) for t in custom] if isinstance(custom, list) else None,
+            str(note) if note is not None else None,
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
 
 
 @app.get("/projects/{scope}")

@@ -1,11 +1,16 @@
 /**
  * 角色中心 —— 与画布同级的一级页面。
  *
- * 数据契约跟官方 VNCCS 一致（workflows/characters.py 的模块注释）：
- *   <角色>/<角色>_config.json + Sprites/<服装>/<表情>/sprite_*.png
- * 所以官方工作流产出的角色目录能直接读，我们产出的它也能读。
+ * 磁盘负责封面 / 精灵帧 / 生成用的属性 config；SQLite（workflows/metadb.py）
+ * 是角色元数据的权威存储：标签、创建/编辑时间、自定义标签、备注、任务历史。
+ * 文件与模型一律不进数据库。
  *
- * ── 2026-11-06 彻底重构 ────────────────────────────────────────────────
+ * ── 2026-11-07 入口重构 ────────────────────────────────────────────────
+ * 默认进入**全屏角色库**（大图 + 贴在图片上的标签 + 名字/tag 搜索、
+ * tag 过滤、名字/创建时间/最后编辑时间排序），点卡片才进某个角色的
+ * 四步工作台；工作台不再留一条窄角色库侧栏。
+ *
+ * ── 2026-11-06 四步工作台 ──────────────────────────────────────────────
  * 旧版是「5 个并列 tab + 右栏 4 组重复按钮 + 3 套互相竞争的引导」，
  * 同一个操作有 2~3 个入口、两个「当前服装」状态、四处不同的抠图默认值、
  * 9 条互相独立的小字消息，用户读完所有说明仍不知道第一步点哪里。
@@ -17,23 +22,23 @@
  *   ④ 结构化选择题优先，专业参数收进进阶设置；
  *   ⑤ 每个动作只有一个入口，前置条件、耗时、失败原因写在按钮旁边。
  *
- * 后端 API 一个没改，只重排前端；所有英文标识仍按原值传给服务端。
+ * 所有英文标识仍按原值传给服务端，中文只在渲染处映射。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   type CharacterDetail, type CharacterSummary, type StyleCatalog,
   type EmotionCatalog,
-  createCharacter, deleteCharacter, deleteCostume, fetchCharacter,
+  deleteCharacter, deleteCostume, fetchCharacter,
   fetchCharacters, renameCharacter, saveCostume, updateCharacterInfo,
   fetchStyleCatalog, fetchEmotionCatalog,
   fetchCharacterPrompt, generateForCharacter, fetchJob, fetchCharacterTags,
   detectEmotionFaces, generateEmotions, type EmotionFrame,
   analyzeCharacter, wizardCharacter, designClothes, clothesWizard,
-  createCharacterFromImage, uploadImage,
   generatePoses, fetchPoseDirs, exportAtlas, fetchAtlasInfo, designUnderwear,
   runPipeline, type PoseDir, type AtlasInfo,
   type CharacterPrompt, type TagCatalog,
 } from '../api'
+import CharacterLibrary, { tagLabel } from './CharacterLibrary'
 import PromptZoom from './PromptZoom'
 import TagPicker from './TagPicker'
 import {
@@ -54,11 +59,18 @@ type Props = { onNotice: (msg: string) => void }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
+function fmtStamp(ts?: number): string {
+  if (!ts) return '—'
+  return new Date(ts * 1000).toLocaleString('zh-CN', { hour12: false })
+}
+
 export default function CharactersPage({ onNotice }: Props) {
   /* ------------------------------------------------------------ 角色库 */
   const [items, setItems] = useState<CharacterSummary[]>([])
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState('')
+  /** 'library' = 全屏角色库（默认首页）；'workspace' = 某个角色的四步工作台 */
+  const [view, setView] = useState<'library' | 'workspace'>('library')
   const [sel, setSel] = useState<string | null>(null)
   const [detail, setDetail] = useState<CharacterDetail | null>(null)
   const [styles, setStyles] = useState<StyleCatalog | null>(null)
@@ -67,10 +79,6 @@ export default function CharactersPage({ onNotice }: Props) {
   const [poseDirs, setPoseDirs] = useState<PoseDir[]>([])
   const [poseDir, setPoseDir] = useState('')
   const [atlasInfo, setAtlasInfo] = useState<AtlasInfo | null>(null)
-  const [newName, setNewName] = useState('')
-  const [cloneOpen, setCloneOpen] = useState(false)
-  const [cloneFile, setCloneFile] = useState<File | null>(null)
-  const [clonePreview, setClonePreview] = useState('')
   const [renameText, setRenameText] = useState('')
   const [renameOpen, setRenameOpen] = useState(false)
   const [pendingDelete, setPendingDelete] = useState<string | null>(null)
@@ -319,35 +327,21 @@ export default function CharactersPage({ onNotice }: Props) {
     }
   }, [busy])
 
-  /* ------------------------------------------------------- 角色库动作 */
-  const doCreate = useCallback(async () => {
-    const name = newName.trim()
-    if (!name || busy) return
-    try {
-      await createCharacter(name)
-      setNewName(''); setCloneOpen(false); setCloneFile(null); setClonePreview('')
-      await reload()
-      setSel(name)
-      onNotice(`已建角色「${name}」`)
-    } catch (e) { setErr(`建角色失败：${explainError(e)}`) }
-  }, [newName, busy, reload, onNotice])
+  /* ------------------------------------------------------- 视图切换 */
+  /** 创建动作只在全屏角色库里发生；这里只负责「选中谁、进不进工作台」。 */
+  const openWorkspace = useCallback((name: string) => {
+    setSel(name)
+    setView('workspace')
+    setUserStep(null)
+  }, [])
 
-  /** 参考图起步：后端先反推再建角色，反推失败不留空壳。 */
-  const doClone = useCallback(async () => {
-    const name = newName.trim()
-    if (!name || !cloneFile || busy) return
-    await runInline('从参考图建角色', async () => {
-      const up = await uploadImage(cloneFile)
-      const r = await createCharacterFromImage({
-        name, image: up.path,
-        background_color: String(draft.background_color ?? 'green'),
-      })
-      setCloneOpen(false); setCloneFile(null); setClonePreview(''); setNewName('')
-      await reload()
-      setSel(name)
-      return `已建角色「${name}」，读出 ${Object.keys(r.fields || {}).length} 项外貌特征`
-    })
-  }, [newName, cloneFile, busy, draft.background_color, reload, runInline])
+  const backToLibrary = useCallback(() => {
+    setView('library')
+    setSel(null)
+    setUserStep(null)
+    setTask(null)
+    setDoneFlash(null)
+  }, [])
 
   const doRename = useCallback(async () => {
     if (!sel || !renameText.trim() || renameText.trim() === sel) return
@@ -363,10 +357,10 @@ export default function CharactersPage({ onNotice }: Props) {
     try {
       await deleteCharacter(name)
       setPendingDelete(null)
-      if (sel === name) setSel(null)
+      if (sel === name) backToLibrary()
       await reload()
     } catch (e) { setErr(`删除失败：${explainError(e)}`) }
-  }, [sel, reload])
+  }, [sel, reload, backToLibrary])
 
   const saveInfo = useCallback(async (patch: Record<string, unknown>) => {
     if (!sel) return
@@ -536,52 +530,35 @@ export default function CharactersPage({ onNotice }: Props) {
    *  用户手动回头看第 ② 步时，主线仍应指向真正缺的那一步）。 */
   const nextStep = progress.firstUndone
   const allDone = progress.done.every(Boolean)
+  const currentSummary = items.find((c) => c.name === sel)
+
+  /* 默认首页：整个页面就是角色库。工作台只是「点开某个角色」之后的第二层。 */
+  if (view === 'library') {
+    return (
+      <CharacterLibrary
+        items={items} loading={loading} err={err}
+        onOpen={openWorkspace}
+        onCreated={async (name) => { await reload(); openWorkspace(name) }}
+        onReload={reload}
+        onDelete={(name) => void doDelete(name)}
+        onNotice={onNotice} />
+    )
+  }
 
   return (
-    <div className="chars cc">
-      {/* ---------------- 左：角色库（只管选，不重复放创建表单） ------------- */}
-      <div className="chars-list cc-rail">
-        <div className="chars-list-head">
-          <b>角色库</b>
-          <span className="chars-count">{items.length}</span>
-        </div>
-        <button type="button" className="cc-rail-new" onClick={() => setUserStep(1)}>
-          ＋ 新角色
-        </button>
-        {loading && <p className="chars-empty is-loading">正在读角色库…</p>}
-        {!loading && items.length === 0 && (
-          <div className="chars-empty cc-empty">
-            <h3>还没有角色</h3>
-            <p>在右侧第 ① 步给角色起个名字，或直接用一张参考图开始。</p>
-          </div>
-        )}
-        <div className="chars-grid">
-          {items.map((c) => (
-            <button type="button" key={c.name}
-              className={`chars-card${sel === c.name ? ' on' : ''}`}
-              onClick={() => setSel(c.name)}>
-              {c.cover_url
-                ? <img src={c.cover_url} alt={c.name} loading="lazy" />
-                : <span className="chars-nocover">无封面</span>}
-              <span className="chars-card-name">{c.name}</span>
-              <span className="chars-card-meta">{c.costumes.length} 服装 · {c.sprites} 图</span>
-              <span className="chars-card-del" title="删除角色"
-                onClick={(e) => { e.stopPropagation(); setPendingDelete(c.name) }}>✕</span>
-            </button>
-          ))}
-        </div>
-        {pendingDelete && (
-          <div className="cc-confirm">
-            <p>删掉「{pendingDelete}」？所有立绘、服装、表情会一起删。</p>
-            <button type="button" className="cc-btn ghost" onClick={() => setPendingDelete(null)}>取消</button>
-            <button type="button" className="cc-btn danger"
-              onClick={() => void doDelete(pendingDelete)}>确认删除</button>
-          </div>
-        )}
-      </div>
-
+    <div className="chars cc is-workspace">
       {/* ---------------- 中：唯一主线 ------------- */}
       <main className="chars-detail cc-main">
+        <div className="cc-backbar">
+          <button type="button" className="cc-btn ghost" onClick={backToLibrary}>← 角色库</button>
+          <span>角色库 / <b>{sel || ''}</b></span>
+          <span className="spacer" />
+          {currentSummary?.updated_at ? (
+            <span className="cc-backbar-meta">
+              最后编辑 {new Date(currentSummary.updated_at * 1000).toLocaleDateString('zh-CN')}
+            </span>
+          ) : null}
+        </div>
         {err && <div className="chars-err">⚠ {err}</div>}
         <StepBar done={progress.done} active={activeStep} onPick={setUserStep} />
 
@@ -607,52 +584,43 @@ export default function CharactersPage({ onNotice }: Props) {
         )}
 
         <div className="chars-body cc-panel">
-          {/* ============================ ① 创建角色 ============================ */}
-          {activeStep === 1 && (
+          {/* ============================ ① 角色档案（创建已在全屏库完成） ============================ */}
+          {activeStep === 1 && sel && detail && (
             <>
-              <StepHead step={1} sub="角色会存成一个独立档案，之后所有立绘、服装、表情、图集都挂在它下面，随时回来继续做。" />
-              <Card title="给角色起个名字" note="中英文都行。名字只用来命名档案和文件夹，不影响长相。"
+              <StepHead step={1} sub="角色已在角色库里建好。这里能改名、删除、查看标签与备注；要编辑标签，回角色库点卡片上的 ✎。" />
+              <Card title="角色档案"
+                note="标签、时间、自定义标签与备注来自本地 SQLite 元数据；生成用的属性 config 与所有图片仍在磁盘上。"
                 tone="primary">
-                <div className="chars-new cc-create">
-                  <input value={newName} placeholder="例：白色猫骑士"
-                    onChange={(e) => setNewName(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === 'Enter') void doCreate() }} />
-                  <button type="button" className="cc-btn primary"
-                    onClick={() => void doCreate()} disabled={!newName.trim() || busy}>
-                    创建角色
-                  </button>
+                <div className="cc-profile">
+                  <div><span>名字</span><b>{detail.name}</b></div>
+                  <div><span>创建时间</span><b>{fmtStamp(currentSummary?.created_at)}</b></div>
+                  <div><span>最后编辑</span><b>{fmtStamp(currentSummary?.updated_at)}</b></div>
+                  <div><span>服装</span><b>{detail.costumes.map((c) => zh(COSTUME_LABEL, c)).join(' / ') || '—'}</b></div>
+                  <div><span>已有素材</span><b>{assetStats.frames} 帧</b></div>
+                  <div><span>标签</span><b className="cc-profile-tags">
+                    {[...(currentSummary?.tags || []), ...(currentSummary?.custom_tags || [])]
+                      .map(tagLabel).join('、') || '—'}
+                  </b></div>
+                </div>
+                {currentSummary?.note && <p className="cc-profile-note">备注：{currentSummary.note}</p>}
+                <div className="cc-actions">
+                  <button type="button" className="cc-btn primary cc-cta"
+                    onClick={() => setUserStep(2)}>去定形象 →</button>
+                  <button type="button" className="cc-btn ghost"
+                    onClick={() => { setRenameText(detail.name); setRenameOpen(true) }}>改名</button>
+                  <button type="button" className="cc-btn ghost"
+                    onClick={() => setPendingDelete(detail.name)}>删除角色</button>
                 </div>
               </Card>
-              <Card title="或者，拿一张参考图开始"
-                note="本地模型会读出可见的外貌特征，并把这张图收编成角色的第一张素材。读错了随时能改。">
-                {!cloneOpen ? (
-                  <button type="button" className="cc-btn ghost" onClick={() => setCloneOpen(true)}>
-                    选择参考图
-                  </button>
-                ) : (
-                  <div className="chars-clone">
-                    <div className="chars-clone-row">
-                      <input type="file" accept="image/png,image/jpeg,image/webp,image/bmp"
-                        onChange={(e) => {
-                          const f = e.target.files?.[0] ?? null
-                          setCloneFile(f)
-                          setClonePreview(f ? URL.createObjectURL(f) : '')
-                        }} />
-                      <button type="button" className="cc-btn ghost"
-                        onClick={() => {
-                          setCloneOpen(false); setCloneFile(null); setClonePreview('')
-                        }}>取消</button>
-                    </div>
-                    {clonePreview && <img className="chars-clone-preview" src={clonePreview} alt="参考图" />}
-                    <button type="button" className="cc-btn primary"
-                      onClick={() => void doClone()}
-                      disabled={busy || !cloneFile || !newName.trim()}>
-                      用参考图创建
-                    </button>
-                    {!newName.trim() && <p className="chars-sub">先在上面填角色名。</p>}
-                  </div>
-                )}
-              </Card>
+              {pendingDelete && (
+                <div className="cc-confirm">
+                  <p>删掉「{pendingDelete}」？所有立绘、服装、表情会一起删。</p>
+                  <button type="button" className="cc-btn ghost"
+                    onClick={() => setPendingDelete(null)}>取消</button>
+                  <button type="button" className="cc-btn danger"
+                    onClick={() => void doDelete(pendingDelete)}>确认删除</button>
+                </div>
+              )}
               <div className="cc-how">
                 <b>接下来会发生什么</b>
                 <ol>
@@ -1020,14 +988,14 @@ export default function CharactersPage({ onNotice }: Props) {
                   </ol>
                 </div>
                 <button type="button" className="cc-btn ghost"
-                  onClick={() => { setSel(null); setUserStep(1) }}>再做一个角色</button>
+                  onClick={backToLibrary}>回到角色库</button>
               </Card>
             </>
           )}
 
-          {!sel && activeStep > 1 && (
-            <Blocker text="先在左边选一个角色，或新建一个。" action="去创建角色"
-              onAction={() => setUserStep(1)} />
+          {!sel && (
+            <Blocker text="先在角色库里选一个角色。" action="回角色库"
+              onAction={backToLibrary} />
           )}
         </div>
 

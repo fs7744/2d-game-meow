@@ -195,3 +195,22 @@ MIUProject/VNCCS_PoseStudio_QI2.1），**不要写 runcomfy.com 这类商业托�
 - 清理手法：按行号从后往前删 + 首行断言 + 替换次数断言；
   验证用 **Pillow 逐张比对清理前后真机截图**（18/18 字节级一致）+ smoke 604/604。
   这类纯样式清理可以放心做，但必须有像素级回归证据。
+
+## 全屏库首页 / SQLite 元数据（2026-11-07）
+
+- 角色中心与画布视图都是**两层**：默认全屏库（`CharacterLibrary.tsx` /
+  `CanvasLibrary.tsx`，共用 `.charlib-*` 样式），点卡片才进工作台/编辑器。
+  工作台不再有左侧窄角色库；画布编辑器顶部浮动「← 画布库」。
+- UI 上「项目」一律叫**画布**（内部 scope / API 路径 `/projects` 不变）。
+  `?editor=1` 深链直接进编辑器（分享 / 恢复 / 冒烟用）；`boot()` 默认拼它，
+  库首页用例用 `stayInLibrary` + `setupFetch` 注入假列表。
+- **SQLite（`workflows/metadb.py`）是角色/画布元数据的权威**：派生 tags、
+  稳定创建/编辑时间、自定义标签、备注、任务历史、封面路径字符串。
+  **文件/图片/精灵帧/模型权重/节点定义一律不入库**，磁盘仍是文件唯一存放处。
+  标准库 `sqlite3` 零安装、单文件、WAL；库在 `library/meta.sqlite3`（被 .gitignore 忽略，
+  `MEOW_LIBRARY_DIR` 可覆盖）。用户明确：**不必再顾忌官方 VNCCS 目录互通**。
+- 卡片：3:4 大图 + 图片上 tag（自定义标签优先，>5 收 `+N`）、名字/tag 模糊搜索、
+  tag 过滤 OR、名字/创建/最后编辑三档排序；偏好存 `library/prefs.json`；
+  空库中央一个大号创建按钮。
+- 改这两个库时：`tagLabel()` 只做显示层中文映射，tag 值原样英文传给后端；
+  `capture.mjs` 的 `CC_FAKE=1` 有完整离线假数据（多角色 + 多画布）。

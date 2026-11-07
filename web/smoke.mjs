@@ -50,6 +50,9 @@ function makeFetch() {
   // 多姿势批量的模拟进度
   // 保存时是否报冲突（模拟别的窗口改了同一个项目）
   let saveConflictMode = false
+  // 库首页用例可以注入一批假角色 / 假画布（不影响其它用例的空库起点）
+  let charactersOverride = null
+  let canvasesOverride = null
   const fetchFn = async (url, init = {}) => {
     calls.push({ url: String(url), method: init.method || 'GET', body: init.body })
     if (String(url).endsWith('/health')) {
@@ -261,6 +264,14 @@ function makeFetch() {
       }
     }
 
+    // ---- 元数据写入端点（SQLite；只存标签/备注，不碰文件）----
+    if ((init.method || 'GET') === 'PATCH' && String(url).endsWith('/meta')
+      && (String(url).includes('/characters/') || String(url).includes('/projects/'))) {
+      return { ok: true, json: async () => ({ ok: true }) }
+    }
+    if (String(url).endsWith('/character-tasks')) {
+      return { ok: true, json: async () => ({ items: [] }) }
+    }
     // ---- 角色中心（assets/characters/）----
     // 服装的增删改：真实后端 PUT 返回 200 并把服装加进 config。
     // 以前 mock 没有这一支，落到末尾 404，前端 saveCostume 抛错，
@@ -287,6 +298,10 @@ function makeFetch() {
       return { ok: true, json: async () => ({ name: b.name, config: { character_info: b.info } }) }
     }
     if (String(url).endsWith('/characters') && (init.method || 'GET') === 'GET') {
+      if (charactersOverride) {
+        return { ok: true, json: async () => ({ count: charactersOverride.length,
+          items: charactersOverride }) }
+      }
       return {
         ok: true,
         json: async () => ({
@@ -295,6 +310,9 @@ function makeFetch() {
             name: n, cover_url: '', sex: 'female', style: 'ghibli_miyazaki',
             nsfw: false, costumes: serverCostumes.get(n) || ['Naked'],
             sprites: 0, config_version: '2.0',
+            tags: ['ghibli_miyazaki', 'human', 'female'],
+            custom_tags: [], note: '',
+            created_at: 1700000000, updated_at: 1700000100,
           })),
         }),
       }
@@ -748,6 +766,10 @@ function makeFetch() {
       return { ok: true, json: async () => ({ id }) }
     }
     if (String(url).endsWith('/projects') && (init.method || 'GET') === 'GET') {
+      if (canvasesOverride) {
+        return { ok: true, json: async () => ({ count: canvasesOverride.length,
+          items: canvasesOverride, current: serverCurrent }) }
+      }
       return {
         ok: true,
         json: async () => ({
@@ -755,6 +777,8 @@ function makeFetch() {
           items: [...serverProjects.values()].map((p) => ({
             id: p.id, name: p.name, created: p.created, updated: p.updated,
             count: (p.nodes || []).length,
+            cover_url: '', tags: ['gen'], custom_tags: [], note: '',
+            created_ts: 1700000000, updated_ts: 1700000100,
           })),
           current: serverCurrent,
         }),
@@ -819,10 +843,12 @@ function makeFetch() {
   fetchFn.setJobsFail = (v) => { jobsFailMode = v }
   fetchFn.setSaveConflict = (v) => { saveConflictMode = v }
   fetchFn.setAnalyzeFail = (v) => { analyzeFails = v }
+  fetchFn.setCharacters = (v) => { charactersOverride = v }
+  fetchFn.setCanvases = (v) => { canvasesOverride = v }
   return fetchFn
 }
 
-async function boot(search, seed) {
+async function boot(search, seed, opts = {}) {
   const html = readFileSync(resolve(dist, 'index.html'), 'utf8')
   const vc = new VirtualConsole()
   const errors = []
@@ -834,13 +860,14 @@ async function boot(search, seed) {
     errors.push(msg)
   })
   const dom = new JSDOM(html, {
-    url: `http://localhost/${search}`,
+    url: `http://localhost/${search}${opts.stayInLibrary ? '' : (search.includes('?') ? '&' : '?') + 'editor=1'}`,
     runScripts: 'dangerously',
     resources: 'usable',
     pretendToBeVisual: true,
     virtualConsole: vc,
     beforeParse(win) {
       win.fetch = makeFetch()
+      if (opts.setupFetch) opts.setupFetch(win.fetch)
       win.matchMedia = () => ({ matches: false, addListener() {}, removeListener() {} })
       // 记录捕获调用：卡头拖拽会 setPointerCapture，按钮上则不应调用。
       // 真实浏览器里正是这个捕获把 click 重定向到卡头，导致按钮点不动。
@@ -899,7 +926,7 @@ function check(name, cond, extra = '') {
       
       .some((x) => (x.textContent || '').includes('人偶姿势')),
     String(section(doc, '节点')?.querySelectorAll('.rail-item').length))
-  check('有「项目」分组（独立画布）', !!section(doc, '项目'))
+  check('有「画布」分组（独立画布）', !!section(doc, '画布'))
   check('缩放显示 100%', doc.querySelector('.zoom-val')?.textContent === '100%')
   check('无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
@@ -1293,7 +1320,7 @@ function check(name, cond, extra = '') {
   // 「LoRA」是新增的（Qwen 现在支持 LoRA，见 engine.available_loras）；
   // 「模板」是项目预设模板区（存模板 / 从模板新建）。
   check('六个菜单分组：项目/模板/节点/资料库/LoRA/设置',
-    JSON.stringify(titles) === JSON.stringify(['项目', '模板', '节点', '资料库', 'LoRA', '设置']),
+    JSON.stringify(titles) === JSON.stringify(['画布', '模板', '节点', '资料库', 'LoRA', '设置']),
     JSON.stringify(titles))
 
   // 分组可折叠
@@ -1408,8 +1435,8 @@ function check(name, cond, extra = '') {
 
   // ---- 导入项目（文件选择）----
   const importBtn = [...doc.querySelectorAll('.rail-new')]
-    .find((b) => (b.textContent || '').includes('导入项目'))
-  check('侧栏有「导入项目」按钮', !!importBtn)
+    .find((b) => (b.textContent || '').includes('导入画布'))
+  check('侧栏有「导入画布」按钮', !!importBtn)
   const fileInput = doc.querySelector('input[type="file"][accept=".mproj"]')
   check('有 .mproj 文件选择框', !!fileInput)
   if (fileInput) {
@@ -1670,11 +1697,11 @@ function check(name, cond, extra = '') {
   const win = dom.window
   await new Promise((r) => setTimeout(r, 500))
 
-  const projSec = () => section(doc, '项目')
+  const projSec = () => section(doc, '画布')
   const projRows = () => [...(projSec()?.querySelectorAll('.project-item') || [])]
   const nodes = () => doc.querySelectorAll('.node').length
 
-  check('项目分组初始有 1 个项目', projRows().length === 1, String(projRows().length))
+  check('画布分组初始有 1 张画布', projRows().length === 1, String(projRows().length))
   check('当前项目有标记', !!projSec().querySelector('.project-item.current'))
   check('demo 节点在画布上', nodes() === 1, String(nodes()))
 
@@ -1684,7 +1711,7 @@ function check(name, cond, extra = '') {
   check('新建后项目数变 2', projRows().length === 2, String(projRows().length))
   check('新项目是空画布', nodes() === 0, String(nodes()))
   check('顶栏显示当前项目名',
-    (doc.querySelector('.brand .sub')?.textContent || '').includes('项目'),
+    (doc.querySelector('.brand .sub')?.textContent || '').includes('画布'),
     doc.querySelector('.brand .sub')?.textContent)
 
   // 在新项目里加一个节点
@@ -1732,7 +1759,7 @@ function check(name, cond, extra = '') {
   await new Promise((r) => setTimeout(r, 700))
 
   // ---- 新建项目：id 来自服务端，不是本地生成 ----
-  const projSec = () => section(doc, '项目')
+  const projSec = () => section(doc, '画布')
   const before = projSec().querySelectorAll('.project-item').length
   projSec().querySelector('.rail-new').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
   await new Promise((r) => setTimeout(r, 700))
@@ -1786,7 +1813,7 @@ function check(name, cond, extra = '') {
   const win = dom.window
   await new Promise((r) => setTimeout(r, 600))
 
-  const projSec = () => section(doc, '项目')
+  const projSec = () => section(doc, '画布')
   const projRows = () => [...(projSec()?.querySelectorAll('.project-item') || [])]
 
   // 启动时会拉 /projects —— 空列表时把缓存里的项目写上去
@@ -1863,7 +1890,7 @@ function check(name, cond, extra = '') {
   const doc = dom.window.document
   await new Promise((r) => setTimeout(r, 500))
 
-  const projSec = () => section(doc, '项目')
+  const projSec = () => section(doc, '画布')
   const rows = () => [...(projSec()?.querySelectorAll('.project-item') || [])]
   check('老存档被迁移成 1 个项目', rows().length === 1, String(rows().length))
   check('迁移后的项目名是「我的项目」',
@@ -3746,14 +3773,20 @@ function ccStep(doc, win, id) {
   return !!b
 }
 async function ccCreate(doc, win) {
-  ccSetInput(win, doc.querySelector('.chars-new input'), 'Alice')
+  // 空库的大按钮 / 有角色时的右上角按钮，都是同一个创建面板入口
+  const opener = [...doc.querySelectorAll('button')]
+    .find((b) => /新建角色|创建第一个角色/.test(b.textContent || ''))
+  if (opener) opener.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await ccWait(150)
+  ccSetInput(win, doc.querySelector('.charlib-create input'), 'Alice')
   await ccWait(80)
-  ;[...doc.querySelectorAll('.chars-new button')][0]
-    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await ccWait(450)
+  const go = [...doc.querySelectorAll('.charlib-create button')]
+    .find((b) => /创建角色/.test(b.textContent || ''))
+  if (go) go.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await ccWait(500)
 }
 
-// 46) 视图与四步骨架
+// 46) 角色中心：一进来就是全屏角色库，点角色才进四步工作台
 {
   const { dom, doc, win, errors, c0 } = await ccBoot()
   const tabs = [...doc.querySelectorAll('.view-tab')]
@@ -3762,38 +3795,41 @@ async function ccCreate(doc, win) {
     && tabs[1].textContent.includes('角色中心'),
     tabs.map((t) => t.textContent).join('/'))
   check('切到角色中心后画布节点不见了', !doc.querySelector('.node'))
-  check('角色中心页面挂上了', !!doc.querySelector('.chars.cc'))
+  check('一进角色中心就是全屏角色库', !!doc.querySelector('.charlib'))
+  check('角色中心不再留左侧窄角色库', !doc.querySelector('.chars-list.cc-rail'))
   check('去服务端读了角色列表',
     calls.slice(c0).some((c) => c.url.endsWith('/characters') && c.method === 'GET'),
     calls.slice(c0).map((c) => c.url).slice(-3).join())
-  check('空库时给的是可照做的下一步（不是文件夹路径）',
-    (doc.querySelector('.chars-empty')?.textContent || '').includes('第 ① 步'),
-    (doc.querySelector('.chars-empty')?.textContent || '').slice(0, 50))
-  const steps = [...doc.querySelectorAll('.cc-step')]
-  check('只有 4 个步骤（旧版 5 个并列 tab 已收编）',
-    steps.length === 4, steps.map((s) => s.textContent).join('/'))
-  check('步骤顺序是 创建角色 → 定形象 → 出素材 → 导出',
-    steps.map((s) => s.textContent).join('|').includes('创建角色')
-    && steps.map((s) => s.textContent).join('|').includes('定形象')
-    && steps.map((s) => s.textContent).join('|').includes('出素材')
-    && steps.map((s) => s.textContent).join('|').includes('导出'))
-  check('右栏空态说清了四步会得到什么',
-    (doc.querySelector('.cc-preview-idle')?.textContent || '').includes('四步'))
-  check('第 ① 步有创建表单（不是让用户去别处找）',
-    !!doc.querySelector('.chars-new input') && !!doc.querySelector('.chars-new button'))
+  check('空库放了一个大号创建按钮', !!doc.querySelector('.charlib-big-create'))
+  check('有名字 / tag 模糊搜索框',
+    !!doc.querySelector('.charlib-search')
+    && /角色名或标签/.test(doc.querySelector('.charlib-search')?.placeholder || ''))
+  const sortOpts = [...doc.querySelectorAll('.charlib-sort select option')]
+    .map((o) => o.textContent || '')
+  check('三种排序：名字 / 创建时间 / 最后编辑时间',
+    sortOpts.includes('名字') && sortOpts.includes('创建时间')
+    && sortOpts.includes('最后编辑时间'), sortOpts.join('/'))
 
   await ccCreate(doc, win)
   const created = calls.slice(c0).find((c) => c.url.endsWith('/characters') && c.method === 'POST')
   check('建角色打到服务端 POST /characters', !!created, created?.body)
-  check('角色出现在库里', [...doc.querySelectorAll('.chars-card-name')]
-    .some((n) => n.textContent === 'Alice'),
-  [...doc.querySelectorAll('.chars-card-name')].map((n) => n.textContent).join())
+  check('创建后进入四步工作台', !!doc.querySelector('.chars.cc.is-workspace'))
+  check('工作台有「← 角色库」返回入口',
+    (doc.querySelector('.cc-backbar')?.textContent || '').includes('角色库'))
   check('选中角色后拉详情',
     calls.slice(c0).some((c) => c.url.includes('/characters/Alice') && c.method === 'GET'))
   check('角色名挂在步骤条下方（知道自己在改谁）',
     (doc.querySelector('.cc-charhead')?.textContent || '').includes('Alice'))
   check('成果区常驻右栏（结果优先，不用切页找）',
     !!doc.querySelector('.cc-preview .sprite-preview'))
+  const steps = [...doc.querySelectorAll('.cc-step')]
+  check('只有 4 个步骤（旧版 5 个并列 tab 已收编）',
+    steps.length === 4, steps.map((x) => x.textContent).join('/'))
+  check('步骤顺序是 创建角色 → 定形象 → 出素材 → 导出',
+    steps.map((x) => x.textContent).join('|').includes('创建角色')
+    && steps.map((x) => x.textContent).join('|').includes('定形象')
+    && steps.map((x) => x.textContent).join('|').includes('出素材')
+    && steps.map((x) => x.textContent).join('|').includes('导出'))
   check('步骤条有完成标记（状态由真实产物推导）',
     doc.querySelectorAll('.cc-step.is-done').length > 0,
     String(doc.querySelectorAll('.cc-step.is-done').length))
@@ -4183,6 +4219,173 @@ async function ccCreate(doc, win) {
   dom.window.close()
 }
 
+
+// 53) 全屏角色库：卡片大图 / 图片上 tag / 名字·tag 搜索 / tag 过滤 / 三种排序
+{
+  const base = {
+    cover_url: '/files/a.png', sex: 'female', style: 'ghibli_miyazaki',
+    nsfw: false, costumes: ['Naked'], sprites: 12, config_version: '2.0',
+    custom_tags: [], note: '', created_at: 1700000000,
+  }
+  const list = [
+    { ...base, name: '白色猫骑士',
+      tags: ['ghibli_miyazaki', 'human', 'silver hair', 'Knight', 'red eyes', 'long hair', 'slim'],
+      custom_tags: ['主角'], updated_at: 1700000300 },
+    { ...base, name: '精灵弓手', tags: ['elf', 'green eyes'], updated_at: 1700000200 },
+    { ...base, name: '机械法师', tags: ['gen', 'topixel'], updated_at: 1700000100 },
+  ]
+  const { dom, errors } = await boot('', null, {
+    stayInLibrary: true,
+    setupFetch: (f) => f.setCharacters(list),
+  })
+  const doc = dom.window.document
+  const win = dom.window
+  await ccWait(300)
+  ;[...doc.querySelectorAll('.view-tab')][1]
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await ccWait(450)
+
+  check('角色库整页网格挂上了', !!doc.querySelector('.charlib-grid'))
+  check('每个角色一张卡片', doc.querySelectorAll('.charlib-card').length === 3,
+    String(doc.querySelectorAll('.charlib-card').length))
+  check('卡片展示角色图片', !!doc.querySelector('.charlib-thumb img'))
+  check('卡片展示角色名字',
+    [...doc.querySelectorAll('.charlib-name')].some((n) => n.textContent === '白色猫骑士'))
+  check('tag 贴在图片上（不是卡片底部）',
+    doc.querySelectorAll('.charlib-thumb .charlib-tagwrap .charlib-tag').length > 0)
+  check('自定义标签也参与展示',
+    [...doc.querySelectorAll('.charlib-tag')].some((t) => t.textContent === '主角'))
+  check('标签过多时收成 +N',
+    [...doc.querySelectorAll('.charlib-tag.is-more')].length > 0)
+  check('有 tag 过滤条', doc.querySelectorAll('.charlib-filter').length > 1)
+
+  // 名字模糊搜索
+  ccSetInput(win, doc.querySelector('.charlib-search'), '精灵')
+  await ccWait(180)
+  check('名字模糊搜索命中 1 张', doc.querySelectorAll('.charlib-card').length === 1,
+    String(doc.querySelectorAll('.charlib-card').length))
+  // tag 模糊搜索
+  ccSetInput(win, doc.querySelector('.charlib-search'), 'green eyes')
+  await ccWait(180)
+  check('tag 也能模糊搜索', doc.querySelectorAll('.charlib-card').length === 1)
+  ccSetInput(win, doc.querySelector('.charlib-search'), '')
+  await ccWait(180)
+  // tag 过滤（OR）
+  const mainChip = [...doc.querySelectorAll('.charlib-filter')]
+    .find((b) => (b.textContent || '').includes('主角'))
+  check('自定义标签出现在过滤条上（tag 值原样英文 / 中文只做显示映射）', !!mainChip)
+  mainChip?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await ccWait(180)
+  check('点 tag 过滤后只剩匹配角色', doc.querySelectorAll('.charlib-card').length === 1,
+    String(doc.querySelectorAll('.charlib-card').length))
+  const clear = [...doc.querySelectorAll('.charlib-filter')]
+    .find((b) => (b.textContent || '').includes('清除筛选'))
+  clear?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await ccWait(180)
+  // 排序：默认按最后编辑倒序；切到名字后顺序变化
+  const nameOf = () => doc.querySelector('.charlib-name')?.textContent
+  check('默认按最后编辑时间倒序', nameOf() === '白色猫骑士', String(nameOf()))
+  ccSetSelect(win, doc.querySelector('.charlib-sort select'), 'name')
+  await ccWait(180)
+  check('可切换成按名字排序', !!nameOf() && nameOf() !== '白色猫骑士', String(nameOf()))
+  ccSetSelect(win, doc.querySelector('.charlib-sort select'), 'created')
+  await ccWait(180)
+  check('可切换成按创建时间排序', !!doc.querySelector('.charlib-sort select'))
+  // 编辑元数据：自定义标签 / 备注写进 SQLite（不碰文件）
+  doc.querySelector('.charlib-edit')
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await ccWait(180)
+  check('有编辑标签/备注面板', !!doc.querySelector('.charlib-create'))
+  ccSetInput(win, doc.querySelector('.charlib-create input'), '待交付, 主角')
+  const save = [...doc.querySelectorAll('.charlib-create button')]
+    .find((b) => (b.textContent || '').includes('保存'))
+  save?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await ccWait(250)
+  check('元数据写回服务端 PATCH /meta',
+    calls.some((c) => c.method === 'PATCH' && c.url.includes('/characters/') && c.url.endsWith('/meta')))
+  check('库交互场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 54) 画布侧：全屏画布库，UI 上「项目」一律改叫「画布」
+{
+  const base = { cover_url: '/files/a.png', created: '', updated: '',
+    custom_tags: [], note: '', created_ts: 1700000000 }
+  const list = [
+    { ...base, id: 'c1', name: '主角立绘', tags: ['gen', 'topixel'], count: 3, updated_ts: 1700000300 },
+    { ...base, id: 'c2', name: '敌人套图', tags: ['posebatch'], cover_url: '', count: 5, updated_ts: 1700000200 },
+    { ...base, id: 'c3', name: '场景概念', tags: ['outpaint'], cover_url: '', count: 2, updated_ts: 1700000100 },
+  ]
+  const { dom, errors } = await boot('', null, {
+    stayInLibrary: true,
+    setupFetch: (f) => f.setCanvases(list),
+  })
+  const doc = dom.window.document
+  const win = dom.window
+  await ccWait(500)
+  check('一进画布视图就是全屏画布库', !!doc.querySelector('.charlib'))
+  check('标题叫「画布库」',
+    (doc.querySelector('.charlib-head h1')?.textContent || '') === '画布库')
+  check('每张画布一张卡片', doc.querySelectorAll('.charlib-card').length === 3,
+    String(doc.querySelectorAll('.charlib-card').length))
+  check('卡片展示封面 / 占位', !!doc.querySelector('.charlib-thumb img')
+    || !!doc.querySelector('.charlib-nocover'))
+  check('tag 贴在图片上',
+    doc.querySelectorAll('.charlib-thumb .charlib-tag').length > 0)
+  const sortOpts = [...doc.querySelectorAll('.charlib-sort select option')]
+    .map((o) => o.textContent || '')
+  check('画布也有三种排序',
+    sortOpts.includes('名字') && sortOpts.includes('创建时间')
+    && sortOpts.includes('最后编辑时间'), sortOpts.join('/'))
+  ccSetInput(win, doc.querySelector('.charlib-search'), '敌人')
+  await ccWait(180)
+  check('画布名字模糊搜索', doc.querySelectorAll('.charlib-card').length === 1)
+  ccSetInput(win, doc.querySelector('.charlib-search'), 'outpaint')
+  await ccWait(180)
+  check('画布 tag 模糊搜索', doc.querySelectorAll('.charlib-card').length === 1)
+  ccSetInput(win, doc.querySelector('.charlib-search'), '')
+  await ccWait(180)
+  // 点卡片进编辑器
+  doc.querySelector('.charlib-card')
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await ccWait(450)
+  check('点卡片进入节点编辑器', !!doc.querySelector('.canvas-viewport'))
+  check('编辑器有「← 画布库」返回入口',
+    (doc.querySelector('.canvas-backbar')?.textContent || '').includes('画布库'))
+  check('侧栏分组已改叫「画布」', !!section(doc, '画布'))
+  const back = [...doc.querySelectorAll('button')]
+    .find((b) => (b.textContent || '').includes('← 画布库'))
+  back?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await ccWait(300)
+  check('能返回画布库', !!doc.querySelector('.charlib'))
+  check('画布库场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 55) 没有画布 / 没有角色时：给一个足够大的创建入口
+{
+  const { dom } = await boot('', null, {
+    stayInLibrary: true,
+    setupFetch: (f) => { f.setCanvases([]); f.setCharacters([]) },
+  })
+  const doc = dom.window.document
+  const win = dom.window
+  await ccWait(450)
+  check('空画布库放大号创建按钮', !!doc.querySelector('.charlib-big-create'))
+  check('大按钮明确写着创建第一张画布',
+    (doc.querySelector('.charlib-big-create')?.textContent || '').includes('创建第一张画布'))
+  doc.querySelector('.charlib-big-create')
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await ccWait(180)
+  check('点大按钮打开创建面板', !!doc.querySelector('.charlib-create input'))
+  ;[...doc.querySelectorAll('.view-tab')][1]
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await ccWait(350)
+  check('空角色库也放大号创建按钮', !!doc.querySelector('.charlib-big-create'))
+  check('大按钮明确写着创建第一个角色',
+    (doc.querySelector('.charlib-big-create')?.textContent || '').includes('创建第一个角色'))
+  dom.window.close()
+}
 
 const failed = results.filter((r) => !r.ok)
 console.log(`\n${results.length - failed.length}/${results.length} 通过`)
