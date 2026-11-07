@@ -982,10 +982,12 @@ export default function App() {
    * 是人偶图，下游要按优先级猜。实测人偶图在 VNCCS 路线上姿态贴合明显更好，
    * 线框骨架已经整个删掉，所以这里只有一个产物、一个字段。
    */
-  const exportMannequin = useCallback(async (id: string, blob: Blob) => {
+  const exportMannequin = useCallback(async (id: string, blob: Blob, subjects = 1) => {
     try {
       const f = new File([blob], 'mannequin.png', { type: 'image/png' })
-      const up = await uploadImage(f, currentId)
+      // 多角色同框时把角色数随图片一起上传，服务端写 sidecar；
+      // 下游角色迁移读到后会把「single character」契约换成复数。
+      const up = await uploadImage(f, currentId, subjects)
       patchNode(id, {
         image: { path: up.path, url: up.url, w: 768, h: 768 },
       })
@@ -1933,7 +1935,7 @@ export default function App() {
           onToggleFavorite={toggleFavorite}
           onDropType={(t, world) => addNode(t, world)}
           onSpawnImg2Img={spawnImg2Img}
-          onExportSkeleton={(id, blob) => void exportMannequin(id, blob)}
+          onExportSkeleton={(id, blob, subjects) => void exportMannequin(id, blob, subjects)}
           poses={lib.poses}
           poseApply={selectedNode?.poseApply}
           onSavePose={(name, pose, yaw, preview) =>

@@ -33,6 +33,7 @@ from . import qwen_mask
 from . import outpaint as op_mod
 from . import swap as swap_mod
 from . import sheet as sheet_mod
+from . import posesubjects
 from . import paths
 from . import projectstore
 from .engine import DEFAULT_MODEL, Engine
@@ -1786,12 +1787,18 @@ def _qwen_pose_clone(eng: Engine, *, pose_image: str | Path,
     if sem:
         instr += " " + sem
 
+    # 多角色人偶参考图：数出主体数，只在 >=2 时把单主体契约换成复数。
+    # count==1 时 adapt_* 原样返回，老产线的提示词一个字节都不变。
+    n_subjects = posesubjects.subjects_for(pose_image)
+    instr = posesubjects.adapt_instruction(instr, n_subjects)
+    neg = posesubjects.adapt_negative(negative or QWEN_NEG, n_subjects)
+
     if seed < 0:
         seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
     torch.cuda.reset_peak_memory_stats()
     dt = _timer()
     out = _qwen_call(
-        eng, prompt=instr, negative=negative or QWEN_NEG,
+        eng, prompt=instr, negative=neg,
         ref_image=[*chars, cond], width=width, height=height, steps=steps,
         cfg=cfg, seed=seed, model=model, label="wpc",
         transparent=transparent,
@@ -1808,7 +1815,8 @@ def _qwen_pose_clone(eng: Engine, *, pose_image: str | Path,
         transparent=transparent)
     return _save(out, _stamp(tag), "pose_clone", {
         "workflow": "wpc", "scope": scope or "default",
-        "prompt": instr, "negative": negative or QWEN_NEG,
+        "prompt": instr, "negative": neg,
+        "pose_subjects": n_subjects,
         "pose_image": str(pose_image), "char_image": str(char_paths[0]),
         "char_images": char_paths, "n_refs": len(char_paths),
         "backend": "qwen-multiref", "bg": bg, "transparent": transparent,
@@ -2606,6 +2614,15 @@ def _qwen_poseswap(eng: Engine, *, pose_images: Sequence[Path], prompt: str,
     sem = (prompt or "").strip()
     neg = (negative or "").strip() or QWEN_FRAME_NEG
 
+    # 逐帧路线的骨架来自 pose_images；多角色参考图要按主体数改契约，
+    # 否则 QWEN_FRAME_NEG 里的 "two characters" 会明确把第二个角色压掉。
+    # ⚠️ 官方 VNCCS 模板在下面会被整体覆盖（use_vnccs 分支），
+    #    那个模板一个字都不能动，所以这里只改我们自己拼的 head。
+    first_pose = next(iter(pose_images), None) if pose_images else ref_image
+    n_subjects = posesubjects.subjects_for(first_pose) if first_pose else 1
+    head = posesubjects.adapt_instruction(head, n_subjects)
+    neg = posesubjects.adapt_negative(neg, n_subjects)
+
     use_vnccs = (engine or "wpc").lower() in ("vnccs", "wvnccs")
     char = None
     chars: List[Image.Image] = []
@@ -2658,6 +2675,8 @@ def _qwen_poseswap(eng: Engine, *, pose_images: Sequence[Path], prompt: str,
         "centered, " + _qwen_backdrop(bg) + "." + QWEN_FRAME_RULES)
     # VNCCS 本身就是「骨架 + 角色」双图路线，两阶段（先草图再换皮）是多余的，
     # 而且两阶段的第二段用 [角色图, 草图]，与 VNCCS 的图序相反。
+    solo_instr = posesubjects.adapt_instruction(solo_instr, n_subjects)
+    reskin_instr = posesubjects.adapt_instruction(reskin_instr, n_subjects)
     use_two_stage = bool(two_stage) and char is not None and not use_vnccs
     # 两阶段模式下**不用少步蒸馏**：Lightning 是按无控制训练的，
     # 8 步配双图条件（草图 + 换皮）质量会掉；宁可多花一倍时间。
@@ -2812,6 +2831,7 @@ def _qwen_poseswap(eng: Engine, *, pose_images: Sequence[Path], prompt: str,
     meta = {
         "workflow": "w4", "scope": scope or "default",
         "prompt": instr, "prompt_body": sem or None, "negative": neg,
+        "pose_subjects": n_subjects,
         "ref_image": str(ref_image) if ref_image else None,
         "backend": "qwen-vnccs-lora" if use_vnccs else "qwen-pose-ref",
         "approx": True,

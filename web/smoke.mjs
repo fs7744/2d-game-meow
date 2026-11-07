@@ -4890,6 +4890,79 @@ async function ccCreate(doc, win) {
   dom.window.close()
 }
 
+// 62) 多角色导出 → 主体数随图上传 → 下游提示词契约
+{
+  const { dom, errors } = await boot('')
+  const doc = dom.window.document
+  const win = dom.window
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms))
+  const add = [...doc.querySelectorAll('.rail-add')].find((b) =>
+    (b.closest('.rail-item')?.textContent || '').includes('人偶姿势'))
+  add?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await wait(250)
+  const node = () => [...doc.querySelectorAll('.node')].find((n) =>
+    (n.querySelector('.node-kind')?.textContent || '').includes('人偶姿势'))
+
+  const sent = []
+  const fakeWin = { postMessage: (m) => sent.push(m) }
+  const frame = node()?.querySelector('.pose-stage iframe')
+  if (frame) Object.defineProperty(frame, 'contentWindow', { value: fakeWin, configurable: true })
+  const feed = (m) => win.dispatchEvent(new win.MessageEvent('message', { data: m, source: fakeWin }))
+  feed({ type: 'ready' })
+  await wait(180)
+
+  const P = (x) => ({ x, y: 0, z: 0, zoom: 1, rotation: [0, 0, 0] })
+  feed({
+    type: 'sceneState',
+    scene: {
+      characters: [
+        { id: 'c1', name: '角色 1', color: '#fff', pose: null, placement: P(0) },
+        { id: 'c2', name: '角色 2', color: '#6cc4ef', pose: null, placement: P(5) },
+        { id: 'c3', name: '角色 3', color: '#4ade9b', pose: null, placement: P(10) },
+      ],
+      activeId: 'c1', tabs: ['t1'], activeTab: 't1',
+      placements: { t1: { c1: P(0), c2: P(5), c3: P(10) } },
+      mode: 'pose', space: 'world', linkAll: false, cameraParams: null,
+    },
+    history: { canUndo: false, canRedo: false }, commit: true,
+  })
+  await wait(180)
+
+  const before = calls.length
+  const exportBtn = [...(node()?.querySelectorAll('button') || [])]
+    .find((b) => (b.textContent || '').includes('导出人偶图'))
+  exportBtn?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await wait(120)
+  feed({
+    type: 'result',
+    dataURL: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==',
+    source: fakeWin,
+  })
+  await wait(700)
+  const up = calls.slice(before).filter((c) => c.url.includes('/upload')).pop()
+  check('导出人偶图会发上传请求', !!up, JSON.stringify(calls.slice(before).map((c) => c.url)))
+  check('三个角色导出时上传带 subjects=3',
+    !!up && /[?&]subjects=3(&|$)/.test(up.url), up?.url)
+  check('单主体导出不带 subjects（老行为不变）',
+    !/subjects=1/.test(up?.url || ''))
+
+  // 静态契约：sidecar 与提示词适配必须在服务端接好
+  const ps = readFileSync(resolve('..', 'workflows', 'posesubjects.py'), 'utf8')
+  check('主体数 sidecar 读写都在',
+    ps.includes('def write_subjects') && ps.includes('def subjects_for'))
+  check('负向词冲突真的被处理', ps.includes('adapt_negative'))
+  const genpy = readFileSync(resolve('..', 'workflows', 'generate.py'), 'utf8')
+  check('wpc / w4 都按 sidecar 改契约',
+    genpy.includes('posesubjects.subjects_for(pose_image)')
+    && genpy.includes('posesubjects.subjects_for(first_pose)'))
+  check('官方 VNCCS 模板没被改写',
+    genpy.includes('_VNCCS_TEMPLATE = ("replace the pose of <image 2>'))
+  const apppy = readFileSync(resolve('..', 'app.py'), 'utf8')
+  check('上传端点写主体数 sidecar', apppy.includes('posesubjects.write_subjects(out, n_subjects)'))
+  check('多主体契约场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
 const failed = results.filter((r) => !r.ok)
 console.log(`\n${results.length - failed.length}/${results.length} 通过`)
 process.exit(failed.length ? 1 : 0)

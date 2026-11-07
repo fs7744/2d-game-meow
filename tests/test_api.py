@@ -919,3 +919,57 @@ def test_character_prompt_endpoint(client):
         assert body["defaults"]["target_size"] > 0
     finally:
         characters.delete_character(name, remove_files=True)
+
+
+def test_job_finally_releases_matte_sessions(client, monkeypatch):
+    """任务收尾必须放掉 rembg 会话：一个 job 内复用、job 结束释放。
+
+    用假工作流顶掉 Qwen（不加载模型），只验 `_run` 的 finally 有没有调用。
+    """
+    import app as appmod
+    from workflows import generate as gen
+
+    calls = []
+    monkeypatch.setattr(appmod.matte, "release_ai_sessions",
+                        lambda: calls.append(1) or 0)
+
+    def fake(eng, *, prompt: str = ""):
+        return {"file": "fake.png", "meta": {"prompt": prompt}}
+
+    monkeypatch.setattr(gen, "txt2img", fake)
+    r = client.post("/generate", json={"workflow": "w1", "params": {"prompt": "x"}})
+    assert r.status_code == 200
+    job_id = r.json()["job_id"]
+    for _ in range(40):
+        job = client.get(f"/jobs/{job_id}").json()
+        if job["status"] in ("done", "failed"):
+            break
+        time.sleep(0.05)
+    assert calls, "任务结束时必须调 matte.release_ai_sessions()，否则会话永久占显存"
+
+
+def test_job_finally_releases_matte_sessions(client, monkeypatch):
+    """任务收尾必须放掉 rembg 会话：一个 job 内复用、job 结束释放。
+
+    用假工作流顶掉 Qwen（不加载模型），只验 `_run` 的 finally 有没有调用。
+    """
+    import app as appmod
+    from workflows import generate as gen
+
+    calls = []
+    monkeypatch.setattr(appmod.matte, "release_ai_sessions",
+                        lambda: calls.append(1) or 0)
+
+    def fake(eng, *, prompt: str = ""):
+        return {"file": "fake.png", "meta": {"prompt": prompt}}
+
+    monkeypatch.setattr(gen, "txt2img", fake)
+    r = client.post("/generate", json={"workflow": "w1", "params": {"prompt": "x"}})
+    assert r.status_code == 200
+    job_id = r.json()["job_id"]
+    for _ in range(40):
+        job = client.get(f"/jobs/{job_id}").json()
+        if job["status"] in ("done", "failed"):
+            break
+        time.sleep(0.05)
+    assert calls, "任务结束时必须调 matte.release_ai_sessions()，否则会话永久占显存"

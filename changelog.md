@@ -65,6 +65,61 @@
 ⚙ 弹窗；39 新增「每个 LoRA 都有自己的强度滑块 / 未挂载置灰」）。
 真机截图 `sx_ui`：侧栏只剩三个页签、状态条有 ⚙，弹窗里每行都有强度条。
 
+## 2026-11-08 · 收尾：失败回滚、会话释放、多角色提示词契约
+
+把上一轮如实留下的三个尾巴全部处理掉。
+
+### 1) 动作导入失败不再清空用户摆好的姿势（官方 0.7.1 同类修复）
+`applyTimeInner()` 在任何校验**之前**就 `viewer.resetPose()`；关键点算不出、
+骨架映射失败或抛异常时，用户摆了半天的姿势会被清成站姿，界面只报一句
+「这一帧套不上人偶」。
+
+- 新增零依赖模块 `vnccs-pose/pose_guard.js`：`snapshotPose` / `restorePose` /
+  `withPoseRollback`，返回 false 或抛异常都还原（含 modelRotation / camera /
+  IK effector / 极点），并把关节标记重新露出来。
+- `applyTime` 包一层；`animSample` 整批失败时还要从**抽帧前**的快照还原
+  （单帧回滚挡不住前 N-1 帧已经改过的状态）。
+- `loadAnimation` 失败时保留上一次成功载入的 state（它全程不动 viewer 骨骼）。
+- `tools/verify_pose_rollback.mjs`：假 viewer 真单元测 6/6（成功不还原、
+  false 还原、抛异常还原后原样抛出、getPose 挂了不二次崩、无快照 no-op）。
+
+### 2) 抠图会话按任务释放（官方 0.7.5「Keep Models Loaded」的等价物）
+`matte._AI_SESSIONS` 以前永久常驻、无释放入口，跟 Qwen 加载管线要的
+17GB headroom 抢显存。`qwen_llm.py` 早就有「默认用完卸、可 keep」的范式。
+
+- `workflows/matte.py` 加 `clear_ai_sessions()`（能 dispose 就 dispose + gc）、
+  `release_ai_sessions()`、`MEOW_MATTE_KEEP=1` 常驻开关、`ai_session_count()`。
+- `app._run` 的 finally 调一次 `matte.release_ai_sessions()`：**一个 job 内
+  跨上百帧复用一次会话，job 结束才放**，不是每帧重建 ONNX。
+  释放失败绝不影响已经成功的生成任务。
+
+### 3) 多角色参考图与「单主体」提示词契约
+上一轮加了多角色同框，但下游姿态链路写死 `a single character` /
+`Redraw the same character`，更糟的是 `QWEN_FRAME_NEG` 把
+**`two characters` 列为负向词** —— 双人参考图接上去，模型会被明确要求只画一个。
+
+- 主体数走**确定性元数据**，不做图像识别：真机三人图因轻微接触连通域会合并
+  成一块（数成 1），而 w4 常见的 OpenPose 骨架线图又全是断开细线（会数成多个）。
+  导出人偶图时前端把 `scene.characters.length` 一起发给 `/upload?subjects=N`，
+  服务端在图片旁写 `.json` sidecar（文件在磁盘、不进数据库）；生成时按参考图
+  路径读。老图没有 sidecar 一律按 1 处理。
+- 新增 `workflows/posesubjects.py`：sidecar 读写、`adapt_instruction()`（单主体
+  → 复数、补「保持相对位置、不要合并或丢人」）、`adapt_negative()`（去掉
+  `two characters` 负向词）。**count==1 时原样返回，老产线提示词一个字节不变**。
+- 接进 `wpc`（pose_clone）与 `w4`（poseswap）两条文本指令链路，产物 meta 加
+  `pose_subjects`。**官方 `_VNCCS_TEMPLATE` 一个字没动**（配套 LoRA 的固定指令）。
+- ⚠️ 如实说明：文本契约已接线并有单测，但「双人参考图最终出图是否真的保住两个
+  角色」需要 GPU 真跑一轮对比才能定；w4 若传的是骨架帧目录而非人偶图，
+  sidecar 不在帧旁，会安全降级成单主体契约。
+
+### 验证
+`tsc -b` / `vite build` ✓、`check-hints` 34/34、**`node smoke.mjs` 730/730**
+（新增 62：三角色导出 → `/upload?subjects=3` → 静态契约断言）、
+后端 `test_posesubjects + test_matte + test_api + test_pose_scene_contract +
+test_poseset` **83 passed / 6 skipped**、`verify_pose_rollback.mjs` 6/6、
+真机 `verify_pose_scene.py` 6/6、`verify_pose_editor.py` 通过、
+`verify_anim_import.mjs` 全部通过（5 个骨架用例 + 断网本地解析器）。
+
 ## 2026-11-08 · 多角色同框 + 整角色变换 + 撤销/构图/阶段进度
 
 用户明确说「我们也要支持多角色同框」，于是把上一轮按「单主体」前提否掉的

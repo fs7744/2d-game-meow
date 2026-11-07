@@ -85,9 +85,11 @@ from workflows import emotiongen
 from workflows import qwen_llm
 from workflows import library
 from workflows import metadb
+from workflows import matte
 from workflows import matte_screen
 from workflows import paths
 from workflows import poselib
+from workflows import posesubjects
 from workflows import poseset
 from workflows import projectio
 from workflows import projectstore
@@ -324,6 +326,14 @@ def _run(job_id: str, workflow: str, params: Dict[str, Any]) -> None:
     finally:
         job["finished"] = time.time()
         job["elapsed"] = round(job["finished"] - job["started"], 2)
+        # 语义分割会话按「一个任务」复用、任务结束释放（学 qwen_llm 的
+        # 默认用完卸载）。只在收尾做一次，批量抠上百帧不会每帧重建 ONNX，
+        # 也不会让 rembg 永久占着显存跟 Qwen 抢 17GB headroom。
+        # 释放失败绝不能把已经成功的生成任务判成失败。
+        try:
+            matte.release_ai_sessions()
+        except Exception:                     # noqa: BLE001
+            pass
         # 任务历史只记摘要（状态 / 耗时），绝不记图片、精灵帧或模型路径。
         # 索引写失败不能反过来影响生成任务本身 —— 主流程已经在上面收尾了。
         try:
@@ -1087,7 +1097,7 @@ async def save_mask(request: Request, name: str = "mask",
 
 @app.post("/upload")
 async def upload_image(request: Request, name: str = "",
-                       project: str = "") -> Dict[str, Any]:
+                       project: str = "", subjects: int = 0) -> Dict[str, Any]:
     """接收一张本地图（请求体是**原始字节**，不是 multipart）。
 
     为什么不用 multipart：多一个依赖（python-multipart），而浏览器端
@@ -1122,7 +1132,12 @@ async def upload_image(request: Request, name: str = "",
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / f"{uuid.uuid4().hex[:10]}_{stem}{ext}"
     out.write_bytes(data)
+    # 多角色人偶参考图：主体数随图片走（磁盘 sidecar，不进数据库）。
+    # 生成时 generate.py 读它来决定提示词用单主体还是复数契约。
+    n_subjects = posesubjects.normalize_count(subjects)
+    posesubjects.write_subjects(out, n_subjects)
     return {"path": str(out), "url": f"/files/{out.relative_to(ASSETS).as_posix()}",
+            "pose_subjects": n_subjects,
             "name": Path(name).name or out.name,
             "w": size[0], "h": size[1], "format": fmt, "bytes": len(data)}
 

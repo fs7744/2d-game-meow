@@ -25,6 +25,7 @@
 import {
   readSkeleton, resolveRig, buildSourceBones, describeRig,
 } from './anim-skeleton.js'
+import { withPoseRollback } from './pose_guard.js'
 
 const THREE_VER = '0.160.0'
 const CDN_BASE = `https://esm.sh/three@${THREE_VER}`
@@ -134,6 +135,8 @@ export async function loadAnimation(buffer, fileName, viewer) {
       throw new Error('这个文件里没有动画轨道（可能是静态模型，或者动作没烘进文件）')
     }
 
+    // loadAnimation 全程不动 viewer 的骨骼（只读 characterRoot 取根节点 y），
+    // 所以失败时**保留上一次成功载入的动作 state**，别清空用户当前的工作。
     // ---- 骨骼：解析成官方认的 17 个锚点 ----
     const rig = readSkeleton(root)
     const map = resolveRig(rig)
@@ -209,8 +212,10 @@ export function errorState() {
  * 看起来像"动作有残留"。官方 FBX 导入也是每帧先 reset。
  */
 export async function applyTime(t, viewer) {
+  // **失败别把用户摆好的姿势清掉**：applyTimeInner 一开始就 resetPose()，
+  // 后面任何一步失败（关键点算不出 / 骨架映射不上 / 抛异常）都要还原。
   try {
-    return await applyTimeInner(t, viewer)
+    return await withPoseRollback(viewer, () => applyTimeInner(t, viewer))
   } catch (e) {
     lastError = String(e?.message || e)
     throw e

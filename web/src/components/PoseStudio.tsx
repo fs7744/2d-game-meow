@@ -60,7 +60,8 @@ type Props = {
   onPose: (pose: unknown) => void
   onYaw: (yaw: number) => void
   /** 导出白底灰人偶 PNG */
-  onExport: (blob: Blob) => void
+  /** 导出图里的角色数（多角色同框时下游提示词要改成复数契约） */
+  onExport: (blob: Blob, subjects?: number) => void
   exporting?: boolean
   /** 从一张真人图自动提姿势（上传 + DWPose 由 App 层负责） */
   onImportImage?: (file: File) => void
@@ -321,7 +322,8 @@ export default function PoseStudio({
           exportTimer.current = null
         }
         try {
-          onExport(dataUrlToBlob(String(d.dataURL || '')))
+          onExport(dataUrlToBlob(String(d.dataURL || '')),
+            sceneRef.current?.characters?.length ?? 1)
         } catch (er) {
           setErr(`导出结果解析失败：${(er as Error).message}`)
         }

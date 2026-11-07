@@ -238,3 +238,89 @@ def test_fill_holes_fills_interior_but_not_open_gap():
     a2 = np.asarray(out2.getchannel("A"))
     assert a2[64, 64] == 0                                     # 中间仍透明
     assert a2[64, 64] == 0                                     # 中间仍透明
+
+
+# ---------------- 分割会话：任务内复用、任务结束释放 ----------------
+
+class _FakeSession:
+    def __init__(self):
+        self.disposed = False
+
+    def dispose(self):
+        self.disposed = True
+
+
+def test_clear_ai_sessions_releases_all(monkeypatch):
+    a, b = _FakeSession(), _FakeSession()
+    monkeypatch.setattr(M, "_AI_SESSIONS", {
+        "m1:isnet-general-use": a, "m2:birefnet-general": b,
+    })
+    assert M.ai_session_count() == 2
+    assert M.clear_ai_sessions() == 2
+    assert a.disposed and b.disposed, "onnxruntime 会话要真的 dispose"
+    assert M.ai_session_count() == 0
+
+
+def test_clear_ai_sessions_by_name(monkeypatch):
+    a, b = _FakeSession(), _FakeSession()
+    monkeypatch.setattr(M, "_AI_SESSIONS", {
+        "m1:isnet-general-use": a, "m2:birefnet-general": b,
+    })
+    assert M.clear_ai_sessions("birefnet-general") == 1
+    assert b.disposed and not a.disposed
+    assert M.ai_session_count() == 1
+
+
+def test_release_respects_keep_flag(monkeypatch):
+    s = _FakeSession()
+    monkeypatch.setattr(M, "_AI_SESSIONS", {"m1:isnet-general-use": s})
+    monkeypatch.setattr(M, "KEEP_AI_SESSIONS", True)
+    assert M.release_ai_sessions() == 0
+    assert M.ai_session_count() == 1 and not s.disposed
+
+    monkeypatch.setattr(M, "KEEP_AI_SESSIONS", False)
+    assert M.release_ai_sessions() == 1
+    assert M.ai_session_count() == 0 and s.disposed
+
+
+# ---------------- 分割会话：任务内复用、任务结束释放 ----------------
+
+class _FakeSession:
+    def __init__(self):
+        self.disposed = False
+
+    def dispose(self):
+        self.disposed = True
+
+
+def test_clear_ai_sessions_releases_all(monkeypatch):
+    a, b = _FakeSession(), _FakeSession()
+    monkeypatch.setattr(M, "_AI_SESSIONS", {
+        "m1:isnet-general-use": a, "m2:birefnet-general": b,
+    })
+    assert M.ai_session_count() == 2
+    assert M.clear_ai_sessions() == 2
+    assert a.disposed and b.disposed, "onnxruntime 会话要真的 dispose"
+    assert M.ai_session_count() == 0
+
+
+def test_clear_ai_sessions_by_name(monkeypatch):
+    a, b = _FakeSession(), _FakeSession()
+    monkeypatch.setattr(M, "_AI_SESSIONS", {
+        "m1:isnet-general-use": a, "m2:birefnet-general": b,
+    })
+    assert M.clear_ai_sessions("birefnet-general") == 1
+    assert b.disposed and not a.disposed
+    assert M.ai_session_count() == 1
+
+
+def test_release_respects_keep_flag(monkeypatch):
+    s = _FakeSession()
+    monkeypatch.setattr(M, "_AI_SESSIONS", {"m1:isnet-general-use": s})
+    monkeypatch.setattr(M, "KEEP_AI_SESSIONS", True)
+    assert M.release_ai_sessions() == 0
+    assert M.ai_session_count() == 1 and not s.disposed
+
+    monkeypatch.setattr(M, "KEEP_AI_SESSIONS", False)
+    assert M.release_ai_sessions() == 1
+    assert M.ai_session_count() == 0 and s.disposed

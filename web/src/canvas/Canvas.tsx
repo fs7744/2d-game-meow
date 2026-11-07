@@ -45,7 +45,7 @@ type Props = {
   onDropType: (type: string, world: { x: number; y: number }) => void
   onSpawnImg2Img: (id: string) => void
   /** 人偶编辑器导出的白底灰人偶 PNG（Blob），由 App 上传并挂到节点上 */
-  onExportSkeleton?: (id: string, blob: Blob) => void
+  onExportSkeleton?: (id: string, blob: Blob, subjects?: number) => void
   /** 人偶编辑器「从图片」：上传 + DWPose 提关节，点投递给编辑器转 3D 骨骼 */
   onImportPose?: (id: string, file: File) => void | Promise<void>
   /** 姿势库（跨节点共享，落在服务端磁盘） */
@@ -524,7 +524,7 @@ export default function Canvas({
               modelCaps?.[n.params.model || model]?.transparent ?? canTransparent
             }
             onSpawnImg2Img={() => onSpawnImg2Img(n.id)}
-            onExportSkeleton={(blob) => onExportSkeleton?.(n.id, blob)}
+            onExportSkeleton={(blob, subjects) => onExportSkeleton?.(n.id, blob, subjects)}
             onImportPose={(file) => onImportPose?.(n.id, file)}
             poses={poses}
             // 带着 nodeId 往下传：只有目标节点会套用，别的节点必须忽略

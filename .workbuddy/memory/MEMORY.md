@@ -69,8 +69,13 @@
   出图前 `hideForCapture()` 藏 gizmo（我们走 viewport:true，官方 layer 过滤不生效）。
   `PoseScene` 落 `project.json.poseScene`；`app.py::PoseSetFrameReq` 必须显式声明
   scene/camera/characters（Pydantic 默认吞多余字段）。
-- **仍未做**（性价比排序，别当已完成）：`matte._AI_SESSIONS` 学 `qwen_llm` 加用完释放、
-  动作采样失败还原 viewer pose、`pipeline.step` 已透传到 TaskBar 但只做了三段文字。
+- 收尾已做：`vnccs-pose/pose_guard.js`（动作采样失败还原姿势，含整批抽帧）、
+  `matte.release_ai_sessions()`（`app._run` finally 按 job 释放，`MEOW_MATTE_KEEP=1` 常驻）、
+  `workflows/posesubjects.py`（多角色参考图 sidecar + 单主体提示词契约改成复数）。
+  **别用图像识别数主体**：真机三人图连通域合并成 1、骨架线图细线反而数成多个；
+  导出走 `/upload?subjects=N` 写图片旁 `.png.json`，`subjects_for()` 读，老图按 1。
+  官方 `_VNCCS_TEMPLATE` 一字未动。w4 传骨架帧目录时 sidecar 不在帧旁会安全降级。
+- **仍需 GPU 验证**：双人参考图最终出图是否真保住两个角色（文本契约已接线并单测通过）。
 
 ## UI 设计系统（改外观只改末尾统一层）
 - `styles.css` 顶部 `:root` 是**唯一**配色/字体来源（只定义一次）。末尾「全站样式统一层」是最终权威层，

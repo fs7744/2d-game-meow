@@ -52,6 +52,7 @@ import { PoseViewerCore } from './pose_studio/core.js'
 import { loadMorphPack, solveMorph, buildStaticModelData } from './pose_studio/morph_runtime.js'
 import { convertOpenPoseToPose } from './pose_studio/imports/openpose.js'
 import { createSceneController } from './scene.js'
+import { snapshotPose, restorePose } from './pose_guard.js'
 
 const EMBED = new URLSearchParams(location.search).get('embed') === '1'
 
@@ -610,6 +611,9 @@ window.addEventListener('message', async (e) => {
       // 批量抽帧（入库用）：一条动画等分 N 帧，逐帧套到人偶上、连缩略图一起回。
       // 缩略图走**和导出同一条通路**（renderOut → viewport capture），
       // 所以存进姿势库的预览和「导出人偶图」长得一样，只是小一号。
+      // 抽帧前留一份：中途第 N 帧失败时，前面 N-1 帧已经把人偶改得面目全非，
+      // 只回滚单帧不够（applyTime 自己只保它那一次），整批要退回起点。
+      const beforeSample = snapshotPose(v)
       try {
         stopPlay(v)                       // 抽帧期间别让播放抢着改姿势
         const m = await import('./anim-import.js')
@@ -642,6 +646,8 @@ window.addEventListener('message', async (e) => {
         post({ type: 'animFrames', frames: aligned, clip: st.name, yaw: currentYaw })
         postPose(v)
       } catch (e) {
+        restorePose(v, beforeSample)
+        sceneCtl.notePose(beforeSample)
         post({ type: 'error', message: String(e?.message || e) })
       }
     } else if (msg.type === 'animPlay') {

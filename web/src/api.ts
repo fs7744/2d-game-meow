@@ -34,9 +34,10 @@ export type UploadedImage = {
  * 上传一张本地图。请求体是**原始字节**（不是 multipart），后端省掉一个依赖。
  * 返回的 path 是磁盘绝对路径——图生图要拿它当 init_image。
  */
-export async function uploadImage(file: File, project?: string): Promise<UploadedImage> {
-  const q = project ? `?name=${encodeURIComponent(file.name)}&project=${encodeURIComponent(project)}`
-    : `?name=${encodeURIComponent(file.name)}`
+export async function uploadImage(file: File, project?: string, subjects?: number): Promise<UploadedImage> {
+  const q = (project ? `?name=${encodeURIComponent(file.name)}&project=${encodeURIComponent(project)}`
+    : `?name=${encodeURIComponent(file.name)}`)
+    + (subjects && subjects > 1 ? `&subjects=${Math.min(12, Math.round(subjects))}` : '')
   const r = await fetch(`${base}/upload${q}`, {
     method: 'POST',
     headers: { 'Content-Type': file.type || 'application/octet-stream' },

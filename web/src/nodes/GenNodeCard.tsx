@@ -270,7 +270,7 @@ type Props = {
   defaultModel?: string
   onSpawnImg2Img: () => void
   /** 人偶编辑器导出的 PNG（Blob）→ 由 App 上传并挂到节点 image 上 */
-  onExportSkeleton?: (blob: Blob) => void
+  onExportSkeleton?: (blob: Blob, subjects?: number) => void
   /** 姿势库（跨节点共享，落在服务端磁盘）；列表变化时子组件要跟着重 render */
   poses?: PosePreset[]
   /** 外部（姿势库）套过来的姿势；只认 nodeId 是本节点的 */
@@ -972,9 +972,9 @@ export default function GenNodeCard({
             yaw={node.yaw ?? 0}
             onPose={(pose) => onPatch({ pose })}
             onYaw={(yaw) => onPatch({ yaw })}
-            onExport={(blob) => {
+            onExport={(blob, subjects) => {
               setPoseExporting(true)
-              try { onExportSkeleton?.(blob) } finally {
+              try { onExportSkeleton?.(blob, subjects) } finally {
                 window.setTimeout(() => setPoseExporting(false), 600)
               }
             }}

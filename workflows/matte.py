@@ -24,6 +24,7 @@
 """
 from __future__ import annotations
 
+import gc
 import os
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
@@ -293,9 +294,50 @@ def trim(rgba: Image.Image, pad: int = 0) -> Image.Image:
 
 _AI_SESSIONS: dict[str, Any] = {}
 
+#: 默认「一个任务内复用、任务结束释放」（对应官方 0.7.5 的 Keep Models Loaded）。
+#: 批量抠上百帧时每帧重建 ONNX 会话太慢，但让 rembg 永久常驻又会跟 Qwen
+#: 抢显存 —— 引擎加载管线前要 17GB headroom。设 1 可常驻（本机显存富余时）。
+KEEP_AI_SESSIONS = os.environ.get("MEOW_MATTE_KEEP") == "1"
+
+
+def clear_ai_sessions(name: Optional[str] = None) -> int:
+    """释放分割会话，返回释放数量。`name` 只清某一个模型，缺省全清。
+
+    rembg 的 session 里握着 onnxruntime 的推理会话与权重；只删字典引用
+    不一定立刻还显存，所以能 dispose 就 dispose，再 gc 一次。
+    """
+    removed = 0
+    for key in list(_AI_SESSIONS):
+        if name and not key.endswith(f":{name}"):
+            continue
+        sess = _AI_SESSIONS.pop(key, None)
+        dispose = getattr(sess, "dispose", None)
+        if callable(dispose):
+            try:
+                dispose()
+            except Exception:                 # noqa: BLE001
+                pass
+        removed += 1
+    if removed:
+        gc.collect()
+    return removed
+
+
+def release_ai_sessions() -> int:
+    """任务收尾时调：默认释放，MEOW_MATTE_KEEP=1 时保留。"""
+    return 0 if KEEP_AI_SESSIONS else clear_ai_sessions()
+
+
+def ai_session_count() -> int:
+    return len(_AI_SESSIONS)
+
 
 def load_ai_session(model_dir: str | Path, name: str = "isnet-general-use"):
-    """加载（并缓存）分割模型。rembg 通过 U2NET_HOME 找本地权重，不走网络。"""
+    """加载（并缓存）分割模型。rembg 通过 U2NET_HOME 找本地权重，不走网络。
+
+    缓存是**任务级**的：同一个 job 里上百帧共用一次，job 结束由
+    `app._run` 的 finally 调 `release_ai_sessions()` 放掉。
+    """
     key = f"{model_dir}:{name}"
     if key in _AI_SESSIONS:
         return _AI_SESSIONS[key]
