@@ -3637,3 +3637,100 @@ button:disabled, .mini.wide:disabled, .cc-btn:disabled,
   .chars.cc.is-workspace .cc-preview { display: none; }
   .charlib-grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); }
 }
+
+/* ---------------- 全局设置 / LoRA 导入（统一层内，不另起第 8 层） ---------------- */
+/* 侧栏「设置」页里的两个全局项：底模只读 + 抠图方式可改。
+   跟前面的 .block / .src-note 同一套边框、圆角、字号，不另造一套视觉。 */
+.settings-global {
+  display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 4px 8px;
+  padding: 8px 10px; margin-bottom: 10px;
+  border: 1px solid var(--px-edge); border-radius: var(--r-sm);
+  background: var(--bg-1);
+}
+.settings-global-k { font-size: 11px; color: var(--muted-2); }
+.settings-global-v {
+  font-family: var(--mono); font-size: 11.5px; font-weight: 600; color: var(--green);
+}
+.settings-global-note {
+  grid-column: 1 / -1; font-size: 10.5px; line-height: 1.6; color: var(--muted-2);
+}
+.matte-backend-select { width: 100%; margin-top: 4px; }
+
+/* LoRA 导入条：按钮是实心底 + 灰白边（别用 opacity 做低调，近黑底会隐形） */
+.lora-import {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 8px 0 6px; margin-bottom: 4px;
+}
+.lora-import-btn {
+  width: 100%; min-height: 30px; padding: 5px 10px;
+  border: 1px dashed var(--px-edge); border-radius: var(--r-sm);
+  background: var(--bg-3); color: var(--white);
+  font-family: var(--sans); font-size: 11.5px; text-align: left; cursor: pointer;
+}
+.lora-import-btn:hover:not(:disabled) { border-color: var(--green); color: var(--green); }
+.lora-import-btn:disabled { opacity: .42; cursor: default; }
+.lora-file-input { display: none; }
+.lora-import-hint { font-size: 10px; line-height: 1.5; color: var(--muted-2); }
+.lora-import-msg {
+  padding: 6px 9px; margin-bottom: 6px;
+  border: 1px solid var(--px-edge); border-radius: var(--r-sm);
+  background: var(--bg-1); font-size: 10.5px; line-height: 1.6;
+  color: var(--cyan); word-break: break-word;
+}
+
+/* 每条 LoRA 的删除按钮：放右上，不新增 .lora-row（冒烟按行数断言可用数量） */
+.lora-item { position: relative; }
+/* 给右上角的删除按钮留位置：不然体积（114MB）会被 ✕ 压住 */
+.lora-item > .lora-row { padding-right: 26px; }
+.lora-del {
+  position: absolute; right: 2px; top: 3px;
+  width: 22px; height: 22px; padding: 0;
+  border: 1px solid var(--px-edge); border-radius: var(--r-sm);
+  background: var(--bg-3); color: var(--muted-2);
+  font-size: 11px; cursor: pointer;
+}
+.lora-del:hover { color: var(--pink); border-color: var(--pink); }
+.lora-del-confirm {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  padding: 7px 9px; margin: 6px 0;
+  border: 1px solid var(--pink); border-radius: var(--r-sm);
+  background: var(--bg-1); font-size: 10.5px; color: var(--white);
+}
+.lora-del-confirm span { flex: 1 1 100%; line-height: 1.6; }
+.lora-del-confirm button {
+  height: 26px; padding: 0 9px;
+  border: 1px solid var(--px-edge); border-radius: var(--r-sm);
+  background: var(--bg-3); color: var(--white); font-size: 11px; cursor: pointer;
+}
+.lora-del-confirm button.danger { border-color: var(--pink); color: var(--pink); }
+
+/* 格式转换确认：Portal 到 body，遮罩固定全屏，不受侧栏滚动影响 */
+.lora-convert-mask {
+  position: fixed; inset: 0; z-index: 9000;
+  display: grid; place-items: center; padding: 24px;
+  background: rgba(6, 8, 12, .72);
+}
+.lora-convert-dialog {
+  width: min(480px, 100%); max-height: 86vh; overflow: auto;
+  padding: 18px 20px;
+  border: 1px solid var(--px-edge); border-radius: var(--r);
+  background: var(--bg-2); box-shadow: var(--shadow-hard);
+}
+.lora-convert-dialog h3 { margin: 0 0 10px; font-family: var(--sans); font-size: 15px; color: var(--white); }
+.lora-convert-dialog p { margin: 0 0 10px; font-size: 12px; line-height: 1.75; color: var(--muted); }
+.lora-convert-lead b { color: var(--yellow); font-weight: 600; }
+.lora-convert-reason { color: var(--cyan) !important; }
+.lora-convert-facts {
+  display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px;
+}
+.lora-convert-facts span {
+  padding: 3px 8px; border: 1px solid var(--px-edge); border-radius: var(--r-sm);
+  background: var(--bg-1); font-family: var(--mono); font-size: 10.5px; color: var(--muted);
+}
+.lora-convert-keys {
+  font-family: var(--mono); font-size: 10px !important; word-break: break-all;
+  color: var(--muted-2) !important;
+}
+.lora-convert-acts {
+  display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px;
+}

@@ -55,6 +55,39 @@ def _lora_keys(path: Path) -> List[str]:
     return [k for k in head if k != "__metadata__"]
 
 
+def lora_format(keys: List[str]) -> Dict[str, Any]:
+    """判定 LoRA 权重的键名格式，给「导入时是否需要转换」用。
+
+    只有 **diffusers 原生格式** 能被 `pipe.load_lora_weights()` 认出来：
+    `transformer.*.lora.down/up.weight`。ComfyUI 生态发的 Qwen LoRA 大多是
+    `diffusion_model.*.lora_A/B.weight`（还有不带前缀的 `transformer_blocks.`
+    变体），直接挂上去时 diffusers 只打一句 "unexpected keys" 就继续，
+    **静默不生效**——这比报错更坏，所以必须在导入时就拦下来问用户。
+
+    返回 `{format, need_convert, convertible, reason}`，另附键数方便 UI 显示。
+    """
+    ks = [str(k) for k in keys if str(k) != "__metadata__"]
+    is_lora_key = lambda k: (".lora.down." in k or ".lora.up." in k
+                             or ".lora_A" in k or ".lora_B" in k)
+    diffusers = [k for k in ks if k.startswith("transformer.") and is_lora_key(k)]
+    comfy = [k for k in ks if is_lora_key(k)
+             and (k.startswith("diffusion_model.")
+                  or k.startswith("transformer_blocks."))]
+    if diffusers and not comfy:
+        return {"format": "diffusers", "need_convert": False, "convertible": True,
+                "reason": "已是 diffusers 原生格式，可直接挂载", "tensors": len(ks)}
+    if comfy:
+        return {"format": "comfyui", "need_convert": True, "convertible": True,
+                "reason": "这是 ComfyUI 格式（diffusion_model. + lora_A/B），"
+                          "当前底模需要 diffusers 格式（transformer. + lora.down/up）",
+                "tensors": len(ks)}
+    # 既没有可识别的 lora 键，也不是 diffusers 格式：可能是别的模型架构的
+    # LoRA（SDXL / Flux / Wan），转了也不会生效，明确告诉用户别硬转。
+    return {"format": "unknown", "need_convert": True, "convertible": False,
+            "reason": "没找到 Qwen-Image 的 LoRA 键（可能不是本底模的权重）",
+            "tensors": len(ks)}
+
+
 def _fp8_linear_cls():
     """fp8(E4M3) 权重量化 Linear：权重存 fp8 buffer，前向时反量化成 bf16 再算。
 
@@ -242,7 +275,18 @@ class Engine:
             pipe = self._load_qwen21(p)
             self._cache[key] = pipe
             log.info("%s 加载 %.1fs", key, time.perf_counter() - t0)
-        return self._get(key)
+        pipe = self._get(key)
+        # 全局 LoRA 是**懒恢复**的：启动时只把规格记进内存，等管线第一次真正
+        # 加载才挂上去。否则「重开应用」会为了恢复一个 LoRA 白白占 15GB 显存。
+        # _sync_loras 有签名比对，重复调用不会反复加载。
+        #
+        # 先剔掉文件已经不在了的条目：用户可能在文件管理器里手删过权重，
+        # 留着会让**每一次生成**都抛 FileNotFoundError（比不挂更难查）。
+        d = self.lora_dir()
+        self._user_specs = [s for s in self._user_specs
+                            if (d / f"{s.get('name')}.safetensors").is_file()]
+        self._sync_loras(pipe)
+        return pipe
 
     # ---------- Qwen-Image-2.1 ----------
 
@@ -269,18 +313,49 @@ class Engine:
             return out
         for f in sorted(d.glob("*.safetensors")):
             try:
-                keys = _lora_keys(f)
+                info = lora_format(_lora_keys(f))
             except Exception:                 # noqa: BLE001
                 continue
-            if not any(k.startswith("transformer.") for k in keys):
+            if info["format"] != "diffusers":
                 continue
             out.append({
                 "name": f.stem,
                 "file": str(f),
                 "size_mb": round(f.stat().st_size / 1024 / 1024, 1),
-                "tensors": len(keys),
+                "tensors": info["tensors"],
+                "format": info["format"],
             })
         return out
+
+    def restore_loras(self, specs: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """从全局设置恢复用户挂载的 LoRA，**不加载模型、不占显存**。
+
+        磁盘是文件的唯一权威：设置里记着但文件已经不在的条目直接丢掉，
+        免得每次生成都在 `_sync_loras` 里抛 FileNotFoundError。
+        真正挂载推迟到 `txt2img_pipe()` 第一次被调用时。
+        """
+        have = {i["name"] for i in self.available_loras()}
+        items = [{"name": str(s.get("name") or "").strip(),
+                  "scale": float(s.get("scale", 1.0))}
+                 for s in specs if isinstance(s, dict)]
+        items = [s for s in items if s["name"] in have]
+        self._user_specs = items
+        self._loaded_sig = None
+        return items
+
+    def forget_lora(self, name: str) -> None:
+        """删掉某个 LoRA 文件后，把内存里相关的挂载状态一并清掉。
+
+        不为了清状态去加载管线（那会白占 15GB 显存）；只让签名失效，
+        下次 `txt2img_pipe()` 重新同步即可。
+        """
+        self._user_specs = [s for s in self._user_specs
+                            if str(s.get("name")) != name]
+        self._temp_specs = [s for s in self._temp_specs
+                            if str(s.get("name")) != name]
+        self._active_loras = [a for a in getattr(self, "_active_loras", [])
+                              if a.get("name") != name]
+        self._loaded_sig = None
 
     def apply_loras(self, pipe, specs: Sequence[Dict[str, Any]],
                     scope: str = "user") -> List[str]:
@@ -384,8 +459,21 @@ class Engine:
         self._loaded_sig = sig
 
     def active_loras(self) -> List[Dict[str, Any]]:
-        """当前生效的 LoRA（供 /loras 与前端显示）。"""
-        return list(getattr(self, "_active_loras", []) or [])
+        """当前生效的 LoRA（供 /loras 与前端显示）。
+
+        **懒恢复期间**管线还没加载，`_active_loras` 是空的，但 `_user_specs`
+        里已经有用户上次挂的规格。只报前者的话，重开应用界面会显示「没挂任何
+        LoRA」，而下一次生成却真的带着它们 —— 显示与行为不一致。所以把还没
+        挂上管的规格也补进来；已挂的按真实状态优先。
+        """
+        out = [dict(a) for a in (getattr(self, "_active_loras", []) or [])]
+        seen = {a.get("name") for a in out}
+        for s in self._user_specs:
+            name = str(s.get("name") or "").strip()
+            if name and name not in seen:
+                out.append({"name": name, "scale": float(s.get("scale", 1.0))})
+                seen.add(name)
+        return out
 
     # ---------------- 快速模式（少步蒸馏） ----------------
 

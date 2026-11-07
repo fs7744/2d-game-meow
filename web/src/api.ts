@@ -106,7 +106,7 @@ function common(params: GenParams, opts: SubmitOpts) {
     pixel: params.pixel,
     palette: params.palette,
     matte: params.matte,
-    // 底模与抠图后端是全局设置，不在节点参数里
+    // 底模与抠图方式都是全局设置（/settings，SQLite 持久化），不再由节点决定
     model: opts.model || 'qwen-image-2.1',
     matte_backend: opts.matteBackend || 'auto',
     // 透明背景：只有 Qwen-Image-2.1 原生支持（VAE 第 4 通道）。
@@ -1349,6 +1349,51 @@ export type QwenLora = {
   file: string
   size_mb: number
   tensors: number
+  /** 新增字段是可选的：老后端的 /loras 不带它 */
+  format?: string
+}
+
+/** 全局设置（SQLite 里的权威副本，重开应用不丢）。 */
+export type GlobalSettings = {
+  base_model: string
+  matte_backend: string
+  loras: { name: string; scale: number }[]
+  fast_mode: boolean
+}
+
+const SETTINGS_FALLBACK: GlobalSettings = {
+  base_model: 'qwen-image-2.1', matte_backend: 'auto', loras: [], fast_mode: false,
+}
+
+export async function fetchGlobalSettings(): Promise<GlobalSettings> {
+  try {
+    const r = await fetch(`${base}/settings`)
+    if (!r.ok) return SETTINGS_FALLBACK
+    const j = await r.json() as Partial<GlobalSettings>
+    return {
+      base_model: j.base_model || SETTINGS_FALLBACK.base_model,
+      matte_backend: j.matte_backend || 'auto',
+      loras: Array.isArray(j.loras) ? j.loras : [],
+      fast_mode: !!j.fast_mode,
+    }
+  } catch { return SETTINGS_FALLBACK }
+}
+
+/** 局部合并写全局设置（不传的键不动）。 */
+export async function putGlobalSettings(
+  patch: Partial<GlobalSettings>,
+): Promise<GlobalSettings> {
+  const r = await fetch(`${base}/settings`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  })
+  if (!r.ok) {
+    let msg = `HTTP ${r.status}`
+    try { const j = await r.json(); if (j?.detail) msg = String(j.detail) } catch { /* 非 JSON */ }
+    throw new Error(msg)
+  }
+  return r.json() as Promise<GlobalSettings>
 }
 
 /** 当前生效的 LoRA */
@@ -1397,6 +1442,77 @@ export async function applyLoras(
 /** 卸载全部 LoRA，回到基座模型 */
 export async function unloadLoras(): Promise<void> {
   await fetch(`${base}/loras/unload`, { method: 'POST' })
+}
+
+/* --------------------------------------------------------------------------
+   LoRA 导入：两步走，格式不符时由用户确认转换
+   -------------------------------------------------------------------------- */
+
+/** 导入第一步的只读检测结果。 */
+export type LoraInspect = {
+  token: string
+  name: string
+  original_name: string
+  size_mb: number
+  tensors: number
+  format: 'diffusers' | 'comfyui' | 'unknown'
+  need_convert: boolean
+  convertible: boolean
+  reason: string
+  sample_keys: string[]
+}
+
+export type LoraCommit = {
+  item: QwenLora
+  converted: boolean
+  skipped: number
+  name: string
+}
+
+/**
+ * 导入第一步：把原始字节发给后端暂存并检测格式。
+ *
+ * 跟 `/upload` 一样走**原始字节**（不引 multipart）；文件名放 query。
+ * 这一步绝不写 `models/lora/`，用户没确认转换之前磁盘上只有一份暂存文件。
+ */
+export async function inspectLora(file: File): Promise<LoraInspect> {
+  const r = await fetch(
+    `${base}/loras/inspect?name=${encodeURIComponent(file.name || 'lora.safetensors')}`,
+    { method: 'POST', body: file },
+  )
+  if (!r.ok) {
+    let msg = `HTTP ${r.status}`
+    try { const j = await r.json(); if (j?.detail) msg = String(j.detail) } catch { /* 非 JSON */ }
+    throw new Error(msg)
+  }
+  return r.json() as Promise<LoraInspect>
+}
+
+/** 导入第二步：`convert=true` 只在用户点过「确认转换」之后才传。 */
+export async function commitLora(
+  token: string, convert: boolean, name?: string,
+): Promise<LoraCommit> {
+  const r = await fetch(`${base}/loras/commit`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token, convert, name: name || '' }),
+  })
+  if (!r.ok) {
+    let msg = `HTTP ${r.status}`
+    try { const j = await r.json(); if (j?.detail) msg = String(j.detail) } catch { /* 非 JSON */ }
+    throw new Error(msg)
+  }
+  return r.json() as Promise<LoraCommit>
+}
+
+export async function deleteLora(name: string): Promise<{ ok: boolean; name: string }> {
+  const r = await fetch(`${base}/loras/${encodeURIComponent(name)}`, { method: 'DELETE' })
+  if (!r.ok) {
+    let msg = `HTTP ${r.status}`
+    try { const j = await r.json(); if (j?.detail) msg = String(j.detail) } catch { /* 非 JSON */ }
+    throw new Error(msg)
+  }
+  return r.json() as Promise<{ ok: boolean; name: string }>
 }
 
 /**
@@ -1543,6 +1659,9 @@ export function submitMatte(
     init_image: initImage,
     background: background || undefined,
     bg_color: bgColor || undefined,
+    // 抠图节点是**纯抠图**，没有 `matte` 开关；以前这里漏带 matte_backend，
+    // 导致侧栏「抠图方式」对它对不上，永远走后端默认 auto。
+    matte_backend: opts.matteBackend || 'auto',
     scope: opts.scope || undefined,
   })
 }

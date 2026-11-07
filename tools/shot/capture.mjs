@@ -262,6 +262,8 @@ async function main() {
         status: 200, headers: { 'Content-Type': 'application/json' },
       })
       const NOW = 1793500000
+      const gsettings = { base_model: 'qwen-image-2.1', matte_backend: 'auto',
+        loras: [{ name: 'qwen21_anyangle', scale: 0.8 }], fast_mode: false }
       const chars = [
         { name: '白色猫骑士', cover_url: '/icon.png', sex: 'female', style: 'ghibli_miyazaki',
           nsfw: false, costumes: ['Naked', 'Knight'], sprites: 12, config_version: '2.0',
@@ -296,6 +298,26 @@ async function main() {
         if (u.endsWith('/projects') && m === 'GET') return json({ count: canvases.length,
           items: canvases, current: 'c1' })
         if (u.endsWith('/library') && m === 'GET') return json({ prompts: [], poses: [], prefs: {} })
+        if (u.endsWith('/settings')) {
+          if (m === 'PUT') Object.assign(gsettings, JSON.parse(init.body || '{}'))
+          return json({ ...gsettings })
+        }
+        if (u.endsWith('/loras') && m === 'GET') return json({
+          items: [
+            { name: 'qwen21_anyangle', file: 'models/lora/qwen21_anyangle.safetensors',
+              size_mb: 114, tensors: 384, format: 'diffusers' },
+            { name: 'vnccs_pose', file: 'models/lora/vnccs_pose.safetensors',
+              size_mb: 152, tensors: 320, format: 'diffusers' },
+          ],
+          active: gsettings.loras,
+        })
+        if (u.includes('/loras/inspect')) return json({
+          token: 'previewtoken01', name: 'my_style',
+          original_name: 'my_style.safetensors', size_mb: 120, tensors: 384,
+          format: 'comfyui', need_convert: true, convertible: true,
+          reason: '这是 ComfyUI 格式（diffusion_model. + lora_A/B），当前底模需要 diffusers 格式',
+          sample_keys: ['diffusion_model.transformer_blocks.0.attn.to_q.lora_A.weight'],
+        })
         if (u.endsWith('/meta') && m === 'PATCH') return json({ ok: true })
         if (u.endsWith('/character-tasks')) return json({ items: [] })
         if (u.includes('/characters/') && u.endsWith('/prompt')) return json({
@@ -363,6 +385,22 @@ async function main() {
     await fshot('25-cc-step3-adv')
     await fp.evaluate(() => document.querySelector('.cc-step[data-step="4"]')?.click())
     await fshot('26-cc-step4')
+    // 回画布编辑器，拍「全局设置 / LoRA 导入」
+    await fp.goto('http://127.0.0.1:8123/index.html?editor=1',
+      { waitUntil: 'networkidle2', timeout: 60000 })
+    await sleep(900)
+    await fp.evaluate(() => [...document.querySelectorAll('.rail-tab')]
+      .find((b) => (b.textContent || '').includes('设置'))?.click())
+    await fshot('27-settings-global')
+    // 选一个 ComfyUI 格式的 LoRA → 应弹出「需要转换」确认框
+    await fp.evaluate(() => {
+      const input = document.querySelector('.lora-file-input')
+      if (!input) return
+      const file = new File([new Uint8Array([1, 2, 3])], 'my_style.safetensors')
+      Object.defineProperty(input, 'files', { configurable: true, get: () => [file] })
+      input.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    await fshot('28-lora-convert', 1000)
     await fp.close()
   }
 

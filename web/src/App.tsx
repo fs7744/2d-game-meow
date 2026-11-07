@@ -18,6 +18,7 @@ import {
   getLibrary, seedLibraryApi, addPromptApi, removePromptApi,
   renamePoseApi, removePoseApi, addPoseApi, createProjectPoseSet,
   fetchLoras, applyLoras, setFastMode, type QwenLora, type ActiveLora,
+  fetchGlobalSettings, putGlobalSettings,
   submitOutpaint, submitOutfitSwap, submitFaceSwap, submitVnccsPose,
   exportProject, importProject, fetchTemplates, saveTemplate, instantiateTemplate,
   deleteTemplate, type TemplateInfo,
@@ -151,7 +152,8 @@ const DEFAULT_PARAMS: GenParams = {
   // 透明底默认关：只有 Qwen 底模支持，SD 系列开了会被后端忽略，
   // 默认打开会让用户误以为选 SD 时也能出透明图
   transparent: false,
-  // 空串 = 跟随侧栏的「新节点默认底模」。节点一旦自己选过就写具体值
+  // 旧存档兼容字段：底模是**全局唯一**的 Qwen-Image-2.1，节点里不再提供选择。
+  // migrate() 会把旧存档里的 sd15 / sdxl 一律清成空串，别让它们混进请求。
   model: '',
 }
 
@@ -228,7 +230,12 @@ function migrate(n: GenNode): GenNode {
   // 每张开一屏参数会把注意力全吃掉。要看参数点节点上的「⚙ 参数」。
   const done = n.job?.status === 'done' && !!n.job.url
   const view: NodeView = done && n.view === 'expanded' ? 'result' : (n.view ?? 'expanded')
-  return { ...n, kind: kind as NodeKind, params: { ...DEFAULT_PARAMS, ...n.params }, view }
+  const params = { ...DEFAULT_PARAMS, ...n.params }
+  // **旧存档里可能钉着 sd15 / sdxl**：底模下拉删掉之后这些值仍会被当作
+  // params.model 提交，而 engine._check_model 只认 Qwen，整单会直接失败。
+  // 这里统一清成「跟随全局」，不静默留一个必然报错的值。
+  if (params.model && params.model !== 'qwen-image-2.1') params.model = ''
+  return { ...n, kind: kind as NodeKind, params, view }
 }
 
 // 仅供截图/联调：?demo=1 铺一个示例节点，?demo=gen 同时触发一次生成
@@ -296,7 +303,13 @@ export default function App() {
   // 底模能力表（透明底 / 指令改图 / LoRA）。当前底模支不支持透明底由它决定，
   // 不能按名字判断——底模名可以是任意目录名。
   const [caps, setCaps] = useState<Record<string, ModelCaps>>({})
+  /** 全局抠图方式：服务端 /settings 是权威，重开应用不丢。 */
   const [matteBackend, setMatteBackend] = useState('auto')
+  const changeMatteBackend = useCallback(async (v: string) => {
+    setMatteBackend(v)
+    try { await putGlobalSettings({ matte_backend: v }) }
+    catch (e) { setNotice(`保存抠图方式失败：${e instanceof Error ? e.message : '未知错误'}`) }
+  }, [])
   // Qwen LoRA：全局状态（挂上后对所有生成生效）
   const [loras, setLoras] = useState<QwenLora[]>([])
   const [activeLoras, setActiveLoras] = useState<ActiveLora[]>([])
@@ -315,6 +328,7 @@ export default function App() {
     try {
       await setFastMode(on)
       setFastModeState(on)
+      try { await putGlobalSettings({ fast_mode: on }) } catch { /* 同上 */ }
       setNotice(on
         ? '快速模式已开：步数压到 8（Lightning 少步蒸馏），实测 -46%'
         : '快速模式已关')
@@ -330,6 +344,8 @@ export default function App() {
     try {
       const r = await applyLoras(items)
       setActiveLoras(r.items)
+      // 全局设置落盘：重开应用时服务端会懒恢复这些挂载（不占显存）。
+      try { await putGlobalSettings({ loras: items }) } catch { /* 落盘失败不打断本次操作 */ }
       setNotice(items.length
         ? `已挂载 LoRA：${items.map((x) => x.name).join('、')}`
         : '已卸载全部 LoRA')
@@ -521,6 +537,18 @@ export default function App() {
     return () => { alive = false }
   }, [])
   useEffect(() => { reloadLoras() }, [reloadLoras])
+
+  /** 全局设置是服务端权威：拉回来覆盖本地初值，界面与后端从第一帧就一致。 */
+  useEffect(() => {
+    let alive = true
+    fetchGlobalSettings().then((s) => {
+      if (!alive) return
+      setMatteBackend(s.matte_backend || 'auto')
+      setFastModeState(!!s.fast_mode)
+      setModel(s.base_model || 'qwen-image-2.1')
+    }).catch(() => { /* 后端没起就用默认值，界面照用 */ })
+    return () => { alive = false }
+  }, [])
 
   useEffect(() => {
     fetchModels().then((m) => {
@@ -1256,7 +1284,8 @@ export default function App() {
      * SDXL 精灵帧是常态，全局一个底模做不到。引擎按 `f"{kind}:{model}"`
      * 分别缓存管线，两套并存只是多占显存。
      */
-    const mdl = node.params.model || model
+    // 底模是全局唯一设置（节点里不再选），旧存档的 params.model 已在 migrate 里归一。
+  const mdl = model
     // 抠图节点不需要提示词（纯图像处理）；文生图/图生图需要
     const needPrompt = node.kind === 'gen' || node.kind === 'img2img' || node.kind === 'inpaint'
       || node.kind === 'airepaint'
@@ -1814,7 +1843,10 @@ export default function App() {
           onApplyFav={applyFavorite}
           onRemoveFav={removeFavorite}
           matteBackend={matteBackend}
-          onMatteBackend={setMatteBackend}
+          onMatteBackend={changeMatteBackend}
+          baseModel={model}
+          onLoraImported={reloadLoras}
+          onLoraDeleted={reloadLoras}
           loras={loras}
           activeLoras={activeLoras}
           onLorasChange={(items) => void changeLoras(items)}

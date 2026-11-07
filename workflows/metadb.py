@@ -17,7 +17,11 @@
 
 表：
   characters  角色元数据（name 主键；tags/custom_tags/costumes 存 JSON 字符串）
+  canvases    画布元数据（id 主键）
   tasks       任务历史摘要（job_id 主键；只记状态与耗时，不记图片路径）
+  settings    全局设置（key 主键；value 是 JSON）
+              —— 底模 / 抠图方式 / 生效的 LoRA / 快速模式。这些以前只在
+              前端内存里，重开一次就没了；现在服务端是权威，重启自动恢复。
 """
 from __future__ import annotations
 
@@ -65,6 +69,11 @@ CREATE TABLE IF NOT EXISTS canvases (
     created_at  REAL NOT NULL,
     updated_at  REAL NOT NULL,
     synced_at   REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL DEFAULT '',
+    updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_characters_updated ON characters(updated_at);
 CREATE INDEX IF NOT EXISTS idx_canvases_updated ON canvases(updated_at);
@@ -328,3 +337,80 @@ def update_canvas_meta(cid: str, custom_tags: Optional[List[str]] = None,
                     (json.dumps(tags, ensure_ascii=False), text, time.time(), cid))
         return _row_to_canvas(con.execute(
             "SELECT * FROM canvases WHERE id = ?", (cid,)).fetchone())
+
+
+# --------------------------------------------------------------------------
+# 全局设置：底模 / 抠图方式 / 生效的 LoRA / 快速模式
+# --------------------------------------------------------------------------
+
+#: 允许写入的 key 与默认值。**白名单**而不是任意键：前端 `PUT /settings`
+#: 是局部合并，写错一个 key 不该悄悄留一条永远用不上的脏数据。
+DEFAULT_SETTINGS: Dict[str, Any] = {
+    "base_model": "qwen-image-2.1",
+    "matte_backend": "auto",
+    "loras": [],            # [{"name": str, "scale": float}]
+    "fast_mode": False,
+}
+
+#: matte.matte_auto 接受的全部后端值（未知值会静默回落 color，别让 UI 存进去）。
+MATTE_BACKENDS = ("auto", "color", "u2net", "ai", "isnet", "birefnet")
+
+
+def get_settings() -> Dict[str, Any]:
+    """读全局设置；缺的键用默认值补齐（老库首次升级时表里是空的）。"""
+    init_db()
+    out = dict(DEFAULT_SETTINGS)
+    with _connect() as con:
+        for row in con.execute("SELECT key, value FROM settings"):
+            k = row["key"]
+            if k not in DEFAULT_SETTINGS:
+                continue
+            try:
+                out[k] = json.loads(row["value"])
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
+def set_settings(patch: Dict[str, Any]) -> Dict[str, Any]:
+    """局部合并写全局设置，返回合并后的完整设置。
+
+    只收白名单里的 key；`loras` 逐项清洗成 `{name, scale}`，避免把整个
+    LoRA 对象（含绝对路径）塞进元数据。
+    """
+    init_db()
+    clean: Dict[str, Any] = {}
+    for key, value in (patch or {}).items():
+        if key not in DEFAULT_SETTINGS:
+            continue
+        if key == "matte_backend":
+            v = str(value or "auto")
+            clean[key] = v if v in MATTE_BACKENDS else "auto"
+        elif key == "loras":
+            items = []
+            for it in (value if isinstance(value, list) else []):
+                if not isinstance(it, dict):
+                    continue
+                name = str(it.get("name") or "").strip()
+                if not name:
+                    continue
+                try:
+                    scale = float(it.get("scale", 1.0))
+                except (TypeError, ValueError):
+                    scale = 1.0
+                items.append({"name": name, "scale": round(scale, 4)})
+            clean[key] = items
+        elif key == "fast_mode":
+            clean[key] = bool(value)
+        else:
+            clean[key] = str(value or DEFAULT_SETTINGS[key])
+    now = time.time()
+    with _connect() as con:
+        for k, v in clean.items():
+            con.execute(
+                "INSERT INTO settings(key, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, "
+                "updated_at=excluded.updated_at",
+                (k, json.dumps(v, ensure_ascii=False), now),
+            )
+    return get_settings()

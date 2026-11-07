@@ -19,6 +19,11 @@
   PUT  /library/poses/{pid}  改名
   DELETE /library/poses/{pid}
   PUT  /library/prefs      写界面偏好
+  GET/PUT /settings        全局设置（底模 / 抠图方式 / 生效 LoRA / 快速模式，SQLite）
+  GET  /loras              可用 LoRA；POST /loras/apply、/loras/unload
+  POST /loras/inspect      导入第一步：暂存 + 只读格式检测（是否需要转换）
+  POST /loras/commit       导入第二步：用户确认后落盘（必要时先转格式）
+  DELETE /loras/{name}     删除已导入的 LoRA
   GET  /projects/{id}/pose_sets            项目里的姿势集（动作抽帧存下来的）
   POST /projects/{id}/pose_sets            新建一个姿势集文件夹（同名拒绝）
   GET  /projects/{id}/pose_sets/{name}     姿势集的帧表
@@ -85,6 +90,7 @@ from workflows import poselib
 from workflows import poseset
 from workflows import projectio
 from workflows import projectstore
+from workflows import lorastore
 from workflows.assetdb import AssetIndex
 from workflows.engine import Engine
 
@@ -106,6 +112,23 @@ UPLOAD_FORMATS = {"PNG": ".png", "JPEG": ".jpg", "WEBP": ".webp",
 app = FastAPI(title="2D Game Asset Pipeline", version="0.1.0")
 engine = Engine(paths.MODELS_DIR)
 index = AssetIndex(ASSETS)
+
+
+def _restore_global_settings() -> None:
+    """启动时把全局设置灌回运行态。
+
+    **不能为了恢复 LoRA 去加载管线**：那会在用户还没点「生成」时就占掉十几 GB
+    显存。`Engine.restore_loras()` 只记规格，真正挂载推迟到第一次 `txt2img_pipe()`。
+    """
+    try:
+        s = metadb.get_settings()
+        engine.restore_loras(s.get("loras") or [])
+        engine.set_fast_mode(bool(s.get("fast_mode")))
+    except Exception as exc:                  # noqa: BLE001
+        log.warning("恢复全局设置失败（不影响使用）：%s", exc)
+
+
+_restore_global_settings()
 
 # 任务表要有上限：老实现是无界 dict，长跑服务会把每个任务的完整 result/meta
 # 一直留在内存里（SPA 一开就是几 MB）。只保留最近 N 条，且优先淘汰已结束的。
@@ -258,6 +281,14 @@ def _run(job_id: str, workflow: str, params: Dict[str, Any]) -> None:
         # **排除第一个位置参数**（eng）：不然客户端传 {"eng": 123} 会被收下，
         # 然后 fn(engine, eng=123) 抛 "got multiple values for argument"。
         kw_names = set(list(sig.parameters)[1:])
+        # 全局「抠图方式」以服务端设置为准：请求没显式给就补上。**只在目标函数
+        # 真的收这个形参时补**——否则会被下面的签名过滤丢进 params_ignored，
+        # 在产物里留一条「matte_backend 被忽略」的假警告。
+        if "matte_backend" in kw_names and "matte_backend" not in params:
+            try:
+                params["matte_backend"] = metadb.get_settings()["matte_backend"]
+            except Exception:                 # noqa: BLE001
+                params["matte_backend"] = "auto"
         accepted = {k: v for k, v in params.items() if k in kw_names}
         # 多余的键**全部记账**：以前把 lora / lora_scale 排除在外（那时还有
         # 专门的解析逻辑），现在 LoRA 整套已删，它们和 clip_skip / strength
@@ -441,6 +472,113 @@ def unload_loras() -> Dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(400, f"卸载 LoRA 失败：{exc}") from exc
     return {"active": [], "items": []}
+
+
+# ---------------------------------------------------------------------------
+# 全局设置 + LoRA 导入
+#
+# 以前底模 / 抠图方式 / LoRA / 快速模式只在前端 useState 里，重开一次全丢；
+# 现在 SQLite 是权威，服务端启动自动恢复（见 _restore_global_settings）。
+# ---------------------------------------------------------------------------
+
+class SettingsReq(BaseModel):
+    """`PUT /settings` 的局部补丁；None 的键不动。"""
+
+    base_model: Optional[str] = None
+    matte_backend: Optional[str] = None
+    loras: Optional[List[Dict[str, Any]]] = None
+    fast_mode: Optional[bool] = None
+
+
+@app.get("/settings")
+def get_global_settings() -> Dict[str, Any]:
+    """读全局设置（底模 / 抠图方式 / 生效的 LoRA / 快速模式）。"""
+    return metadb.get_settings()
+
+
+@app.put("/settings")
+def put_global_settings(req: SettingsReq) -> Dict[str, Any]:
+    """写全局设置并让运行态立刻跟上（都不加载模型、不占显存）。"""
+    patch = req.model_dump(exclude_none=True)
+    s = metadb.set_settings(patch)
+    if "loras" in patch:
+        engine.restore_loras(s["loras"])
+    if "fast_mode" in patch:
+        engine.set_fast_mode(s["fast_mode"])
+    return s
+
+
+@app.post("/loras/inspect")
+async def lora_inspect(request: Request, name: str = "") -> Dict[str, Any]:
+    """导入第一步：收原始字节 → 暂存 → **只读**格式检测，不写 models/lora/。
+
+    返回 `need_convert` / `convertible` / `reason`，前端据此决定要不要弹
+    「需要转换，是否继续」的确认框。用户没确认之前，磁盘上只有一份暂存文件。
+    """
+    if name and not name.lower().endswith(".safetensors"):
+        raise HTTPException(400, "只支持 .safetensors 格式的 LoRA 文件")
+    lorastore.STAGE_DIR.mkdir(parents=True, exist_ok=True)
+    token = lorastore.new_token()
+    tmp = lorastore.stage_path(token)
+    total = 0
+    try:
+        with open(tmp, "wb") as f:
+            async for chunk in request.stream():
+                total += len(chunk)
+                if total > lorastore.MAX_LORA_BYTES:
+                    raise HTTPException(
+                        413, f"文件太大（上限 {lorastore.MAX_LORA_BYTES // 2**30}GB）")
+                f.write(chunk)
+        if total == 0:
+            raise HTTPException(400, "空文件")
+        info = lorastore.inspect(tmp, name)
+    except HTTPException:
+        tmp.unlink(missing_ok=True)
+        raise
+    except Exception as exc:                  # noqa: BLE001
+        tmp.unlink(missing_ok=True)
+        raise HTTPException(400, f"无法读取这个 LoRA：{exc}") from exc
+    return {"token": token, **info}
+
+
+class LoraCommitReq(BaseModel):
+    """导入第二步：`convert=True` 才是用户确认过转换。"""
+
+    token: str
+    convert: bool = False
+    name: str = ""
+
+
+@app.post("/loras/commit")
+def lora_commit(req: LoraCommitReq) -> Dict[str, Any]:
+    """把暂存文件（必要时先转格式）落进 `models/lora/`。"""
+    try:
+        out = lorastore.commit(req.token, req.convert, req.name)
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:                  # noqa: BLE001
+        raise HTTPException(500, f"导入 LoRA 失败：{exc}") from exc
+    # 同名重导入：清掉内存里旧的挂载规格，再按磁盘上的新文件重新恢复。
+    engine.forget_lora(out["name"])
+    engine.restore_loras(metadb.get_settings().get("loras") or [])
+    return out
+
+
+@app.delete("/loras/{name}")
+def lora_delete(name: str) -> Dict[str, Any]:
+    """删掉一个已导入的 LoRA（文件 + 全局设置里的挂载记录）。"""
+    try:
+        removed = lorastore.delete(name)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    engine.forget_lora(removed)
+    s = metadb.get_settings()
+    rest = [x for x in (s.get("loras") or []) if x.get("name") != removed]
+    s = metadb.set_settings({"loras": rest})
+    engine.restore_loras(s["loras"])
+    return {"ok": True, "name": removed, "active": engine.active_loras()}
 
 
 #: 能当 W4 输入的图片扩展名。与 generate.POSE_EXTS 保持一致。

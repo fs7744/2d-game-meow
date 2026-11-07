@@ -22,6 +22,73 @@
 
 ---
 
+## 2026-11-07 · 底模收归全局 + 全局设置落 SQLite + LoRA 导入（格式不符先问再转）
+
+### 节点里不再选底模
+
+后端早就是 Qwen-only（`engine.DEFAULT_MODEL` + `_check_model` 硬拒其它值），
+但前端还留着整套「每个节点一个底模下拉」：`GenParams.model`、`WORKFLOW_OF`、
+`shortModel`、`usableModels` 与 `setNodeModel` 的推荐参数联动，一共 120 行只为
+渲染一个**永远只有一项**的下拉。这轮全部删掉：
+
+- 节点卡头不再有 `.node-model`；参数区第一个控件就是提示词，视觉上更直接。
+- 提交时底模统一用全局 `model`（`app._run` 再兜一层），节点里无处可改。
+- **旧存档的坑**：以前节点可能钉着 `sd15` / `sdxl`，删了下拉之后这个值仍会被
+  当 `params.model` 提交，而 `_check_model` 只认 Qwen → **整单直接失败**。
+  `migrate()` 现在把非 Qwen 的旧值一律清成空串，弹窗里也验过（用例 22b）。
+- `/models` 的冒烟 mock 从「sd15/sdxl/sdxl-anime」改成 Qwen-only：以前底模联动
+  用例跑的是与生产**相反**的数据，属于自欺欺人的绿。
+
+### 全局设置进 SQLite（`metadb.settings`）
+
+抠图方式 / 生效的 LoRA / 快速模式以前只在 React `useState` 里，重开一次全丢。
+现在服务端是权威：
+
+- `metadb` 新增 `settings` 表（key/value + JSON），白名单只收
+  `base_model` / `matte_backend` / `loras` / `fast_mode`；未知抠图后端归一成 `auto`。
+- `GET/PUT /settings`；启动时 `_restore_global_settings()` 把设置灌回 engine。
+- **LoRA 懒恢复**：`Engine.restore_loras()` 只记规格，不为了恢复去加载管线
+  （那会在用户还没点「生成」时白占十几 GB 显存）；真正挂载推迟到
+  `txt2img_pipe()` 第一次调用。`active_loras()` 会把「待挂载」也报成已挂，
+  否则界面刷新后显示「没挂任何 LoRA」，实际下一次生成却带着它们。
+- 补齐一处真 bug：`api.submitMatte()` 从来没带 `matte_backend`，所以侧栏
+  选的「抠图方式」对抠图节点（wbg）**完全不生效**，恒走后端默认 `auto`。
+  后端 `_run` 也补了一层：接受 `matte_backend` 的工作流没带这个键时，用全局值。
+
+### LoRA 导入：先检测、再问、才转换（`workflows/lorastore.py`）
+
+ComfyUI 生态发的 Qwen LoRA 大半是 `diffusion_model.` + `lora_A/B`，而
+`pipe.load_lora_weights()` 只认 `transformer.` + `lora.down/up`。直接挂上去
+diffusers 只打一句 "unexpected keys found" 就继续 —— **看起来导入成功，实际
+一点效果没有**，比报错难查得多。所以做成两步：
+
+1. `POST /loras/inspect`：原始字节流式落进 `library/lora_staging/`（2GB 上限），
+   只读 safetensors 头，返回 `format / need_convert / convertible / reason /
+   sample_keys`。**这一步绝不写 `models/lora/`**。
+2. `POST /loras/commit`：`convert=true` 才调 `tools/convert_lora.py` 的
+   `convert_weights()`（同一套键名映射与 img_mlp gate_up 拆分，服务端不另写一份），
+   转换结果再校验一次必须是 diffusers 格式，然后原子替换进 `models/lora/`。
+   未确认转换 → 明确 400；不是本底模的 LoRA（`unknown`）→ 报错并附头几个键名。
+3. `DELETE /loras/{name}` 删文件 + 从全局设置里摘掉挂载记录（不加载管线）。
+
+前端：侧栏 LoRA 段加「＋ 导入 LoRA（.safetensors）」、每条一个删除按钮与内联
+确认；格式不符弹 **Portal 到 body** 的确认框，说清「ComfyUI → diffusers」、
+张量数、体积、转换后文件名与键名示例，用户点「确认转换并导入」才落盘。
+
+### 验证
+
+`tsc -b` / `vite build` ✓、`check-hints` 34/34、**`node smoke.mjs` 668/668**
+（重写用例 10 / 22 / 22b / 23，新增 56 全局设置、57 转换确认、58 直接导入与删除）、
+`pytest tests/test_models.py tests/test_review_round2.py tests/test_lora_import.py`
+**30 passed**（新增 13 条：格式判定、未确认拒绝、确认后转换、非本底模拒绝、
+文件名清洗、设置白名单、懒恢复剔除缺失文件）。真机离线截图新增
+`27-settings-global` / `28-lora-convert`。
+
+一个如实说明：角色中心的「额外抠一次纯色幕布」走的是
+`matte_screen.chroma_screen_matte`（边框取色的幕布键控），跟这里的
+`matte.matte_auto(backend)` 是两套算法，**不受全局抠图方式影响**；
+设置面板里也写清了这一点。
+
 ## 2026-11-07 · 全屏库首页 + SQLite 元数据 + 「项目」改名「画布」
 
 用户连续提了几条，一起落地：

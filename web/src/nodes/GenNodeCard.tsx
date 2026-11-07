@@ -325,41 +325,6 @@ function styleOf(p: GenParams): string {
   return byParams
 }
 
-/**
- * 节点 kind → 工作流名。**必须和 engine._ARCH_WORKFLOWS 用同一套词**，
- * 否则前端过滤和后端 require() 会各说各话（界面允许选、提交后被拒）。
- */
-const WORKFLOW_OF: Record<string, string> = {
-  gen: 'txt2img',
-  img2img: 'img2img',
-  bg: 'matte',
-  inpaint: 'inpaint',
-  airepaint: 'ai_repaint',
-  pixelify: 'pixelify',
-  poseswap: 'poseswap',
-  poseclone: 'pose_clone',
-  posebatch: 'pose_clone',
-  spriteswap: 'sprite_swap',
-  topixel: 'topixel',
-  // 这三个是 2026-10-30/31 加的，漏了会让它们的 `wf` 为空 →
-  // 底模下拉整块不渲染、isApprox 判断也失效
-  outpaint: 'outpaint',
-  outfit: 'outfit_swap',
-  faceswap: 'face_swap',
-}
-
-/**
- * 底模下拉里的短名：目录名（qwen-image-2.1）太长，撑爆 260px 的卡片。
- *
- * **别再把 sd15 / sdxl 加回这张表**：SD 权重早就归档了（见 README「底模」），
- * 下拉选项本身来自后端 `/models`，这张表只做「目录名 → 人看的名字」。
- * 留着旧映射的坏处不是显示错——是让人以为"列表里可能会冒出一个 SD"，
- * 排查模型相关问题时白查一遍。
- */
-function shortModel(m: string): string {
-  const map: Record<string, string> = { 'qwen-image-2.1': 'Qwen-Image 2.1' }
-  return map[m] || m
-}
 
 
 export default function GenNodeCard({
@@ -376,13 +341,9 @@ export default function GenNodeCard({
   model,
   matteBackend,
   charPathsOf,
-  onModel,
   maxCandidates,
   poseDirs,
   canTransparent,
-  nodesModels,
-  modelCaps,
-  defaultModel,
   onSpawnImg2Img,
   onExportSkeleton,
   poses,
@@ -450,29 +411,6 @@ export default function GenNodeCard({
   const headFilePath = isImg || isPoseEdit ? node.image?.path || ''
     : imageMode || resultMode ? job?.path || '' : ''
   const headFile = headFilePath ? fileNameOf(headFilePath) : ''
-  /** 本节点跑的工作流名（和 /models 的 caps.workflows 同一套词） */
-  const wf = WORKFLOW_OF[node.kind] || ''
-  /**
-   * 这个底模跑本节点的工作流是**近似实现**吗。
-   *
-   * 「近似」= 原生硬约束不存在，靠软引导或后处理凑（Qwen：没有 mask 接口 →
-   * 局部重绘是「整图指令改图 + 蒙版贴回」；没有 ControlNet → 姿态靠骨架图软引导）。
-   * 必须在卡头上标出来：不标的话用户会拿它当 SD 同款用，然后怪「改了没生效」。
-   */
-  const isApprox = !!(modelCaps?.[model]?.approx || []).includes(wf)
-  /** 图片节点不跑模型，不显示底模下拉 */
-  const modelAble = !isImg && !!wf
-  /**
-   * 本节点能选的底模：按 caps.workflows 过滤。
-   *
-   * 这是**正确性**过滤而不是洁癖：Qwen 管线没有 unet/tokenizer，ControlNet
-   * 类节点选它会在建管线时崩成 "Pipeline expected ['unet', ...]"。
-   * 老后端不返回 workflows 时（列表为空）不过滤，退回旧行为。
-   */
-  const usableModels = (nodesModels || []).filter((m) => {
-    const list = modelCaps?.[m]?.workflows
-    return !list || !list.length || !wf || list.includes(wf)
-  })
   // 当前选中的骨架目录（可能是手填的通配，那就匹配不到，只是没有帧数提示）
   const poseDirInfo = (poseDirs || []).find((d) => d.path === p.psDir)
   const [maskOpen, setMaskOpen] = useState(false)
@@ -1018,67 +956,6 @@ export default function GenNodeCard({
             </button>
           </div>
           <div className="node-result-foot">连线、改提示词、调参数 → 点「⚙ 参数」展开</div>
-        </div>
-      )}
-
-      {/*
-        底模：**节点级选择**。放在正文最前面（不是塞进「更多设置」）。
-        原因：底模决定"画成什么样"，是仅次于提示词的决定项；一张画布上
-        经常要混跑（Qwen 出立绘 + SDXL 出精灵帧），藏在二级菜单里等于逼用户
-        全局来回切，而每次全局切都会把各节点调好的参数冲一遍。
-        只列出**本节点真能跑**的底模（Qwen 没有 SD 的 UNet/CLIP，
-        角色迁移/序列帧替换选它就是必崩，不如不列）。
-      */}
-      {modelAble && usableModels.length > 0 && (
-        <div className="node-model">
-          <span className="node-model-label">底模</span>
-          <select
-            value={node.params.model || ''}
-            title={'这个节点用哪个底模。\n'
-              + '「跟随默认」= 跟着侧栏的新节点默认值走；选了具体值就固定住，'
-              + '以后侧栏再改也不影响它。\n'
-              + '切换会套用新底模的推荐尺寸/步数（手调过的参数不会被冲掉）。'}
-            onChange={(e) => {
-              const v = e.target.value
-              if (!v) {
-                // 清空 = 回到「跟随默认」。只改字段，不动参数——
-                // 用户只是想让它跟默认走，不是想重置参数
-                onPatch({ params: { ...p, model: '' } })
-                return
-              }
-              if (v === model) return
-              onModel?.(v)
-            }}
-          >
-            <option value="">跟随默认（{shortModel(defaultModel || model)}）</option>
-            {usableModels.map((m) => (
-              <option key={m} value={m}>{shortModel(m)}</option>
-            ))}
-          </select>
-          {isApprox && (
-            <span
-              className="node-model-approx"
-              title={'这个底模跑这个节点是「近似实现」：\n'
-                + '它没有该工作流原本依赖的硬约束（Qwen 没有 mask 接口、'
-                + '也没有 ControlNet），改由「整图指令改图 + 蒙版贴回」或'
-                + '「骨架图当参考 + 指令」实现。\n'
-                + '· 局部重绘：选区外保证逐点不变，选区内不保证只改那一点\n'
-                + '· 姿态/序列帧：姿势是软引导，上身跟随较好、腿部常被参考图的站姿覆盖，'
-                + '动作幅度偏保守（详见 docs/PLAN-QWEN-ONLY.md §2.8）'}
-            >
-              近似
-            </span>
-          )}
-          {usableModels.length < (nodesModels?.length ?? 0) && (
-            <span
-              className="node-model-note"
-              title={'有些底模没列出来，是因为它们跑不了这个节点：\n'
-                + 'Qwen-Image 的管线没有 SD 的 UNet / CLIP 文本编码器，'
-                + '而 ControlNet / IP-Adapter 这套组件只有 SD 系有。'}
-            >
-              ⓘ
-            </span>
-          )}
         </div>
       )}
 
@@ -2764,9 +2641,7 @@ export default function GenNodeCard({
                   if (st.width !== undefined) patch.width = st.width
                   if (st.height !== undefined) patch.height = st.height
                   setParams(patch)
-                  // 底模不属于节点参数（是全局状态）：档位要求 sdxl-anime 就切过去，
-                  // 否则用户漏一步就白挂 LoRA——Illustrious 的 LoRA 挂 SD1.5 会直接报错
-                  if (st.model && st.model !== model) onModel?.(st.model, { keepNodes: true })
+                  // 底模是全局唯一设置，档位不再切换底模（Qwen-only）。
                 }}
               >
                 {/* 「自定义参数」不提供手选：像素块/色数这两个数强耦合

@@ -53,6 +53,18 @@ function makeFetch() {
   // 库首页用例可以注入一批假角色 / 假画布（不影响其它用例的空库起点）
   let charactersOverride = null
   let canvasesOverride = null
+  // 全局设置（服务端权威副本）：用例可注入，用来验「重开应用不丢」
+  let settings = { base_model: 'qwen-image-2.1', matte_backend: 'auto',
+    loras: [], fast_mode: false }
+  // LoRA 导入检测结果：默认给一个 ComfyUI 格式（需要用户确认转换）
+  let loraInspect = {
+    token: 'abcdef123456', name: 'my_style',
+    original_name: 'my_style.safetensors', size_mb: 120, tensors: 384,
+    format: 'comfyui', need_convert: true, convertible: true,
+    reason: '这是 ComfyUI 格式（diffusion_model. + lora_A/B），当前底模需要 diffusers 格式',
+    sample_keys: ['diffusion_model.transformer_blocks.0.attn.to_q.lora_A.weight'],
+  }
+  let lastLoraCommit = null
   const fetchFn = async (url, init = {}) => {
     calls.push({ url: String(url), method: init.method || 'GET', body: init.body })
     if (String(url).endsWith('/health')) {
@@ -640,26 +652,52 @@ function makeFetch() {
       }
     }
     if (String(url).endsWith('/models')) {
+      // 与真实后端一致：**只有 Qwen-Image-2.1**（SD 权重已归档）。
+      // 以前这里 mock 了 sd15/sdxl，导致底模联动用例跑在与生产相反的数据上。
       return {
         ok: true,
         json: async () => ({
-          current: 'sd15',
-          available: ['sd15', 'sdxl', 'sdxl-anime'],
-          // sdxl-anime 的架构是 sdxl：LoRA 过滤必须按架构比，按名字比会把
-          // 挂在 sdxl-anime 上的 SDXL LoRA 全过滤掉
-          arch: { sd15: 'sd15', sdxl: 'sdxl', 'sdxl-anime': 'sdxl' },
-          refiner: true,
-          // 与后端 Engine.RECOMMEND 一致：SDXL 推荐 768/24，不是 1024
+          current: 'qwen-image-2.1',
+          available: ['qwen-image-2.1'],
+          arch: { 'qwen-image-2.1': 'qwen21' },
+          refiner: false,
           recommend: {
-            sd15: { width: 768, height: 768, steps: 30, cfg: 7.0, pixel: 6, palette: 32,
-              max_candidates: 6 },
-            sdxl: { width: 768, height: 768, steps: 24, cfg: 6.5, pixel: 6, palette: 32,
-              max_candidates: 3 },
-            'sdxl-anime': { width: 1024, height: 1024, steps: 28, cfg: 8.0, pixel: 0,
-              palette: 0, clip_skip: 2, preset: 'anime', max_candidates: 3 },
+            'qwen-image-2.1': { width: 768, height: 768, steps: 16, cfg: 1.0,
+              pixel: 6, palette: 32, max_candidates: 6 },
           },
         }),
       }
+    }
+    // ---- 全局设置（SQLite 权威副本）----
+    if (String(url).endsWith('/settings')) {
+      if ((init.method || 'GET') === 'PUT') {
+        Object.assign(settings, JSON.parse(init.body || '{}'))
+      }
+      return { ok: true, json: async () => ({ ...settings }) }
+    }
+    // ---- LoRA 导入：两步走（先检测、再确认落盘）----
+    if (String(url).includes('/loras/inspect')) {
+      return { ok: true, json: async () => ({ ...loraInspect }) }
+    }
+    if (String(url).endsWith('/loras/commit')) {
+      const b = JSON.parse(init.body || '{}')
+      lastLoraCommit = b
+      const nm = b.name || loraInspect.name
+      return {
+        ok: true,
+        json: async () => ({
+          item: { name: nm, file: `models/lora/${nm}.safetensors`,
+            size_mb: loraInspect.size_mb, tensors: loraInspect.tensors, format: 'diffusers' },
+          converted: !!b.convert,
+          skipped: b.convert ? 3 : 0,
+          name: nm,
+        }),
+      }
+    }
+    if ((init.method || 'GET') === 'DELETE' && String(url).includes('/loras/')) {
+      return { ok: true, json: async () => ({
+        ok: true, name: decodeURIComponent(String(url).split('/loras/')[1] || ''),
+      }) }
     }
     if (String(url).endsWith('/loras/scan')) {
       return {
@@ -709,7 +747,8 @@ function makeFetch() {
             { name: 'qwen21_lightning', file: 'models/lora/qwen21_lightning.safetensors',
               size_mb: 64, tensors: 256 },
           ],
-          active: [],
+          // 服务端会把「已持久化但还没加载管线」的挂载也报成 active（懒恢复）
+          active: settings.loras,
         }),
       }
     }
@@ -844,6 +883,10 @@ function makeFetch() {
   fetchFn.setSaveConflict = (v) => { saveConflictMode = v }
   fetchFn.setAnalyzeFail = (v) => { analyzeFails = v }
   fetchFn.setCharacters = (v) => { charactersOverride = v }
+  fetchFn.setSettings = (v) => { settings = { ...settings, ...v } }
+  fetchFn.getSettings = () => ({ ...settings })
+  fetchFn.setLoraInspect = (v) => { loraInspect = { ...loraInspect, ...v } }
+  fetchFn.getLastLoraCommit = () => lastLoraCommit
   fetchFn.setCanvases = (v) => { canvasesOverride = v }
   return fetchFn
 }
@@ -1340,25 +1383,20 @@ function check(name, cond, extra = '') {
   await new Promise((r) => setTimeout(r, 100))
   check('侧栏可展开', !doc.querySelector('.rail.collapsed'))
 
-  // 底模已经下放到**节点卡头**，侧栏不再有「底模」分组
+  // 底模是**全局唯一设置**：节点卡头不再有下拉，只在设置面板里只读展示
   doc.querySelector('details.fold').open = true
   await new Promise((r) => setTimeout(r, 80))
-  check('侧栏不再有「底模」分组（每个节点自己选）', !section(doc, '底模'), JSON.stringify(titles))
-  const nodeModelSel = doc.querySelector('.node-model select')
-  check('节点卡头上有自己的底模下拉', !!nodeModelSel)
-  // 不写死数量：mock 里加一个底模就会误报。只断言"列出来的都是本机已装的"
-  check('节点底模下拉列出本机已装的',
-    !!nodeModelSel && [...nodeModelSel.options]
-      .filter((o) => o.value).every((o) => ['sd15', 'sdxl', 'sdxl-anime', 'qwen-image-2.1'].includes(o.value)),
-    String(nodeModelSel?.options.length))
-
-  const setSelect = (el, v) => {
-    const setter = Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value').set
-    setter.call(el, v)
-    el.dispatchEvent(new win.Event('change', { bubbles: true }))
-  }
-  setSelect(nodeModelSel, 'sdxl')
-  await new Promise((r) => setTimeout(r, 300))
+  check('侧栏没有「底模」分组（底模是全局设置）', !section(doc, '底模'), JSON.stringify(titles))
+  check('节点卡头不再有底模下拉（不必每个节点选一次）',
+    !doc.querySelector('.node-model select'))
+  const baseRow = doc.querySelector('.settings-global')
+  check('设置面板展示全局底模', (baseRow?.textContent || '').includes('Qwen-Image 2.1'),
+    baseRow?.textContent || '（没有 .settings-global）')
+  check('抠图方式在全局设置里', !!doc.querySelector('.matte-backend-select'))
+  check('LoRA 段有导入入口', !!doc.querySelector('.lora-import-btn'))
+  check('LoRA 段不再要求手敲转换命令',
+    !(doc.querySelector('.rail-sec:nth-of-type(5)')?.textContent || '')
+      .includes('python tools/convert_lora.py'))
 
   check('侧栏场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
@@ -2587,102 +2625,82 @@ function check(name, cond, extra = '') {
   dom.window.close()
 }
 
-// 22) 切换底模：自动套用后端推荐参数，但不覆盖手改过的节点
-{
-  const { dom, errors } = await boot('')
-  const doc = dom.window.document
-  const win = dom.window
-
-  const genItem = [...section(doc, '节点').querySelectorAll('.rail-item')]
-    .find((it) => (it.querySelector('b')?.textContent || '') === '图生成')
-  const addGen = async () => {
-    genItem.querySelector('.rail-add').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-    await new Promise((r) => setTimeout(r, 120))
-  }
-  await addGen()
-  await addGen()
-
-  const num = (node, prefix) => {
-    const lab = [...node.querySelectorAll('label')]
-      .find((l) => (l.textContent || '').trim().startsWith(prefix))
-    return lab?.querySelector('input')?.value
-  }
-  let nodes = [...doc.querySelectorAll('.node')]
-  check('新节点默认用 SD1.5 的推荐值（768 / 30 步）',
-    num(nodes[0], '宽') === '768' && num(nodes[0], '步数') === '30',
-    JSON.stringify({ w: num(nodes[0], '宽'), s: num(nodes[0], '步数') }))
-
-  // 手改第二个节点的宽度，模拟"用户调过参"
-  const setNum = (el, v) => {
-    const setter = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value').set
-    setter.call(el, String(v))
-    el.dispatchEvent(new win.Event('input', { bubbles: true }))
-  }
-  const wLab = [...nodes[1].querySelectorAll('label')]
-    .find((l) => (l.textContent || '').trim().startsWith('宽'))
-  setNum(wLab.querySelector('input'), 640)
-  await new Promise((r) => setTimeout(r, 80))
-
-  const modelSel = doc.querySelector('.node-model select')
-  const setSel = (el, v) => {
-    const setter = Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value').set
-    setter.call(el, v)
-    el.dispatchEvent(new win.Event('change', { bubbles: true }))
-  }
-  setSel(modelSel, 'sdxl')
-  await new Promise((r) => setTimeout(r, 200))
-
-  nodes = [...doc.querySelectorAll('.node')]
-  // 底模现在是**节点级**：侧栏那个只决定「新节点的默认值」。
-  // 仍处于「跟随默认」的节点要跟着走（否则会出现「底模 SDXL、步数 30」
-  // 这种自相矛盾的配置）；手改过参数的节点不被覆盖。
-  check('节点切 SDXL 后套用推荐步数（30 → 24）',
-    num(nodes[0], '步数') === '24', num(nodes[0], '步数'))
-  check('手改过参数的节点不被覆盖（宽仍是 640）',
-    num(nodes[1], '宽') === '640', num(nodes[1], '宽'))
-  check('切换给出推荐参数提示',
-    (doc.querySelector('.toast')?.textContent || '').includes('推荐'),
-    doc.querySelector('.toast')?.textContent)
-
-  // 节点自己的底模下拉：只影响这一个节点
-  nodes = [...doc.querySelectorAll('.node')]
-  const nodeModelSel = nodes[0].querySelector('.node-model select')
-  check('节点上有自己的底模下拉', !!nodeModelSel)
-  // 先把这个节点单独钉到 sd15，再钉到 sdxl，验「只动自己」
-  setSel(nodeModelSel, 'sd15')
-  await new Promise((r) => setTimeout(r, 250))
-  nodes = [...doc.querySelectorAll('.node')]
-  check('节点单独选 SD1.5 后套用推荐步数（24 → 30）',
-    num(nodes[0], '步数') === '30', num(nodes[0], '步数'))
-  check('该节点值变成具体的底模（不再跟随默认）',
-    nodes[0].querySelector('.node-model select')?.value === 'sd15',
-    nodes[0].querySelector('.node-model select')?.value)
-  check('另一个节点不受影响',
-    num(nodes[1], '宽') === '640' && num(nodes[1], '步数') === '30',
-    JSON.stringify({ w: num(nodes[1], '宽'), s: num(nodes[1], '步数') }))
-  // 切回「跟随默认」：只改字段，不动参数
-  setSel(nodes[0].querySelector('.node-model select'), '')
-  await new Promise((r) => setTimeout(r, 200))
-  check('切回「跟随默认」步数仍是 30（不重置参数）',
-    num([...doc.querySelectorAll('.node')][0], '步数') === '30',
-    num([...doc.querySelectorAll('.node')][0], '步数'))
-
-  check('底模切换场景无脚本错误', errors.length === 0, errors[0] || '')
-  dom.window.close()
-}
-
-// 23) 候选数上限跟随底模显存（超了要让用户看见，而不是静默变慢）
+// 22) 底模是全局唯一设置：节点没有下拉，提交时统一用 Qwen，旧存档的 sd15 也清掉
 {
   const { dom, errors } = await boot('')
   const doc = dom.window.document
   const win = dom.window
   const wait = (ms) => new Promise((r) => setTimeout(r, ms))
 
-  // 加一个序列帧节点
+  const addOf = (name) => [...section(doc, '节点').querySelectorAll('.rail-item')]
+    .find((it) => (it.querySelector('b')?.textContent || '') === name)
+  addOf('图生成').querySelector('.rail-add')
+    .dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await wait(220)
+
+  const num = (node, prefix) => {
+    const lab = [...node.querySelectorAll('label')]
+      .find((l) => (l.textContent || '').trim().startsWith(prefix))
+    return lab?.querySelector('input')?.value
+  }
+  const node0 = () => doc.querySelector('.node')
+  check('新节点用全局底模的推荐参数（768 / 16 步）',
+    num(node0(), '宽') === '768' && num(node0(), '步数') === '16',
+    JSON.stringify({ w: num(node0(), '宽'), s: num(node0(), '步数') }))
+  check('节点上没有底模下拉', !node0()?.querySelector('.node-model'))
+
+  // 提交时 model 由全局注入：请求体里只能是 Qwen
+  const genBtn = node0()?.querySelector('.gen-btn')
+  genBtn?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await wait(600)
+  const sub = calls.filter((c) => c.url.endsWith('/generate')).pop()
+  const body = sub ? JSON.parse(sub.body) : null
+  check('提交的底模是全局 Qwen-Image 2.1（节点无处可改）',
+    body?.params?.model === 'qwen-image-2.1', JSON.stringify(body?.params?.model))
+
+  check('全局底模场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 22b) 旧存档里钉着 sd15 的节点：迁移后要清成空串，不能把必然报错的值发出去
+{
+  const legacy = {
+    nodes: [{
+      id: 'oldsd', kind: 'gen', x: 40, y: 60, view: 'expanded',
+      params: { prompt: 'old sd node', width: 768, height: 768, steps: 30,
+        cfg: 7, seed: 1, preset: 'sprite', pixel: 6, palette: 32, matte: false,
+        model: 'sd15' },
+    }],
+    viewport: { x: 33, y: 44, z: 1 },
+  }
+  const { dom, errors } = await boot('', { 'meow.canvas.v1': JSON.stringify(legacy) })
+  const doc = dom.window.document
+  const win = dom.window
+  await new Promise((r) => setTimeout(r, 600))
+  const node = doc.querySelector('.node')
+  check('旧存档节点被带过来', !!node)
+  check('节点上没有底模下拉（旧值不该渲染成控件）', !node?.querySelector('.node-model'))
+  node?.querySelector('.gen-btn')?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 600))
+  const sub = calls.filter((c) => c.url.endsWith('/generate')).pop()
+  check('旧存档的 sd15 被归一成全局 Qwen',
+    sub && JSON.parse(sub.body).params.model === 'qwen-image-2.1',
+    sub ? JSON.parse(sub.body).params.model : '（没有提交）')
+  check('旧存档迁移场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 23) 候选数上限跟随全局底模显存（超了要让用户看见，而不是静默变慢）
+{
+  const { dom, errors } = await boot('')
+  const doc = dom.window.document
+  const win = dom.window
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms))
+
   const item = [...section(doc, '节点').querySelectorAll('.rail-item')]
     .find((it) => (it.querySelector('b')?.textContent || '') === '序列帧替换')
   item.querySelector('.rail-add').dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await wait(150)
+  await wait(200)
 
   const node = () => doc.querySelector('.node')
   const candInput = () => {
@@ -2690,37 +2708,22 @@ function check(name, cond, extra = '') {
       .find((l) => (l.textContent || '').trim().startsWith('候选'))
     return lab?.querySelector('input')
   }
+  check('候选上限按全局底模的显存算出（6）',
+    candInput()?.getAttribute('max') === '6', candInput()?.getAttribute('max'))
+  check('候选旁说明上限来源',
+    (node().textContent || '').includes('由当前底模的显存占用算出'))
+  check('序列帧节点也没有底模下拉', !node()?.querySelector('.node-model'))
+
+  // 超出上限的输入被夹住
   const setNum = (el, v) => {
     const setter = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value').set
     setter.call(el, String(v))
     el.dispatchEvent(new win.Event('input', { bubbles: true }))
   }
-
-  check('SD1.5 下候选上限是 6（后端按总显存算）',
-    candInput()?.getAttribute('max') === '6', candInput()?.getAttribute('max'))
-
-  // 超出上限的输入被夹住
   setNum(candInput(), 9)
-  await wait(120)
+  await wait(140)
   check('输入超过上限时被夹到 6，不会提交跑不动的配置',
     candInput()?.value === '6', candInput()?.value)
-  check('候选旁说明上限来源',
-    (node().textContent || '').includes('由当前底模的显存占用算出'),
-    (node().textContent || '').slice(-60))
-
-  // 用**这个节点自己的**底模下拉切到 SDXL：上限收到 3，已设的 6 要跟着降
-  const nodeModelSel = node().querySelector('.node-model select')
-  const setSel = (el, v) => {
-    const setter = Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value').set
-    setter.call(el, v)
-    el.dispatchEvent(new win.Event('change', { bubbles: true }))
-  }
-  setSel(nodeModelSel, 'sdxl')
-  await wait(300)
-  check('节点切 SDXL 后候选上限收到 3',
-    candInput()?.getAttribute('max') === '3', candInput()?.getAttribute('max'))
-  check('已设的 6 张跟着降到 3（界面上不能写着跑不动的值）',
-    candInput()?.value === '3', candInput()?.value)
 
   check('候选上限场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
@@ -4384,6 +4387,180 @@ async function ccCreate(doc, win) {
   check('空角色库也放大号创建按钮', !!doc.querySelector('.charlib-big-create'))
   check('大按钮明确写着创建第一个角色',
     (doc.querySelector('.charlib-big-create')?.textContent || '').includes('创建第一个角色'))
+  dom.window.close()
+}
+
+// 56) 全局设置：抠图方式 / 快速模式 / 已挂 LoRA 都由服务端持久化
+{
+  const { dom, errors } = await boot('', null, {
+    setupFetch: (f) => f.setSettings({
+      base_model: 'qwen-image-2.1',
+      matte_backend: 'u2net',
+      fast_mode: true,
+      loras: [{ name: 'qwen21_anyangle', scale: 0.9 }],
+    }),
+  })
+  const doc = dom.window.document
+  const win = dom.window
+  await ccWait(450)
+  ;[...doc.querySelectorAll('.rail-tab')]
+    .find((t) => (t.textContent || '').includes('设置'))
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await ccWait(200)
+
+  check('启动时读了全局设置',
+    calls.some((c) => c.method === 'GET' && c.url.endsWith('/settings')),
+    calls.map((c) => `${c.method} ${c.url}`).slice(-6).join(' / '))
+  check('抠图方式回填成服务端存的 u2net',
+    doc.querySelector('.matte-backend-select')?.value === 'u2net',
+    doc.querySelector('.matte-backend-select')?.value)
+  check('快速模式回填成开',
+    doc.querySelector('.lora-row.fast-toggle input')?.checked === true)
+  check('已挂的 LoRA 回填（懒恢复期间也显示为已挂）',
+    doc.querySelector('.lora-row:not(.fast-toggle) input')?.checked === true)
+
+  // 改抠图方式 → 立刻写回 /settings
+  const sel = doc.querySelector('.matte-backend-select')
+  const setter = Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value').set
+  setter.call(sel, 'color')
+  sel.dispatchEvent(new win.Event('change', { bubbles: true }))
+  await ccWait(250)
+  const putMatte = calls.filter((c) => c.method === 'PUT' && c.url.endsWith('/settings')).pop()
+  check('改抠图方式写回 /settings',
+    !!putMatte && JSON.parse(putMatte.body).matte_backend === 'color',
+    putMatte?.body)
+
+  // 关掉快速模式 → 也写回
+  doc.querySelector('.lora-row.fast-toggle input')
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await ccWait(300)
+  const putFast = calls.filter((c) => c.method === 'PUT' && c.url.endsWith('/settings'))
+    .filter((c) => 'fast_mode' in JSON.parse(c.body || '{}')).pop()
+  check('快速模式写回 /settings',
+    !!putFast && JSON.parse(putFast.body).fast_mode === false, putFast?.body)
+
+  // 勾一个 LoRA → 挂载 + 写回设置
+  const loraBox = [...doc.querySelectorAll('.lora-row:not(.fast-toggle) input')]
+    .find((i) => i.checked === false)
+  loraBox?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await ccWait(300)
+  const putLora = calls.filter((c) => c.method === 'PUT' && c.url.endsWith('/settings'))
+    .filter((c) => Array.isArray(JSON.parse(c.body || '{}').loras)).pop()
+  check('LoRA 挂载写回 /settings',
+    !!putLora && JSON.parse(putLora.body).loras.length >= 1, putLora?.body)
+  check('全局设置场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 57) LoRA 导入：ComfyUI 格式必须先提示「需要转换」，用户确认后才落盘
+{
+  const { dom, errors, fetch: f } = await boot('', null, {
+    setupFetch: (fk) => fk.setLoraInspect({
+      token: 'tok1234567890', name: 'my_style',
+      original_name: 'my_style.safetensors', size_mb: 120, tensors: 384,
+      format: 'comfyui', need_convert: true, convertible: true,
+      reason: '这是 ComfyUI 格式（diffusion_model. + lora_A/B），当前底模需要 diffusers 格式',
+      sample_keys: ['diffusion_model.transformer_blocks.0.attn.to_q.lora_A.weight'],
+    }),
+  })
+  const doc = dom.window.document
+  const win = dom.window
+  await ccWait(450)
+
+  check('LoRA 段有导入按钮', !!doc.querySelector('.lora-import-btn'))
+  const input = doc.querySelector('.lora-file-input')
+  check('有隐藏的 .safetensors 选择框',
+    !!input && input.getAttribute('accept') === '.safetensors')
+  const file = new win.File([new Uint8Array([1, 2, 3])], 'my_style.safetensors')
+  const list = { 0: file, length: 1, item: () => file }
+  Object.defineProperty(input, 'files', { configurable: true, get: () => list })
+  input.dispatchEvent(new win.Event('change', { bubbles: true }))
+  await ccWait(400)
+
+  check('导入第一步是「检测」而不是直接落盘',
+    calls.some((c) => c.url.includes('/loras/inspect')))
+  check('格式不符不直接 commit', !calls.some((c) => c.url.endsWith('/loras/commit')))
+  const dlg = doc.querySelector('.lora-convert-dialog')
+  check('弹出「需要转换」确认框', !!dlg)
+  check('确认框说清了原因（ComfyUI → diffusers）',
+    (dlg?.textContent || '').includes('需要转换')
+    && (dlg?.textContent || '').includes('diffusers'), dlg?.textContent?.slice(0, 80))
+  check('确认框列出张量与体积', (dlg?.textContent || '').includes('384'))
+
+  // 取消 → 不落盘、不留下对话框
+  ;[...(dlg?.querySelectorAll('button') || [])]
+    .find((b) => (b.textContent || '').trim() === '取消')
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await ccWait(250)
+  check('点取消后关闭对话框且没有 commit',
+    !doc.querySelector('.lora-convert-dialog')
+    && !calls.some((c) => c.url.endsWith('/loras/commit')))
+
+  // 再走一遍并确认转换
+  input.dispatchEvent(new win.Event('change', { bubbles: true }))
+  await ccWait(400)
+  ;[...(doc.querySelectorAll('.lora-convert-dialog button') || [])]
+    .find((b) => (b.textContent || '').includes('确认转换并导入'))
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await ccWait(500)
+  const commit = calls.filter((c) => c.url.endsWith('/loras/commit')).pop()
+  check('确认后才 commit，且 convert=true',
+    !!commit && JSON.parse(commit.body).convert === true, commit?.body)
+  check('导入成功给出结果（含张量数）',
+    (doc.querySelector('.lora-import-msg')?.textContent || '').includes('已转换并导入'),
+    doc.querySelector('.lora-import-msg')?.textContent)
+  check('转换导入场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 58) LoRA 导入：已是 diffusers 格式就直接落盘；删除走 DELETE 并同步设置
+{
+  const { dom, errors, fetch: f } = await boot('', null, {
+    setupFetch: (fk) => {
+      fk.setLoraInspect({
+        token: 'tokdiff0123456', name: 'clean_style',
+        original_name: 'clean_style.safetensors', size_mb: 88, tensors: 256,
+        format: 'diffusers', need_convert: false, convertible: true,
+        reason: '已是 diffusers 原生格式，可直接挂载',
+        sample_keys: ['transformer.transformer_blocks.0.attn.to_q.lora.down.weight'],
+      })
+      fk.setSettings({ loras: [{ name: 'qwen21_anyangle', scale: 0.8 }] })
+    },
+  })
+  const doc = dom.window.document
+  const win = dom.window
+  await ccWait(450)
+
+  const input = doc.querySelector('.lora-file-input')
+  const file = new win.File([new Uint8Array([1])], 'clean_style.safetensors')
+  const list = { 0: file, length: 1, item: () => file }
+  Object.defineProperty(input, 'files', { configurable: true, get: () => list })
+  input.dispatchEvent(new win.Event('change', { bubbles: true }))
+  await ccWait(450)
+
+  check('兼容格式不弹转换框', !doc.querySelector('.lora-convert-dialog'))
+  const commit = calls.filter((c) => c.url.endsWith('/loras/commit')).pop()
+  check('兼容格式直接 commit（convert=false）',
+    !!commit && JSON.parse(commit.body).convert === false, commit?.body)
+  check('导入成功提示',
+    (doc.querySelector('.lora-import-msg')?.textContent || '').includes('已导入'),
+    doc.querySelector('.lora-import-msg')?.textContent)
+
+  // 删除：先出内联确认，再发 DELETE
+  doc.querySelector('.lora-del')
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await ccWait(200)
+  check('删除前先确认', !!doc.querySelector('.lora-del-confirm'))
+  ;[...doc.querySelectorAll('.lora-del-confirm button')]
+    .find((b) => (b.textContent || '').includes('确认删除'))
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await ccWait(350)
+  check('删除调用 DELETE /loras/<name>',
+    calls.some((c) => c.method === 'DELETE' && c.url.includes('/loras/')),
+    calls.filter((c) => c.method === 'DELETE').map((c) => c.url).join(' / '))
+  check('删除后刷新 LoRA 列表',
+    calls.filter((c) => c.method === 'GET' && c.url.endsWith('/loras')).length >= 2)
+  check('删除场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 
