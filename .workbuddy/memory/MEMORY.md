@@ -169,3 +169,18 @@ MIUProject/VNCCS_PoseStudio_QI2.1），**不要写 runcomfy.com 这类商业托�
   logo 是 512→26px 下采样，`image-rendering: pixelated` 只给放大显示的精灵帧。
 - CSS 特异性坑：改 `.cc-step-no` 这类被 `.chars-tab.cc-step .cc-step-no`
   定义的圆角，必须带全前缀才生效。
+
+## 全站样式统一层（2026-11-07，styles.css 最末一层）
+
+- ⚠️ **以后改外观只改这一层，不要再叠第 8 层。** 前面 3400 行已有 6 层
+  override，同类控件各写各的（圆角 5 套 / 阴影两套 / 按钮高度 10 种 /
+  disabled 7 种 / hover 5 套 / 激活态 4 套）。统一层只做对齐，不动布局/定位/DOM。
+- 基准：卡片圆角 `var(--r)=4px`、控件 `var(--r-sm)=3px`；边框
+  `1px solid var(--px-edge)`；阴影 `var(--shadow-hard)`；主视图 tab 绿底、
+  其余 tab 青激活；文字按钮 30px / 主 CTA 38px；disabled `.42`；
+  小标题统一 `--sans`。虚线只留给「空/新增」语义。
+- **画布网格两边同步**：`Canvas.tsx` 的 `GRID_BASE`（32）与
+  `.canvas-grid` 的 `background-size: 32px × 3` 必须一致。
+  以前内联写死 24/120/120 而 CSS 图层顺序是「横线/竖线/点」，
+  渲染出 24×120 长方格——用户明确说难看。只给一个尺寸值让三层复用。
+- 中文小标题别用 `--mono`（Consolas 无中文字形，低分辨率糊成方块）。

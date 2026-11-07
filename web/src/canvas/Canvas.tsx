@@ -404,9 +404,15 @@ export default function Canvas({
             }`,
     }))
 
+  /** 网格基准必须和 styles.css 的 `.canvas-grid` 一致（32px 正方格）。
+   *  以前这里写死 24/120/120 三层尺寸，而 CSS 的图层顺序是
+   *  「横线 / 竖线 / 点」——于是横线每 24px、竖线每 120px，
+   *  铺出一片 24×120 的长方格。只给一个尺寸值时，所有图层复用它，
+   *  平移 / 缩放后格子始终是正方形。 */
+  const GRID_BASE = 32
   const gridStyle: React.CSSProperties = {
-    backgroundPosition: `${viewport.x}px ${viewport.y}px, ${viewport.x}px ${viewport.y}px`,
-    backgroundSize: `${24 * viewport.z}px ${24 * viewport.z}px, ${120 * viewport.z}px ${120 * viewport.z}px, ${120 * viewport.z}px ${120 * viewport.z}px`,
+    backgroundPosition: `${viewport.x}px ${viewport.y}px`,
+    backgroundSize: `${GRID_BASE * viewport.z}px ${GRID_BASE * viewport.z}px`,
   }
 
   return (
