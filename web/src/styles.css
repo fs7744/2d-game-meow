@@ -3820,3 +3820,17 @@ button:disabled, .mini.wide:disabled, .cc-btn:disabled,
 .lora-convert-one:hover:not(:disabled) { border-color: var(--cyan); }
 .lora-convert-one:disabled { opacity: .42; cursor: default; }
 .lora-skip-no { flex: 0 0 auto; font-size: 9.5px; color: var(--muted-2); }
+
+/* LoRA 强度：每一行都显示，未挂载时置灰（以前只有勾上才出现，像功能丢了） */
+.lora-scale.is-off { opacity: .42; }
+.lora-scale.is-off b { color: var(--muted-2); }
+.lora-scale input[type='range']:disabled { cursor: default; }
+
+/* 侧栏状态条里的「⚙ 全局设置」入口：设置已不在侧栏里，这里只是快捷方式 */
+.rail-settings {
+  flex: 0 0 auto; width: 22px; height: 22px; padding: 0;
+  border: 1px solid var(--px-edge); border-radius: var(--r-sm);
+  background: var(--bg-3); color: var(--muted-2);
+  font-size: 11px; line-height: 1; cursor: pointer;
+}
+.rail-settings:hover { color: var(--cyan); border-color: var(--cyan); }

@@ -1393,9 +1393,13 @@ function check(name, cond, extra = '') {
   // 底模选择已移到每个节点自己的卡头上，侧栏不再有「底模」分组；
   // 「LoRA」是新增的（Qwen 现在支持 LoRA，见 engine.available_loras）；
   // 「模板」是项目预设模板区（存模板 / 从模板新建）。
-  check('六个菜单分组：项目/模板/节点/资料库/LoRA/设置',
-    JSON.stringify(titles) === JSON.stringify(['画布', '模板', '节点', '资料库', 'LoRA', '设置']),
+  // 设置（含 LoRA / 抠图方式）已经**移出侧栏**，只在顶栏 ⚙ 弹窗里出现；
+  // 侧栏只保留画布/模板/节点/资料库四段，避免同一份设置两个入口、两套状态。
+  check('四个菜单分组：画布/模板/节点/资料库',
+    JSON.stringify(titles) === JSON.stringify(['画布', '模板', '节点', '资料库']),
     JSON.stringify(titles))
+  check('侧栏不再有 LoRA 分组', !section(doc, 'LoRA'))
+  check('侧栏不再有设置分组', !section(doc, '设置'))
 
   // 分组可折叠
   const head = doc.querySelector('.rail-sec-head')
@@ -1420,14 +1424,23 @@ function check(name, cond, extra = '') {
   check('侧栏没有「底模」分组（底模是全局设置）', !section(doc, '底模'), JSON.stringify(titles))
   check('节点卡头不再有底模下拉（不必每个节点选一次）',
     !doc.querySelector('.node-model select'))
-  const baseRow = doc.querySelector('.settings-global')
-  check('设置面板展示全局底模', (baseRow?.textContent || '').includes('Qwen-Image 2.1'),
-    baseRow?.textContent || '（没有 .settings-global）')
-  check('抠图方式在全局设置里', !!doc.querySelector('.matte-backend-select'))
-  check('LoRA 段有导入入口', !!doc.querySelector('.lora-import-btn'))
-  check('LoRA 段不再要求手敲转换命令',
-    !(doc.querySelector('.rail-sec:nth-of-type(5)')?.textContent || '')
-      .includes('python tools/convert_lora.py'))
+  // 侧栏里不能再出现任何设置控件（否则就是「画布里的设置还在」）
+  check('侧栏里没有抠图方式下拉', !doc.querySelector('.rail .matte-backend-select'))
+  check('侧栏里没有 LoRA 面板', !doc.querySelector('.rail .lora-import-btn'))
+  // 侧栏状态条有一个快捷入口，点了打开同一个弹窗
+  const railGear = doc.querySelector('.rail-settings')
+  check('侧栏状态条有全局设置快捷入口', !!railGear)
+  railGear?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 300))
+  const gsDlg = doc.querySelector('.gs-dialog')
+  check('点侧栏 ⚙ 打开全局设置弹窗', !!gsDlg)
+  check('弹窗里展示全局底模',
+    (gsDlg?.querySelector('.settings-global')?.textContent || '').includes('Qwen-Image 2.1'))
+  check('弹窗里能改抠图方式', !!gsDlg?.querySelector('.matte-backend-select'))
+  check('弹窗里有 LoRA 导入入口', !!gsDlg?.querySelector('.lora-import-btn'))
+  gsDlg?.querySelector('.gs-close')
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 200))
 
   check('侧栏场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
@@ -3295,21 +3308,30 @@ function check(name, cond, extra = '') {
   dom.window.close()
 }
 
-// 39) 侧栏 LoRA 面板：列出可用 LoRA、勾选即挂载
+// 39) 全局设置里的 LoRA 面板：列出可用 LoRA、勾选即挂载
 {
   const { dom, errors } = await boot('?demo=1')
   const doc = dom.window.document
   const win = dom.window
   await new Promise((r) => setTimeout(r, 600))
+  await openSettings(doc, win)
   // 排除快速模式那一行（它也是 .lora-row）
   const rows = [...doc.querySelectorAll('.lora-row:not(.fast-toggle)')]
-  check('侧栏列出可用的 Qwen LoRA', rows.length === 2, String(rows.length))
+  check('全局设置里列出可用的 Qwen LoRA', rows.length === 2, String(rows.length))
   check('LoRA 行显示名称与体积',
     (rows[0]?.textContent || '').includes('qwen21_anyangle')
     && (rows[0]?.textContent || '').includes('114MB'),
     rows[0]?.textContent)
   const cb = rows[0]?.querySelector('input[type=checkbox]')
   check('LoRA 有勾选框', !!cb)
+  // 强度是**每一行都有**的（没勾时置灰），不能只在挂载后才出现
+  const scales = [...doc.querySelectorAll('.lora-item .lora-scale')]
+  check('每个 LoRA 都有自己的强度滑块', scales.length === rows.length,
+    `${scales.length} / ${rows.length}`)
+  check('没挂载的 LoRA 强度滑块置灰',
+    [...doc.querySelectorAll('.lora-item .lora-scale')]
+      .every((el) => !el.classList.contains('is-off')
+        || el.querySelector('input')?.disabled === true))
   cb?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
   await new Promise((r) => setTimeout(r, 400))
   const apply = calls.find((c) => c.url.endsWith('/loras/apply'))
@@ -3330,9 +3352,11 @@ function check(name, cond, extra = '') {
   const doc = dom.window.document
   const win = dom.window
   await new Promise((r) => setTimeout(r, 600))
+  await openSettings(doc, win)
   const row = doc.querySelector('.lora-row.fast-toggle')
-  check('侧栏有「快速模式」开关', !!row, row?.textContent)
-  const fastNote = row?.parentElement?.querySelector('.src-note')
+  check('全局设置里有「快速模式」开关', !!row, row?.textContent)
+  // 说明是紧跟在这行后面的那一条（父容器里第一条 .src-note 现在是通用设置那段）
+  const fastNote = row?.nextElementSibling
   check('快速模式说明提到步数与提速',
     (fastNote?.textContent || '').includes('8')
     && (fastNote?.textContent || '').includes('9.3s'),
@@ -3774,6 +3798,16 @@ function check(name, cond, extra = '') {
 // ① 创建角色 → ② 定形象 → ③ 出素材 → ④ 导出，完成状态由磁盘上的真实产物推导。
 // 下面这组用例同时钉住 API 契约（一个没改）和新的信息架构。
 const ccWait = (ms) => new Promise((r) => setTimeout(r, ms))
+/** 打开全局设置弹窗（设置已不在画布侧栏里，只有顶栏 ⚙ 一个入口）。 */
+async function openSettings(doc, win) {
+  const btn = [...doc.querySelectorAll('.top-action')]
+    .find((b) => (b.textContent || '').includes('设置'))
+  btn?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  // 不能调 ccWait：它在这个文件后面才用 const 定义（TDZ），会报
+  // "Cannot access 'ccWait' before initialization"
+  await new Promise((r) => setTimeout(r, 300))
+}
+
 async function ccBoot() {
   // 快照必须在 boot 之前：角色中心一挂载就会发 /characters、静态目录等请求
   const c0 = calls.length
@@ -4434,10 +4468,7 @@ async function ccCreate(doc, win) {
   const doc = dom.window.document
   const win = dom.window
   await ccWait(450)
-  ;[...doc.querySelectorAll('.rail-tab')]
-    .find((t) => (t.textContent || '').includes('设置'))
-    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await ccWait(200)
+  await openSettings(doc, win)
 
   check('启动时读了全局设置',
     calls.some((c) => c.method === 'GET' && c.url.endsWith('/settings')),
@@ -4498,6 +4529,7 @@ async function ccCreate(doc, win) {
   const win = dom.window
   await ccWait(450)
 
+  await openSettings(doc, win)
   check('LoRA 段有导入按钮', !!doc.querySelector('.lora-import-btn'))
   const input = doc.querySelector('.lora-file-input')
   check('有隐藏的 .safetensors 选择框',
@@ -4562,6 +4594,7 @@ async function ccCreate(doc, win) {
   const win = dom.window
   await ccWait(450)
 
+  await openSettings(doc, win)
   const input = doc.querySelector('.lora-file-input')
   const file = new win.File([new Uint8Array([1])], 'clean_style.safetensors')
   const list = { 0: file, length: 1, item: () => file }
@@ -4595,7 +4628,7 @@ async function ccCreate(doc, win) {
   dom.window.close()
 }
 
-// 59) 全局设置是**全站**的：角色中心也能打开、改完画布侧栏是同一份
+// 59) 全局设置是**全站**的：角色中心也能打开，两处读到的是同一份
 {
   const { dom } = await boot('', null, {
     stayInLibrary: true,
@@ -4654,9 +4687,13 @@ async function ccCreate(doc, win) {
   doc.querySelector('.charlib-card')
     ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
   await ccWait(700)
-  check('画布侧栏显示同一份抠图方式（跨视图共享状态）',
-    doc.querySelector('.rail .matte-backend-select')?.value === 'u2net',
-    doc.querySelector('.rail .matte-backend-select')?.value)
+  check('画布侧栏里不再复制设置控件',
+    !doc.querySelector('.rail .matte-backend-select')
+    && !doc.querySelector('.rail .lora-import-btn'))
+  await openSettings(doc, win)
+  check('弹窗里读到的仍是刚才在角色中心改的值（跨视图共享状态）',
+    doc.querySelector('.gs-dialog .matte-backend-select')?.value === 'u2net',
+    doc.querySelector('.gs-dialog .matte-backend-select')?.value)
   dom.window.close()
 }
 
@@ -4666,10 +4703,7 @@ async function ccCreate(doc, win) {
   const doc = dom.window.document
   const win = dom.window
   await ccWait(450)
-  ;[...doc.querySelectorAll('.rail-tab')]
-    .find((t) => (t.textContent || '').includes('设置'))
-    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await ccWait(250)
+  await openSettings(doc, win)
 
   const headInfo = doc.querySelector('.lora-head-info')
   check('显示扫到几个 / 可挂几个',

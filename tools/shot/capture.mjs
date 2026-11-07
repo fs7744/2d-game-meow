@@ -421,7 +421,8 @@ async function main() {
     await fp.goto('http://127.0.0.1:8123/index.html?editor=1',
       { waitUntil: 'networkidle2', timeout: 60000 })
     await sleep(900)
-    await fp.evaluate(() => [...document.querySelectorAll('.rail-tab')]
+    // 设置已经从侧栏搬到顶栏 ⚙ 弹窗（侧栏只留画布/模板/节点/资料库）
+    await fp.evaluate(() => [...document.querySelectorAll('.top-action')]
       .find((b) => (b.textContent || '').includes('设置'))?.click())
     await fshot('28-settings-global')
     // 选一个 ComfyUI 格式的 LoRA → 应弹出「需要转换」确认框

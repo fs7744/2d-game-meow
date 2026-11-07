@@ -35,7 +35,10 @@
 - 节点「执行中」只看 `job.status` queued/running；**任何异常路径都要退出执行中**（提交 30s 超时、轮询连续 3 次失败、30 分钟看门狗、worker 兜底 try、404 明确文案）。
 - 「角色图」是上游产物（`image.path`/`job.path`），统一走 `imagePathOf(node)`；`onConnect` 角色图白名单硬编码 `['poseclone','spriteswap','posebatch']`，新增节点必须加。
 - 角色迁移批量必须读 `params["engine"]`（默认 wvnccs）；姿势集帧永远是人偶灰人偶（参考模式只认 skeleton/outline）。
-- 侧栏 4 tab 但 **6 个 `.rail-sec` DOM 顺序必须是 画布/模板/节点/资料库/LoRA/设置**，只用 `.is-hidden`+CSS 切，别条件卸载；`NODE_ENTRIES` 顺序别重排（smoke 用 `.rail-add` 索引）。`Ctrl/⌘+K` 聚焦搜索。
+- 侧栏 **3 个 tab（节点/画布/资料库）+ 4 个 `.rail-sec`（画布/模板/节点/资料库）**，只用 `.is-hidden`+CSS 切，别条件卸载；
+  `NODE_ENTRIES` 顺序别重排（smoke 用 `.rail-add` 索引）。`Ctrl/⌘+K` 聚焦搜索。
+  **设置（底模/抠图方式/LoRA）不许放回侧栏**：只长在顶栏 ⚙ 弹窗里（用户明确说「画布里的设置还在」不能再犯），
+  侧栏状态条右侧只留一个 `.rail-settings` 快捷按钮去开同一个弹窗。
 - `NodeView='expanded'|'image'|'result'`：出图自动 result，参数区 CSS 隐藏 **DOM 保留**；结果条只为有入边节点渲染 `[data-port]`。`?demo=result` 是假结果。
 - `--rail-w:252px` 必须与 `App.tsx`、`store/projects.ts` 初始 viewport `x:300,y:96` 同步。`.chars` 是 `position:absolute; inset:0`。
 - 弹窗走 **Portal 到 body**；灯箱 wheel 要 `addEventListener(...,{passive:false})`；别用 `opacity` 做低调按钮（近黑底等于隐形）。
@@ -75,9 +78,11 @@
   转换完再校验是 diffusers 才原子替换。ComfyUI 格式直接挂会**静默不生效**。
 - `submitMatte` 必须带 `matte_backend`（以前漏了，抠图节点的全局方式完全不生效）；
   后端 `_run` 按工作流白名单兜底注入全局值。
-- **UI 是两个挂载点、一份状态**：`components/GlobalSettings.tsx` 的
-  `LoraSettings` / `GeneralSettings` 既渲染在画布侧栏两个 `.rail-sec` 里，
-  也被顶栏 ⚙ 弹窗复用；状态只在 App 里一份，别在别处再复制。
+- **全局设置只有一个挂载点**：`components/GlobalSettings.tsx` 的
+  `LoraSettings` / `GeneralSettings` 只渲染在顶栏 ⚙ 弹窗里（画布与角色中心共用），
+  状态在 App 一份。**别再往侧栏塞一份**（用户为这个提过两次）。
+- **LoRA 强度滑块每行常显**：未挂载时 disabled + `.is-off` 置灰（默认 0.8），
+  不能只在 `activeLoras` 命中时才渲染——用户会以为功能没了。
 - 角色中心抠图**跟着全局方式走**：`matte_screen.global_backend()` 读 SQLite
   （2s 缓存）；`auto` 仍是官方幕布键控（`chroma_screen_matte`），
   只有显式选 `u2net`/`color` 才走 `matte.matte_auto(backend)`。

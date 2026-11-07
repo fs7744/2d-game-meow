@@ -193,21 +193,23 @@ export function LoraSettings({
                 </label>
                 <button type="button" className="lora-del" title={`删除 ${l.name}`}
                   onClick={() => setPendingDelete(l.name)}>✕</button>
-                {act && (
-                  <label className="lora-scale">
-                    <span>强度</span>
-                    <input
-                      type="range" min={0.1} max={1.5} step={0.05}
-                      value={act.scale}
-                      onChange={(e) => {
-                        const sc = Number(e.target.value)
-                        onLorasChange(activeLoras.map((x) =>
-                          x.name === l.name ? { name: x.name, scale: sc } : x))
-                      }}
-                    />
-                    <b>{act.scale.toFixed(2)}</b>
-                  </label>
-                )}
+                {/* 强度**每一行都显示**：以前只有勾上之后才出现，用户会以为
+                    这个功能没了。没勾时显示默认值 0.8 并置灰，勾上就能拖。 */}
+                <label className={`lora-scale${act ? '' : ' is-off'}`}
+                  title={act ? `${l.name} 的强度` : '先勾上左边的框，强度才会生效'}>
+                  <span>强度</span>
+                  <input
+                    type="range" min={0.1} max={1.5} step={0.05}
+                    value={act?.scale ?? 0.8}
+                    disabled={!act}
+                    onChange={(e) => {
+                      const sc = Number(e.target.value)
+                      onLorasChange(activeLoras.map((x) =>
+                        x.name === l.name ? { name: x.name, scale: sc } : x))
+                    }}
+                  />
+                  <b>{(act?.scale ?? 0.8).toFixed(2)}</b>
+                </label>
               </div>
             )
           })}
@@ -370,7 +372,11 @@ export default function GlobalSettingsDialog({
           onLorasChange={rest.onLorasChange}
           fastMode={rest.fastMode}
           onFastMode={rest.onFastMode}
-          onLorasChanged={rest.onLorasChanged} />
+          onLorasChanged={rest.onLorasChanged}
+          skipped={rest.skipped}
+          count={rest.count}
+          dir={rest.dir}
+          onRefresh={rest.onRefresh} />
       </div>
     </div>, document.body)
 }

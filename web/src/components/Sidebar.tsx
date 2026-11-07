@@ -1,7 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { FavoritePrompt } from '../types'
-import type { QwenLora, ActiveLora } from '../api'
-import { LoraSettings, GeneralSettings } from './GlobalSettings'
 import type { TemplateInfo } from '../api'
 import type { ProjectMeta } from '../store/projects'
 
@@ -37,28 +35,9 @@ type Props = {
   onRemoveFav: (id: string) => void
   /** 打开资料库浏览面板（提示词 / 姿势两个 tab） */
   onOpenLibrary: (tab: 'prompt' | 'pose') => void
-  matteBackend: string
-  onMatteBackend: (v: string) => void
+  /** 打开全局设置弹窗（设置已不在侧栏里，画布与角色中心共用顶栏那一份） */
+  onOpenSettings: () => void
   scanning?: boolean
-  /** 可用的 Qwen LoRA（只含 diffusers 原生格式的） */
-  loras: QwenLora[]
-  /** 当前生效的 LoRA */
-  activeLoras: ActiveLora[]
-  /** 挂载 / 卸载 LoRA（状态式：一直生效直到下次改） */
-  onLorasChange: (items: { name: string; scale: number }[]) => void
-  /** 快速模式（少步蒸馏）：挂 Lightning + 步数压到 8 */
-  fastMode: boolean
-  onFastMode: (on: boolean) => void
-  /** 全局底模（只读展示：节点里不再提供选择） */
-  baseModel: string
-  /** 导入 / 删除 / 转换 LoRA 之后刷新列表 */
-  onLorasChanged?: () => void
-  /** 目录里存在但格式不对的（显示为「待转换」） */
-  lorasSkipped?: QwenLora[]
-  lorasDir?: string
-  lorasCount?: number
-  /** 重新扫描 models/lora/ */
-  onRefreshLoras?: () => void | Promise<void>
 }
 
 /* ==========================================================================
@@ -75,16 +54,16 @@ type Props = {
    - VS Code / Figma：Activity Bar 图标导航，每个面板独立滚动，
      面板底部有状态条，不把「资源」和「设置」混在一条长列表里。
 
-   这里取同一个骨架：4 个一级 tab（节点 / 项目 / 资料库 / 设置），
+   这里取同一个骨架：3 个一级 tab（节点 / 画布 / 资料库）；
+   设置（底模 / 抠图方式 / LoRA）不属于任何一个画布，已移到顶栏 ⚙ 弹窗。
    节点 tab 内做「常用置顶 → 搜索 → 分类列表」，并支持 Ctrl+K 聚焦搜索、
    Enter 添加第一个匹配、Esc 清空。
    ========================================================================== */
-type RailTab = 'nodes' | 'projects' | 'library' | 'settings'
+type RailTab = 'nodes' | 'projects' | 'library'
 const RAIL_TABS: { id: RailTab; icon: string; label: string; hint: string }[] = [
   { id: 'nodes', icon: '▣', label: '节点', hint: '节点库：搜索、分类、拖到画布' },
   { id: 'projects', icon: '▤', label: '画布', hint: '画布与模板' },
   { id: 'library', icon: '☆', label: '资料库', hint: '提示词收藏与姿势库' },
-  { id: 'settings', icon: '⚙', label: '设置', hint: 'LoRA 与全局选项' },
 ]
 
 /** 节点清单。以前是 16 段复制粘贴的 JSX，改一个标题要动 16 处。
@@ -317,17 +296,15 @@ function ProjectRow({
 /**
  * 左边栏：一级 tab 导航 + 独立面板，整条可收起成图标条。
  *
- * **兼容性约定**：6 个 `.rail-sec` 的 DOM 顺序仍是
- * 「项目 / 模板 / 节点 / 资料库 / LoRA / 设置」。切 tab 只用 class 控制
+ * **兼容性约定**：4 个 `.rail-sec` 的 DOM 顺序是
+ * 「画布 / 模板 / 节点 / 资料库」（设置已移出侧栏，见 GlobalSettings.tsx）。
+ * 切 tab 只用 class 控制
  * `display:none`，不条件卸载——jsdom 冒烟用例仍能在任何 tab 下查询和点击
  * 面板里的按钮（真实浏览器里不可见，但 DOM 始终完整）。
  */
 export default function Sidebar({
   favs, onAddNode, canApply, onApplyFav, onRemoveFav, onOpenLibrary,
-  matteBackend, onMatteBackend,
-  loras, activeLoras, onLorasChange, fastMode, onFastMode,
-  baseModel, onLorasChanged,
-  lorasSkipped, lorasDir, lorasCount, onRefreshLoras,
+  onOpenSettings,
   projects, currentProject, onSwitchProject, onCreateProject, onRenameProject, onDeleteProject,
   onExportProject, onRevealProject, onSaveTemplate, onImportProject,
   templates, onUseTemplate, onDeleteTemplate,
@@ -631,29 +608,6 @@ export default function Sidebar({
           </Section>
         </div>
 
-        {/* ---------- 面板 4：LoRA + 设置（保持 Section 顺序第五、第六） ---------- */}
-        <div className={pageClass('settings')} data-page="settings">
-          <Section icon="◈" title="LoRA" count={loras.length}>
-            <LoraSettings
-              loras={loras}
-              activeLoras={activeLoras}
-              onLorasChange={onLorasChange}
-              fastMode={fastMode}
-              onFastMode={onFastMode}
-              onLorasChanged={onLorasChanged}
-              skipped={lorasSkipped}
-              count={lorasCount}
-              dir={lorasDir}
-              onRefresh={onRefreshLoras} />
-          </Section>
-
-          <Section icon="⚙" title="设置">
-            <GeneralSettings
-              baseModel={baseModel}
-              matteBackend={matteBackend}
-              onMatteBackend={onMatteBackend} />
-          </Section>
-        </div>
       </div>
 
       {/* 状态条：一眼看到「我现在在哪个项目」，以及 Ctrl+K 这个入口。 */}
@@ -661,6 +615,10 @@ export default function Sidebar({
         <span className="rail-status-dot" aria-hidden="true" />
         <span className="rail-status-name" title={current?.name}>{current?.name ?? '未命名画布'}</span>
         <span className="rail-status-count">{current?.count ?? 0} 节点</span>
+        <button type="button" className="rail-settings" onClick={onOpenSettings}
+          title="全局设置：底模 / 抠图方式 / LoRA（画布与角色中心共用）">
+          ⚙
+        </button>
       </div>
     </aside>
   )

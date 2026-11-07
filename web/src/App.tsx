@@ -1880,19 +1880,7 @@ export default function App() {
           canApply={!!selectedId}
           onApplyFav={applyFavorite}
           onRemoveFav={removeFavorite}
-          matteBackend={matteBackend}
-          onMatteBackend={changeMatteBackend}
-          baseModel={model}
-          onLorasChanged={reloadLoras}
-          lorasSkipped={lorasSkipped}
-          lorasDir={lorasDir}
-          lorasCount={lorasCount}
-          onRefreshLoras={reloadLoras}
-          loras={loras}
-          activeLoras={activeLoras}
-          onLorasChange={(items) => void changeLoras(items)}
-          fastMode={fastMode}
-          onFastMode={(on) => void changeFastMode(on)}
+          onOpenSettings={() => setSettingsOpen(true)}
         />
         <Canvas
           nodes={nodes}
