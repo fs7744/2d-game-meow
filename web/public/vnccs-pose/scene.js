@@ -277,7 +277,27 @@ export function createSceneController({ getViewer, canvas, post, getYaw, measure
     }
     if (camera && scene.cameraParams) applyCameraParams(v, scene.cameraParams)
     attachGizmo(v)
+    // 多角色时按所有人的横向跨度重新取景：默认机位是按单主体算的，
+    // 加第二个角色后右边那个会被裁掉半个身子（真机截图里踩到过）。
+    if (scene.characters.length > 1) fitScene(v)
     v.requestRender?.()
+  }
+
+  /** 把所有角色一起框进来。只在角色集合/切换时调用，拖 gizmo 时不动相机。 */
+  function fitScene(v) {
+    if (!v?.camera || !v?.orbit || !v.meshCenter) return
+    const xs = scene.characters.map((c) => placementOf(c.id).x)
+    const minX = Math.min(...xs)
+    const maxX = Math.max(...xs)
+    const midX = (minX + maxX) / 2
+    const width = maxX - minX
+    // 20 是单主体的距离；每多 1 单位横向跨度就再退 1.6 单位，
+    // 45° 视场下可见宽度 ≈ 0.83×距离，足够留出两侧余量。
+    const dist = Math.max(20, 20 + width * 1.6)
+    const c = v.meshCenter
+    v.camera.position.set(c.x + midX, c.y, c.z + dist)
+    v.orbit.target.set(c.x + midX, c.y, c.z)
+    v.orbit.update()
   }
 
   async function emit(commit = true) {
@@ -340,12 +360,16 @@ export function createSceneController({ getViewer, canvas, post, getYaw, measure
       let i = scene.characters.length + 1
       while (used.has(`c${i}`)) i += 1
       const id = `c${i}`
+      // **新人偶必须站得开**：默认 (0,0,0) 会正好压在第一个角色身上，
+      // 用户点「＋角色」后画面看起来没变化，还以为按钮坏了。横向错开 5 个
+      // 世界单位（人偶肩宽约 3~4），最多 12 个角色也不越 [-50,50] 的边界。
+      const spread = { ...zeroPlacement(), x: Math.min(40, 5 * (i - 1)) }
       scene.characters.push({
         id, name: `角色 ${i}`, color: PALETTE[(i - 1) % PALETTE.length],
         // 新人偶复制当前姿势，用户一加就能看到两个同姿势角色，再各自摆
-        pose: clone(activeChar().pose || {}), placement: zeroPlacement(),
+        pose: clone(activeChar().pose || {}), placement: spread,
       })
-      for (const t of scene.tabs) scene.placements[t][id] = zeroPlacement()
+      for (const t of scene.tabs) scene.placements[t][id] = { ...spread }
       scene.activeId = id
       syncToViewer(v)
       await emit(true)

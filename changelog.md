@@ -95,6 +95,10 @@ space / linkAll / tab / addTab / transform / camera / undo / redo，回执
 
 - 每个姿势 tab 有独立的 `placements[tab][角色 id]`；切换 tab 从当前复制一份，
   不会让用户以为刚摆的位置丢了。
+- **新人偶自动错开**（横向 5 单位/个）并**自动取景**：真机导出图里第一次
+  加角色时新人偶压在第一个身上（默认 0,0,0），第二次又因单主体机位把
+  第三个裁掉半身。`fitScene()` 按所有角色横向跨度把相机拉远居中，
+  只在角色集合/切换时调用，拖 gizmo 时不动相机。
 - 联动移动用官方 `translateCharacterPosition`（到边界时整组一起停），
   联动旋转用 `rotateCharacterAboutPivot` 绕各自骨盆补偿位置。
 - **撤销栈复用引擎预留的扩展点**：`options.captureHistoryContext()` 把每个

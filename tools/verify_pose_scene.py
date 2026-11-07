@@ -66,9 +66,12 @@ window.addEventListener('message', (e) => {
     const tf = states.findIndex((s) => xOf(s) === 4.5)
     const undo0 = tf >= 0 && states.slice(tf + 1).some((s) => xOf(s) === 0)
     const last = states[states.length - 1] || {}
+    const newX = last.placements && last.placements.t1 && last.placements.t1.c3
+      ? Number(last.placements.t1.c3.x) : 0
     const url = d.dataURL || ''
     log('OK load2=' + load2 + ' tf45=' + (tf >= 0) + ' undo0=' + undo0
       + ' chars=' + (last.characters ? last.characters.length : 0)
+      + ' spread=' + (newX > 0)
       + ' pngLen=' + url.length + ' b64=' + (url.split(',')[1] || ''))
   }
 })
@@ -128,6 +131,7 @@ def main() -> int:
         "精确 X=4.5 生效": "tf45=true" in title,
         "撤销退回 X=0": "undo0=true" in title,
         "加角色后变 3 个": "chars=3" in title,
+        "新角色自动错开不重叠": "spread=true" in title,
     }
     for name, ok in checks.items():
         print(("  ✓ " if ok else "  ✗ ") + name)
