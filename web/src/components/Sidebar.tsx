@@ -1,9 +1,7 @@
-import { useEffect, useMemo, useRef, useState,
-  type ChangeEvent, type ReactNode } from 'react'
-import { createPortal } from 'react-dom'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { FavoritePrompt } from '../types'
-import type { QwenLora, ActiveLora, LoraInspect } from '../api'
-import { inspectLora, commitLora, deleteLora } from '../api'
+import type { QwenLora, ActiveLora } from '../api'
+import { LoraSettings, GeneralSettings } from './GlobalSettings'
 import type { TemplateInfo } from '../api'
 import type { ProjectMeta } from '../store/projects'
 
@@ -54,14 +52,7 @@ type Props = {
   /** 全局底模（只读展示：节点里不再提供选择） */
   baseModel: string
   /** 导入 / 删除 LoRA 之后刷新列表 */
-  onLoraImported?: () => void
-  onLoraDeleted?: () => void
-}
-
-const MATTE_LABEL: Record<string, string> = {
-  auto: '自动（有分割模型就抠得干净）',
-  u2net: '语义分割 · 准但慢',
-  color: '纯色键控 · 极快',
+  onLorasChanged?: () => void
 }
 
 /* ==========================================================================
@@ -329,7 +320,7 @@ export default function Sidebar({
   favs, onAddNode, canApply, onApplyFav, onRemoveFav, onOpenLibrary,
   matteBackend, onMatteBackend,
   loras, activeLoras, onLorasChange, fastMode, onFastMode,
-  baseModel, onLoraImported, onLoraDeleted,
+  baseModel, onLorasChanged,
   projects, currentProject, onSwitchProject, onCreateProject, onRenameProject, onDeleteProject,
   onExportProject, onRevealProject, onSaveTemplate, onImportProject,
   templates, onUseTemplate, onDeleteTemplate,
@@ -338,58 +329,6 @@ export default function Sidebar({
   const [tab, setTab] = useState<RailTab>('nodes')
   const [query, setQuery] = useState('')
 
-  /* ---------------- LoRA 导入：两步走，格式不符必须用户确认转换 ---------------- */
-  const [importBusy, setImportBusy] = useState(false)
-  const [importMsg, setImportMsg] = useState('')
-  /** 需要转换、等用户点确认的检测结果 */
-  const [pendingConvert, setPendingConvert] = useState<LoraInspect | null>(null)
-  const [pendingLoraDelete, setPendingLoraDelete] = useState('')
-  const loraFileRef = useRef<HTMLInputElement | null>(null)
-
-  const onPickLora = async (e: ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    e.target.value = ''            // 允许重复选同名文件
-    if (!file) return
-    setImportBusy(true); setImportMsg('')
-    try {
-      const info = await inspectLora(file)
-      if (!info.convertible) {
-        setImportMsg(`无法导入：${info.reason}。头几个键：${info.sample_keys.join('、')}`)
-        return
-      }
-      if (info.need_convert) { setPendingConvert(info); return }
-      const out = await commitLora(info.token, false, info.name)
-      setImportMsg(`已导入「${out.name}」· ${out.item.tensors} 个张量`)
-      onLoraImported?.()
-    } catch (err) {
-      setImportMsg(`导入失败：${err instanceof Error ? err.message : '未知错误'}`)
-    } finally { setImportBusy(false) }
-  }
-
-  const confirmConvert = async () => {
-    if (!pendingConvert) return
-    setImportBusy(true)
-    try {
-      const out = await commitLora(pendingConvert.token, true, pendingConvert.name)
-      setImportMsg(`已转换并导入「${out.name}」· ${out.item.tensors} 个张量`
-        + (out.skipped ? `，跳过 ${out.skipped} 个无关键` : ''))
-      setPendingConvert(null)
-      onLoraImported?.()
-    } catch (err) {
-      setImportMsg(`转换失败：${err instanceof Error ? err.message : '未知错误'}`)
-    } finally { setImportBusy(false) }
-  }
-
-  const doDeleteLora = async (name: string) => {
-    setPendingLoraDelete('')
-    try {
-      await deleteLora(name)
-      setImportMsg(`已删除「${name}」`)
-      onLoraDeleted?.()
-    } catch (err) {
-      setImportMsg(`删除失败：${err instanceof Error ? err.message : '未知错误'}`)
-    }
-  }
   const importRef = useRef<HTMLInputElement | null>(null)
   const searchRef = useRef<HTMLInputElement | null>(null)
 
@@ -688,158 +627,23 @@ export default function Sidebar({
         {/* ---------- 面板 4：LoRA + 设置（保持 Section 顺序第五、第六） ---------- */}
         <div className={pageClass('settings')} data-page="settings">
           <Section icon="◈" title="LoRA" count={loras.length}>
-            <label className="lora-row fast-toggle">
-              <input
-                type="checkbox"
-                checked={fastMode}
-                onChange={(e) => onFastMode(e.target.checked)}
-              />
-              <span className="lora-name">快速模式（少步蒸馏）</span>
-              <span className="lora-size">-46%</span>
-            </label>
-            <div className="src-note">
-              挂 Lightning 少步蒸馏 LoRA，步数压到 8。实测 24 步 17.3s → 8 步 9.3s，
-              画质几乎不掉。逐帧路线（姿态序列 / 序列帧替换）建议开着。
-            </div>
-
-            {/* 导入入口刻意不用 .lora-row：冒烟按 .lora-row 的行数断言可用 LoRA 数。 */}
-            <div className="lora-import">
-              <button type="button" className="lora-import-btn" disabled={importBusy}
-                onClick={() => loraFileRef.current?.click()}>
-                {importBusy ? '处理中…' : '＋ 导入 LoRA（.safetensors）'}
-              </button>
-              <input ref={loraFileRef} type="file" accept=".safetensors"
-                className="lora-file-input" onChange={(e) => void onPickLora(e)} />
-              <span className="lora-import-hint">先检测格式，不匹配会问你要不要转换</span>
-            </div>
-            {importMsg && <div className="lora-import-msg">{importMsg}</div>}
-
-            {loras.length === 0 ? (
-              <div className="src-note">
-                还没有导入 LoRA。点上面的「导入」选一个 .safetensors；
-                ComfyUI 格式会在你确认之后自动转成 diffusers 原生格式。
-              </div>
-            ) : (
-              <>
-                {loras.map((l) => {
-                  const act = activeLoras.find((a) => a.name === l.name)
-                  return (
-                    <div className="lora-item" key={l.name}>
-                      <label className="lora-row">
-                        <input
-                          type="checkbox"
-                          checked={!!act}
-                          onChange={(e) => {
-                            const next = e.target.checked
-                              ? [...activeLoras.filter((a) => a.name !== l.name),
-                                { name: l.name, scale: act?.scale ?? 0.8 }]
-                              : activeLoras.filter((a) => a.name !== l.name)
-                            onLorasChange(next.map((x) => ({ name: x.name, scale: x.scale })))
-                          }}
-                        />
-                        <span className="lora-name" title={l.file}>{l.name}</span>
-                        <span className="lora-size">{l.size_mb}MB</span>
-                      </label>
-                      <button type="button" className="lora-del" title={`删除 ${l.name}`}
-                        onClick={() => setPendingLoraDelete(l.name)}>✕</button>
-                      {act && (
-                        <label className="lora-scale">
-                          <span>强度</span>
-                          <input
-                            type="range" min={0.1} max={1.5} step={0.05}
-                            value={act.scale}
-                            onChange={(e) => {
-                              const sc = Number(e.target.value)
-                              onLorasChange(activeLoras.map((x) =>
-                                x.name === l.name ? { name: x.name, scale: sc } : x))
-                            }}
-                          />
-                          <b>{act.scale.toFixed(2)}</b>
-                        </label>
-                      )}
-                    </div>
-                  )
-                })}
-                {pendingLoraDelete && (
-                  <div className="lora-del-confirm">
-                    <span>删掉「{pendingLoraDelete}」？文件会从磁盘移除。</span>
-                    <button type="button" onClick={() => setPendingLoraDelete('')}>取消</button>
-                    <button type="button" className="danger"
-                      onClick={() => void doDeleteLora(pendingLoraDelete)}>确认删除</button>
-                  </div>
-                )}
-                {activeLoras.length > 0 && (
-                  <div className="src-note">
-                    每个 LoRA 单独调强度；挂上的 LoRA 对**所有**生成生效（全局状态），
-                    重开应用也会自动恢复，直到在这里取消。
-                  </div>
-                )}
-              </>
-            )}
+            <LoraSettings
+              loras={loras}
+              activeLoras={activeLoras}
+              onLorasChange={onLorasChange}
+              fastMode={fastMode}
+              onFastMode={onFastMode}
+              onLorasChanged={onLorasChanged} />
           </Section>
 
           <Section icon="⚙" title="设置">
-            <div className="settings-global">
-              <span className="settings-global-k">底模（全局）</span>
-              <b className="settings-global-v">
-                {baseModel === 'qwen-image-2.1' ? 'Qwen-Image 2.1' : baseModel}
-              </b>
-              <span className="settings-global-note">
-                整站只有一个底模，节点里不用再选；挂上的 LoRA 同样全局生效。
-              </span>
-            </div>
-            <label className="block">
-              抠图方式（全局）
-              <select className="matte-backend-select" value={matteBackend}
-                onChange={(e) => onMatteBackend(e.target.value)}>
-                {Object.keys(MATTE_LABEL).map((k) => (
-                  <option key={k} value={k}>{MATTE_LABEL[k]}</option>
-                ))}
-              </select>
-            </label>
-            <div className="src-note">
-              对所有画布生成生效，设置保存在本地，重开应用不丢。角色中心的
-              「额外抠一次纯色幕布」是另一套键控，不走这里的算法。
-            </div>
+            <GeneralSettings
+              baseModel={baseModel}
+              matteBackend={matteBackend}
+              onMatteBackend={onMatteBackend} />
           </Section>
         </div>
       </div>
-
-      {/* 格式不符时先问用户：直接挂 ComfyUI 格式会「静默不生效」，比报错更难查。
-          用 Portal 挂到 body，别被侧栏的滚动容器裁掉。 */}
-      {pendingConvert && createPortal(
-        <div className="lora-convert-mask"
-          onClick={() => { if (!importBusy) setPendingConvert(null) }}>
-          <div className="lora-convert-dialog" onClick={(e) => e.stopPropagation()}>
-            <h3>这个 LoRA 需要转换</h3>
-            <p className="lora-convert-lead">
-              「{pendingConvert.original_name}」是 <b>ComfyUI 格式</b>；当前底模
-              Qwen-Image 2.1 只能挂载 <b>diffusers 原生格式</b>。直接导入会
-              「挂上了但完全没效果」，而且不会报任何错。
-            </p>
-            <p className="lora-convert-reason">{pendingConvert.reason}</p>
-            <div className="lora-convert-facts">
-              <span>张量 {pendingConvert.tensors}</span>
-              <span>{pendingConvert.size_mb} MB</span>
-              <span>存为 {pendingConvert.name}.safetensors</span>
-            </div>
-            <p className="lora-convert-keys">
-              键名示例：{pendingConvert.sample_keys.join('、')}
-            </p>
-            <div className="src-note">
-              转换只改键名与张量布局（含 img_mlp 拆分），不改权重数值；
-              原始文件保持不动，转换结果写进 models/lora/。
-            </div>
-            <div className="lora-convert-acts">
-              <button type="button" className="cc-btn ghost" disabled={importBusy}
-                onClick={() => setPendingConvert(null)}>取消</button>
-              <button type="button" className="cc-btn primary" disabled={importBusy}
-                onClick={() => void confirmConvert()}>
-                {importBusy ? '转换中…' : '确认转换并导入'}
-              </button>
-            </div>
-          </div>
-        </div>, document.body)}
 
       {/* 状态条：一眼看到「我现在在哪个项目」，以及 Ctrl+K 这个入口。 */}
       <div className="rail-status">

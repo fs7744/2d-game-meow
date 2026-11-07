@@ -112,3 +112,51 @@ def test_official_module_is_intact():
     # 唯一允许的改动：不再 import comfy
     src = Path(ms.chroma_screen_matte.__file__).read_text(encoding="utf-8")
     assert "import comfy" not in src, "不该还依赖 ComfyUI"
+
+
+# ---------------- 全局「抠图方式」对角色中心生效 ----------------
+
+def test_global_backend_reads_setting(monkeypatch):
+    """`auto` 之外的显式选择要从全局设置读出来（而不是永远返回 auto）。"""
+    from workflows import metadb
+
+    monkeypatch.setattr(metadb, "get_settings", lambda: {"matte_backend": "u2net"})
+    ms.reset_backend_cache()
+    assert ms.global_backend() == "u2net"
+    ms.reset_backend_cache()
+
+
+def test_global_backend_unknown_value_falls_back(monkeypatch):
+    from workflows import metadb
+
+    monkeypatch.setattr(metadb, "get_settings", lambda: {"matte_backend": "拼错了"})
+    ms.reset_backend_cache()
+    assert ms.global_backend() == "auto"
+    ms.reset_backend_cache()
+
+
+def test_matte_pil_honours_global_backend(monkeypatch):
+    """角色中心的抠图要跟着全局方式走：auto 用幕布键控，显式选择走 matte_auto。"""
+    from workflows import matte as matte_mod
+
+    called = {}
+
+    def fake_auto(im, backend="auto", model_dir=None, info=None, **kw):
+        called["backend"] = backend
+        called["model_dir"] = model_dir
+        return im.convert("RGBA")
+
+    monkeypatch.setattr(matte_mod, "matte_auto", fake_auto)
+
+    img = _screen_image()
+
+    monkeypatch.setattr(ms, "global_backend", lambda: "color")
+    ms.matte_pil(img)
+    assert called["backend"] == "color", "全局选了纯色键控，却没走 matte_auto"
+    assert called["model_dir"], "分割后端要有模型目录，不能传 None"
+
+    called.clear()
+    monkeypatch.setattr(ms, "global_backend", lambda: "auto")
+    out = ms.matte_pil(img)
+    assert "backend" not in called, "auto 不该改走 matte_auto（默认仍是官方幕布键控）"
+    assert out is not None and out.mode == "RGBA"

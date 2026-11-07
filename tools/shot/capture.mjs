@@ -385,13 +385,19 @@ async function main() {
     await fshot('25-cc-step3-adv')
     await fp.evaluate(() => document.querySelector('.cc-step[data-step="4"]')?.click())
     await fshot('26-cc-step4')
+    // 角色中心也能开全局设置（顶栏 ⚙，不依赖画布侧栏）
+    await fp.evaluate(() => [...document.querySelectorAll('.top-action')]
+      .find((b) => (b.textContent || '').includes('设置'))?.click())
+    await fshot('27-gs-from-characters')
+    await fp.evaluate(() => document.querySelector('.gs-close')?.click())
+    await sleep(300)
     // 回画布编辑器，拍「全局设置 / LoRA 导入」
     await fp.goto('http://127.0.0.1:8123/index.html?editor=1',
       { waitUntil: 'networkidle2', timeout: 60000 })
     await sleep(900)
     await fp.evaluate(() => [...document.querySelectorAll('.rail-tab')]
       .find((b) => (b.textContent || '').includes('设置'))?.click())
-    await fshot('27-settings-global')
+    await fshot('28-settings-global')
     // 选一个 ComfyUI 格式的 LoRA → 应弹出「需要转换」确认框
     await fp.evaluate(() => {
       const input = document.querySelector('.lora-file-input')
@@ -400,7 +406,7 @@ async function main() {
       Object.defineProperty(input, 'files', { configurable: true, get: () => [file] })
       input.dispatchEvent(new Event('change', { bubbles: true }))
     })
-    await fshot('28-lora-convert', 1000)
+    await fshot('29-lora-convert', 1000)
     await fp.close()
   }
 

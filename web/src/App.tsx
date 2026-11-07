@@ -32,6 +32,7 @@ import Lightbox from './components/Lightbox'
 import LibraryDrawer, { type LibraryTab } from './components/LibraryDrawer'
 import CharactersPage from './components/CharactersPage'
 import CanvasLibrary from './components/CanvasLibrary'
+import GlobalSettingsDialog from './components/GlobalSettings'
 import type { PoseDir } from './api'
 import type { ModelCaps } from './api'
 import type {
@@ -303,6 +304,8 @@ export default function App() {
   // 底模能力表（透明底 / 指令改图 / LoRA）。当前底模支不支持透明底由它决定，
   // 不能按名字判断——底模名可以是任意目录名。
   const [caps, setCaps] = useState<Record<string, ModelCaps>>({})
+  /** 全局设置弹窗：画布与角色中心共用同一个入口（顶栏 ⚙）。 */
+  const [settingsOpen, setSettingsOpen] = useState(false)
   /** 全局抠图方式：服务端 /settings 是权威，重开应用不丢。 */
   const [matteBackend, setMatteBackend] = useState('auto')
   const changeMatteBackend = useCallback(async (v: string) => {
@@ -1790,6 +1793,15 @@ export default function App() {
         >
           ☆ 资料库
         </button>
+        {/* 全局设置：以前只长在画布侧栏里，进角色中心就改不到。
+            现在提到顶栏，两个视图共用同一份（底模 / 抠图方式 / LoRA）。 */}
+        <button
+          className="top-action"
+          onClick={() => setSettingsOpen(true)}
+          title="全局设置：底模 / 抠图方式 / LoRA（画布与角色中心共用）"
+        >
+          ⚙ 设置
+        </button>
         <div className="spacer" />
         <span className={`gpu ${device && !device.includes('未连接') ? 'ok' : 'bad'}`} title={device}>
           {device || '连接中…'}
@@ -1806,9 +1818,23 @@ export default function App() {
         )}
       </header>
 
+      <GlobalSettingsDialog
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        baseModel={model}
+        matteBackend={matteBackend}
+        onMatteBackend={(v) => void changeMatteBackend(v)}
+        loras={loras}
+        activeLoras={activeLoras}
+        onLorasChange={(items) => void changeLoras(items)}
+        fastMode={fastMode}
+        onFastMode={(on) => void changeFastMode(on)}
+        onLorasChanged={reloadLoras}
+      />
+
       <main className="stage">
         {view === 'characters' ? (
-          <CharactersPage onNotice={setNotice} />
+          <CharactersPage onNotice={setNotice} matteBackend={matteBackend} />
         ) : canvasView === 'library' ? (
           <CanvasLibrary
             onOpen={(id) => { switchProject(id); setCanvasView('editor') }}
@@ -1845,8 +1871,7 @@ export default function App() {
           matteBackend={matteBackend}
           onMatteBackend={changeMatteBackend}
           baseModel={model}
-          onLoraImported={reloadLoras}
-          onLoraDeleted={reloadLoras}
+          onLorasChanged={reloadLoras}
           loras={loras}
           activeLoras={activeLoras}
           onLorasChange={(items) => void changeLoras(items)}

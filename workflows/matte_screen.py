@@ -13,12 +13,14 @@
 from __future__ import annotations
 
 import os
+import time
 from typing import Any, Dict, Optional, Tuple
 
 import torch
 from PIL import Image
 
 from workflows import chroma_screen_matte
+from workflows import paths
 
 #: 官方默认参数（chroma_screen_matte.screen_matte 的签名默认值）
 DEFAULT_PARAMS: Dict[str, Any] = {
@@ -48,14 +50,56 @@ def _to_tensor(im: Image.Image) -> torch.Tensor:
     return t
 
 
+#: 全局「抠图方式」的小缓存。角色中心一次批量可能抠上百帧，每帧都开一次
+#: SQLite 连接不值当；设置改了最多晚 TTL 生效，用户感知不到。
+_BACKEND_CACHE: Dict[str, Any] = {"at": 0.0, "v": "auto"}
+_BACKEND_TTL = 2.0
+_ALLOWED_BACKENDS = ("auto", "color", "u2net", "ai", "isnet", "birefnet")
+
+
+def reset_backend_cache() -> None:
+    """让下一次调用重新读设置（设置刚改完 / 测试里用）。"""
+    _BACKEND_CACHE["at"] = 0.0
+
+
+def global_backend() -> str:
+    """读全局「抠图方式」（顶栏 ⚙ 设置，存在 SQLite）。读不到就当 auto。
+
+    **auto 保持原来的官方幕布键控**：角色出图的背景是已知纯色幕，
+    `chroma_screen_matte` 就是为它调的，换成语义分割反而是降级。
+    只有用户明确选了 u2net / color，才切到 `matte.matte_auto` 那套算法。
+    """
+    now = time.time()
+    if now - float(_BACKEND_CACHE["at"]) < _BACKEND_TTL:
+        return str(_BACKEND_CACHE["v"])
+    v = "auto"
+    try:
+        from workflows import metadb
+        v = str(metadb.get_settings().get("matte_backend") or "auto")
+    except Exception:                      # noqa: BLE001
+        v = "auto"
+    if v not in _ALLOWED_BACKENDS:
+        v = "auto"
+    _BACKEND_CACHE.update(at=now, v=v)
+    return v
+
+
 def matte_pil(im: Image.Image, **params: Any) -> Optional[Image.Image]:
     """抠一张**已经在内存里**的图，返回 RGBA。
 
     表情批量生成要边走边抠（贴回 → 抠 → 落盘），先写盘再读回来纯属白折腾，
     而且中间那个临时文件还得管。算法与 `matte_rgba` 完全一样，只是不吃路径。
+
+    **算法跟全局设置走**：`auto` 用官方幕布键控（默认，背景是纯色幕时最准）；
+    用户选了 u2net / color 就交给 `matte.matte_auto`，与画布节点同一条路。
+    以前这个入口硬编码一种算法，所以「抠图方式」对角色中心完全不生效。
     """
     if im is None:
         return None
+    backend = global_backend()
+    if backend != "auto":
+        from workflows import matte as matte_mod
+        return matte_mod.matte_auto(im, backend, model_dir=paths.MODELS_DIR / "matte")
     tensor = _to_tensor(im)
     kw = dict(DEFAULT_PARAMS)
     kw.update({k: v for k, v in params.items() if v is not None and k in DEFAULT_PARAMS})

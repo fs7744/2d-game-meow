@@ -4564,6 +4564,71 @@ async function ccCreate(doc, win) {
   dom.window.close()
 }
 
+// 59) 全局设置是**全站**的：角色中心也能打开、改完画布侧栏是同一份
+{
+  const { dom } = await boot('', null, {
+    stayInLibrary: true,
+    setupFetch: (f) => {
+      f.setSettings({ matte_backend: 'color' })
+      // 塞一张画布：后面要进编辑器看侧栏是不是同一份值
+      f.serverProjects.set('c1', {
+        id: 'c1', name: '测试画布', created: '', updated: '',
+        nodes: [], viewport: { x: 300, y: 96, z: 1 },
+      })
+    },
+  })
+  const doc = dom.window.document
+  const win = dom.window
+  await ccWait(450)
+  ;[...doc.querySelectorAll('.view-tab')]
+    .find((t) => (t.textContent || '').includes('角色中心'))
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await ccWait(450)
+
+  check('角色中心没有侧栏（设置不能只靠侧栏）', !doc.querySelector('.rail'))
+  const gear = [...doc.querySelectorAll('.top-action')]
+    .find((b) => (b.textContent || '').includes('设置'))
+  check('顶栏有全局设置入口（角色中心也够得着）', !!gear,
+    [...doc.querySelectorAll('.top-action')].map((b) => b.textContent).join('/'))
+  gear?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await ccWait(300)
+  const dlg = doc.querySelector('.gs-dialog')
+  check('弹出全局设置弹窗', !!dlg)
+  check('弹窗里同时有通用与 LoRA 两段',
+    (dlg?.textContent || '').includes('底模（全局）')
+    && (dlg?.textContent || '').includes('LoRA（'),
+    (dlg?.textContent || '').slice(0, 60))
+  const sel = dlg?.querySelector('.matte-backend-select')
+  check('弹窗里的抠图方式是服务端存的那份（color）',
+    sel?.value === 'color', sel?.value)
+
+  const setter = Object.getOwnPropertyDescriptor(win.HTMLSelectElement.prototype, 'value').set
+  setter.call(sel, 'u2net')
+  sel.dispatchEvent(new win.Event('change', { bubbles: true }))
+  await ccWait(350)
+  const put = calls.filter((c) => c.method === 'PUT' && c.url.endsWith('/settings')).pop()
+  check('角色中心里改的抠图方式也写回 /settings',
+    !!put && JSON.parse(put.body).matte_backend === 'u2net', put?.body)
+
+  dlg?.querySelector('.gs-close')
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await ccWait(200)
+  check('能关掉弹窗', !doc.querySelector('.gs-dialog'))
+
+  // 切回画布并进编辑器：侧栏读到的必须是同一个值（不是两套状态）
+  ;[...doc.querySelectorAll('.view-tab')]
+    .find((t) => (t.textContent || '').includes('画布'))
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await ccWait(400)
+  doc.querySelector('.charlib-card')
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await ccWait(700)
+  check('画布侧栏显示同一份抠图方式（跨视图共享状态）',
+    doc.querySelector('.rail .matte-backend-select')?.value === 'u2net',
+    doc.querySelector('.rail .matte-backend-select')?.value)
+  dom.window.close()
+}
+
 const failed = results.filter((r) => !r.ok)
 console.log(`\n${results.length - failed.length}/${results.length} 通过`)
 process.exit(failed.length ? 1 : 0)

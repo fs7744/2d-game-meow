@@ -75,8 +75,12 @@
   转换完再校验是 diffusers 才原子替换。ComfyUI 格式直接挂会**静默不生效**。
 - `submitMatte` 必须带 `matte_backend`（以前漏了，抠图节点的全局方式完全不生效）；
   后端 `_run` 按工作流白名单兜底注入全局值。
-- 角色中心「额外抠一次纯色幕布」走 `matte_screen.chroma_screen_matte`，
-  与 `matte.matte_auto(backend)` 是两套算法，**不受全局抠图方式影响**（已写进 UI 文案）。
+- **UI 是两个挂载点、一份状态**：`components/GlobalSettings.tsx` 的
+  `LoraSettings` / `GeneralSettings` 既渲染在画布侧栏两个 `.rail-sec` 里，
+  也被顶栏 ⚙ 弹窗复用；状态只在 App 里一份，别在别处再复制。
+- 角色中心抠图**跟着全局方式走**：`matte_screen.global_backend()` 读 SQLite
+  （2s 缓存）；`auto` 仍是官方幕布键控（`chroma_screen_matte`），
+  只有显式选 `u2net`/`color` 才走 `matte.matte_auto(backend)`。
 
 ## 全屏库首页 / SQLite 元数据（2026-11-07）
 - 角色中心与画布视图都是**两层**：默认全屏库（`CharacterLibrary.tsx` / `CanvasLibrary.tsx`，共用 `.charlib-*`），点卡片才进工作台/编辑器。

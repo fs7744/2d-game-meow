@@ -55,16 +55,26 @@ import {
   type StepId, type TaskState,
 } from './characters/model'
 
-type Props = { onNotice: (msg: string) => void }
+type Props = {
+  onNotice: (msg: string) => void
+  /** 全局抠图方式（顶栏 ⚙ 全局设置里改）。角色中心的幕布抠图会跟着它走。 */
+  matteBackend?: string
+}
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+/** 全局抠图方式 → 勾选项后面那一小截说明（值原样来自 /settings）。 */
+const MATTE_SHORT: Record<string, string> = {
+  auto: '自动', u2net: '语义分割', color: '纯色键控',
+}
 
 function fmtStamp(ts?: number): string {
   if (!ts) return '—'
   return new Date(ts * 1000).toLocaleString('zh-CN', { hour12: false })
 }
 
-export default function CharactersPage({ onNotice }: Props) {
+export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Props) {
+  const matteMethod = MATTE_SHORT[matteBackend] ?? matteBackend
   /* ------------------------------------------------------------ 角色库 */
   const [items, setItems] = useState<CharacterSummary[]>([])
   const [loading, setLoading] = useState(true)
@@ -750,9 +760,13 @@ export default function CharactersPage({ onNotice }: Props) {
                 <label className="chars-check">
                   <input type="checkbox" checked={matte} onChange={(e) => setMatte(e.target.checked)} />
                   额外抠一次纯色背景
+                  <span className="cc-inline-tag" title="在顶栏 ⚙ 全局设置里改">
+                    方式：{matteMethod}
+                  </span>
                   <span className="chars-sub">
                     默认关：模型本来就出透明底。只有底色不干净时才勾，
-                    白毛 / 白甲角色勾了可能被一起判成背景。这个开关对后面所有生成都生效。
+                    白毛 / 白甲角色勾了可能被一起判成背景。这个开关对后面所有生成都生效；
+                    抠图算法跟全局设置走（顶栏 ⚙ 设置）。
                   </span>
                 </label>
                 <div className="cc-fields">
@@ -823,6 +837,9 @@ export default function CharactersPage({ onNotice }: Props) {
                   <label className="chars-check">
                     <input type="checkbox" checked={matte} onChange={(e) => setMatte(e.target.checked)} />
                     额外抠一次背景
+                    <span className="cc-inline-tag" title="在顶栏 ⚙ 全局设置里改">
+                      {matteMethod}
+                    </span>
                   </label>
                   <span className="cc-cost">
                     预计 {pipelineEstimate}

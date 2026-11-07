@@ -22,6 +22,53 @@
 
 ---
 
+## 2026-11-07 · 全局设置提升为全站入口（角色中心也能改、也生效）
+
+上一轮把底模 / 抠图方式 / LoRA 收到了 SQLite，但它们的**界面**还长在画布侧栏里：
+一进角色中心就再也改不到，看起来像「画布的设置」。这轮把界面提到全站。
+
+### 一个实现，两个挂载点
+
+新增 `web/src/components/GlobalSettings.tsx`，导出 `LoraSettings` /
+`GeneralSettings` / `GlobalSettingsDialog`：
+
+- **画布侧栏**：仍然是原来的「LoRA」「设置」两个 `.rail-sec`（6 段 DOM 顺序不变），
+  只是内容改成引用共享组件；
+- **顶栏 ⚙ 设置**：新增按钮 + Portal 弹窗，画布和角色中心都能开，两段内容完整。
+
+关键是**只有一份状态**（App 的 `loras/activeLoras/matteBackend/fastMode`）：
+以前同一个动作在两个地方各写一遍，迟早不一致；现在两边都只是这份状态的两个视图。
+冒烟用例 59 专门验这个：在角色中心把抠图方式改成 u2net，切回画布进编辑器，
+侧栏读到的必须是同一个值。
+
+### 抠图方式真的对角色中心生效了
+
+以前角色中心的「额外抠一次背景」固定走 `matte_screen.chroma_screen_matte`
+（官方幕布键控），跟全局设置毫无关系 —— 上一轮我在 UI 上写了「不受影响」，
+这轮把它接通：
+
+- `matte_screen.global_backend()` 从 SQLite 读全局方式（2 秒小缓存：批量抠
+  上百帧时不该每帧开一次库连接）；
+- `auto` **保持原来的官方幕布键控**（角色出图背景是已知纯色幕，这套就是为它调的，
+  换成语义分割反而是降级）；
+- 只有用户明确选了 `u2net` / `color`，才切到 `matte.matte_auto(backend)`，
+  与画布节点走同一条路；模型目录用 `MODELS_DIR/matte`（与 `engine.matte_dir` 一致）。
+- 角色中心那两个勾选项后面直接显示当前方式（`方式：自动` / `语义分割` / `纯色键控`），
+  点不了但一眼看得到，改去顶栏 ⚙。
+
+LoRA 本来就是引擎级全局状态（`apply_loras` 的 user 槽），角色中心的生成同样带着它；
+之前缺的只是「在角色中心改」的入口，现在有了。
+
+### 验证
+
+`tsc -b` / `vite build` ✓、`check-hints` 34/34、**`node smoke.mjs` 676/676**
+（新增 59：角色中心无侧栏 → 顶栏 ⚙ 可开 → 弹窗含通用+LoRA → 改完写回 /settings
+→ 切回画布侧栏是同一个值）、`pytest test_matte_screen` **10 passed**
+（新增 3 条：读设置、未知值回落 auto、`auto` 不走 matte_auto 而显式选择才走）、
+`pytest test_characters + test_matte + test_api` 全绿。
+真机截图新增 `27-gs-from-characters`（角色中心里打开）与
+`28-settings-global`（画布侧栏同一份）/ `29-lora-convert`。
+
 ## 2026-11-07 · 底模收归全局 + 全局设置落 SQLite + LoRA 导入（格式不符先问再转）
 
 ### 节点里不再选底模
@@ -84,10 +131,10 @@ diffusers 只打一句 "unexpected keys found" 就继续 —— **看起来导�
 文件名清洗、设置白名单、懒恢复剔除缺失文件）。真机离线截图新增
 `27-settings-global` / `28-lora-convert`。
 
-一个如实说明：角色中心的「额外抠一次纯色幕布」走的是
-`matte_screen.chroma_screen_matte`（边框取色的幕布键控），跟这里的
-`matte.matte_auto(backend)` 是两套算法，**不受全局抠图方式影响**；
-设置面板里也写清了这一点。
+当时还留着一个缺口：角色中心的「额外抠一次纯色幕布」固定走
+`matte_screen.chroma_screen_matte`，**不受全局抠图方式影响** ——
+下一节「全局设置提升为全站入口」已把它接通（`auto` 仍用这套幕布键控，
+显式选 `u2net`/`color` 才切到 `matte.matte_auto`）。
 
 ## 2026-11-07 · 全屏库首页 + SQLite 元数据 + 「项目」改名「画布」
 
