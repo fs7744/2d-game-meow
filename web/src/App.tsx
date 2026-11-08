@@ -1037,6 +1037,7 @@ export default function App() {
   const savePoseSet = useCallback(async (
     name: string,
     frames: { t: number; yaw: number; pose: unknown; png: string }[],
+    source: Record<string, unknown> = {},
   ) => {
     if (!currentId) {
       setNotice('还没有项目 id：先保存一次项目')
@@ -1046,6 +1047,8 @@ export default function App() {
     try {
       const r = await createProjectPoseSet(currentId, name, frames, {
         count: frames.length, at: Date.now(),
+        // 抽帧面板选了动作模板就留痕：Godot 导出顺着 poseSet 反查 fps/loop
+        ...source,
       })
       setNotice(`已存成姿势集「${r.set.name}」（${r.set.count} 帧，`
         + `在项目目录 poses/${r.set.name}/ 下）`)

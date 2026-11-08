@@ -25,6 +25,10 @@ export type SampledFrame = {
   png: string
   /** 16×16 灰度指纹（base64，256 字节）；空串 = 算指纹失败，按"完全不同"处理 */
   hash: string
+  /** 多机位抽帧时这一帧属于哪个方向（如 down / up-right）；单方向抽帧没有 */
+  direction?: string
+  /** 该帧用的白模机位（度）。单方向抽帧沿用宿主当前 yaw */
+  yaw?: number
 }
 
 const cache = new Map<string, Uint8Array>()

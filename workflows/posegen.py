@@ -20,6 +20,7 @@ batch 只会把显存顶爆，速度不会快——每张的 latent 尺寸可能
 """
 from __future__ import annotations
 
+import json
 import os
 import time
 from typing import Any, Callable, Dict, List, Optional, Sequence
@@ -27,6 +28,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 from PIL import Image
 
 from workflows import characters
+from workflows import directions
 
 #: 官方 `pose_sampler` 默认（`:825-833`）
 POSE_DEFAULTS = {"steps": 20, "cfg": 1.0, "target_size": 1024}
@@ -85,6 +87,58 @@ def _resolve_pose_paths(poses: Sequence[str], pose_dir: str = "") -> List[str]:
 def resolve_pose_paths(poses: Sequence[str], pose_dir: str = "") -> List[str]:
     """公开入口（`app.py` / `pipeline.py` 都调它，别直接摸下划线版本）。"""
     return _resolve_pose_paths(poses, pose_dir)
+
+
+def _set_direction_map(folder: str) -> Dict[str, Dict[str, Any]]:
+    """读旁边的 ``set.json``，建立 ``文件名 → {direction, yaw}`` 映射。
+
+    多机位抽帧时宿主把 ``direction`` / ``yaw`` 写在每一帧上
+    （``poseset.EXTRA_FRAME_KEYS`` 原样透传）。这里**只读**，不新增落盘数据：
+    方向信息本来就在姿势集里，以前被 ``_resolve_pose_paths`` 只列文件名的做法
+    整个丢掉了。
+    """
+    file = os.path.join(folder, "set.json")
+    if not os.path.isfile(file):
+        return {}
+    try:
+        with open(file, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    out: Dict[str, Dict[str, Any]] = {}
+    for item in doc.get("frames") or []:
+        if not isinstance(item, dict):
+            continue
+        fn = str(item.get("file") or "")
+        if not fn:
+            continue
+        try:
+            yaw = int(item.get("yaw") or 0)
+        except (TypeError, ValueError):
+            yaw = 0
+        out[fn] = {"direction": directions.validate_direction(item.get("direction")),
+                   "yaw": yaw}
+    return out
+
+
+def pose_entries(paths: Sequence[str]) -> List[Dict[str, Any]]:
+    """给一组真实存在的姿势图补上方向元数据；没有 set.json 就全是空方向。"""
+    cache: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    out: List[Dict[str, Any]] = []
+    for p in paths:
+        folder = os.path.dirname(p)
+        if folder not in cache:
+            cache[folder] = _set_direction_map(folder)
+        meta = cache[folder].get(os.path.basename(p)) or {}
+        out.append({"path": p, "direction": meta.get("direction", ""),
+                    "yaw": meta.get("yaw", 0)})
+    return out
+
+
+def resolve_pose_frames(poses: Sequence[str], pose_dir: str = ""
+                        ) -> List[Dict[str, Any]]:
+    """公开入口：路径 + 方向元信息（编排层想知道这批帧覆盖几个机位时用）。"""
+    return pose_entries(_resolve_pose_paths(poses, pose_dir))
 
 
 #: 官方 `character_generator.py:988`（透明底那句，跟换装/表情共用同一句）
@@ -149,6 +203,9 @@ def run_batch(
     pose_paths = _resolve_pose_paths(params.get("poses") or [], str(params.get("pose_dir") or ""))
     if not pose_paths:
         raise PoseGenError("没有可用的姿势图：给几张姿势图，或指定一个骨架帧目录")
+    # 方向来自姿势集自己的 set.json（多机位抽帧时落的），不是新参数：
+    # 老目录没有这个文件 → 每帧都是空方向 → 输出文件名和以前一字不差。
+    pose_meta = pose_entries(pose_paths)
 
     # 角色底图：**显式指定 source_costume 时只认它**，否则按「这套服装 → Naked」退。
     #
@@ -217,7 +274,7 @@ def run_batch(
     items: List[Dict[str, Any]] = []
     failed: List[Dict[str, Any]] = []
     started = time.time()
-    for index, pose_path in enumerate(pose_paths):
+    for index, (pose_path, entry) in enumerate(zip(pose_paths, pose_meta)):
         if job is not None:
             job["progress"] = {"done": index, "total": total,
                                "current": f"第 {index + 1}/{total} 张姿势"}
@@ -242,10 +299,12 @@ def run_batch(
                     matte_error = str(exc)
             results.append(image)
             items.append({"index": index + 1, "pose": pose_path,
+                          "direction": entry["direction"], "yaw": entry["yaw"],
                           "size": list(image.size), "matte_error": matte_error,
                           "seconds": round(time.time() - t0, 2)})
         except Exception as exc:                      # noqa: BLE001
             failed.append({"index": index + 1, "pose": pose_path,
+                           "direction": entry["direction"],
                            "error": f"{type(exc).__name__}: {exc}"})
         if job is not None:
             job["progress"]["done"] = index + 1
@@ -257,11 +316,23 @@ def run_batch(
     target = characters.sprites_dir(name, costume, "neutral")
     os.makedirs(os.path.dirname(target), exist_ok=True)
     written: List[str] = []
+    dir_written: Dict[str, List[str]] = {}
+    per_dir_count: Dict[str, int] = {}
     with characters.staged_image_batch(target, version_existing=True) as stage:
         for i, image in enumerate(results, start=1):
-            fname = f"sprite_pose_{i:04d}.png"
+            # 方向帧按方向独立编号：down_0001..0008 与 right_0001..0008 一起落，
+            # 别把八个方向串成 64 帧的一条长动画。无方向时 frame_filename("")
+            # 仍是官方的 sprite_pose_0001.png。
+            info = items[i - 1] if i - 1 < len(items) else {}
+            key = str(info.get("direction") or "")
+            n = per_dir_count.get(key, 0) + 1
+            per_dir_count[key] = n
+            fname = directions.frame_filename(key, n)
             image.save(os.path.join(stage, fname), format="PNG")
-            written.append(os.path.join(target, fname))
+            path = os.path.join(target, fname)
+            written.append(path)
+            if key:
+                dir_written.setdefault(key, []).append(path)
 
     if job is not None:
         job["progress"] = {"done": total, "total": total, "current": ""}
@@ -269,6 +340,8 @@ def run_batch(
         "character": name, "costume": costume,
         "source": char_path, "count": len(written),
         "sprites": written, "poses": pose_paths[:len(written)],
+        "directions": sorted(dir_written),
+        "directionFrames": dir_written,
         "seed": seed, "steps": steps, "cfg": cfg, "background": background,
         "items": items, "failed": failed,
         "seconds": round(time.time() - started, 2),

@@ -25,11 +25,26 @@ import { clipLabel } from '../fileName'
 import {
   applyFilters, diffStats, hashDiff, loopSeam, type SampledFrame,
 } from '../store/animFrames'
+import { DIRECTIONS, DIRECTION_LABELS, YAW_MAP, type ViewMode } from '../store/playtest'
+import { fetchMotionTemplates, type MotionTemplate } from '../api'
 
 /** 8 个精灵素材常用的朝向（导出机位，绕 Y 的角度） */
 export const YAWS: Array<[number, string]> = [
   [0, '正面'], [45, '右前'], [90, '右侧'], [135, '右后'],
   [180, '背面'], [225, '左后'], [270, '左侧'], [315, '左前'],
+]
+
+/**
+ * 抽帧时的机位模式。**默认 single**，与改造前完全一致；
+ * 选了视角模式才按 `directions` 一次抽多个方向（每个方向单独做脚底对齐）。
+ * 方向表与角色中心试玩台共用 `store/playtest.ts` 的一张表，别在这里另写一份。
+ */
+type SampleMode = 'single' | ViewMode
+const SAMPLE_MODES: Array<{ id: SampleMode; label: string; hint: string }> = [
+  { id: 'single', label: '当前机位', hint: '只抽当前朝向（和以前一样）' },
+  { id: 'topdown-4', label: '四方向', hint: '0° / 90° / 180° / 270°' },
+  { id: 'topdown-8', label: '八方向', hint: 'YAWS 全 8 个机位，生成量 ×8' },
+  { id: 'side-2', label: '横板左右', hint: '90° / 270°，另一向可镜像派生' },
 ]
 
 /** 嵌入模式：只留画布，控制条由宿主提供 */
@@ -90,7 +105,8 @@ type Props = {
   /** 场景变化 → App 写回节点存档 */
   onScene?: (scene: PoseScene) => void
   /** 把一个动作抽出来的 N 帧存成项目里的姿势集（同名会被后端拒绝） */
-  onSavePoseSet?: (name: string, frames: PoseSetFrameIn[]) => Promise<boolean> | boolean
+  onSavePoseSet?: (name: string, frames: PoseSetFrameIn[],
+                   source?: Record<string, unknown>) => Promise<boolean> | boolean
 }
 
 /** 抽帧结果的一帧（`png` 是 iframe 出的人偶图 dataURL） */
@@ -101,6 +117,8 @@ export type PoseSetFrameIn = {
   png: string
   /** 抽帧那一刻的多角色场景（位置按 tab 独立存） */
   scene?: PoseScene | null
+  /** 多机位抽帧时这一帧的方向 key（单方向抽帧不带） */
+  direction?: string
 }
 
 export default function PoseStudio({
@@ -144,6 +162,18 @@ export default function PoseStudio({
    * 100KB 的 base64 会让自动保存变慢）。
    */
   const [sampled, setSampled] = useState<SampledFrame[] | null>(null)
+  /** 抽帧机位模式：默认单方向，完全兼容改造前 */
+  const [sampleMode, setSampleMode] = useState<SampleMode>('single')
+  /** 动作模板：只用来带出帧数 / 机位模式，并把 templateId 写进 set.json.source */
+  const [templates, setTemplates] = useState<MotionTemplate[]>([])
+  const [templateId, setTemplateId] = useState('')
+  useEffect(() => {
+    let alive = true
+    fetchMotionTemplates()
+      .then((r) => { if (alive) setTemplates(Array.isArray(r?.items) ? r.items : []) })
+      .catch(() => { /* 模板是可选增强，拉不到就当没有 */ })
+    return () => { alive = false }
+  }, [])
   /** 已勾选的帧（按 sampled 的**下标**，不是点击顺序 —— 存出去要帧序） */
   const [picks, setPicks] = useState<number[]>([])
   /** 两把筛子：跳帧步长 + 近似度（只改"显示哪些"，不动勾选） */
@@ -232,6 +262,8 @@ export default function PoseStudio({
         boneCount?: number; format?: string; switched?: boolean
         rig?: { familyLabel?: string; mapped?: number; missing?: string[] }
         frames?: { t: number; pose: unknown; png?: string }[]
+        /** 多机位抽帧回执里带的方向 key 列表（单方向抽帧没有） */
+        directions?: string[]
         clip?: string
         t?: number
         on?: boolean
@@ -309,7 +341,10 @@ export default function PoseStudio({
         setStep(1)
         setSimPct(0)
         setShowAll(false)
-        setStatus(`抽到 ${frames.length} 帧（还没存）：挑完点「存为姿势集」`)
+        const dirCount = Array.isArray(d.directions) ? d.directions.length : 0
+        setStatus(dirCount
+          ? `抽到 ${frames.length} 帧 / ${dirCount} 个方向（还没存）：挑完点「存为姿势集」`
+          : `抽到 ${frames.length} 帧（还没存）：挑完点「存为姿势集」`)
       } else if (d.type === 'error') {
         setAnimBusy(false)
         setSampling(false)
@@ -660,16 +695,54 @@ export default function PoseStudio({
               />
               帧
             </label>
+            <select
+              className="pose-sample-mode"
+              value={sampleMode}
+              disabled={sampling}
+              onChange={(e) => setSampleMode(e.target.value as SampleMode)}
+              title={SAMPLE_MODES.find((m) => m.id === sampleMode)?.hint}
+            >
+              {SAMPLE_MODES.map((m) => (
+                <option key={m.id} value={m.id}>{m.label}</option>
+              ))}
+            </select>
+            <select
+              className="pose-sample-mode pose-template-select"
+              value={templateId}
+              disabled={sampling}
+              onChange={(e) => {
+                const id = e.target.value
+                setTemplateId(id)
+                const t = templates.find((x) => x.id === id)
+                if (!t) return
+                // 帧数取第一个动作；机位模式按模板的 viewMode 一次性带出，
+                // 用户仍可再手动改，模板不是强制项。
+                const n = t.actions?.[0]?.frames
+                if (n) setFrameCount(Math.max(1, Math.min(240, n)))
+                if (t.viewMode === 'topdown-4' || t.viewMode === 'topdown-8'
+                    || t.viewMode === 'side-2') setSampleMode(t.viewMode)
+              }}
+              title="动作模板：带出帧数与机位模式，并把 templateId 写进 set.json.source，供导出时反查 fps/loop"
+            >
+              <option value="">不用模板</option>
+              {templates.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name}（{t.directions?.length ?? 0} 向 · {t.actions?.length ?? 0} 动作）
+                </option>
+              ))}
+            </select>
             <button
               type="button" className="pose-batch-btn"
               disabled={!ready || sampling}
               onClick={() => {
                 setErr('')
                 setSampling(true)
-                post({ type: 'animSample', count: frameCount })
+                const dirs = sampleMode === 'single' ? undefined
+                  : DIRECTIONS[sampleMode].map((k) => ({ key: k, yaw: YAW_MAP[k] }))
+                post({ type: 'animSample', count: frameCount, directions: dirs })
               }}
-              title={'按当前机位把这条动作等分成 N 帧，抽出来**先给你看**，'
-                + '挑完再存（不点存就不会落盘）'}
+              title={'按选中的机位模式把这条动作等分成 N 帧，抽出来**先给你看**，'
+                + '挑完再存（不点存就不会落盘）。多方向时每个方向单独做脚底对齐。'}
             >
               {sampling ? '抽帧中…' : (sampled ? '重新抽帧' : '抽帧看看')}
             </button>
@@ -759,6 +832,9 @@ export default function PoseStudio({
                       type="button"
                       className={`anim-cell${on ? ' on' : ''}`}
                       title={`第 ${f.i + 1} 帧 · ${f.frame.t.toFixed(2)}s · 与前帧差 ${f.diff.toFixed(1)}%`
+                        + (f.frame.direction
+                          ? ` · ${DIRECTION_LABELS[f.frame.direction] ?? f.frame.direction} ${f.frame.yaw ?? ''}°`
+                          : '')
                         + `\n点击${on ? '取消' : '选中'}；双击放大`}
                       onClick={() => setPicks((cur) => (
                         cur.includes(f.i) ? cur.filter((x) => x !== f.i) : [...cur, f.i].sort((a, b) => a - b)
@@ -767,6 +843,11 @@ export default function PoseStudio({
                     >
                       <img src={f.frame.png} alt={`第 ${f.i + 1} 帧`} draggable={false} />
                       <span className="anim-idx">{f.i + 1}</span>
+                      {f.frame.direction && (
+                        <span className="anim-dir">
+                          {DIRECTION_LABELS[f.frame.direction] ?? f.frame.direction}
+                        </span>
+                      )}
                       {on && (
                         <span className="anim-order">
                           {pickedFrames.findIndex((x) => x.i === f.i) + 1}
@@ -800,11 +881,18 @@ export default function PoseStudio({
                       || clipLabel(anim.clips[anim.index]?.name, anim.index)).trim()
                     if (!projectId) { setErr('没有项目 id，存不了（先保存项目）'); return }
                     const items: PoseSetFrameIn[] = pickedFrames.map((p) => ({
-                      t: p.frame.t, yaw: yawRef.current, pose: p.frame.pose, png: p.frame.png,
+                      t: p.frame.t,
+                      // 多机位抽帧时每帧带自己的 yaw / direction，别统一盖成当前机位
+                      yaw: p.frame.yaw ?? yawRef.current,
+                      pose: p.frame.pose,
+                      png: p.frame.png,
                       scene: sceneRef.current,
+                      ...(p.frame.direction ? { direction: p.frame.direction } : {}),
                     }))
                     setSavingSet(true)
-                    Promise.resolve(onSavePoseSetRef.current?.(name, items))
+                    Promise.resolve(onSavePoseSetRef.current?.(
+                      name, items, templateId ? { templateId } : {},
+                    ))
                       .then((ok) => {
                         if (ok) {
                           setStatus(`已存成姿势集「${name}」（${items.length} 帧）`)

@@ -614,6 +614,7 @@ window.addEventListener('message', async (e) => {
       // 抽帧前留一份：中途第 N 帧失败时，前面 N-1 帧已经把人偶改得面目全非，
       // 只回滚单帧不够（applyTime 自己只保它那一次），整批要退回起点。
       const beforeSample = snapshotPose(v)
+      const startYaw = currentYaw
       try {
         stopPlay(v)                       // 抽帧期间别让播放抢着改姿势
         const m = await import('./anim-import.js')
@@ -624,30 +625,60 @@ window.addEventListener('message', async (e) => {
         const count = Math.max(1, Math.min(240, Math.round(Number(msg.count) || 8)))
         // 首尾都是端点帧（站立/收势），等分时避开两头一点点，取中段更"有动作"
         const dur = Math.max(0.001, st.duration)
+
+        // 可选：按视角模式一次性抽多个机位（YAWS 0/45/.../315）。
+        // **不传 directions 就走原来的单方向路径，帧结构一字不变** ——
+        // 现有工具、冒烟和「抽帧看看」都依赖这条老路径。
+        const dirs = Array.isArray(msg.directions) && msg.directions.length
+          ? msg.directions.slice(0, 8).map((d) => ({
+              key: String((d && d.key) || ''),
+              yaw: ((Math.round(Number(d && d.yaw) || 0) % 360) + 360) % 360,
+            }))
+          : null
+        const groups = dirs || [{ key: '', yaw: startYaw }]
         const frames = []
-        for (let i = 0; i < count; i++) {
-          const t = count === 1 ? dur * 0.5 : (dur * (i + 0.5)) / count
-          const ok = await m.applyTime(t, v)
-          if (!ok) throw new Error(m.errorState() || `第 ${i + 1} 帧套不上人偶`)
-          const png = renderOut(256) || ''
-          // 指纹在这里算：宿主那边再解一遍 PNG 纯属浪费（24 张 256² base64
-          // 解码会卡住主线程）。16×16 灰度 256 字节，够判"姿势变没变"。
-          frames.push({
-            t: Number(t.toFixed(3)), pose: v.getPose(), png,
-            hash: await frameHash(png),
-          })
-          if (i % 6 === 5) post({ type: 'progress', text: `抽帧 ${i + 1}/${count}` })
+        for (const dir of groups) {
+          if (dirs) {
+            setYaw(dir.yaw)               // 摆导航相机；renderOut 用 viewport:true
+            // 等两帧，确保 OrbitControls / 相机矩阵真的更新完再抓图，
+            // 否则 8 个方向可能抓到同一个机位。
+            await new Promise((done) => requestAnimationFrame(
+              () => requestAnimationFrame(done)))
+          }
+          const group = []
+          for (let i = 0; i < count; i++) {
+            const t = count === 1 ? dur * 0.5 : (dur * (i + 0.5)) / count
+            const ok = await m.applyTime(t, v)
+            if (!ok) throw new Error(m.errorState() || `第 ${i + 1} 帧套不上人偶`)
+            const png = renderOut(256) || ''
+            // 指纹在这里算：宿主那边再解一遍 PNG 纯属浪费（24 张 256² base64
+            // 解码会卡住主线程）。16×16 灰度 256 字节，够判"姿势变没变"。
+            group.push({
+              t: Number(t.toFixed(3)), pose: v.getPose(), png,
+              hash: await frameHash(png),
+              ...(dirs ? { direction: dir.key, yaw: dir.yaw } : {}),
+            })
+            if (i % 6 === 5) post({
+              type: 'progress',
+              text: `${dirs ? `${dir.key} · ` : ''}抽帧 ${i + 1}/${count}`,
+            })
+          }
+          // **每个方向单独做屏幕空间脚底对齐**：不同 yaw 下透视投影的
+          // 脚底墨迹行不一样，把 8 个方向混在一次 alignFrames 里会互相拉偏。
+          frames.push(...await m.alignFrames(group))
         }
-        // 抽完把时间轴拉回第 0 帧，别让编辑器停在最后一帧
+        // 抽完把时间轴拉回第 0 帧，别让编辑器停在最后一帧；机位也还回去。
         await m.applyTime(0, v)
-        // **最后一步屏幕空间对齐**：世界空间的脚下对齐只能保证骨骼一致，
-        // 透视相机下脚前后移动会让屏幕落点变。这里把每帧的墨迹底边压到同一行。
-        const aligned = await m.alignFrames(frames)
-        post({ type: 'animFrames', frames: aligned, clip: st.name, yaw: currentYaw })
+        if (dirs) setYaw(startYaw)
+        post({
+          type: 'animFrames', frames, clip: st.name, yaw: startYaw,
+          ...(dirs ? { directions: dirs.map((d) => d.key) } : {}),
+        })
         postPose(v)
       } catch (e) {
         restorePose(v, beforeSample)
         sceneCtl.notePose(beforeSample)
+        if (currentYaw !== startYaw) setYaw(startYaw)
         post({ type: 'error', message: String(e?.message || e) })
       }
     } else if (msg.type === 'animPlay') {

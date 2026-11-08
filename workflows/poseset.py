@@ -155,7 +155,7 @@ def _exists_name(root: Path, name: str) -> bool:
 
 #: 编辑器可以在每帧额外带的构图 / 场景字段。后端只负责原样透传，
 #: 内容的解释权在前端 —— 别在这里解析或校验，免得前端改结构还要动后端。
-EXTRA_FRAME_KEYS = ("camera", "characters", "scene")
+EXTRA_FRAME_KEYS = ("camera", "characters", "scene", "direction")
 
 
 def _frame_extras(item: Dict[str, Any]) -> Dict[str, Any]:

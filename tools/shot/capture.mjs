@@ -147,6 +147,42 @@ async function main() {
   }
   await shot('04-library', 1200)
 
+  // 资料库第三个 tab：动作模板管理（真实后端数据，3 套内置预设）
+  await page.evaluate(() => {
+    const b = [...document.querySelectorAll('.lib-tab')]
+      .find((x) => (x.textContent || '').includes('动作模板'))
+    b?.click()
+  })
+  await shot('35-motion-templates', 800)
+  const mtDiag = await page.evaluate(() => ({
+    tabs: [...document.querySelectorAll('.lib-tab')].map((b) => b.textContent?.trim()),
+    cards: document.querySelectorAll('.mt-card').length,
+    builtin: document.querySelectorAll('.mt-card.builtin').length,
+    cost: document.querySelector('.mt-cost')?.textContent?.trim(),
+    foot: document.querySelector('.lib-foot')?.textContent?.trim().slice(0, 60),
+  }))
+  await page.evaluate(() => {
+    const b = [...document.querySelectorAll('.mt-btn')]
+      .find((x) => (x.textContent || '').includes('新建模板'))
+    b?.click()
+  })
+  await shot('36-motion-editor', 500)
+  const mtEditor = await page.evaluate(() => ({
+    open: !!document.querySelector('.mt-editor'),
+    actionRows: document.querySelectorAll('.mt-action-row').length,
+    advanced: !!document.querySelector('.mt-adv'),
+  }))
+  if (mtDiag.cards < 3 || mtDiag.builtin !== 3 || !mtEditor.open || !mtEditor.advanced) {
+    errors.push(`动作模板面板不完整: ${JSON.stringify({ mtDiag, mtEditor })}`)
+  }
+  console.log('  ✓ 35/36 动作模板管理', JSON.stringify({ mtDiag, mtEditor }))
+  // 切回默认 tab 再关，别影响后面 06 场景的截图
+  await page.evaluate(() => {
+    const b = [...document.querySelectorAll('.lib-tab')]
+      .find((x) => (x.textContent || '').includes('提示词'))
+    b?.click()
+  })
+
   // 侧栏重构后的四个一级面板 + 搜索 + 收起态
   await page.keyboard.press('Escape')   // 关掉资料库抽屉，别挡住侧栏
   await sleep(300)
@@ -298,6 +334,38 @@ async function main() {
         if (u.endsWith('/projects') && m === 'GET') return json({ count: canvases.length,
           items: canvases, current: 'c1' })
         if (u.endsWith('/library') && m === 'GET') return json({ prompts: [], poses: [], prefs: {} })
+        if (u.endsWith('/motion-templates') && m === 'GET') return json({
+          version: 1, count: 3,
+          items: [
+            { id: 'topdown-walk-4', name: '俯视 RPG · 四方向基础', viewMode: 'topdown-4',
+              builtin: true, directions: ['down', 'up', 'left', 'right'],
+              actions: [{ name: 'idle', frames: 4, fps: 8, loop: true, oneShot: false }],
+              mirrorFrom: {}, pivot: { x: 0.5, y: 1 }, camera: { pitch: 45, ortho: false },
+              source: { kind: 'glb', file: '', clip: 'walk' }, yawMap: {},
+              qwenPromptContract: '', subjects: 1, note: '',
+              budget: { candidates: 1, singleFrameSeconds: 26, passRate: 0.75 } },
+            { id: 'topdown-full-8', name: '俯视 RPG · 八方向全套', viewMode: 'topdown-8',
+              builtin: true, directions: ['down', 'down-right', 'right', 'up-right',
+                'up', 'up-left', 'left', 'down-left'],
+              actions: [{ name: 'idle', frames: 4, fps: 8, loop: true, oneShot: false }],
+              mirrorFrom: {}, pivot: { x: 0.5, y: 1 }, camera: { pitch: 45, ortho: false },
+              source: { kind: 'glb', file: '', clip: 'walk' }, yawMap: {},
+              qwenPromptContract: '', subjects: 1, note: '',
+              budget: { candidates: 1, singleFrameSeconds: 26, passRate: 0.75 } },
+            { id: 'side-platformer-2', name: '横板 · 左右 + 镜像', viewMode: 'side-2',
+              builtin: true, directions: ['left', 'right'], mirrorFrom: { right: 'left' },
+              actions: [{ name: 'idle', frames: 4, fps: 8, loop: true, oneShot: false }],
+              pivot: { x: 0.5, y: 1 }, camera: { pitch: 0, ortho: true },
+              source: { kind: 'glb', file: '', clip: 'walk' }, yawMap: {},
+              qwenPromptContract: '', subjects: 1, note: '',
+              budget: { candidates: 1, singleFrameSeconds: 26, passRate: 0.75 } },
+          ],
+          estimates: {
+            'topdown-walk-4': { images: 104, totalMinutes: 60.1, mirroredDirections: [] },
+            'topdown-full-8': { images: 208, totalMinutes: 120.2, mirroredDirections: [] },
+            'side-platformer-2': { images: 34, totalMinutes: 19.6, mirroredDirections: ['right'] },
+          },
+        })
         if (u.endsWith('/settings')) {
           if (m === 'PUT') Object.assign(gsettings, JSON.parse(init.body || '{}'))
           return json({ ...gsettings })
@@ -353,9 +421,63 @@ async function main() {
           defaults: { steps: 25, cfg: 3, sampler: 'euler', scheduler: 'simple' },
         })
         if (u.includes('/characters/') && u.endsWith('/atlas')) return json({
-          character: chars[0].name, exists: true, frames: 12, animations: 3,
+          character: chars[0].name, exists: true, frames: 12, animations: 7,
+          directionAnimations: 4,
           size: [512, 768], canvas: [128, 192], bytes: 82000, image: '/icon.png',
         })
+        // 导出前试玩验收台（只读）。必须给完整形状，否则会落到下面那条
+        // 「按角色名读详情」的宽泛 GET 分支，组件拿到 CharacterDetail 就空了。
+        if (u.includes('/characters/') && u.endsWith('/playtest')) {
+          const yaw = { down: 0, 'down-right': 45, right: 90, 'up-right': 135,
+            up: 180, 'up-left': 225, left: 270, 'down-left': 315 }
+          const have = ['down', 'up', 'left', 'right']
+          const vm = (dirs, mirrored = []) => {
+            const missing = dirs.filter((d) => !have.includes(d) && !mirrored.includes(d))
+            return {
+              ready: missing.length === 0, required: dirs, missing, mirrored,
+              yawMap: Object.fromEntries(dirs.map((d) => [d, yaw[d]])),
+              hasFrames: true,
+              note: missing.length
+                ? `已有 ${have.length} 个方向帧；缺的按白模机位补出。`
+                : '方向资产齐全，可以按当前视角模式验收并导出。',
+            }
+          }
+          // 每个方向给独立 URL（query 只用于断言「换朝向真的换了帧组」），
+          // 静态服务会忽略 query 照常返回 icon.png。
+          const dirFrames = Object.fromEntries(have.map((d) => [
+            d, [`/icon.png?dir=${d}`, `/icon.png?dir=${d}&f=2`],
+          ]))
+          return json({
+            character: chars[0].name,
+            clips: [
+              { id: 'Naked/neutral', label: 'Naked · neutral', costume: 'Naked',
+                emotion: 'neutral',
+                frames: dirFrames.down, directionFrames: dirFrames,
+                directions: have, defaultDirection: 'down', totalFrames: 8,
+                frameRate: 8, loop: true },
+              { id: 'Naked/angry', label: 'Naked · angry', costume: 'Naked',
+                emotion: 'angry', frames: ['/icon.png'], frameRate: 8, loop: true },
+            ],
+            clipCount: 2, frameCount: 9,
+            atlas: { exists: true, frameRate: 8, loop: true,
+              pivot: { x: 0.5, y: 1 }, canvas: [128, 192], source: 'atlas',
+              directions: have },
+            directions: { present: have, characterDirs: have, atlasDirs: have,
+              projectDirs: [], convention: 'directory-or-filename',
+              templates: [{
+                id: 'topdown-walk-4', name: '俯视 RPG · 四方向基础',
+                viewMode: 'topdown-4', directions: have,
+                actionCount: 4, fps: 8, loop: true,
+                estimate: { images: 104, totalMinutes: 60.1, mirroredDirections: [] },
+                project: 'c1', poseSet: '四向走路',
+              }] },
+            viewModes: {
+              'topdown-4': vm(['down', 'up', 'left', 'right']),
+              'topdown-8': vm(Object.keys(yaw)),
+              'side-2': vm(['left', 'right'], ['right']),
+            },
+          })
+        }
         if (u.includes('/poses/meta')) return json({
           count: 3, files: ['/icon.png', '/icon.png', '/icon.png'],
         })
@@ -411,6 +533,56 @@ async function main() {
     await fshot('25-cc-step3-adv')
     await fp.evaluate(() => document.querySelector('.cc-step[data-step="4"]')?.click())
     await fshot('26-cc-step4')
+    // 试玩验收台：横板 → 八方向双键 → 横板跳跃
+    const ptDiag = await fp.evaluate(() => ({
+      hasPlaytest: !!document.querySelector('.pt-root'),
+      modes: [...document.querySelectorAll('.pt-mode')].map((b) => b.textContent?.trim()),
+      warning: document.querySelector('.pt-warning')?.textContent?.trim().slice(0, 90),
+      reportRows: document.querySelectorAll('.pt-report-row').length,
+      avatar: !!document.querySelector('.pt-avatar'),
+      hud: document.querySelector('.pt-hud')?.textContent?.trim(),
+    }))
+    await fshot('30-playtest-side')
+    await fp.evaluate(() => [...document.querySelectorAll('.pt-mode')]
+      .find((b) => (b.textContent || '').includes('八方向'))?.click())
+    await fp.keyboard.down('d')
+    await fp.keyboard.down('w')
+    await fshot('31-playtest-8dir', 700)
+    await fp.keyboard.up('w')
+    await fp.keyboard.up('d')
+    await fp.evaluate(() => [...document.querySelectorAll('.pt-mode')]
+      .find((b) => (b.textContent || '').includes('横板'))?.click())
+    await fp.keyboard.press('Space')
+    await fshot('32-playtest-jump', 450)
+    // 方向帧：按 W 要切到 up 帧组（HUD 与 <img src> 都得变），
+    // 不能还是拿同一组帧占位却假装按方向播。
+    await fp.evaluate(() => [...document.querySelectorAll('.pt-mode')]
+      .find((b) => (b.textContent || '').includes('八方向'))?.click())
+    await fp.keyboard.down('w')
+    await fshot('33-playtest-up', 500)
+    const dirDiag = await fp.evaluate(() => ({
+      hud: document.querySelector('.pt-hud')?.textContent?.trim(),
+      frameSrc: document.querySelector('.pt-avatar')?.getAttribute('src'),
+    }))
+    await fp.keyboard.up('w')
+    if (!String(dirDiag.frameSrc || '').includes('dir=up')
+        || !String(dirDiag.hud || '').includes('帧组 上')) {
+      errors.push(`方向帧切换失败: ${JSON.stringify(dirDiag)}`)
+    }
+    // 验收参数写回图集导出：点了必须给可见反馈
+    await fp.evaluate(() => document.querySelector('.pt-apply .pt-btn')?.click())
+    // 验收清单 + 写回按钮在舞台下方，滚进去才拍得到（不然只有 DOM 断言、没有视觉证据）
+    await fp.evaluate(() => document.querySelector('.pt-report')
+      ?.scrollIntoView({ block: 'center' }))
+    await fshot('34-playtest-apply', 400)
+    const appliedText = await fp.evaluate(() =>
+      document.querySelector('.pt-applied')?.textContent?.trim() || '')
+    if (!appliedText) errors.push('写入导出参数没有可见反馈')
+    const templateText = await fp.evaluate(() =>
+      document.querySelector('.pt-templates')?.textContent?.trim() || '')
+    if (!templateText.includes('俯视 RPG')) errors.push('关联动作模板没显示')
+    console.log('  ✓ 30~34 试玩验收台',
+      JSON.stringify({ ...ptDiag, dirDiag, appliedText, templateText: templateText.slice(0, 90) }))
     // 角色中心也能开全局设置（顶栏 ⚙，不依赖画布侧栏）
     await fp.evaluate(() => [...document.querySelectorAll('.top-action')]
       .find((b) => (b.textContent || '').includes('设置'))?.click())

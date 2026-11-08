@@ -1191,6 +1191,8 @@ export type AtlasInfo = {
   image?: string
   frames?: number
   animations?: number
+  /** atlas.json 里按方向拆出的动画组数（老图集为 0） */
+  directionAnimations?: number
   size?: [number, number]
   canvas?: [number, number]
   bytes?: number
@@ -1215,6 +1217,157 @@ export function exportAtlas(
 /** 图集导出了没有（只统计，不拉整份 JSON）。 */
 export function fetchAtlasInfo(name: string): Promise<AtlasInfo> {
   return req(`/characters/${encodeURIComponent(name)}/atlas`)
+}
+
+/* ---------------- 导出前试玩验收（只读） ----------------
+   后端只扫现有 VNCCS 目录 + atlas.json，不写盘、不生成图。
+   viewModes 会如实报告三种视角各缺哪些方向 —— 当前角色目录只有
+   「服装 × 表情」两维，所以默认都会报缺方向，这正是验收台要暴露的。 */
+export type PlaytestClip = {
+  id: string
+  label: string
+  costume: string
+  emotion: string
+  /** 默认方向的帧（没有方向维时就是整组帧） */
+  frames: string[]
+  frameRate: number
+  loop: boolean
+  /** 方向 key → 该方向的帧序列；老角色目录为空对象 */
+  directionFrames?: Record<string, string[]>
+  directions?: string[]
+  defaultDirection?: string
+  /** 所有方向加起来的帧数（frames 只是其中一个方向） */
+  totalFrames?: number
+}
+
+export type PlaytestReadiness = {
+  ready: boolean
+  required: string[]
+  missing: string[]
+  mirrored: string[]
+  yawMap: Record<string, number>
+  hasFrames: boolean
+  note: string
+}
+
+export type PlaytestAssets = {
+  character: string
+  clips: PlaytestClip[]
+  clipCount: number
+  frameCount: number
+  atlas: {
+    exists: boolean
+    frameRate: number
+    loop: boolean
+    pivot: { x: number; y: number }
+    canvas: [number, number]
+    source: 'atlas' | 'default'
+    directions?: string[]
+    broken?: boolean
+  }
+  directions: {
+    present: string[]
+    convention: string
+    /** 角色目录里落盘的方向帧（sprite_<方向>_NNNN.png 或方向子目录） */
+    characterDirs?: string[]
+    /** 画布项目姿势集 set.json 里已抽出的方向 */
+    projectDirs?: string[]
+    /** atlas.json 里按方向拆好的动画组 */
+    atlasDirs?: string[]
+    poseSets?: Array<{
+      project: string; name: string; directions: string[]
+      frames: number; path: string
+      templateId?: string
+    }>
+    /** 画布姿势集 set.json.source 里登记的动作模板（含成本估算） */
+    templates?: Array<{
+      id: string; name: string; viewMode: string; directions: string[]
+      actionCount: number; fps: number; loop: boolean
+      estimate: MotionEstimate
+      project: string; poseSet: string
+    }>
+  }
+  viewModes: Record<string, PlaytestReadiness>
+}
+
+export function fetchPlaytestAssets(name: string): Promise<PlaytestAssets> {
+  return req(`/characters/${encodeURIComponent(name)}/playtest`)
+}
+
+/* ---------------- 动作模板 registry（只读展示 + 抽帧参数预设） ----------------
+   模板只存元数据，落 library/motion_templates.json；内置三套是代码常量不落盘。
+   方向 key / 动作名一律英文原值，只在渲染处显示中文。 */
+export type MotionAction = {
+  name: string
+  clip: string
+  frames: number
+  fps: number
+  loop: boolean
+  oneShot: boolean
+}
+
+export type MotionTemplate = {
+  id: string
+  name: string
+  /** 与 store/playtest.ts 的 ViewMode 同值 */
+  viewMode: string
+  builtin: boolean
+  source: { kind: string; file: string; clip: string }
+  directions: string[]
+  yawMap: Record<string, number>
+  camera: { pitch: number; ortho: boolean }
+  mirrorFrom: Record<string, string>
+  actions: MotionAction[]
+  pivot: { x: number; y: number }
+  qwenPromptContract: string
+  budget: { candidates: number; singleFrameSeconds: number; passRate: number }
+  subjects: number
+  note: string
+}
+
+export type MotionEstimate = {
+  templateId: string
+  actions: number
+  framesPerDirection: number
+  directions: number
+  renderDirections: number
+  mirroredDirections: string[]
+  candidates: number
+  images: number
+  perFrameSeconds: number
+  totalSeconds: number
+  totalMinutes: number
+  subjects: number
+}
+
+export type MotionTemplates = {
+  version: number
+  count: number
+  items: MotionTemplate[]
+  estimates: Record<string, MotionEstimate>
+}
+
+/** 内置 + 用户模板 + 每套的逐帧成本估算，一次给全。 */
+export function fetchMotionTemplates(): Promise<MotionTemplates> {
+  return req('/motion-templates')
+}
+
+export function saveMotionTemplate(
+  template: Partial<MotionTemplate>,
+): Promise<MotionTemplates> {
+  return req('/motion-templates',
+    { method: 'POST', body: JSON.stringify(template) })
+}
+
+export function updateMotionTemplate(
+  id: string, template: Partial<MotionTemplate>,
+): Promise<MotionTemplates> {
+  return req(`/motion-templates/${encodeURIComponent(id)}`,
+    { method: 'PUT', body: JSON.stringify(template) })
+}
+
+export function deleteMotionTemplate(id: string): Promise<MotionTemplates> {
+  return req(`/motion-templates/${encodeURIComponent(id)}`, { method: 'DELETE' })
 }
 
 export type CharacterPrompt = {

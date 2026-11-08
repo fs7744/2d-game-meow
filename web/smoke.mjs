@@ -28,6 +28,29 @@ function makeFetch() {
   let jobsFailMode = false
   /** 服务端「磁盘」上的用户资料库（library/*.json）。**每个 fetch 一份**。 */
   const library = { prompts: [], poses: [], prefs: {} }
+  /** 动作模板 registry：内置一套 + 用户在面板里增删改的，都是每个 fetch 一份 */
+  const motionTemplates = [{
+    id: 'side-platformer-2', name: '横板 · 左右 + 镜像',
+    viewMode: 'side-2', builtin: true,
+    source: { kind: 'glb', file: '', clip: 'walk' },
+    directions: ['left', 'right'], yawMap: { left: 270, right: 90 },
+    camera: { pitch: 0, ortho: true }, mirrorFrom: { right: 'left' },
+    actions: [{ name: 'idle', clip: 'idle', frames: 4,
+      fps: 8, loop: true, oneShot: false }],
+    pivot: { x: 0.5, y: 1 }, qwenPromptContract: '',
+    budget: { candidates: 1, singleFrameSeconds: 26, passRate: 0.75 },
+    subjects: 1, note: '',
+  }]
+  const motionSummary = () => ({
+    version: 1, count: motionTemplates.length,
+    items: motionTemplates.map((t) => ({ ...t })),
+    estimates: Object.fromEntries(motionTemplates.map((t) => [t.id, {
+      images: (t.actions || []).reduce((n, a) => n + (a.frames || 0), 0)
+        * Math.max(1, (t.directions || []).length - Object.keys(t.mirrorFrom || {}).length),
+      totalMinutes: 1.7,
+      mirroredDirections: Object.keys(t.mirrorFrom || {}),
+    }])),
+  })
   /** 服务端「磁盘」上的角色库（assets/characters/）。**每个 fetch 一份**。 */
   const serverCharacters = new Set()
   /** 每个角色名下的服装清单（PUT /costumes 会追加） */
@@ -386,6 +409,50 @@ function makeFetch() {
         }),
       }
     }
+    // 导出前试玩验收（只读接口）。
+    // **必须放在下面那条按角色名读详情的宽泛 GET 分支之前**：否则前端拿到的是
+    // CharacterDetail，clips 缺失会让整棵 React 树崩掉、后续用例连锁失败。
+    if (String(url).includes('/characters/') && String(url).endsWith('/playtest')) {
+      const name = decodeURIComponent(String(url).split('/characters/')[1].split('/')[0])
+      const yaw = { down: 0, 'down-right': 45, right: 90, 'up-right': 135,
+        up: 180, 'up-left': 225, left: 270, 'down-left': 315 }
+      const vm = (dirs, mirrored = []) => ({
+        ready: false, required: dirs,
+        missing: dirs.filter((d) => !mirrored.includes(d)), mirrored,
+        yawMap: Object.fromEntries(dirs.map((d) => [d, yaw[d]])),
+        hasFrames: true, note: '现有角色目录只有「服装 × 表情」两维，没有方向维。',
+      })
+      return {
+        ok: true,
+        json: async () => ({
+          character: name,
+          clips: [{
+            id: 'Naked/neutral', label: 'Naked · neutral',
+            costume: 'Naked', emotion: 'neutral',
+            frames: ['/files/f1.png', '/files/f2.png', '/files/f3.png'],
+            frameRate: 8, loop: true,
+          }],
+          clipCount: 1, frameCount: 3,
+          atlas: { exists: false, frameRate: 8, loop: true,
+            pivot: { x: 0.5, y: 1 }, canvas: [128, 128], source: 'default' },
+          directions: {
+            present: [], convention: 'none',
+            templates: [{
+              id: 'side-platformer-2', name: '横板 · 左右 + 镜像',
+              viewMode: 'side-2', directions: ['left', 'right'],
+              actionCount: 1, fps: 8, loop: true,
+              estimate: { images: 4, totalMinutes: 1.7, mirroredDirections: ['right'] },
+              project: 'p1', poseSet: '八向走路',
+            }],
+          },
+          viewModes: {
+            'topdown-4': vm(['down', 'up', 'left', 'right']),
+            'topdown-8': vm(Object.keys(yaw)),
+            'side-2': vm(['left', 'right'], ['right']),
+          },
+        }),
+      }
+    }
     if (String(url).includes('/characters/') && (init.method || 'GET') === 'GET') {
       const name = decodeURIComponent(String(url).split('/characters/')[1].split('?')[0])
       return {
@@ -478,6 +545,47 @@ function makeFetch() {
     }
     if (String(url).endsWith('/library')) {
       return { ok: true, json: async () => ({ ...library }) }
+    }
+    // 动作模板 registry：GET 列表 / 估算，POST 新建，PUT 更新，DELETE 删除
+    if (String(url).includes('/motion-templates')) {
+      const method = init.method || 'GET'
+      const tail = String(url).split('/motion-templates')[1] || ''
+      const id = decodeURIComponent(tail.replace(/^\//, '').split('/')[0] || '')
+      const asOk = (o) => ({ ok: true, json: async () => o })
+      if (method === 'GET' && tail.endsWith('/estimate')) {
+        return asOk(motionSummary().estimates[id] || { images: 0, totalMinutes: 0 })
+      }
+      if (method === 'GET' && !id) return asOk(motionSummary())
+      if (method === 'POST' && !id) {
+        const b = JSON.parse(init.body || '{}')
+        const dirs = b.viewMode === 'side-2' ? ['left', 'right']
+          : b.viewMode === 'topdown-8'
+            ? ['down', 'down-right', 'right', 'up-right', 'up', 'up-left', 'left', 'down-left']
+            : ['down', 'up', 'left', 'right']
+        motionTemplates.push({
+          ...b, id: `mt${motionTemplates.length}`, builtin: false,
+          directions: dirs, yawMap: {},
+          camera: { pitch: b.viewMode === 'side-2' ? 0 : 45, ortho: b.viewMode === 'side-2' },
+          mirrorFrom: b.viewMode === 'side-2' ? { right: 'left' } : {},
+          pivot: { x: 0.5, y: 1 },
+          source: { kind: 'glb', file: '', clip: b.actions?.[0]?.name || 'idle' },
+          subjects: b.subjects || 1, note: b.note || '',
+          qwenPromptContract: b.qwenPromptContract || '',
+          budget: b.budget || { candidates: 1, singleFrameSeconds: 26, passRate: 0.75 },
+        })
+        return asOk(motionSummary())
+      }
+      if (method === 'PUT' && id) {
+        const b = JSON.parse(init.body || '{}')
+        const i = motionTemplates.findIndex((t) => t.id === id)
+        if (i >= 0) motionTemplates[i] = { ...motionTemplates[i], ...b, id }
+        return asOk(motionSummary())
+      }
+      if (method === 'DELETE' && id) {
+        const i = motionTemplates.findIndex((t) => t.id === id)
+        if (i >= 0) motionTemplates.splice(i, 1)
+        return asOk(motionSummary())
+      }
     }
     // 随项目发行的 VNCCS 官方姿势清单（只给路径，不给本体）
     if (String(url).includes('/pose_library')) {
@@ -3656,7 +3764,7 @@ function check(name, cond, extra = '') {
   const addCall = calls.find((c) => c.url.endsWith('/library/prompts') && c.method === 'POST')
   check('收藏打到服务端 /library/prompts（不写 localStorage）', !!addCall, addCall?.url)
 
-  // 2. 打开资料库面板：两个 tab（提示词 / 姿势）
+  // 2. 打开资料库面板：三个 tab（提示词 / 姿势 / 动作模板）
   const openLib = [...doc.querySelectorAll('.rail-lib .rail-item-main')]
     .find((b) => (b.textContent || '').includes('提示词收藏'))
   check('侧栏有资料库入口', !!openLib)
@@ -3664,8 +3772,8 @@ function check(name, cond, extra = '') {
   await new Promise((r) => setTimeout(r, 200))
   const modal = doc.querySelector('.lib-modal')
   check('打开资料库浏览面板', !!modal)
-  check('面板上有两个 tab（提示词 / 姿势）',
-    [...(doc.querySelectorAll('.lib-tab') || [])].length === 2,
+  check('面板上有三个 tab（提示词 / 姿势 / 动作模板）',
+    [...(doc.querySelectorAll('.lib-tab') || [])].length === 3,
     String(doc.querySelectorAll('.lib-tab').length))
   const cards = () => [...doc.querySelectorAll('.lib-modal .lib-card')]
   check('提示词页显示刚收藏的那条',
@@ -3748,6 +3856,55 @@ function check(name, cond, extra = '') {
   check('取回来的官方姿势写进人偶节点（带朝向）',
     appliedNode?.poseApply?.yaw === 90 && !!appliedNode?.pose,
     JSON.stringify(appliedNode?.poseApply || {}).slice(0, 80))
+
+  // 5.5 动作模板 tab：内置只读、新建走 POST、删除要二次确认
+  const motionTab = [...doc.querySelectorAll('.lib-tab')]
+    .find((b) => (b.textContent || '').includes('动作模板'))
+  check('资料库有动作模板 tab', !!motionTab)
+  motionTab?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 250))
+  const builtinCard = doc.querySelector('.mt-card.builtin')
+  check('动作模板面板列出内置模板',
+    !!builtinCard && (builtinCard.textContent || '').includes('横板 · 左右 + 镜像'))
+  check('内置模板不能编辑/删除，只能另存为我的',
+    (builtinCard?.textContent || '').includes('另存为我的')
+    && !(builtinCard?.textContent || '').includes('确认删除'))
+  const newBtn = [...doc.querySelectorAll('.mt-btn')]
+    .find((b) => (b.textContent || '').includes('新建模板'))
+  newBtn?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 150))
+  check('新建模板打开编辑表单', !!doc.querySelector('.mt-editor'))
+  setInput(doc.querySelector('.mt-editor .mt-field input'), '测试 · 施法四方向')
+  await new Promise((r) => setTimeout(r, 100))
+  const saveBtn = [...doc.querySelectorAll('.mt-editor .mt-btn')]
+    .find((b) => (b.textContent || '').includes('保存'))
+  saveBtn?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 300))
+  const postCall = calls.find((c) => c.url.endsWith('/motion-templates') && c.method === 'POST')
+  check('保存模板打到 POST /motion-templates', !!postCall)
+  check('保存的名字与动作表都进了请求体', (() => {
+    if (!postCall) return false
+    const b = JSON.parse(postCall.body || '{}')
+    return b.name === '测试 · 施法四方向' && Array.isArray(b.actions)
+      && b.actions.length >= 1 && b.actions[0].loop === true
+  })(), postCall?.body)
+  check('保存后列表多出一张「我的」卡片',
+    doc.querySelectorAll('.mt-card').length === 2
+    && (doc.querySelector('.mt-card:not(.builtin)')?.textContent || '').includes('编辑'))
+  const mineCard = doc.querySelector('.mt-card:not(.builtin)')
+  const delBtn = [...(mineCard?.querySelectorAll('.mt-btn') || [])]
+    .find((b) => (b.textContent || '').trim() === '删除')
+  delBtn?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 150))
+  const confirmBtn = [...(mineCard?.querySelectorAll('.mt-btn') || [])]
+    .find((b) => (b.textContent || '').includes('确认删除'))
+  check('删除用户模板前要二次确认', !!confirmBtn)
+  confirmBtn?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await new Promise((r) => setTimeout(r, 300))
+  check('确认删除打到 DELETE /motion-templates/{id}',
+    calls.some((c) => c.url.includes('/motion-templates/') && c.method === 'DELETE'))
+  check('删完只剩内置模板', doc.querySelectorAll('.mt-card').length === 1,
+    String(doc.querySelectorAll('.mt-card').length))
 
   // 6. Esc 能关掉浮层（临时的面板不该只能去找 ×）
   win.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))

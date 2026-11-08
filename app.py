@@ -78,6 +78,7 @@ from workflows import assetdb
 from workflows import characters
 from workflows import charactergen
 from workflows import clothesgen
+from workflows import directions
 from workflows import posegen
 from workflows import spriteatlas
 from workflows import pipeline
@@ -85,10 +86,12 @@ from workflows import emotiongen
 from workflows import qwen_llm
 from workflows import library
 from workflows import metadb
+from workflows import motiontemplates
 from workflows import matte
 from workflows import matte_screen
 from workflows import paths
 from workflows import poselib
+from workflows import playtest
 from workflows import posesubjects
 from workflows import poseset
 from workflows import projectio
@@ -757,6 +760,59 @@ def get_library() -> Dict[str, Any]:
     return library.snapshot()
 
 
+# ---------------------------------------------------------------- 动作模板
+
+
+@app.get("/motion-templates")
+def motion_templates_list() -> Dict[str, Any]:
+    """内置预设 + 用户模板 + 每套的逐帧生成成本估算（一次给全，避免 N+1）。
+
+    模板只存元数据（不存图 / 权重），落 ``library/motion_templates.json``；
+    内置三套是代码常量，不落盘，升级不会跟用户改过的文件打架。
+    """
+    return motiontemplates.summary()
+
+
+@app.get("/motion-templates/{tid}/estimate")
+def motion_template_estimate(tid: str) -> Dict[str, Any]:
+    t = motiontemplates.get_template(tid)
+    if not t:
+        raise HTTPException(404, f"没有这套动作模板：{tid}")
+    return motiontemplates.estimate(t)
+
+
+@app.post("/motion-templates")
+def motion_template_create(req: Dict[str, Any]) -> Dict[str, Any]:
+    """新建一套模板（id 由服务端生成，返回完整列表）。"""
+    if not isinstance(req, dict):
+        raise HTTPException(400, "模板必须是对象")
+    try:
+        return motiontemplates.summary(motiontemplates.save_template(req))
+    except motiontemplates.TemplateError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.put("/motion-templates/{tid}")
+def motion_template_update(tid: str, req: Dict[str, Any]) -> Dict[str, Any]:
+    """更新一套用户模板。**内置 id 不可覆盖**（要改就另存）。"""
+    if not isinstance(req, dict):
+        raise HTTPException(400, "模板必须是对象")
+    doc = dict(req)
+    doc["id"] = tid
+    try:
+        return motiontemplates.summary(motiontemplates.save_template(doc))
+    except motiontemplates.TemplateError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.delete("/motion-templates/{tid}")
+def motion_template_delete(tid: str) -> Dict[str, Any]:
+    try:
+        return motiontemplates.summary(motiontemplates.delete_template(tid))
+    except motiontemplates.TemplateError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 class PromptReq(BaseModel):
     text: str
     negative: str = ""
@@ -855,6 +911,12 @@ def pose_dirs(limit: int = 40) -> Dict[str, Any]:
     用户在界面上手里只有一个路径。让他手抄绝对路径既不友好也容易错。
     这里只扫 assets 下两层（深度与产物结构对齐），不递归全盘——
     assets 里已有几千个文件，深扫会把接口拖慢。
+
+    **例外**：画布项目里的多机位姿势集在
+    ``assets/projects/<项目>/poses/<集>/``（深度 3），两层扫描够不到。
+    上一版因此让角色中心「先在画布存一组姿势集」那句话点不通。这里定向
+    补扫 ``poses/`` 与 ``pose_frames/`` 两类目录，不把全局深度加深；
+    带 ``directions`` 的是按 YAWS 抽出来的多机位姿势集。
     """
     found: List[Dict[str, Any]] = []
 
@@ -875,6 +937,42 @@ def pose_dirs(limit: int = 40) -> Dict[str, Any]:
                 scan(Path(e.path), depth + 1)
 
     scan(ASSETS, 0)
+    seen = {item["path"] for item in found}
+
+    def scan_set(d: Path, kind: str) -> None:
+        if not d.is_dir() or d.name.startswith(".") or str(d) in seen:
+            return
+        try:
+            imgs = sorted(p.name for p in d.iterdir()
+                          if p.is_file() and p.suffix.lower() in _POSE_EXTS)
+        except OSError:
+            return
+        if len(imgs) < 2:
+            return
+        item: Dict[str, Any] = {
+            "path": str(d), "count": len(imgs), "sample": imgs[:3],
+            "name": f"{d.parents[1].name}/{kind}/{d.name}",
+        }
+        set_file = d / "set.json"
+        if set_file.is_file():
+            try:
+                doc = json.loads(set_file.read_text(encoding="utf-8"))
+                dirs = {
+                    directions.validate_direction(f.get("direction"))
+                    for f in (doc.get("frames") or []) if isinstance(f, dict)
+                }
+                dirs.discard("")
+                if dirs:
+                    item["directions"] = sorted(dirs)
+            except (OSError, ValueError):
+                pass
+        seen.add(str(d))
+        found.append(item)
+
+    projects = ASSETS / "projects"
+    for kind in ("poses", "pose_frames"):
+        for set_dir in sorted(projects.glob(f"*/{kind}/*")):
+            scan_set(set_dir, kind)
     found.sort(key=lambda x: (-x["count"], x["path"]))
     return {"count": len(found[:limit]), "items": found[:limit]}
 
@@ -1411,8 +1509,6 @@ class PoseGenReq(BaseModel):
     pose_dir: str = ""
     #: 背景（官方会往 prompt 追一句"改成纯 X 色"）；空 = 用角色自己的
     background_color: str = ""
-    #: 背景（官方会往 prompt 追一句"改成纯 X 色"）；空 = 用角色自己的
-    background_color: str = ""
     #: 一句话；也可以给"每张一句"的列表（官方 `_pose_prompts` 支持）
     prompts: Any = ""
     steps: int = int(posegen.POSE_DEFAULTS["steps"])
@@ -1897,7 +1993,6 @@ def pose_generate_api(name: str, req: PoseGenReq) -> Dict[str, Any]:
         "character": safe, "costume": costume,
         "poses": poses, "prompts": req.prompts,
         "background_color": req.background_color,
-        "background_color": req.background_color,
         "steps": int(req.steps), "cfg": float(req.cfg), "seed": int(req.seed),
         "transparent": bool(req.transparent), "matte": bool(req.matte),
         "lora": req.lora,
@@ -1999,6 +2094,22 @@ def character_atlas_export(name: str, req: AtlasReq) -> Dict[str, Any]:
             "position": _q.qsize()}
 
 
+@app.get("/characters/{name}/playtest")
+def character_playtest_assets(name: str) -> Dict[str, Any]:
+    """导出前的试玩验收：只读扫现有精灵帧 + atlas 元数据 + 方向缺口报告。
+
+    **不写盘、不生成图**。前端据此把角色放进场景里跑一遍，并检查
+    四方向 / 八方向 / 横板三种视角模式各缺哪些方向。
+    """
+    try:
+        safe = characters.ensure_safe_name(name, "角色名")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not characters.character_exists(safe):
+        raise HTTPException(404, f"没有这个角色：{safe}")
+    return playtest.collect(safe)
+
+
 @app.get("/characters/{name}/atlas")
 def character_atlas_info(name: str) -> Dict[str, Any]:
     """图集导出了没有 / 多大 / 多少帧。
@@ -2029,6 +2140,7 @@ def character_atlas_info(name: str) -> Dict[str, Any]:
         "image": _asset_url(str(image)),
         "frames": len(frames),
         "animations": len(animations),
+        "directionAnimations": int(info.get("directionAnimations") or 0),
         "size": [info.get("size", {}).get("w", 0), info.get("size", {}).get("h", 0)],
         "canvas": [info.get("canvas", {}).get("w", 0), info.get("canvas", {}).get("h", 0)],
         "bytes": image.stat().st_size,
@@ -2501,6 +2613,9 @@ class PoseSetFrameReq(BaseModel):
     scene: Optional[Dict[str, Any]] = None
     camera: Optional[Dict[str, Any]] = None
     characters: Optional[List[Any]] = None
+    #: 多机位抽帧的方向 key（down / up-right / left …）。单方向抽帧不带。
+    #: **必须显式声明**：Pydantic 默认吞掉多余字段，不声明就静默丢失。
+    direction: Optional[str] = None
 
 
 class PoseSetCreateReq(BaseModel):
@@ -2657,13 +2772,17 @@ def project_pose_render_gif(scope: str, name: str,
 @app.post("/projects/{scope}/pose_renders/{name}/godot")
 def project_pose_render_godot(
     scope: str, name: str,
-    stem: str = "", anim: str = "", fps: float = 12.0, loop: bool = True,
+    stem: str = "", anim: str = "",
+    fps: Optional[float] = None, loop: Optional[bool] = None,
     folder: str = "sprites", origin: str = "bottom",
     texture_filter: str = "nearest",
 ) -> Dict[str, Any]:
     """成片集 → Godot 4 工程包（逐帧 PNG + SpriteFrames + AnimatedSprite2D + zip）。
 
     每帧取**当前选中的候选**：用户挑过的就是他要交付的版本。
+
+    ``fps`` / ``loop`` 不传时，顺着成片集 → 姿势集 → ``set.json.source.templateId``
+    反查动作模板取值；模板也没有才退回 12 fps / 循环。显式传参永远优先。
     """
     from workflows import godotexport
     try:

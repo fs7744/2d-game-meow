@@ -330,3 +330,29 @@ def test_run_batch_defaults_to_vnccs(monkeypatch, tmp_path):
     assert res["engine"] == "wvnccs" and res["images"] == 1
     assert calls and calls[0]["transparent"] is True, "透明底要转到 VNCCS 的 transparent"
     assert calls[0]["steps"] >= 20, "VNCCS 的 LoRA 按 25 步训的，步数不能压到 16"
+
+
+def test_multi_yaw_direction_survives_round_trip():
+    """多机位抽帧：direction / yaw 必须写进 set.json 并能原样读回。
+
+    Pydantic 默认吞多余字段、`_frame_extras` 也只认白名单里的键，
+    任一端漏了，八方向帧存完就退化成「一堆没标方向的图」。
+    """
+    import json
+
+    frames = _frames(3)
+    keys = ["down", "right", "up"]
+    yaws = [0, 90, 180]
+    for i, f in enumerate(frames):
+        f["direction"] = keys[i]
+        f["yaw"] = yaws[i]
+    poseset.save_pose_set(PROJECT, "八向", frames)
+
+    folder = paths.PROJECTS_DIR / PROJECT / poseset.POSES_DIR / "八向"
+    doc = json.loads((folder / poseset.SET_FILE).read_text(encoding="utf-8"))
+    assert [f["direction"] for f in doc["frames"]] == keys
+    assert [f["yaw"] for f in doc["frames"]] == yaws
+
+    loaded = poseset.load_pose_set(PROJECT, "八向")
+    assert [f["direction"] for f in loaded["frames"]] == keys
+    assert [f["yaw"] for f in loaded["frames"]] == yaws

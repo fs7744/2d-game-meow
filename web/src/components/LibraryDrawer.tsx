@@ -19,8 +19,9 @@ import { fetchPoseBody } from '../api'
 import { filterPrompts } from '../store/prompts'
 import { filterPoses } from '../store/poses'
 import { POSE_CATEGORY_LABEL, POSE_NAME_LABEL, POSE_TAG_LABEL, zh } from '../labels'
+import MotionTemplatePanel from './MotionTemplatePanel'
 
-export type LibraryTab = 'prompt' | 'pose'
+export type LibraryTab = 'prompt' | 'pose' | 'motion'
 /** 姿势页的两种来源：用户自己的 / 随项目发行的官方库 */
 export type PoseSource = 'mine' | 'official'
 
@@ -173,12 +174,20 @@ export default function LibraryDrawer({
           >
             姿势 <b>{poses.length}</b>
           </button>
+          <button
+            className={`lib-tab${tab === 'motion' ? ' on' : ''}`}
+            onClick={() => onTab('motion')}
+            title="动作模板：方向 / 动作 / 帧率 / 预算，抽帧与 Godot 导出都从这里读"
+          >
+            动作模板
+          </button>
           <span className="spacer" />
           <input
             className="lib-search"
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder={tab === 'prompt' ? '搜正向 / 负向…' : '搜名字 / 朝向…'}
+            placeholder={tab === 'prompt' ? '搜正向 / 负向…'
+              : tab === 'motion' ? '搜模板名 / id…' : '搜名字 / 朝向…'}
           />
         </div>
 
@@ -220,7 +229,7 @@ export default function LibraryDrawer({
               </div>
             ))}
           </div>
-        ) : (
+        ) : tab === 'pose' ? (
           <>
             <div className="lib-src">
               <button
@@ -414,11 +423,22 @@ export default function LibraryDrawer({
               </div>
             )}
           </>
+        ) : (
+          <MotionTemplatePanel query={q} />
         )}
 
         <div className="lib-foot">
-          「我存的」在服务端磁盘 <b>library/</b>（换浏览器、清缓存都不丢，整个目录拷走就是备份）；
-          「VNCCS 官方库」随项目发行，在 <b>web/public/vnccs-pose/PoseLibrary/</b>。
+          {tab === 'motion' ? (
+            <>
+              动作模板在服务端磁盘 <b>library/motion_templates.json</b>，只存元数据不存图；
+              内置三套是代码常量、不落盘。<b>成本按 t/(1-(1-p)^k) 估算</b>，横板镜像派生会少一半机位。
+            </>
+          ) : (
+            <>
+              「我存的」在服务端磁盘 <b>library/</b>（换浏览器、清缓存都不丢，整个目录拷走就是备份）；
+              「VNCCS 官方库」随项目发行，在 <b>web/public/vnccs-pose/PoseLibrary/</b>。
+            </>
+          )}
         </div>
       </div>
     </div>

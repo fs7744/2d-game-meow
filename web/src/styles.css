@@ -2725,6 +2725,125 @@ input:disabled, select:disabled, textarea:disabled { opacity: 0.42; }
 .node-result .conn.in.char.result-port { top: 96px; }
 
 /* ==========================================================================
+   角色中心 · 导出前试玩验收台（2026-11-08）
+   三种视角模式一等支持；缺方向要显眼地报出来，不做「看起来能跑」的假象。
+   ========================================================================== */
+.pt-root { display: flex; flex-direction: column; gap: 10px; }
+.pt-toolbar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  padding: 10px; border: 1px solid var(--line); border-radius: var(--r);
+  background: var(--bg-2);
+}
+.pt-modes { display: flex; gap: 2px; padding: 3px; background: var(--bg-3); border-radius: 999px; }
+.pt-mode {
+  height: 28px; padding: 0 11px; border: 0; border-radius: 999px;
+  background: transparent; color: var(--muted); font-size: 11.5px; white-space: nowrap;
+}
+.pt-mode:hover { color: var(--white); background: var(--bg-4); }
+.pt-mode.on { background: var(--green); color: #08160f; font-weight: 700; }
+.pt-field {
+  display: flex; align-items: center; gap: 5px;
+  font-size: 11px; color: var(--muted); white-space: nowrap;
+}
+.pt-field select, .pt-field input[type="number"] {
+  height: 26px; padding: 0 6px; min-width: 0;
+  background: var(--bg-3); border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm); color: var(--white); font-size: 11px;
+}
+.pt-field input[type="number"] { width: 56px; }
+.pt-field input[type="range"] { width: 84px; }
+.pt-btn {
+  height: 28px; padding: 0 10px; border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm); background: var(--bg-3); color: var(--muted); font-size: 11.5px;
+}
+.pt-btn:hover { border-color: var(--green); color: var(--white); }
+
+.pt-warning {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+  padding: 10px 12px; border: 1px solid rgba(245, 198, 90, 0.42);
+  border-radius: var(--r); background: rgba(245, 198, 90, 0.08);
+  color: var(--muted); font-size: 11.5px; line-height: 1.6;
+}
+.pt-warning b { color: var(--yellow); }
+.pt-warning p { margin: 3px 0 0; }
+.pt-warning-detail { font-family: var(--mono); font-size: 10.5px; color: var(--muted-2); }
+.pt-placeholder {
+  display: inline-flex; align-items: center; gap: 5px;
+  flex: none; white-space: nowrap; font-size: 11px; color: var(--muted);
+}
+
+.pt-stage {
+  position: relative; height: 340px; overflow: hidden;
+  border: 1px solid var(--line-strong); border-radius: var(--r);
+}
+.pt-bg-grid {
+  background-color: #151a24;
+  background-image:
+    linear-gradient(rgba(233, 238, 247, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(233, 238, 247, 0.05) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+.pt-bg-plain { background: #3a4250; }
+.pt-bg-scene {
+  background: linear-gradient(#1d2b3a 0%, #1d2b3a 62%, #263a30 62%, #263a30 100%);
+}
+/* 横板：地面线与角色脚底共用 78% 这条基准线。角色用 translateY(-100%)
+   把底边贴上去，pivot=(0.5,1) 才真的生效；否则线会穿过角色腰。 */
+.pt-ground {
+  position: absolute; left: 0; right: 0; top: 78%; height: 1px;
+  background: rgba(74, 222, 155, 0.45); border-bottom: 1px dashed rgba(74, 222, 155, 0.25);
+}
+.pt-avatar {
+  position: absolute; left: 50%; top: 50%; height: auto; max-width: none;
+  image-rendering: pixelated; pointer-events: none; z-index: 2;
+}
+.pt-mode-side-2 .pt-avatar { top: 78%; }
+.pt-hud {
+  position: absolute; left: 10px; top: 10px; z-index: 3;
+  display: flex; flex-wrap: wrap; gap: 5px;
+}
+.pt-hud span {
+  padding: 2px 8px; border-radius: 999px;
+  border: 1px solid var(--line-strong); background: rgba(11, 14, 20, 0.82);
+  color: var(--white); font-size: 10.5px;
+}
+.pt-keys {
+  position: absolute; right: 10px; bottom: 10px; z-index: 3;
+  padding: 4px 9px; border-radius: var(--r-sm);
+  background: rgba(11, 14, 20, 0.82); color: var(--muted);
+  font-size: 10.5px;
+}
+.pt-empty {
+  display: grid; place-items: center; min-height: 140px;
+  color: var(--muted-2); font-size: 12px; text-align: center; padding: 20px;
+}
+
+.pt-report {
+  padding: 12px; border: 1px solid var(--line); border-radius: var(--r);
+  background: var(--bg-2);
+}
+.pt-report h4 { margin: 0 0 9px; font-size: 12.5px; font-weight: 700; color: var(--white); }
+.pt-report-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 7px; }
+.pt-report-row {
+  display: flex; flex-direction: column; gap: 3px; padding: 8px 10px;
+  border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--bg-3);
+  font-size: 11px; color: var(--muted);
+}
+.pt-report-row b { color: var(--white); font-size: 11.5px; }
+.pt-report-row.ok { border-color: rgba(74, 222, 155, 0.45); }
+.pt-report-row.ok span:first-of-type { color: var(--green); }
+.pt-report-yaw { color: var(--muted-2); font-family: var(--mono); font-size: 10px; }
+.pt-source, .pt-note {
+  margin: 9px 0 0; font-size: 11px; line-height: 1.65; color: var(--muted-2);
+}
+.pt-note { border-left: 2px solid var(--yellow); padding-left: 8px; }
+
+@media (max-width: 1080px) {
+  .pt-stage { height: 280px; }
+  .pt-toolbar { gap: 6px; }
+}
+
+/* ==========================================================================
    角色中心重构（2026-11-06）：四步工作台 + 常驻成果预览
    --------------------------------------------------------------------------
    旧版三栏是「角色库 / 5 个并列 tab / 重复操作按钮」，信息层级全平铺。
@@ -3913,3 +4032,112 @@ button:disabled, .mini.wide:disabled, .cc-btn:disabled,
 }
 .pose-radar-legend { font-size: 9.5px; line-height: 1.6; color: var(--muted-2); }
 .pose-scene-hint { font-size: 10px; line-height: 1.6; color: var(--muted-2); }
+
+/* ---------- 多机位抽帧（YAWS 方向模式） ---------- */
+.pose-sample-mode {
+  height: 22px; min-width: 88px; padding: 0 4px;
+  background: var(--bg-3); border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm); color: var(--white); font-size: 10.5px;
+}
+.pose-sample-mode:disabled { opacity: 0.45; }
+.pose-template-select { min-width: 132px; max-width: 210px; }
+.anim-dir {
+  position: absolute; left: 3px; bottom: 3px; z-index: 2;
+  padding: 0 4px; border-radius: 3px;
+  background: rgba(11, 14, 20, 0.86); border: 1px solid var(--line);
+  color: var(--white); font-size: 9.5px; line-height: 1.5;
+}
+
+/* ---------- 关联动作模板 ---------- */
+.pt-templates { margin-top: 10px; }
+.pt-templates h4 { margin: 0 0 7px; font-size: 12px; font-weight: 700; color: var(--white); }
+.pt-template-row {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px;
+  padding: 8px 10px; border: 1px solid var(--line);
+  border-radius: var(--r-sm); background: var(--bg-3);
+  font-size: 11px; color: var(--muted);
+}
+.pt-template-row + .pt-template-row { margin-top: 6px; }
+.pt-template-row b { color: var(--white); font-size: 11.5px; }
+.pt-template-cost { color: var(--yellow); }
+.pt-template-src { margin-left: auto; font-family: var(--mono); font-size: 10px; color: var(--muted-2); }
+
+/* ---------- 资料库 · 动作模板管理 ---------- */
+.mt-root { display: flex; flex-direction: column; gap: 9px; flex: 1; min-height: 0; overflow: auto; }
+.mt-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; }
+.mt-hint { font-size: 11px; line-height: 1.5; color: var(--muted-2); }
+.mt-err, .mt-ok { margin: 0; font-size: 11.5px; line-height: 1.5; }
+.mt-err { color: var(--pink); }
+.mt-ok { color: var(--green); }
+.mt-btn {
+  height: 30px; padding: 0 11px; background: var(--bg-3);
+  border: 1px solid var(--line-strong); border-radius: var(--r-sm);
+  color: var(--white); font-size: 11.5px; cursor: pointer; white-space: nowrap;
+}
+.mt-btn:hover { border-color: var(--green); }
+.mt-btn:disabled { opacity: 0.42; cursor: not-allowed; }
+.mt-btn.primary {
+  height: 38px; background: var(--green); border-color: var(--green);
+  color: #08160f; font-weight: 700;
+}
+.mt-btn.danger { color: var(--pink); border-color: rgba(255, 122, 144, 0.45); }
+
+.mt-editor {
+  display: flex; flex-direction: column; gap: 9px; padding: 11px;
+  border: 1px solid var(--green); border-radius: var(--r); background: var(--bg-2);
+}
+.mt-editor-head { display: flex; align-items: center; gap: 6px; }
+.mt-editor-head b { font-size: 12.5px; color: var(--white); }
+.mt-fields { display: flex; flex-wrap: wrap; gap: 9px; }
+.mt-field {
+  display: flex; flex-direction: column; gap: 4px; min-width: 132px;
+  font-size: 11px; color: var(--muted);
+}
+.mt-field.wide { flex: 1 1 100%; }
+.mt-field input, .mt-field select, .mt-aname,
+.mt-action-row input[type="number"] {
+  height: 28px; padding: 0 7px; background: var(--bg-3);
+  border: 1px solid var(--line-strong); border-radius: var(--r-sm);
+  color: var(--white); font: inherit; font-size: 11.5px;
+}
+.mt-actions-head { display: flex; align-items: center; gap: 9px; }
+.mt-actions-head b { font-size: 11.5px; color: var(--white); }
+.mt-actions-head span { flex: 1; font-size: 10.5px; color: var(--muted-2); }
+.mt-action-rows { display: flex; flex-direction: column; gap: 5px; }
+.mt-action-row { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; }
+.mt-action-row .mt-aname { flex: 1 1 160px; min-width: 120px; }
+.mt-action-row label { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--muted); }
+.mt-action-row input[type="number"] { width: 62px; }
+.mt-check { white-space: nowrap; }
+.mt-adv { border-top: 1px solid var(--line); padding-top: 8px; }
+.mt-adv summary { font-size: 11.5px; color: var(--muted); cursor: pointer; margin-bottom: 8px; }
+
+.mt-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(238px, 1fr)); gap: 8px; }
+.mt-card {
+  display: flex; flex-direction: column; gap: 6px; padding: 10px;
+  border: 1px solid var(--line); border-radius: var(--r); background: var(--bg-2);
+}
+.mt-card.builtin { border-color: rgba(108, 196, 239, 0.32); }
+.mt-card-head { display: flex; align-items: center; gap: 7px; }
+.mt-card-head b { font-size: 12px; color: var(--white); }
+.mt-badge {
+  margin-left: auto; padding: 1px 6px; border-radius: 999px;
+  border: 1px solid rgba(108, 196, 239, 0.5); color: var(--cyan); font-size: 10px;
+}
+.mt-badge.mine { border-color: rgba(74, 222, 155, 0.5); color: var(--green); }
+.mt-card-sub { font-size: 11px; color: var(--muted); }
+.mt-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.mt-chip {
+  padding: 1px 6px; border: 1px solid var(--line); border-radius: var(--r-sm);
+  font-family: var(--mono); font-size: 10px; color: var(--muted);
+}
+.mt-cost { font-size: 11px; color: var(--yellow); }
+.mt-note { font-size: 10.5px; line-height: 1.5; color: var(--muted-2); }
+.mt-card-actions { display: flex; flex-wrap: wrap; gap: 5px; margin-top: auto; }
+.mt-card-actions .mt-btn { height: 28px; }
+
+/* ---------- 验收参数写回图集导出 ---------- */
+.pt-apply { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; margin-top: 10px; }
+.pt-apply .pt-btn { height: 30px; padding: 0 12px; font-size: 11.5px; }
+.pt-btn:disabled { opacity: 0.42; cursor: not-allowed; }
+.pt-applied { font-size: 11px; color: var(--green); }

@@ -112,8 +112,11 @@ def test_pose_set_request_keeps_scene_fields():
         t=0.5, yaw=90, pose={"bones": {}}, png=PNG_DATA_URL,
         scene={"characters": [{"id": "c1"}]},
         camera={"zoom": 2}, characters=[{"id": "c1", "name": "A"}],
+        direction="up-right",
     )
     dumped = req.model_dump()
     assert dumped["scene"] == {"characters": [{"id": "c1"}]}
     assert dumped["camera"] == {"zoom": 2}
     assert dumped["characters"][0]["name"] == "A"
+    # 多机位抽帧的方向 key：Pydantic 默认吞多余字段，漏声明就静默丢
+    assert dumped["direction"] == "up-right"

@@ -37,6 +37,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from PIL import Image
 
 from workflows import characters
+from workflows import directions
 
 
 class AtlasError(RuntimeError):
@@ -52,6 +53,8 @@ class Frame:
     index: int
     path: str
     size: Tuple[int, int]
+    #: 方向 key（``sprite_<direction>_0001.png``）；老帧为空串
+    direction: str = ""
     #: 统一画布内的偏移（水平居中 + 底边对齐），导出时填
     offset: Tuple[int, int] = (0, 0)
 
@@ -63,6 +66,7 @@ class AtlasResult:
     meta_path: str
     frames: int = 0
     animations: int = 0
+    direction_animations: int = 0
     size: Tuple[int, int] = (0, 0)
     canvas: Tuple[int, int] = (0, 0)
     bytes: int = 0
@@ -133,15 +137,32 @@ def collect_frames(
             if emotion.casefold() in seen_emo:
                 continue
             seen_emo.add(emotion.casefold())
-            paths = characters.list_sprite_images(name, costume, emotion)
-            for path in paths:
+            # 两种落帧形态都认：老目录是「表情/」下平铺 PNG；方向帧还可以
+            # 按「表情/<方向>/」分目录。文件名带方向时以文件名为准。
+            candidates: List[Tuple[str, str]] = [
+                (p, "") for p in characters.list_sprite_images(name, costume, emotion)
+            ]
+            emo_root = Path(sub)
+            if emo_root.is_dir():
+                for child in sorted(emo_root.iterdir()):
+                    if not child.is_dir() or _skip_entry(child.name):
+                        continue
+                    key = directions.validate_direction(child.name)
+                    if not key:
+                        continue
+                    for p in sorted(child.glob("*")):
+                        if p.is_file() and p.suffix.lower() in characters.IMAGE_EXTS:
+                            candidates.append((str(p), key))
+            for path, dir_hint in candidates:
                 try:
                     with Image.open(path) as im:
                         size = im.size
                 except (OSError, ValueError):
                     continue
                 out.append(Frame(costume=costume, emotion=emotion,
-                                 index=_frame_index(path), path=path, size=size))
+                                 index=_frame_index(path), path=path, size=size,
+                                 direction=dir_hint
+                                 or directions.direction_from_name(path)))
     if not out:
         raise AtlasError(
             f"「{name}」没有可导出的精灵帧：先在「出图」页生成一张，"
@@ -265,11 +286,17 @@ def export_character_atlas(
 
     entries: Dict[str, Any] = {}
     groups: Dict[str, List[str]] = {}
+    dir_groups: Dict[str, Dict[str, List[str]]] = {}
     notes: List[str] = []
 
     for frame, (x, y) in zip(frames, positions):
-        # 帧名用「服装/表情/原文件名」：引擎侧看名字就知道是哪一套的哪一帧
-        key = f"{frame.costume}/{frame.emotion}/{Path(frame.path).name}"
+        # 帧名用「服装/表情/原文件名」：引擎侧看名字就知道是哪一套的哪一帧。
+        # 按方向分目录时补一段方向名，否则 8 个目录里的 0001.png 会互相覆盖。
+        fname = Path(frame.path).name
+        if frame.direction and Path(frame.path).parent.name == frame.direction:
+            fname = f"{frame.direction}/{fname}"
+        group = f"{frame.costume}/{frame.emotion}"
+        key = f"{group}/{fname}"
         entries[key] = {
             "frame": {"x": x, "y": y, "w": canvas[0], "h": canvas[1]},
             "rotated": False,
@@ -279,7 +306,10 @@ def export_character_atlas(
                                  "w": frame.size[0], "h": frame.size[1]},
             "sourceSize": {"w": canvas[0], "h": canvas[1]},
         }
-        groups.setdefault(f"{frame.costume}/{frame.emotion}", []).append(key)
+        groups.setdefault(group, []).append(key)
+        if frame.direction:
+            dir_groups.setdefault(group, {}).setdefault(
+                frame.direction, []).append(key)
 
     # **图集过大要提醒**：一个角色几十帧时，一张图可能到 4096×8000，
     # 引擎上传纹理时会卡在显卡上限（多数是 4096 或 8192），PNG 也动辄几十 MB。
@@ -289,20 +319,25 @@ def export_character_atlas(
             f"图集偏大（{len(frames)} 帧 / {atlas.width}×{atlas.height}）："
             "部分引擎的纹理上限是 4096，可以按服装分批导出（costumes 参数）")
 
-    # **图集过大要提醒**：一个角色几十帧时，一张图可能到 4096×8000，
-    # 引擎上传纹理时会卡在显卡上限（多数是 4096 或 8192），PNG 也动辄几十 MB。
-    # 这里不替用户决定怎么切，只把事实说出来（分组导出可以按服装分批）。
-    if len(frames) > 48 or max(atlas.size) > 4096:
-        notes.append(
-            f"图集偏大（{len(frames)} 帧 / {atlas.width}×{atlas.height}）："
-            "部分引擎的纹理上限是 4096，可以按服装分批导出（costumes 参数）")
-
+    # 主组保持原样（「服装/表情」全部帧），老消费者拿到的数据结构不变；
+    # 有方向帧时**额外**给每个方向一条独立动画，引擎按方向切动画而不是
+    # 把八个方向串成一条（那样角色会在原地疯狂转圈）。
     animations: Dict[str, Any] = {}
     for group, keys in groups.items():
         keys.sort(key=lambda k: _frame_index(k))
         animations[group] = {"frames": keys, "frameRate": frame_rate, "loop": True}
         if len(keys) == 1:
             notes.append(f"{group} 只有 1 帧（单帧动画，引擎里当静态图用）")
+    direction_animations = 0
+    for group, by_dir in dir_groups.items():
+        for key, keys in sorted(by_dir.items()):
+            keys.sort(key=lambda k: _frame_index(k))
+            animations[f"{group}@{key}"] = {
+                "frames": keys, "frameRate": frame_rate, "loop": True,
+                "direction": key, "yaw": directions.yaw_of(key),
+                "pivot": {"x": 0.5, "y": 1.0},
+            }
+            direction_animations += 1
 
     meta = {
         "frames": entries,
@@ -317,6 +352,7 @@ def export_character_atlas(
             "character": name,
             # 引擎侧建 sprite 时按这个尺寸，别按 atlas 里单帧的 frame.w/h 猜
             "canvas": {"w": canvas[0], "h": canvas[1]},
+            "directionAnimations": direction_animations,
             # 轴心在底边中点：地面站位就是帧的底边
             "pivot": {"x": 0.5, "y": 1.0},
         },
@@ -331,6 +367,7 @@ def export_character_atlas(
         character=name,
         image_path=str(image_path), meta_path=str(meta_path),
         frames=len(frames), animations=len(animations),
+        direction_animations=direction_animations,
         size=(atlas.width, atlas.height), canvas=canvas,
         bytes=image_path.stat().st_size, notes=notes,
     )

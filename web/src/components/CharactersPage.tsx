@@ -39,6 +39,7 @@ import {
   type CharacterPrompt, type TagCatalog,
 } from '../api'
 import CharacterLibrary, { tagLabel } from './CharacterLibrary'
+import CharacterPlaytest from './CharacterPlaytest'
 import PromptZoom from './PromptZoom'
 import TagPicker from './TagPicker'
 import {
@@ -89,6 +90,8 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
   const [poseDirs, setPoseDirs] = useState<PoseDir[]>([])
   const [poseDir, setPoseDir] = useState('')
   const [atlasInfo, setAtlasInfo] = useState<AtlasInfo | null>(null)
+  /** 试玩验收台调好的帧率，写回图集导出（一个来源，别在三处各填一遍） */
+  const [atlasFrameRate, setAtlasFrameRate] = useState(8)
   const [renameText, setRenameText] = useState('')
   const [renameOpen, setRenameOpen] = useState(false)
   const [pendingDelete, setPendingDelete] = useState<string | null>(null)
@@ -535,8 +538,8 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
   /* ----------------------------------------------------- 第 ④ 步：导出 */
   const doExportAtlas = useCallback(() => {
     if (!sel) return
-    void runTask('导出图集', () => exportAtlas(sel))
-  }, [sel, runTask])
+    void runTask('导出图集', () => exportAtlas(sel, { frame_rate: atlasFrameRate }))
+  }, [sel, runTask, atlasFrameRate])
 
   /* ================================================================== 渲染 */
   /** 下一步永远指向第一个真正没做完的步骤（不是简单的 activeStep+1：
@@ -969,18 +972,26 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
           {/* ============================= ④ 导出 ============================= */}
           {activeStep === 4 && sel && detail && (
             <>
-              <StepHead step={4} sub="把所有精灵帧打包成一张大图加一份坐标表，直接拿进 Godot / Unity / Aseprite。" />
+              <StepHead step={4} sub="先把素材放进场景里跑一遍，再打包成图集和坐标表，直接拿进 Godot / Unity / Aseprite。" />
+              <Card title="导出前试玩验收" tone="plain"
+                note="俯视四方向 / 俯视八方向 / 横板三种视角都能试；缺哪些方向、对应白模哪个机位，会直接列在下面。">
+                <CharacterPlaytest character={sel} onApplyFps={setAtlasFrameRate} />
+              </Card>
               <Card title="导出图集" tone="primary"
                 note="所有帧会统一到同一画布并做水平居中 + 底边对齐，动画里角色才不会上下抖。">
                 <div className="cc-actions">
                   <button type="button" className="cc-btn primary cc-cta"
                     onClick={doExportAtlas} disabled={busy || !hasSprite}>导出图集</button>
-                  <span className="cc-cost">输出 atlas.png + atlas.json</span>
+                  <span className="cc-cost">
+                    输出 atlas.png + atlas.json · 帧率 {atlasFrameRate} fps
+                    {atlasFrameRate !== 8 && '（来自试玩验收）'}
+                  </span>
                 </div>
                 {atlasInfo?.exists && (
                   <>
                     <p className="chars-sub">
-                      现有图集：{atlasInfo.frames} 帧 / {atlasInfo.animations} 组动画 ·{' '}
+                      现有图集：{atlasInfo.frames} 帧 / {atlasInfo.animations} 组动画
+                      {!!atlasInfo.directionAnimations && `（其中 ${atlasInfo.directionAnimations} 组按方向拆分）`} ·{' '}
                       {atlasInfo.size?.[0]}×{atlasInfo.size?.[1]} ·{' '}
                       单帧画布 {atlasInfo.canvas?.[0]}×{atlasInfo.canvas?.[1]} ·{' '}
                       {Math.max(1, Math.round((atlasInfo.bytes || 0) / 1024))} KB

@@ -124,3 +124,80 @@
   `userStep` 可回看、任务完成后自动推进，每步只有一个 `.cc-cta`，单步重跑收进 `details.cc-adv`（DOM 常驻）。
   单一 `matte=false`、表情默认 16 步、所有任务走 `runTask` 统一轮询；**不切走用户当前步骤**。
   旧版 5 个并列 tab / 右栏重复按钮 / `browseCostume` 双状态 / 9 条 xxxMsg 已删，别写回。
+
+## 试玩验收台 / 方向维度（2026-11-08 起）
+
+- 视角模式是**一等概念**：`topdown-4 / topdown-8 / side-2`，表在
+  `web/src/store/playtest.ts` 与 `workflows/playtest.py` 两处必须一致。
+  八方向靠双键向量合成；横板 left/right，right 由 left 镜像派生、带地面与跳跃。
+- `GET /characters/{name}/playtest` 只读扫现有 `Sprites/<服装>/<表情>/*.png` +
+  `Atlas/atlas.json`，**不新增落盘数据**；缺方向如实报告，默认值标 `source="default"`。
+  试玩台挂角色中心步骤 ④ 导出顶部。
+- **官方 VNCCS 没有原生八方向**；`PoseStudio.tsx:30` 的 `YAWS` 是我们自己转相机的
+  8 个机位（0/45/…/315），角度→方向名映射首次真机出帧要校准一次，别写成官方能力。
+  `docs/角色中心-剩余工作与做法.md:86,521` 的「8 方向不做」只针对官方原生支持。
+- 播放与位移**共用一个 rAF**，每帧位移 `speed/fps`（对方项目 setInterval + rAF
+  双时钟会滑步）；pivot 从 atlas 读并作 `transform-origin`，横板用 `translateY(-100%)`
+  把脚底贴到 `.pt-ground` 的 78% 基准线。
+- 新增角色接口时：`smoke.mjs` 里 `/characters/{name}` 的宽泛 GET 分支会抢请求，
+  专用 mock 分支**必须放在它前面**，否则组件拿到 CharacterDetail、缺字段会崩整棵树。
+## 多机位抽帧（2026-11-08 第二轮）
+
+- `entry.js` 的 `animSample` 支持可选 `directions: [{key, yaw}]`：
+  **方向循环 × 帧循环**，每方向先 `setYaw` + 双 rAF（等相机矩阵真的更新），
+  再逐帧采样，**每个方向单独 `alignFrames()`**（不同 yaw 脚底墨迹行不同，混在一起会互相拉偏），
+  帧带 `direction`/`yaw`，结束恢复原机位。**不传 directions 时老路径一字不变**，
+  帧里不带 direction —— 现有工具与 730 条冒烟都依赖这条契约，别改坏。
+- 宿主 `PoseStudio.tsx` 的抽帧模式默认「当前机位」，可选四/八方向/横板左右，
+  方向表复用 `store/playtest.ts`（**只有一张表**）。帧墙角标显示方向。
+- 方向元数据链路：`PoseSetFrameReq.direction`（Pydantic 不声明就吞字段）
+  → `poseset.EXTRA_FRAME_KEYS` 加 `direction` → `set.json` 每帧 →
+  `load_pose_set` 靠 `_frame_extras` 原样回传。`playtest._project_direction_assets()`
+  扫 `assets/projects/*/poses/*/set.json` 的 direction，把已抽方向算进就绪判定。
+- 真机验证脚本 `tools/verify_multi_yaw.mjs`（直接开 studio.html 顶层，不走宿主 React）。
+  实测 4 机位 × 2 帧 → **4/4 种指纹、PNG 长度各异**，证明相机真的转了；
+  单方向抽帧仍 3 帧且无 direction。**动过相机/对齐必须真机跑一次**。
+- **2026-11-08 方向闭环已打通**：`workflows/directions.py` 是后端**唯一**方向表
+  （`DIRECTIONS`/`YAW_MAP`/`direction_from_name`/`frame_filename`），
+  `playtest.py` 从它 re-export，前端仍是 `store/playtest.ts` 那一张表（共两张，别写第三份）。
+  链路：`set.json.direction` → `posegen.pose_entries()` 读旁边 set.json →
+  按方向独立编号落 `sprite_<方向>_NNNN.png`（无 set.json 仍 `sprite_pose_NNNN.png`）→
+  `spriteatlas` 额外产出 `<组>@<方向>` 动画（带 yaw/pivot，主组保留全帧）→
+  `godotexport.frame_groups()` 靠成片集的 `poseSet` 反查方向，≥2 方向才走
+  **多动画 `.tres` + `animations.json`**（单动画文本一字未改，测试有逐字断言）→
+  试玩台 `clips.directionFrames` 按朝向选帧、换方向帧索引归零、HUD 标「占位」。
+  老角色目录/老成片集在每一环都退回原行为。
+- `/pose_dirs` 原来只扫两层，够不到 `assets/projects/<id>/poses/<集>/`（深度 3）；
+  现在**定向补扫** `poses/` 与 `pose_frames/` 两类目录，带 `directions` 字段，
+  不把全局深度加深（assets 几千文件）。角色中心「姿势素材」下拉终于点得通。
+- 验收写回：试玩台「把试玩参数写入导出」→ `CharactersPage.atlasFrameRate`
+  → `exportAtlas(name,{frame_rate})` → `atlas.json` → `_read_atlas` 回读，
+  fps 只有一个来源（对方项目三套 fps 互不相通的坑没带进来）。
+- 新增 `tests/test_direction_pipeline.py`（9 例）钉住整条链；
+  后端子集 150 passed / 5 skipped，`smoke 730/730`，真机 34 张 0 错误。
+- **2026-11-08 动作模板 registry 已落地**：`workflows/motiontemplates.py`
+  是唯一定义，用户模板落 `library/motion_templates.json`（只存元数据），
+  **内置三套是代码常量不落盘**（`topdown-walk-4` / `topdown-full-8` /
+  `side-platformer-2`），升级不会跟用户改过的文件打架；内置 id 不可覆盖/删。
+  字段：`viewMode / directions / yawMap / camera / mirrorFrom /
+  actions[{name,clip,frames,fps,loop,oneShot}] / pivot / budget / subjects`。
+  `normalize()` 必须幂等（`estimate`/`playback` 会反复调），
+  `oneShot` 永远强制 `loop=False`。成本按 `t/(1-(1-p)^k)`，
+  **k=1 时是 t/p 不是 t**（要摊失败重跑）；横板 `mirrorFrom` 省一半机位。
+  REST：`GET/POST/PUT/DELETE /motion-templates` + `/{id}/estimate`。
+- 模板消费链：`PoseStudio` 抽帧面板选模板 → 带出帧数与机位模式 →
+  `templateId` 进 `set.json.source` → `godotexport.export_bundle()` 的
+  **fps/loop 缺省**时顺着 `render.json.poseSet` 反查模板（显式传参永远优先，
+  老调用方不变），`animations.json` 记 `playbackSource/templateId`；
+  `playtest` 扫 `source.templateId` 给验收台显示模板名 / fps / 成本估算。
+- 新增 `tests/test_motiontemplates.py`（9 例）。后端子集 **159 passed / 5 skipped**。
+- **模板编辑 UI 已做**：`components/MotionTemplatePanel.tsx` 挂在资料库抽屉
+  **第三个 tab**（`LibraryTab` 加 `'motion'`）。列表区分内置只读（只能「另存为我的」）
+  与用户模板（编辑 / 删除需二次确认）；表单只暴露名字 / viewMode / 动作表 /
+  进阶预算，`directions`/`camera`/`pivot` 留空由后端推导，**不复制第二套校验**。
+  卡片用独立 `.mt-*` 类名，别用 `.lib-card`（smoke 按它计数）。
+- `smoke.mjs` 的 `/motion-templates` mock 现在是内存 registry（GET/POST/PUT/DELETE
+  全支持），资料库 tab 断言 2→3 并新增 10 条模板 CRUD 断言 → **740/740**。
+  真机新增 35/36 两张截图（模板列表 + 编辑表单），0 脚本错误。
+- 仍未做：碰撞盒、角色中心「一键按模板补方向帧」、抽帧面板下拉的真机验证
+  （要先导入 glb 才出现）、逐帧 Qwen 多角色一致性（需 GPU 真跑）。改动**未提交**。
