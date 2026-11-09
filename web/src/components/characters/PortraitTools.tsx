@@ -5,6 +5,8 @@
  *   1. 两个处理都在弹窗里挑参数，处理完先给**滑动比对**，拖动分割线就能看差异；
  *   2. 处理结果是**新的一份**，原图一个字节都不改；
  *   3. 删除必须确认，避免手抖误删。
+ *   4. 像素化产出的是「格子图」，交付时要按 NEAREST 放大回原尺寸，
+ *      否则 768×1024 的立绘会变成 48×64，画廊里小得没法看（也可选保留小图）。
  *
  * 「处理并比对」时后端已经把新文件落盘（同目录、不覆盖）；用户若不满意可以
  * 「放弃这份」把它删掉，或「改参数重做」自动丢弃上一份再调。
@@ -29,6 +31,14 @@ const MATTE_DEFAULTS = {
 const PIXEL_DEFAULTS = {
   target: 'auto', colors: 32, grid_snap: true, sample_method: 'median',
   transparent_bg: false, pre_enhance: '0', edge_rebuild: false,
+  /** restore = 放大回原图尺寸（立绘交付）；native = 保留格子小图（精灵帧素材） */
+  output: 'restore',
+}
+
+/** meta 里的尺寸是 [w, h]，展示成 "768 × 1024"；缺失就返回空串。 */
+function sizeText(meta: Record<string, unknown> | undefined, key: string): string {
+  const v = meta?.[key]
+  return Array.isArray(v) && v.length === 2 ? `${v[0]} × ${v[1]}` : ''
 }
 
 /** 拖拽分割线：左边原图、右边结果，range 覆盖整个画面，拖动即比对。 */
@@ -82,13 +92,15 @@ export function PortraitProcessDialog({ character, item, op, onClose, onChanged 
     ? { backend: matte.backend, tol: matte.tol,
       fringe: matte.fringe, holes: matte.holes }
     : {
-      target: pixel.target === 'auto' ? null
-        : [Number(pixel.target), Number(pixel.target)],
+      // 只给「长边」，短边由后端按原图比例推导 —— 以前写死 [N, N] 会把
+      // 3:4 的立绘压成正方形，人物变形。
+      long_edge: pixel.target === 'auto' ? null : Number(pixel.target),
       colors: pixel.colors, grid_snap: pixel.grid_snap,
       sample_method: pixel.sample_method,
       transparent_bg: pixel.transparent_bg,
       pre_enhance: Number(pixel.pre_enhance),
       edge_rebuild: pixel.edge_rebuild,
+      output: pixel.output,
     }
 
   const run = async () => {
@@ -156,14 +168,21 @@ export function PortraitProcessDialog({ character, item, op, onClose, onChanged 
                   </>
                 ) : (
                   <>
-                    <Field label="目标像素尺寸" hint="自动 = 检测原图网格">
+                    <Field label="目标像素尺寸" hint="填的是长边格数，短边按原图比例算">
                       <select value={pixel.target}
                         onChange={(e) => setPixel({ ...pixel, target: e.target.value })}>
                         <option value="auto">自动检测</option>
-                        <option value="64">64 × 64</option>
-                        <option value="96">96 × 96</option>
-                        <option value="128">128 × 128</option>
-                        <option value="192">192 × 192</option>
+                        <option value="64">长边 64 格</option>
+                        <option value="96">长边 96 格</option>
+                        <option value="128">长边 128 格</option>
+                        <option value="192">长边 192 格</option>
+                      </select>
+                    </Field>
+                    <Field label="输出尺寸" hint="像素块本身仍是低分辨率格子">
+                      <select value={pixel.output}
+                        onChange={(e) => setPixel({ ...pixel, output: e.target.value })}>
+                        <option value="restore">恢复原图尺寸（推荐）</option>
+                        <option value="native">保留像素小图（做精灵帧）</option>
                       </select>
                     </Field>
                     <Field label="色板色数" hint="0 = 只做网格对齐">
@@ -227,6 +246,11 @@ export function PortraitProcessDialog({ character, item, op, onClose, onChanged 
               pos={pos} onPos={setPos} />
             <p className="cc-tool-hint">
               左：原图 · 右：处理后的新立绘 <b>{result.name}</b>（已保存为独立一份）
+              {op === 'pixel' && (
+                <> · 格子 {sizeText(result.meta, 'native_size')}
+                  → 交付 {sizeText(result.meta, 'output_size')}
+                  {result.meta?.output === 'native' && '（保留小图）'}</>
+              )}
             </p>
             <div className="cc-tool-actions">
               <button type="button" className="cc-btn ghost" disabled={busy}

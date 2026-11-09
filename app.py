@@ -2045,11 +2045,25 @@ def process_portrait_api(name: str, req: PortraitProcessReq) -> Dict[str, Any]:
                          "holes": holes, **info})
             suffix = "bg"
         else:
-            raw_target = p.get("target")
+            # **目标尺寸按「长边」解释，短边按原图比例推导**。
+            # 以前前端写死 [N, N]，768×1024（3:4）的立绘被压成 64×64（1:1），
+            # 人物整个变形；滑动比对两边宽高比不同也对不齐。
+            src_w, src_h = src.size
+            long_edge = p.get("long_edge")
+            if long_edge is None:
+                raw_target = p.get("target")
+                if isinstance(raw_target, (list, tuple)) and len(raw_target) == 2:
+                    long_edge = max(int(raw_target[0]), int(raw_target[1]))
+                elif isinstance(raw_target, (int, float)):
+                    long_edge = int(raw_target)
             target = None
-            if isinstance(raw_target, (list, tuple)) and len(raw_target) == 2:
-                target = (max(16, min(512, int(raw_target[0]))),
-                          max(16, min(512, int(raw_target[1]))))
+            if long_edge is not None:
+                n = max(16, min(512, int(long_edge)))
+                if src_w >= src_h:
+                    tw, th = n, max(1, round(n * src_h / src_w))
+                else:
+                    th, tw = n, max(1, round(n * src_w / src_h))
+                target = (tw, th)
             colors = max(0, min(128, int(p.get("colors", 32))))
             sample = str(p.get("sample_method") or "median")
             if sample not in ("median", "majority", "center"):
@@ -2064,12 +2078,25 @@ def process_portrait_api(name: str, req: PortraitProcessReq) -> Dict[str, Any]:
                 target_size=target, sample_method=sample, colors=colors,
                 transparent_bg=transparent_bg, snap_to=16,
                 pre_enhance=pre_enhance, edge_rebuild=edge_rebuild)
-            out = res["items"][0]["image"]
+            native = res["items"][0]["image"]
+            native_size = [native.width, native.height]
+            # pixelfy 输出的是**格子图**（768×1024 自动检测后只有 48×64），
+            # 那是精灵帧要的原生像素尺寸，但直接存成一张「立绘」就小到没法用。
+            # 项目里 postprocess.pixelate() 的标准做法是降采样后按 NEAREST
+            # 放大回原尺寸：像素块保持硬边、不引入新颜色、alpha 不产生半透明。
+            # `output=native` 保留原生小图，给要拿去做精灵帧素材的人。
+            output_mode = str(p.get("output") or "restore").lower()
+            if output_mode not in ("restore", "native"):
+                output_mode = "restore"
+            out = (native.resize((src_w, src_h), Image.NEAREST)
+                   if output_mode == "restore" else native)
             meta.update({
+                "long_edge": int(long_edge) if long_edge is not None else None,
                 "target": list(target) if target else None,
                 "colors": colors, "grid_snap": grid_snap,
                 "sample_method": sample, "transparent_bg": transparent_bg,
                 "pre_enhance": pre_enhance, "edge_rebuild": edge_rebuild,
+                "native_size": native_size, "output": output_mode,
                 "output_size": [out.width, out.height],
             })
             suffix = "px"

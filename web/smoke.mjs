@@ -421,7 +421,9 @@ function makeFetch() {
         after: `/files/processed_${suffix}.png`,
         path: `/p/processed_${suffix}.png`,
         name: `portrait_x_${suffix}.png`,
-        meta: { op, output_size: [16, 16] },
+        meta: op === 'pixel'
+          ? { op, native_size: [48, 64], output_size: [768, 1024], output: 'restore' }
+          : { op, output_size: [768, 1024] },
       }) }
     }
     if (String(url).includes('/portraits/delete')) {
@@ -5522,11 +5524,37 @@ async function ccCreate(doc, win) {
     dlgText().includes('目标像素尺寸')
     && dlgText().includes('色板色数')
     && dlgText().includes('网格吸附'))
+  check('像素化默认「恢复原图尺寸」，避免格子小图直接当立绘',
+    dlgText().includes('输出尺寸') && dlgText().includes('恢复原图尺寸'))
   clickEl(dlgBtn('处理并比对'))
   await ccWait(250)
-  check('像素化请求带 op=pixel',
-    calls.slice(c0).some((c) => c.url.includes('/portraits/process')
-      && String(c.body || '').includes('"op":"pixel"')))
+  const pixelReqs = () => calls.slice(c0).filter((c) =>
+    c.url.includes('/portraits/process')
+    && String(c.body || '').includes('"op":"pixel"'))
+  const pixelParams = () => {
+    const last = pixelReqs().pop()
+    try { return JSON.parse(last?.body || '{}').params || {} } catch { return {} }
+  }
+  check('像素化请求带 op=pixel', pixelReqs().length > 0)
+  check('按「长边」发尺寸，不再写死 [N,N] 把 3:4 立绘压成正方形',
+    'long_edge' in pixelParams() && !('target' in pixelParams()),
+    JSON.stringify(pixelParams()))
+  check('默认要求后端放大回原尺寸', pixelParams().output === 'restore')
+  check('结果区显示「格子尺寸 → 交付尺寸」',
+    dlgText().includes('48 × 64') && dlgText().includes('768 × 1024'),
+    dlgText().slice(-160))
+
+  // 改参数重做 → 换成「保留像素小图」，这是给精灵帧素材用的分支
+  clickEl(dlgBtn('改参数重做'))
+  await ccWait(200)
+  const outField = [...doc.querySelectorAll('.cc-tool-field')]
+    .find((f) => (f.textContent || '').includes('输出尺寸'))
+  ccSetSelect(win, outField?.querySelector('select'), 'native')
+  await ccWait(150)
+  clickEl(dlgBtn('处理并比对'))
+  await ccWait(250)
+  check('可选保留原生像素小图', pixelParams().output === 'native',
+    JSON.stringify(pixelParams()))
   clickEl(dlgBtn('放弃这份'))
   await ccWait(200)
 

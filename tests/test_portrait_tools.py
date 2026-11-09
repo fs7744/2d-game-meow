@@ -23,13 +23,16 @@ def _fresh(name: str) -> str:
     return ch.create_character(name)["character_info"]["name"]
 
 
-def _seed(name: str, filename: str = "portrait_seed.png") -> str:
+def _seed(name: str, filename: str = "portrait_seed.png",
+          size=(64, 64)) -> str:
     """造一张绿幕 + 红色方块的立绘，放在角色 Portraits/ 下。"""
     folder = ch.portraits_dir(name)
     os.makedirs(folder, exist_ok=True)
     path = os.path.join(folder, filename)
-    im = Image.new("RGB", (64, 64), (0, 255, 0))
-    ImageDraw.Draw(im).rectangle((20, 20, 44, 44), fill=(220, 30, 30))
+    w, h = size
+    im = Image.new("RGB", (w, h), (0, 255, 0))
+    ImageDraw.Draw(im).rectangle((w // 3, h // 3, w * 2 // 3, h * 2 // 3),
+                                 fill=(220, 30, 30))
     im.save(path, format="PNG")
     return path
 
@@ -72,9 +75,12 @@ def test_pixel_creates_new_file_and_never_overwrites(client):
     assert r1.status_code == 200, r1.text
     b1 = r1.json()
     assert b1["name"].endswith("_px.png")
-    assert b1["meta"]["output_size"] == [16, 16]
+    # 格子图是 16×16，但交付的立绘要放大回原图 64×64（否则画廊里小得没法看）
+    assert b1["meta"]["native_size"] == [16, 16]
+    assert b1["meta"]["output_size"] == [64, 64]
+    assert b1["meta"]["output"] == "restore"
     with Image.open(b1["path"]) as out:
-        assert out.size == (16, 16)
+        assert out.size == (64, 64)
 
     r2 = _post(client, name, "pixel", src,
                {"target": [16, 16], "colors": 8, "grid_snap": True})
@@ -136,3 +142,54 @@ def test_variant_path_is_unique_and_in_same_folder():
     assert a != b
     assert os.path.dirname(a) == os.path.dirname(src)
     assert not a.endswith("_matte.png"), "否则 list_portraits 会把它当副本跳过"
+
+
+# ---------------- 像素化尺寸：长边推导 + 放大回原尺寸 ----------------
+
+def test_pixel_long_edge_keeps_aspect_ratio(client):
+    """3:4 立绘不能被压成正方形（以前前端写死 target=[N, N]）。"""
+    name = _fresh("ToolPixelAspectProbe")
+    src = _seed(name, size=(96, 128))
+    r = _post(client, name, "pixel", src,
+              {"long_edge": 32, "colors": 8, "grid_snap": False})
+    assert r.status_code == 200, r.text
+    b = r.json()
+    m = b["meta"]
+    assert m["target"] == [24, 32], m["target"]       # 96/128 = 3/4
+    assert m["native_size"] == [24, 32]
+    assert m["output_size"] == [96, 128], "交付尺寸要跟原立绘一致"
+    with Image.open(b["path"]) as out:
+        assert out.size == (96, 128)
+        assert abs(out.width / out.height - 96 / 128) < 1e-6
+
+
+def test_pixel_auto_restores_full_size(client):
+    """自动检测出的格子图很小（768×1024 → 48×64），但交付必须是原尺寸。"""
+    name = _fresh("ToolPixelAutoProbe")
+    src = _seed(name, size=(768, 1024))
+    b = _post(client, name, "pixel", src, {"colors": 16}).json()
+    m = b["meta"]
+    assert m["long_edge"] is None
+    assert m["native_size"][0] < 768 and m["native_size"][1] < 1024
+    assert m["output_size"] == [768, 1024]
+    with Image.open(b["path"]) as out:
+        assert out.size == (768, 1024)
+
+
+def test_pixel_native_option_and_no_new_colors(client):
+    """output=native 保留小图；restore 的 NEAREST 放大不能造出新颜色 / 半透明。"""
+    name = _fresh("ToolPixelColorProbe")
+    src = _seed(name, size=(96, 128))
+    params = {"long_edge": 32, "colors": 8, "grid_snap": False}
+    small = _post(client, name, "pixel", src,
+                  {**params, "output": "native"}).json()
+    big = _post(client, name, "pixel", src,
+                {**params, "output": "restore"}).json()
+    assert small["meta"]["output_size"] == [24, 32]
+    assert big["meta"]["output_size"] == [96, 128]
+
+    with Image.open(small["path"]) as a, Image.open(big["path"]) as b:
+        ca = set(a.convert("RGBA").getdata())
+        cb = set(b.convert("RGBA").getdata())
+        assert cb == ca, "NEAREST 放大只复制像素，不该引入新颜色或新 alpha"
+        assert all(x[3] in (0, 255) for x in cb), "alpha 硬边不能变半透明"
