@@ -44,6 +44,13 @@ export function useRig() {
   const animRef = useRef(-1)
   const modeRef = useRef<RigMode>('setup')
   const loopRef = useRef(true)
+  const playingRef = useRef(false)
+  /**
+   * 物理约束的模拟状态必须跨帧保留（上游 app.physics），否则摆动类约束在播放/离屏渲染里
+   * 永远是静止的：`solvePhysics` 只在 delta > 0 时才推进仿真。
+   */
+  const physicsRef = useRef<Map<string, any>>(new Map())
+  const physicsDeltaRef = useRef(0)
   const [rev, setRev] = useState(0)
   const bump = useCallback(() => setRev((v) => v + 1), [])
 
@@ -64,14 +71,25 @@ export function useRig() {
   const [status, setStatus] = useState('')
   const [source, setSource] = useState<RigSource>({ kind: 'blank', label: '空白工程', name: '' })
 
-  /** 把 setup pose + 当前动画在 t 秒的采样合成为 pose.world / quads。 */
-  const recompute = useCallback((t = timeRef.current) => {
+  /** 把 setup pose + 当前动画在 t 秒的采样合成为 pose.world / quads。
+   *  `dt` 是距上一帧的秒数：物理约束据此推进（与上游 `app.pose()` / `AnimationState.apply` 同语义）。 */
+  const recompute = useCallback((t = timeRef.current, dt = 0) => {
     const d = docRef.current, p = poseRef.current
     if (!d || !p) return
     p.reset(d)
     const ai = animRef.current
     if (modeRef.current === 'animate' && ai >= 0 && d.animations[ai]) {
+      if (dt > 0 && playingRef.current) physicsDeltaRef.current += dt
+      // 暂停时上游会清空物理状态（app.pose(): `else if (this.physics.size) this.physics.clear()`），
+      // 这样再次播放时摆动从动画姿势重新起振，而不是接着上次的残留。
+      if (!playingRef.current && physicsRef.current.size) physicsRef.current.clear()
+      p.physics = physicsRef.current
+      p.physicsDelta = physicsDeltaRef.current
+      physicsDeltaRef.current = 0
       p.apply(d, d.animations[ai], t, 1)
+    } else if (physicsRef.current.size) {
+      physicsRef.current.clear()
+      physicsDeltaRef.current = 0
     }
     p.updateWorld(d)
   }, [])
@@ -94,6 +112,12 @@ export function useRig() {
     })
   }, [onion])
 
+  // 播放状态同步：暂停时清空物理模拟，避免下次播放接着上次的残留速度。
+  useEffect(() => {
+    playingRef.current = playing
+    if (!playing) { physicsRef.current.clear(); physicsDeltaRef.current = 0 }
+  }, [playing])
+
   // 播放：单一 rAF 驱动时间与姿势（双时钟会滑步）。画布自己另跑 rAF 读 poseRef。
   useEffect(() => {
     if (!playing) return
@@ -109,7 +133,8 @@ export function useRig() {
       let t = timeRef.current + dt
       if (t > dur) t = loopRef.current ? t % dur : dur
       timeRef.current = t
-      recompute(t)
+      // 传真实帧间隔：物理约束要逐帧仿真，按时间 t 直接采样会让摆动/惯性完全停住。
+      recompute(t, dt)
       if (now - lastUi > 90) { setTimeState(t); bump(); lastUi = now }
       if (!loopRef.current && t >= dur) { setPlaying(false); return }
       raf = requestAnimationFrame(tick)
@@ -504,10 +529,14 @@ export function useRig() {
     const fr = output.outputFrame({ width, height, fps: 30, frame: null }, bounds)
     const zoom = 1 / Math.max(1e-6, fr.scale)
     const view = { zoom, x: -fr.cx * zoom, y: fr.cy * zoom }
+    // 物理约束要逐帧推进：单个 Pose + 累加 dt，跟上游离线渲染一样跨帧保留模拟状态。
+    const p = new P.Pose(d)
+    const step = (a.duration || 1) / Math.max(1, count - 1)
     for (let f = 0; f < count; f++) {
       const t = (a.duration || 1) * (f / Math.max(1, count - 1))
-      const p = new P.Pose(d)
-      p.reset(d); p.apply(d, a, t, 1); p.updateWorld(d)
+      p.reset(d)
+      p.physicsDelta = f > 0 ? step : 0
+      p.apply(d, a, t, 1); p.updateWorld(d)
       drawScene(ctx, d, p, imgs, {
         width, height, view,
         showBones: false, showMesh: false, showImages: true, onion: false,

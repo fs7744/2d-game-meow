@@ -69,6 +69,30 @@ function drained(e: any): Promise<void> {
   })
 }
 
+/**
+ * 逐帧推进姿势，语义与上游 `render/offline.js` 的 `FrameRenderer.render` 一致：
+ * 物理约束（摆动/惯性）靠跨帧累积的 dt 仿真，`Pose` 与它的 `physics` 状态必须跨帧复用；
+ * 起始帧之前的预热帧也要走一遍，否则从静止状态起算会让摆动轨迹整体偏掉。
+ */
+export function makeFramePose(doc: any, anim: any, fps: number) {
+  const pose = new P.Pose(doc)
+  const dt = 1 / Math.max(1e-6, fps)
+  let frame = -1
+  let time = 0
+  return (n: number) => {
+    while (frame < n) {
+      // 第一帧不推进：上游 `render()` 里 `if (this.frame >= 0) state.update(...)`。
+      if (frame >= 0) { pose.physicsDelta = dt; time += dt }
+      frame++
+      pose.reset(doc)
+      // 时间累加而不是 frame*dt：上游 `TrackEntry.time += step`，逐帧累加才与它逐位一致。
+      if (anim) pose.apply(doc, anim, time, 1)
+      pose.updateWorld(doc)
+    }
+    return pose
+  }
+}
+
 /** 渲染 PNG 序列（透明），返回 [{path, bytes}]，由调用方打包 ZIP。 */
 export async function renderPngSequence(doc: any, images: any, o: FilmOptions,
   onProgress: (done: number, total: number) => void): Promise<{ path: string; bytes: Uint8Array }[]> {
@@ -78,18 +102,16 @@ export async function renderPngSequence(doc: any, images: any, o: FilmOptions,
   const anim = doc.animations[o.animation]
   // 跟上游 frameRange 一致：帧号含首尾两端（0..round(duration*fps)），比时长×fps 多一帧。
   const frames = Math.max(1, Math.round((o.end - o.start) * o.fps) + 1)
+  const startFrame = Math.max(0, Math.round(o.start * o.fps))
   const bounds = output.animationBounds(doc, o.animation, o.fps)
   const frame = output.outputFrame({ width: o.width, height: o.height, fps: o.fps,
     frame: null }, bounds)
   const zoom = 1 / Math.max(1e-6, frame.scale)
   const view = { zoom, x: -frame.cx * zoom, y: frame.cy * zoom }
+  const sample = makeFramePose(doc, anim, o.fps)
   const out: { path: string; bytes: Uint8Array }[] = []
   for (let i = 0; i < frames; i++) {
-    const t = o.start + i / o.fps
-    const pose = new P.Pose(doc)
-    pose.reset(doc)
-    if (anim) pose.apply(doc, anim, t, 1)
-    pose.updateWorld(doc)
+    const pose = sample(startFrame + i)
     drawScene(ctx, doc, pose, images, {
       width: o.width, height: o.height, view, showBones: false,
       showMesh: false, showImages: true, onion: false, sel: null, grid: false,
@@ -155,6 +177,8 @@ export async function renderVideo(doc: any, images: any, o: FilmOptions,
 
   const anim = doc.animations[o.animation]
   const total = Math.max(1, Math.round((o.end - o.start) * o.fps) + 1)
+  const startFrame = Math.max(0, Math.round(o.start * o.fps))
+  const sample = makeFramePose(doc, anim, o.fps)
   const bounds = output.animationBounds(doc, o.animation, o.fps)
   const outFrame = output.outputFrame({ width, height, fps: o.fps, frame: null }, bounds)
   const zoom = 1 / Math.max(1e-6, outFrame.scale)
@@ -166,11 +190,7 @@ export async function renderVideo(doc: any, images: any, o: FilmOptions,
   try {
     for (let i = 0; i < total; i++) {
       if (failure) throw failure
-      const t = o.start + i / o.fps
-      const pose = new P.Pose(doc)
-      pose.reset(doc)
-      if (anim) pose.apply(doc, anim, t, 1)
-      pose.updateWorld(doc)
+      const pose = sample(startFrame + i)
       drawScene(ctx, doc, pose, images, {
         width, height, view, showBones: false, showMesh: false,
         showImages: true, onion: false, sel: null, grid: false,
