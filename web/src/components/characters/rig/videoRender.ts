@@ -5,6 +5,7 @@
  */
 import { pose as P, mp4, webm, output } from '../../../rig/facade.js'
 import { drawScene } from './rigRender'
+import { poseSceneActors, sceneBounds } from './scenePose'
 
 export type FilmFormat = 'mp4' | 'webm' | 'png'
 export type FilmOptions = {
@@ -74,11 +75,13 @@ function drained(e: any): Promise<void> {
  * 物理约束（摆动/惯性）靠跨帧累积的 dt 仿真，`Pose` 与它的 `physics` 状态必须跨帧复用；
  * 起始帧之前的预热帧也要走一遍，否则从静止状态起算会让摆动轨迹整体偏掉。
  */
-export function makeFramePose(doc: any, anim: any, fps: number) {
+export function makeFramePose(doc: any, anim: any, fps: number,
+  actors?: Map<string, { doc: any; pose: any }>) {
   const pose = new P.Pose(doc)
   const dt = 1 / Math.max(1e-6, fps)
   let frame = -1
   let time = 0
+  const shot = anim?.name ?? ''
   return (n: number) => {
     while (frame < n) {
       // 第一帧不推进：上游 `render()` 里 `if (this.frame >= 0) state.update(...)`。
@@ -88,6 +91,13 @@ export function makeFramePose(doc: any, anim: any, fps: number) {
       // 时间累加而不是 frame*dt：上游 `TrackEntry.time += step`，逐帧累加才与它逐位一致。
       if (anim) pose.apply(doc, anim, time, 1)
       pose.updateWorld(doc)
+      // 场景演员：视差 + 各自片段，物理同样按帧推进（frame 0 不推进）。
+      if (actors?.size) {
+        poseSceneActors({
+          doc, stagePose: pose, shot, time, dt: frame > 0 ? dt : 0,
+          playing: true, actors,
+        })
+      }
     }
     return pose
   }
@@ -95,7 +105,8 @@ export function makeFramePose(doc: any, anim: any, fps: number) {
 
 /** 渲染 PNG 序列（透明），返回 [{path, bytes}]，由调用方打包 ZIP。 */
 export async function renderPngSequence(doc: any, images: any, o: FilmOptions,
-  onProgress: (done: number, total: number) => void): Promise<{ path: string; bytes: Uint8Array }[]> {
+  onProgress: (done: number, total: number) => void,
+  actors?: Map<string, { doc: any; pose: any }>): Promise<{ path: string; bytes: Uint8Array }[]> {
   const cv = document.createElement('canvas')
   cv.width = o.width; cv.height = o.height
   const ctx = cv.getContext('2d')!
@@ -103,18 +114,18 @@ export async function renderPngSequence(doc: any, images: any, o: FilmOptions,
   // 跟上游 frameRange 一致：帧号含首尾两端（0..round(duration*fps)），比时长×fps 多一帧。
   const frames = Math.max(1, Math.round((o.end - o.start) * o.fps) + 1)
   const startFrame = Math.max(0, Math.round(o.start * o.fps))
-  const bounds = output.animationBounds(doc, o.animation, o.fps)
+  const bounds = sceneBounds(doc, o.animation, o.fps, actors ?? new Map())
   const frame = output.outputFrame({ width: o.width, height: o.height, fps: o.fps,
     frame: null }, bounds)
   const zoom = 1 / Math.max(1e-6, frame.scale)
   const view = { zoom, x: -frame.cx * zoom, y: frame.cy * zoom }
-  const sample = makeFramePose(doc, anim, o.fps)
+  const sample = makeFramePose(doc, anim, o.fps, actors)
   const out: { path: string; bytes: Uint8Array }[] = []
   for (let i = 0; i < frames; i++) {
     const pose = sample(startFrame + i)
     drawScene(ctx, doc, pose, images, {
       width: o.width, height: o.height, view, showBones: false,
-      showMesh: false, showImages: true, onion: false, sel: null, grid: false,
+      showMesh: false, showImages: true, onion: false, sel: null, grid: false, actors,
     })
     const blob: Blob = await new Promise((r) => cv.toBlob((b) => r(b || new Blob()), 'image/png'))
     out.push({ path: `frames/frame_${String(i).padStart(4, '0')}.png`,
@@ -126,7 +137,8 @@ export async function renderPngSequence(doc: any, images: any, o: FilmOptions,
 
 /** 编码 MP4(H.264) 或 WebM(VP9/VP8，可选透明)。返回文件字节。 */
 export async function renderVideo(doc: any, images: any, o: FilmOptions,
-  onProgress: (done: number, total: number) => void): Promise<Uint8Array> {
+  onProgress: (done: number, total: number) => void,
+  actors?: Map<string, { doc: any; pose: any }>): Promise<Uint8Array> {
   if (!canEncodeVideo()) throw new Error('当前浏览器没有 WebCodecs，无法编码 MP4/WebM；请改用 PNG 序列')
   const VE = (window as any).VideoEncoder
   const VF = (window as any).VideoFrame
@@ -178,8 +190,8 @@ export async function renderVideo(doc: any, images: any, o: FilmOptions,
   const anim = doc.animations[o.animation]
   const total = Math.max(1, Math.round((o.end - o.start) * o.fps) + 1)
   const startFrame = Math.max(0, Math.round(o.start * o.fps))
-  const sample = makeFramePose(doc, anim, o.fps)
-  const bounds = output.animationBounds(doc, o.animation, o.fps)
+  const sample = makeFramePose(doc, anim, o.fps, actors)
+  const bounds = sceneBounds(doc, o.animation, o.fps, actors ?? new Map())
   const outFrame = output.outputFrame({ width, height, fps: o.fps, frame: null }, bounds)
   const zoom = 1 / Math.max(1e-6, outFrame.scale)
   const view = { zoom, x: -outFrame.cx * zoom, y: outFrame.cy * zoom }
@@ -193,7 +205,7 @@ export async function renderVideo(doc: any, images: any, o: FilmOptions,
       const pose = sample(startFrame + i)
       drawScene(ctx, doc, pose, images, {
         width, height, view, showBones: false, showMesh: false,
-        showImages: true, onion: false, sel: null, grid: false,
+        showImages: true, onion: false, sel: null, grid: false, actors,
       })
       if (!transparent && o.background) {
         ctx.save()

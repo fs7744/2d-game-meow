@@ -11,6 +11,7 @@ import {
   interop, binary, constraintdata as CD, zip as zipNs, output,
 } from '../../../rig/facade.js'
 import { drawScene } from './rigRender'
+import { poseSceneActors, sceneBounds } from './scenePose'
 import {
   basename, type Sel, type RigMode, type RigTool, type ViewState, type RigSource,
 } from './types'
@@ -51,6 +52,11 @@ export function useRig() {
    */
   const physicsRef = useRef<Map<string, any>>(new Map())
   const physicsDeltaRef = useRef(0)
+  /**
+   * 场景演员：actor id → 自己的文档 + 常驻 Pose（物理状态挂在 Pose 上，必须跨帧复用）。
+   * 演员图片以 `@<id>/<name>` 为键放进同一个 imagesRef，画布与离屏渲染共用。
+   */
+  const actorRef = useRef<Map<string, { doc: any; pose: any }>>(new Map())
   const [rev, setRev] = useState(0)
   const bump = useCallback(() => setRev((v) => v + 1), [])
 
@@ -78,13 +84,16 @@ export function useRig() {
     if (!d || !p) return
     p.reset(d)
     const ai = animRef.current
+    const playingNow = playingRef.current
+    let step = 0
     if (modeRef.current === 'animate' && ai >= 0 && d.animations[ai]) {
-      if (dt > 0 && playingRef.current) physicsDeltaRef.current += dt
+      if (dt > 0 && playingNow) physicsDeltaRef.current += dt
       // 暂停时上游会清空物理状态（app.pose(): `else if (this.physics.size) this.physics.clear()`），
       // 这样再次播放时摆动从动画姿势重新起振，而不是接着上次的残留。
-      if (!playingRef.current && physicsRef.current.size) physicsRef.current.clear()
+      if (!playingNow && physicsRef.current.size) physicsRef.current.clear()
       p.physics = physicsRef.current
       p.physicsDelta = physicsDeltaRef.current
+      step = physicsDeltaRef.current
       physicsDeltaRef.current = 0
       p.apply(d, d.animations[ai], t, 1)
     } else if (physicsRef.current.size) {
@@ -92,6 +101,12 @@ export function useRig() {
       physicsDeltaRef.current = 0
     }
     p.updateWorld(d)
+    poseSceneActors({
+      doc: d, stagePose: p,
+      shot: modeRef.current === 'animate' && ai >= 0 ? (d.animations[ai]?.name ?? '') : '',
+      time: modeRef.current === 'animate' ? t : -1,
+      dt: step, playing: playingNow, actors: actorRef.current,
+    })
   }, [])
 
   const commit = useCallback(() => { recompute(); bump() }, [recompute, bump])
@@ -488,6 +503,74 @@ export function useRig() {
     commit()
   }, [commit])
 
+  // ---------------------------------------------------------------- 场景演员
+
+  /**
+   * 载入一个演员工程（产物里的 `.rigby` 工作文件）。演员图片按 `@<id>/<name>` 并入同一个
+   * 图像库：上游的 `openWorkfile` 会 `images.clear()`，所以先用独立的 store 读，再带前缀搬过来，
+   * 否则会把舞台自己的图全清掉。
+   */
+  const loadActorDoc = useCallback(async (id: string, url: string) => {
+    const res = await fetch(url)
+    if (!res.ok) throw new Error(`读取演员工程失败（HTTP ${res.status}）`)
+    const bytes = new Uint8Array(await res.arrayBuffer())
+    const tmp = new images.Images()
+    const fs = {
+      readFile: async () => bytes,
+      readText: async () => new TextDecoder().decode(bytes),
+      list: async () => [], exists: async () => true,
+    }
+    const out = await io.openProject(`${id}.rigby`, fs, tmp)
+    for (const [name, entry] of tmp.map as Map<string, any>) {
+      imagesRef.current.insert(`@${id}/${name}`, entry.canvas)
+    }
+    return { doc: out.doc, warnings: out.warnings || [] }
+  }, [])
+
+  /** 把演员文档挂到场景里的某个演员上（画布与离屏渲染共用这一份 Pose）。 */
+  const attachActor = useCallback((actorId: string, doc: any) => {
+    actorRef.current.set(actorId, { doc, pose: new P.Pose(doc) })
+    commit()
+  }, [commit])
+
+  const detachActor = useCallback((actorId: string) => {
+    actorRef.current.delete(actorId)
+    commit()
+  }, [commit])
+
+  /** 演员自己的动画名（场景片段只能选演员自己的动画，不是舞台的）。 */
+  const actorAnimations = useCallback((actorId: string): string[] => {
+    const rt = actorRef.current.get(actorId)
+    return rt ? rt.doc.animations.map((a: any) => a.name) : []
+  }, [])
+
+  /**
+   * 场景导出：舞台骨架 + 每个已载入演员的骨架 / 图集 + 场景清单（`.scene.json`）。
+   * 走上游 `io.exportScene`；演员图片在共享库里带 `@<id>/` 前缀，这里按前缀包一层视图给它。
+   */
+  const exportSceneBundle = useCallback(async () => {
+    const d = docRef.current
+    if (!d.scene) throw new Error('先在「场景 / 摄影机」里初始化场景')
+    const actorDocs: any[] = []
+    for (const a of d.scene.actors) {
+      const rt = actorRef.current.get(a.id)
+      if (!rt) continue
+      actorDocs.push({
+        id: a.id, doc: rt.doc,
+        images: { get: (n: string) => imagesRef.current.get(`@${a.id}/${n}`) },
+      })
+    }
+    const out: Record<string, Uint8Array> = {}
+    const r = await io.exportScene('stage.json', memFs(out), d, imagesRef.current, actorDocs)
+    const files = Object.entries(out).map(([p, bytes]) => ({ path: p, bytes }))
+    return {
+      zip: zipNs.zip(files) as Uint8Array,
+      warnings: (r.warnings || []) as string[],
+      files: files.map((f) => f.path),
+      missing: d.scene.actors.length - actorDocs.length,
+    }
+  }, [])
+
   // ---------------------------------------------------------------- 导出
 
   /** 一次生成用户要的全部无损格式 + 可继续编辑的工程文件。 */
@@ -525,7 +608,7 @@ export function useRig() {
     const ctx = cv.getContext('2d')!
     const entries: { path: string; bytes: Uint8Array }[] = []
     // 跟影片工作区的离屏渲染用同一套自动取景（core/output.js），否则高个子角色会被裁掉。
-    const bounds = output.animationBounds(d, animRef.current, 30)
+    const bounds = sceneBounds(d, animRef.current, 30, actorRef.current)
     const fr = output.outputFrame({ width, height, fps: 30, frame: null }, bounds)
     const zoom = 1 / Math.max(1e-6, fr.scale)
     const view = { zoom, x: -fr.cx * zoom, y: fr.cy * zoom }
@@ -537,10 +620,15 @@ export function useRig() {
       p.reset(d)
       p.physicsDelta = f > 0 ? step : 0
       p.apply(d, a, t, 1); p.updateWorld(d)
+      // 场景演员同样逐帧摆姿势（视差 + 片段 + 物理），否则导出的序列里只有舞台。
+      poseSceneActors({
+        doc: d, stagePose: p, shot: a.name, time: t, dt: f > 0 ? step : 0,
+        playing: true, actors: actorRef.current,
+      })
       drawScene(ctx, d, p, imgs, {
         width, height, view,
         showBones: false, showMesh: false, showImages: true, onion: false,
-        sel: null, grid: false,
+        sel: null, grid: false, actors: actorRef.current,
       })
       const blob: Blob = await new Promise((res) => cv.toBlob((b) => res(b || new Blob()), 'image/png'))
       entries.push({ path: `frames/frame_${String(f).padStart(4, '0')}.png`,
@@ -566,6 +654,7 @@ export function useRig() {
     addAnimation, removeAnimation, patchAnimation, keyCurrent, allKeys, patchKey, removeKey,
     addEvent, removeEvent, patchEvent, addSkin, removeSkin,
     constraints, addConstraint, removeConstraint, addPose, applyPose,
+    actorRef, loadActorDoc, attachActor, detachActor, actorAnimations, exportSceneBundle,
     buildExports, renderFrames,
   }
 }

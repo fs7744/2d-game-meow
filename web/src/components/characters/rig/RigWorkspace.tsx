@@ -138,10 +138,10 @@ function FilmPanel({ rig, onNotice }: WorkspaceProps) {
       const onP = (done: number, total: number) =>
         setProgress(`${done}/${total} 帧 · ${timecode(done / fps, fps)}`)
       if (format === 'png') {
-        const files = await renderPngSequence(rig.docRef.current, rig.imagesRef.current, o, onP)
+        const files = await renderPngSequence(rig.docRef.current, rig.imagesRef.current, o, onP, rig.actorRef.current)
         download(`${rig.docRef.current.name}_png.zip`, zipNs.zip(files) as Uint8Array, 'application/zip')
       } else {
-        const bytes = await renderVideo(rig.docRef.current, rig.imagesRef.current, o, onP)
+        const bytes = await renderVideo(rig.docRef.current, rig.imagesRef.current, o, onP, rig.actorRef.current)
         download(`${rig.docRef.current.name || 'anim'}.${format}`, bytes,
           format === 'mp4' ? 'video/mp4' : 'video/webm')
       }
@@ -299,43 +299,76 @@ function LipSyncPanel({ rig, onNotice }: WorkspaceProps) {
 
 /* ------------------------------ 场景 / 摄影机 ------------------------------ */
 
-function ScenePanel({ rig, items, character, stage, onNotice }: WorkspaceProps) {
+function ScenePanel({ rig, items, character, stage }: WorkspaceProps) {
   const d = rig.docRef.current
   const sc: any = d.scene || null
   const [msg, setMsg] = useState('')
   const [err, setErr] = useState('')
   const [actorName, setActorName] = useState('演员 1')
   const [actorSrc, setActorSrc] = useState('')
+  const [busy, setBusy] = useState('')
 
   const init = () => {
     d.scene = sceneNs.emptyScene()
     rig.commit(); setMsg('已建立场景（当前骨架作为舞台）')
   }
-  const addActor = () => {
+  /**
+   * 放到舞台：选了来源工程就把它的 `.rigby` 真读进来（文档 + 带 `@<id>/` 前缀的图片），
+   * 这样画布 / 影片渲染里真的能看到这个演员；没选来源就只建锚骨与槽位（纯元数据）。
+   */
+  const addActor = async () => {
+    setErr(''); setMsg('')
     if (!d.scene) d.scene = sceneNs.emptyScene()
-    const a = sceneNs.addActorToStage(d, {
-      id: actorSrc || `actor_${d.scene.actors.length + 1}`,
-      name: actorName, source: actorSrc || null,
-      at: [d.scene.actors.length * 180 - 90, 0], ground: 0,
-    })
-    rig.commit(); setMsg(`已把「${a.name}」放到舞台上（锚骨 ${a.bone} / 槽 ${a.slot}）`)
+    const it = actorSrc ? items.find((x) => x.id === actorSrc) : null
+    const url = it?.formats?.['project.rigby']
+    // 同一个来源可以放多次：id 是演员图片的前缀与运行时键，必须唯一。
+    const base = actorSrc || 'actor'
+    let id = `${base}_${d.scene.actors.length + 1}`
+    for (let n = 2; d.scene.actors.some((x: any) => x.id === id); n++) id = `${base}_${n}`
+    if (actorSrc && !url) { setErr('这份产物没有可编辑工程（project.rigby），只能建空演员'); return }
+    setBusy(url ? '载入演员工程…' : '')
+    try {
+      let actorDoc: any = null
+      let warnings: string[] = []
+      if (url) ({ doc: actorDoc, warnings } = await rig.loadActorDoc(id, url))
+      const at = [d.scene.actors.length * 260 - 130, 0]
+      const a = sceneNs.addActorToStage(d, {
+        id, name: actorName || id, source: it?.source?.label || actorSrc || null,
+        at, ground: actorDoc ? sceneNs.groundOffset(actorDoc) : 0,
+      })
+      if (actorDoc) rig.attachActor(a.id, actorDoc)
+      else rig.commit()
+      setMsg(actorDoc
+        ? `已载入「${a.name}」：${actorDoc.bones.length} 骨 / ${actorDoc.animations.length} 动画，锚骨 ${a.bone}`
+        : `已把「${a.name}」放到舞台上（未载入工程，仅锚骨 ${a.bone} / 槽 ${a.slot}）`)
+      if (warnings.length) setErr(warnings.slice(0, 3).join('；'))
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally { setBusy('') }
   }
+  // 片段是按「镜头」分组的（镜头 = 舞台当前动画名），写错键名就一个都播不出来。
+  const shotName = d.animations[rig.animation]?.name || ''
   const setClip = (ai: number, patch: any) => {
+    if (!shotName) { setErr('先在时间轴里选一个舞台动画（它就是这个镜头）'); return }
     const a: any = d.scene.actors[ai]
-    const list = (a.clips.main ||= [])
-    if (!list.length) list.push(sceneNs.readClip({ animation: d.animations[0]?.name || 'idle' }))
+    const list = (a.clips[shotName] ||= [])
+    // 新片段默认用演员自己的第一个动画（选舞台动画会一个都播不出来）。
+    const own = rig.actorAnimations(a.id)
+    if (!list.length) list.push(sceneNs.readClip({ animation: own[0] || 'idle' }))
     Object.assign(list[0], patch)
     rig.commit()
   }
-  const exportManifest = () => {
+  const exportManifest = async () => {
     if (!d.scene) { setErr('先初始化场景'); return }
-    const files = new Map<string, string>()
-    for (const a of d.scene.actors) files.set(a.id, `${a.id}.json`)
-    const m = sceneNs.writeSceneManifest(d.scene, 'stage.json', files)
-    download(`${d.name || 'scene'}.scene.json`, JSON.stringify(m, null, 2), 'application/json')
-    onNotice('场景清单已导出（含演员片段、深度与焦距）')
+    setErr('')
+    try {
+      const r = await rig.exportSceneBundle()
+      download(`${d.name || 'scene'}_scene.zip`, r.zip, 'application/zip')
+      setMsg(`场景已导出：${r.files.length} 个文件（清单 + 舞台骨架/图集 + 演员骨架/图集）`)
+      if (r.missing) setErr(`${r.missing} 个演员未载入工程，清单里没有他们的骨架文件`)
+    } catch (e) { setErr(e instanceof Error ? e.message : String(e)) }
   }
-  const clipOf = (a: any) => (a.clips?.main?.[0] || null)
+  const clipOf = (a: any) => (shotName ? (a.clips?.[shotName]?.[0] || null) : null)
 
   return (
     <div className="rig-ws-panel">
@@ -350,10 +383,13 @@ function ScenePanel({ rig, items, character, stage, onNotice }: WorkspaceProps) 
           <label className="rig-field"><span>来源工程</span>
             <select value={actorSrc} onChange={(e) => setActorSrc(e.target.value)}>
               <option value="">（外部 / 手动）</option>
-              {items.map((it) => <option key={it.id} value={it.id}>{it.source?.label || it.id}</option>)}
+              {items.filter((it) => it.formats['project.rigby'])
+                .map((it) => <option key={it.id} value={it.id}>{it.source?.label || it.id} · {it.bones} 骨</option>)}
             </select>
           </label>
-          <button type="button" className="rig-btn" onClick={addActor}>＋ 放到舞台</button>
+          <button type="button" className="rig-btn" disabled={!!busy} onClick={() => void addActor()}>
+            {busy || '＋ 放到舞台'}
+          </button>
           <button type="button" className="rig-btn primary" onClick={exportManifest}>导出场景清单</button>
         </>}
       </div>
@@ -361,9 +397,14 @@ function ScenePanel({ rig, items, character, stage, onNotice }: WorkspaceProps) 
         <div className="rig-ws-actors">
           {sc.actors.map((a: any, i: number) => {
             const c = clipOf(a)
+            // 片段只能选演员自己的动画；没载入工程时退回舞台动画名（仅清单用途）。
+            const anims: string[] = rig.actorAnimations(a.id)
+            const choices = anims.length ? anims : d.animations.map((x: any) => x.name)
+            const loaded = anims.length > 0
             return (
               <div className="rig-actor" key={a.id}>
-                <b>{a.name}</b><em>{a.id} · 深度 {sc.depth[a.bone] ?? 0}</em>
+                <b>{a.name}</b>
+                <em>{a.id} · 深度 {sc.depth[a.bone] ?? 0} · {loaded ? '已载入' : '未载入工程'}</em>
                 <div className="rig-row">
                   <label className="rig-field inline"><span>深度</span>
                     <input type="number" value={sc.depth[a.bone] ?? 0}
@@ -371,7 +412,7 @@ function ScenePanel({ rig, items, character, stage, onNotice }: WorkspaceProps) 
                   <label className="rig-field inline"><span>动画</span>
                     <select value={c?.animation || ''} onChange={(e) => setClip(i, { animation: e.target.value })}>
                       <option value="">（无）</option>
-                      {d.animations.map((x: any) => <option key={x.name} value={x.name}>{x.name}</option>)}
+                      {choices.map((n: string) => <option key={n} value={n}>{n}</option>)}
                     </select>
                   </label>
                   <label className="rig-field inline"><span>起</span>
@@ -393,6 +434,7 @@ function ScenePanel({ rig, items, character, stage, onNotice }: WorkspaceProps) 
                     <input type="number" step={0.05} value={c?.blend ?? 0.2}
                       onChange={(e) => setClip(i, { blend: Number(e.target.value) })} /></label>
                   <button type="button" className="rig-mini danger" onClick={() => {
+                    rig.detachActor(a.id)
                     sc.actors.splice(i, 1); rig.commit()
                   }}>移除</button>
                 </div>
@@ -401,7 +443,7 @@ function ScenePanel({ rig, items, character, stage, onNotice }: WorkspaceProps) 
           })}
           {!sc.actors.length && <p className="rig-hint">还没有演员。加进来后每个演员是一个锚骨 + 槽位，片段支持裁剪 / 速度 / 循环 / 交叉淡入，深度控制视差。</p>}
         </div>
-        <p className="rig-hint">舞台骨架：{d.bones.length} 骨 · 摄影机深度层 {Object.keys(sc.depth).length} 个 · 角色 {character} / 阶段 {stage}</p>
+        <p className="rig-hint">舞台骨架：{d.bones.length} 骨 · 当前镜头 {shotName || '（未选动画）'} · 摄影机深度层 {Object.keys(sc.depth).length} 个 · 角色 {character} / 阶段 {stage}</p>
       </>}
       {msg && <div className="rig-ok">{msg}</div>}
       {err && <div className="rig-err">{err}</div>}

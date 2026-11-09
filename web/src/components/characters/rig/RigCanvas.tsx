@@ -29,6 +29,10 @@ export function RigCanvas({ rig }: { rig: RigApi }) {
     const d = rig.docRef.current, p = rig.poseRef.current
     const pts: number[][] = []
     for (const q of p.quads(d)) for (const pt of q.positions) pts.push(pt)
+    // 场景演员也纳入取景，否则加了演员后默认视图里看不到他们。
+    for (const rt of rig.actorRef.current.values()) {
+      for (const q of rt.pose.quads(rt.doc)) for (const pt of q.positions) pts.push(pt)
+    }
     if (!pts.length) return
     const xs = pts.map((v) => v[0]), ys = pts.map((v) => v[1])
     const minX = Math.min(...xs), maxX = Math.max(...xs)
@@ -94,6 +98,7 @@ export function RigCanvas({ rig }: { rig: RigApi }) {
           width: w, height: h, view: r.view,
           showBones: r.showBones, showMesh: r.showMesh, showImages: r.showImages,
           onion: r.onion, sel: r.sel, grid: r.grid,
+          actors: r.actorRef.current,
         }, r.ghosts())
       }
       raf = requestAnimationFrame(loop)

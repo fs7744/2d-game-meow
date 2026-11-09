@@ -16,6 +16,12 @@ export type DrawOpts = {
   onion: boolean
   sel: Sel
   grid: boolean
+  /**
+   * 场景演员：actor id → 已摆好姿势的 { doc, pose }。按舞台 drawOrder 插到演员槽位处绘制
+   * （上游 `scene.forEachLayer` / `sceneDrawList` 的语义），演员图片在同一个 Images 里以
+   * `@<id>/<name>` 为键。
+   */
+  actors?: Map<string, { doc: any; pose: any }> | null
 }
 
 /**
@@ -142,6 +148,17 @@ function drawBones(ctx: CanvasRenderingContext2D, doc: any, pose: any, o: DrawOp
   ctx.globalAlpha = 1
 }
 
+/** 舞台槽位索引 → 演员；没有可画的演员时返回 null（走无场景的快路径）。 */
+function actorSlotMap(doc: any, o: DrawOpts): Map<number, any> | null {
+  if (!o.actors?.size || !doc.scene?.actors?.length) return null
+  const out = new Map<number, any>()
+  for (const a of doc.scene.actors) {
+    const i = doc.slots.findIndex((s: any) => s.name === a.slot)
+    if (i >= 0 && o.actors!.has(a.id)) out.set(i, a)
+  }
+  return out.size ? out : null
+}
+
 export function drawScene(ctx: CanvasRenderingContext2D, doc: any, pose: any,
   images: any, o: DrawOpts, ghosts: { pose: any; alpha: number }[] = []) {
   ctx.clearRect(0, 0, o.width, o.height)
@@ -170,7 +187,36 @@ export function drawScene(ctx: CanvasRenderingContext2D, doc: any, pose: any,
   // Images.tinted 处理 RGB 染色（白色时直接返回原图），与上游 drawQuad 一致。
   const getImage = (n: string, c: number[]) =>
     images?.tinted?.(n, c) || images?.get?.(n) || null
-  for (const q of pose.quads(doc)) drawQuad(ctx, q, getImage, o)
+  const actorBySlot = actorSlotMap(doc, o)
+  if (!actorBySlot) {
+    for (const q of pose.quads(doc)) drawQuad(ctx, q, getImage, o)
+  } else {
+    // 场景：按舞台绘制顺序插画，演员画在自己的槽位处（前后关系由 drawOrder 决定）。
+    const bySlot = new Map<number, any[]>()
+    for (const q of pose.quads(doc)) {
+      const list = bySlot.get(q.slot)
+      if (list) list.push(q)
+      else bySlot.set(q.slot, [q])
+    }
+    for (const i of pose.drawOrder) {
+      const actor = actorBySlot.get(i)
+      if (actor) {
+        const rt = o.actors!.get(actor.id)
+        const tint = pose.color[i] || [1, 1, 1, 1]
+        if (rt && tint[3] > 0) {
+          const actorImage = (n: string, c: number[]) => {
+            const key = `@${actor.id}/${n}`
+            return images?.tinted?.(key, c) || images?.get?.(key) || null
+          }
+          ctx.save()
+          ctx.globalAlpha = Math.min(1, Math.max(0, tint[3]))
+          for (const q of rt.pose.quads(rt.doc)) drawQuad(ctx, q, actorImage, o)
+          ctx.restore()
+        }
+      }
+      for (const q of bySlot.get(i) ?? []) drawQuad(ctx, q, getImage, o)
+    }
+  }
 
   if (o.onion) {
     for (const g of ghosts) {
