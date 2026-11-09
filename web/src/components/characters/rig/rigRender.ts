@@ -18,6 +18,18 @@ export type DrawOpts = {
   grid: boolean
 }
 
+/**
+ * region 的「图片像素 → 世界坐标」仿射，与 rigby2d `editor/viewport.js` 的
+ * `toLocal = Affine(att.width/img.width, 0, 0, -att.height/img.height, -att.width/2, att.height/2)`
+ * 等价：图片 (0,0) 在左上，对应 Pose.quads() 的 positions[0]；(w,0) → positions[1]，
+ * (0,h) → positions[3]。外层画布已有 scale(zoom,-zoom)（Y 向上），这里不能再翻一次，
+ * 否则整张图上下颠倒。单独导出给 tools/verify_rig_alignment.mjs 做逐角核对。
+ */
+export function regionTransform(pos: number[][], w: number, h: number): number[] | null {
+  if (!w || !h || pos.length !== 4) return null
+  return affine3([[0, 0], [w, 0], [0, h]], [pos[0], pos[1], pos[3]])
+}
+
 /** 三个源点 → 三个目标点的仿射变换（canvas transform 的 a,b,c,d,e,f）。 */
 function affine3(s: number[][], d: number[][]): number[] | null {
   const [s0, s1, s2] = s, [d0, d1, d2] = d
@@ -46,15 +58,23 @@ function texturedTriangle(ctx: CanvasRenderingContext2D, img: CanvasImageSource,
   ctx.restore()
 }
 
-function drawQuad(ctx: CanvasRenderingContext2D, q: any, getImage: (n: string) => any, o: DrawOpts) {
-  const img = q.image ? getImage(q.image) : null
+/** 与上游 editor/viewport.js 的 BLEND_OPS 一致。 */
+const BLEND_OPS: Record<string, GlobalCompositeOperation> = {
+  normal: 'source-over', additive: 'lighter', multiply: 'multiply', screen: 'screen',
+}
+
+function drawQuad(ctx: CanvasRenderingContext2D, q: any, getImage: (n: string, c: number[]) => any, o: DrawOpts) {
+  const tint = q.color || [1, 1, 1, 1]
+  const img = q.image ? getImage(q.image, tint) : null
   const pos: number[][] = q.positions
   if (o.showImages && img) {
-    ctx.globalAlpha = q.color ? q.color[3] : 1
+    // save/restore 包住 alpha 与混合模式，避免污染后续的骨骼线 / 网格线。
+    ctx.save()
+    ctx.globalAlpha = Math.min(1, Math.max(0, tint[3]))
+    ctx.globalCompositeOperation = BLEND_OPS[q.blend] ?? 'source-over'
     if (q.kind === 'region' && pos.length === 4) {
-      // positions: 左下 / 右下 / 右上 / 左上；图片 (0,0) 在左上
-      const p0 = pos[3], p1 = pos[2], p2 = pos[0]
-      const m = affine3([[0, 0], [img.width, 0], [0, img.height]], [p0, p1, p2])
+      // positions 是 Pose.quads() 的 左上/右上/右下/左下（Y 向上）。
+      const m = regionTransform(pos, img.width, img.height)
       if (m) {
         ctx.save()
         ctx.transform(m[0], m[1], m[2], m[3], m[4], m[5])
@@ -73,7 +93,7 @@ function drawQuad(ctx: CanvasRenderingContext2D, q: any, getImage: (n: string) =
         texturedTriangle(ctx, img, src, ids.map((k) => pos[k]))
       }
     }
-    ctx.globalAlpha = 1
+    ctx.restore()
   }
   if (q.kind === 'mesh' && o.showMesh) {
     ctx.strokeStyle = 'rgba(90, 209, 196, .55)'
@@ -137,6 +157,8 @@ export function drawScene(ctx: CanvasRenderingContext2D, doc: any, pose: any,
     }
   }
   ctx.save()
+  // 上游 viewport.js：nearest 时关掉平滑，避免像素风素材被插值糊掉。
+  ctx.imageSmoothingEnabled = doc.textureFilter !== 'nearest'
   ctx.translate(o.width / 2 + o.view.x, o.height / 2 + o.view.y)
   ctx.scale(o.view.zoom, -o.view.zoom)
 
@@ -145,7 +167,9 @@ export function drawScene(ctx: CanvasRenderingContext2D, doc: any, pose: any,
   ctx.lineWidth = 1 / o.view.zoom
   ctx.beginPath(); ctx.moveTo(-20, 0); ctx.lineTo(20, 0); ctx.moveTo(0, -20); ctx.lineTo(0, 20); ctx.stroke()
 
-  const getImage = (n: string) => images?.get?.(n) || null
+  // Images.tinted 处理 RGB 染色（白色时直接返回原图），与上游 drawQuad 一致。
+  const getImage = (n: string, c: number[]) =>
+    images?.tinted?.(n, c) || images?.get?.(n) || null
   for (const q of pose.quads(doc)) drawQuad(ctx, q, getImage, o)
 
   if (o.onion) {
