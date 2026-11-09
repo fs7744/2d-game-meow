@@ -22,6 +22,52 @@
 
 ---
 
+## 2026-11-09 · 立绘工具箱：真换装 / 真换表情
+
+用户要求把「换装 / 换表情」也做成立绘悬浮工具箱里的动作，形态跟扣背景 /
+像素化一致，但选的是**真换图**：跑 Qwen 生成新的一份立绘，原图不变。
+
+### 后端
+
+新增 `POST /characters/{name}/portraits/variant`（`kind=outfit|emotion`）：
+
+- **复用已有 `w2`（Qwen 指令改图）链路**，不新增模型工作流 —— `woutfit` 要第二张
+  服装参考图、`wemo` 只在动作帧上批量改脸，两者都不适合「单张立绘 → 单张立绘」。
+- 换装提示词：`Change ONLY the character's outfit to: <描述>` + 保持脸 / 发型 /
+  姿势 / 背景 / 画风的约束。
+- 换表情：官方 `EMOTION_PROMPT_TEMPLATE` 原文 + 「只改脸」区域约束，负向词用
+  官方 `EMOTION_NEGATIVE_EXTRA`（哭类表情不顺手画眼泪）。
+- **画风中立**：强制 `preset="none"`、`matte=False`，不挂 sprite 公共契约。
+- 走同一个单卡队列（返回 `job_id`），出图后由 `_run` 的 `publish` 收编成
+  `kind=portrait` 并带上当前 `stage`，所以新立绘落在同一生命阶段、
+  自动继承服装 / 表情目录。
+- 参数白名单夹取（steps 8~60、cfg 0.5~8、seed、描述截断），路径仍受
+  `_checked_portrait` 限制在角色 `Portraits/` 下。
+
+### 前端
+
+- 工具箱从三个动作扩到五个：扣背景 / 像素化 / **换装** / **换表情** / 删除；
+  按钮改按内容宽 + 自动换行，窄卡片里不会把「换表情」挤到溢出。
+- 新组件 `PortraitVariantDialog`：服装描述 / 归入服装 / 表情名（带常用
+  safe_name 建议，也可自由输入）/ 步数 / 种子 → 生成 → **滑动比对**；
+  「放弃这份」会删掉刚收编进 `Portraits/` 的那一份。
+- 轮询**复用角色中心统一的 `runTask`**，不另起时钟；弹窗内自己显示进度
+  （弹窗会盖住右栏任务条，所以加了一条 `.cc-tool-progress`）。
+- `JobState` 增加可选 `published`，`fetchJob` 透传 `result.published`，
+  「放弃这份」才能拿到要删的绝对路径。
+
+### 验证
+
+`tsc -b` / `vite build` ✓、`check-hints` 34/34、**`node smoke.mjs` 839/839**
+（用例 65 改为五个动作；新增用例 66：换装参数 / stage / 统一轮询 / 比对 /
+放弃删除；换表情 kind 与表情名 / 标签；后端静态契约 `w2` + `preset=none` +
+官方模板 + `publish.kind=portrait`）、`tests/test_portrait_variant.py` **4 例**
+（换装入队参数、换表情官方模板与负向词、缺参/坏 kind/越界路径 400、
+参数夹取）、后端回归 **40 passed / 5 skipped**（含 test_api）。
+
+> 取舍：换表情是「整图指令改图」，衣服靠提示词约束保持一致；官方 `wemo` 是
+> 脸部 mask 局部重绘、逐像素锁定衣服，要那种效果得再接脸部检测与 mask 流程。
+
 ## 2026-11-09 · 阶段编辑页：导航项改为「角色设定」，删掉重复大标题
 
 用户对照截图指出：进入某个生命阶段后，导航第一项仍写「生命阶段」不对，

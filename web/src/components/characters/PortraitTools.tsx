@@ -14,9 +14,11 @@
 import { useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import {
-  deletePortrait, processPortrait,
+  deletePortrait, processPortrait, submitPortraitVariant,
   type PortraitItem, type PortraitOp, type PortraitProcessResult,
+  type PortraitVariantKind,
 } from '../../api'
+import type { TaskState } from './model'
 
 type CommonProps = {
   character: string
@@ -261,6 +263,158 @@ export function PortraitProcessDialog({ character, item, op, onClose, onChanged 
               </button>
               <span className="spacer" />
               <button type="button" className="cc-btn primary" onClick={finish}>完成</button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>, document.body)
+}
+
+/** 常用表情快捷项：官方表情库的 safe_name，也可以直接输入任意表情名
+ *  （后端 `emotiongen.resolve_emotions` 认不出的会当自定义表情处理）。 */
+const QUICK_EMOTIONS = ['smile', 'angry', 'sad', 'surprised', 'wink',
+  'laugh', 'cry', 'neutral']
+
+type VariantProps = CommonProps & {
+  kind: PortraitVariantKind
+  stage: string
+  task: TaskState | null
+  /** 复用角色中心统一的 runTask 轮询，不另起一套时钟 */
+  runTask: (label: string, submit: () => Promise<unknown>,
+    onDone?: (job: unknown, result: unknown) => void) => Promise<void>
+}
+
+type VariantResult = {
+  before: string
+  after: string
+  path?: string
+  name?: string
+}
+
+/** 换装 / 换表情：跑 Qwen 真出图，产物收编成同阶段的新一份立绘。
+ *  跟扣背景 / 像素化一样是「弹窗挑参数 → 生成 → 滑动比对 → 放弃 / 完成」。 */
+export function PortraitVariantDialog({ character, item, kind, stage, task,
+  runTask, onClose, onChanged }: VariantProps) {
+  const [desc, setDesc] = useState('')
+  const [costume, setCostume] = useState(item.costume || 'Naked')
+  const [emotion, setEmotion] = useState('smile')
+  const [steps, setSteps] = useState(24)
+  const [seed, setSeed] = useState(-1)
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState<VariantResult | null>(null)
+  const [pos, setPos] = useState(50)
+  const [err, setErr] = useState('')
+
+  const label = kind === 'outfit' ? '换装' : '换表情'
+  const ready = kind === 'outfit' ? !!desc.trim() : !!emotion.trim()
+
+  const run = () => {
+    if (!ready || busy) return
+    setBusy(true); setErr('')
+    const params = kind === 'outfit'
+      ? { description: desc.trim(), costume: costume.trim() || item.costume,
+        emotion_tag: item.emotion || 'neutral', steps, seed }
+      : { emotion_name: emotion.trim(), costume: item.costume,
+        emotion_tag: emotion.trim(), steps, seed }
+    void runTask(label,
+      () => submitPortraitVariant(character,
+        { path: item.path, kind, params, stage }),
+      (job) => {
+        // runTask 的 onDone 收到的是 fetchJob 结果：url 是生成图，
+        // published.path 是收编进 Portraits/ 的那一份（放弃时要删它）。
+        const j = job as { url?: string; published?: { path?: string; file?: string } }
+        setResult({ before: item.url, after: j.url || item.url,
+          path: j.published?.path, name: j.published?.file })
+        onChanged()
+      }).catch((e) => {
+        setErr(e instanceof Error ? e.message : String(e))
+      }).finally(() => setBusy(false))
+  }
+
+  const discard = async () => {
+    if (result?.path) {
+      try { await deletePortrait(character, result.path) } catch { /* 忽略 */ }
+    }
+    onChanged(); onClose()
+  }
+
+  return createPortal(
+    <div className="cc-tool-mask" onClick={onClose}>
+      <div className="cc-tool-dialog" onClick={(e) => e.stopPropagation()}>
+        <div className="cc-tool-head">
+          <b>{label}</b>
+          <span className="cc-tool-file" title={item.name}>{item.name}</span>
+          <span className="spacer" />
+          <button type="button" className="cc-tool-x" onClick={onClose}>✕</button>
+        </div>
+        {err && <p className="cc-tool-err">⚠ {err}</p>}
+
+        {!result ? (
+          <>
+            <div className="cc-tool-body">
+              <div className="cc-tool-form">
+                {kind === 'outfit' ? (
+                  <>
+                    <Field label="服装描述" hint="只改衣服，脸 / 姿势 / 画风保持不变">
+                      <textarea rows={3} value={desc}
+                        placeholder="例：赛博朋克护士服，白大褂 + 护目镜"
+                        onChange={(e) => setDesc(e.target.value)} />
+                    </Field>
+                    <Field label="归入服装" hint="留空 = 沿用当前服装">
+                      <input value={costume}
+                        onChange={(e) => setCostume(e.target.value)} />
+                    </Field>
+                  </>
+                ) : (
+                  <Field label="表情" hint="官方表情库 safe_name，也可直接输入">
+                    <input list="cc-emo-list" value={emotion}
+                      onChange={(e) => setEmotion(e.target.value)} />
+                    <datalist id="cc-emo-list">
+                      {QUICK_EMOTIONS.map((e) => <option key={e} value={e} />)}
+                    </datalist>
+                  </Field>
+                )}
+                <Field label="步数" hint="Qwen 768² 建议 24，低于 16 步会糊块">
+                  <input type="number" min={8} max={60} value={steps}
+                    onChange={(e) => setSteps(Number(e.target.value) || 24)} />
+                </Field>
+                <Field label="随机种子" hint="-1 = 每次随机">
+                  <input type="number" value={seed}
+                    onChange={(e) => setSeed(Number(e.target.value) || -1)} />
+                </Field>
+              </div>
+            </div>
+            {busy && (
+              <p className="cc-tool-progress">
+                生成中… {task?.message || '单卡队列排队中，约 20~30 秒'}
+              </p>
+            )}
+            {!busy && task?.status === 'failed' && (
+              <p className="cc-tool-err">⚠ {task.message}</p>
+            )}
+            <p className="cc-tool-hint">
+              会跑 Qwen 生成<strong>一张新立绘</strong>（原图保持不变），
+              自动收进当前生命阶段，出完可以拖动分割线比对。
+            </p>
+            <div className="cc-tool-actions">
+              <button type="button" className="cc-btn ghost" onClick={onClose}>取消</button>
+              <span className="spacer" />
+              <button type="button" className="cc-btn primary" disabled={busy || !ready}
+                onClick={run}>{busy ? '生成中…' : '生成并比对'}</button>
+            </div>
+          </>
+        ) : (
+          <>
+            <CompareSlider before={result.before} after={result.after}
+              pos={pos} onPos={setPos} />
+            <p className="cc-tool-hint">
+              左：原图 · 右：新生成的立绘 <b>{result.name || '（已收进角色库）'}</b>
+            </p>
+            <div className="cc-tool-actions">
+              <button type="button" className="cc-btn ghost"
+                onClick={() => void discard()}>放弃这份</button>
+              <span className="spacer" />
+              <button type="button" className="cc-btn primary" onClick={onClose}>完成</button>
             </div>
           </>
         )}

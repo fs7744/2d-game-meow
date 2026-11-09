@@ -1362,7 +1362,8 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
             <PortraitPane
               character={detail.name} portraits={portraits}
               task={task} doneFlash={doneFlash} onDismissFlash={() => setDoneFlash(null)}
-              onChanged={() => void refreshPortraits()} />
+              onChanged={() => void refreshPortraits()}
+              stageId={stageId} runTask={runTask} />
           ) : (
             <aside className="cc-preview cc-preview-idle">
               <div className="cc-preview-head"><b>立绘</b></div>

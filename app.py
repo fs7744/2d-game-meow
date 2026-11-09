@@ -2133,6 +2133,120 @@ def delete_portrait_api(name: str, req: PortraitDeleteReq) -> Dict[str, Any]:
     return {"ok": ok, "deleted": os.path.basename(target)}
 
 
+class PortraitVariantReq(BaseModel):
+    path: str
+    #: outfit = 换装，emotion = 换表情
+    kind: str = "outfit"
+    params: Dict[str, Any] = Field(default_factory=dict)
+    #: 当前生命阶段：新立绘要落回同一个阶段
+    stage: str = ""
+
+
+#: 换装指令：只改衣服，其余全部保持（跟官方 swap 的「谁是身份」约束同思路）。
+_PORTRAIT_OUTFIT_INSTR = (
+    "Change ONLY the character's outfit to: {desc}. "
+    "Keep the same face, hairstyle, hair colour, body proportions, pose, "
+    "background, lighting and art style. Do not change anything except the clothing."
+)
+#: 表情指令在官方模板之外补的约束：整图指令改图不像官方脸部 crop 那样
+#: 天然锁定区域，得明说「只改脸」。
+_PORTRAIT_EMOTION_EXTRA = (
+    " Change ONLY the facial expression. Keep the same pose, clothes, hair, "
+    "background and art style."
+)
+
+
+@app.post("/characters/{name}/portraits/variant")
+def portrait_variant_api(name: str, req: PortraitVariantReq) -> Dict[str, Any]:
+    """对一张立绘**真换装 / 真换表情**，产出同一个阶段下的新一份立绘。
+
+    复用已有的 `w2`（Qwen 指令改图）链路和 `_run` 的 `publish` 收编机制：
+    源图当参考、提示词当指令，出图后由 worker 直接收进 `Portraits/<服装>/<表情>/`，
+    原图一个字节不改。走同一个单卡队列，所以立刻返回 `job_id`，前端轮询 `/jobs/<id>`。
+
+    **不新增模型工作流**：`woutfit` 要第二张服装参考图、`wemo` 只在动作帧上
+    批量改脸，两者都不适合「单张立绘 → 单张立绘」。表情提示词用官方
+    `EMOTION_PROMPT_TEMPLATE` 原文 + 额外区域约束，负向词用官方
+    `EMOTION_NEGATIVE_EXTRA`。
+    """
+    try:
+        safe = characters.ensure_safe_name(name, "角色名")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not characters.character_exists(safe):
+        raise HTTPException(404, f"没有这个角色：{safe}")
+    src_path = _checked_portrait(safe, req.path)
+    kind = str(req.kind or "").strip().lower()
+    if kind not in ("outfit", "emotion"):
+        raise HTTPException(400, f"不支持的变体：{kind}")
+    p = req.params or {}
+    emo = ""
+
+    if kind == "outfit":
+        desc = str(p.get("description") or "").strip()[:400]
+        if not desc:
+            raise HTTPException(400, "换装要填一句服装描述")
+        prompt = _PORTRAIT_OUTFIT_INSTR.format(desc=desc)
+        negative = ""
+    else:
+        emo = str(p.get("emotion_name") or "").strip()[:80]
+        if not emo:
+            raise HTTPException(400, "换表情要选一个表情")
+        # 官方模板原文（emotiongen.py:50），只追加区域约束
+        prompt = (emotiongen.EMOTION_PROMPT_TEMPLATE.format(emotion=emo)
+                  + _PORTRAIT_EMOTION_EXTRA)
+        negative = emotiongen.EMOTION_NEGATIVE_EXTRA.strip().lstrip(",").strip()
+
+    try:
+        costume = characters.ensure_safe_name(
+            str(p.get("costume") or "Naked"), "服装名")
+        emotion_tag = characters.ensure_safe_name(
+            str(p.get("emotion_tag") or (emo if kind == "emotion" else "neutral")),
+            "表情名")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    def _clamp_int(key: str, default: int, lo: int, hi: int) -> int:
+        try:
+            return max(lo, min(hi, int(p.get(key, default))))
+        except (TypeError, ValueError):
+            return default
+
+    try:
+        cfg = max(0.5, min(8.0, float(p.get("cfg", 1.0) or 1.0)))
+    except (TypeError, ValueError):
+        cfg = 1.0
+
+    params: Dict[str, Any] = {
+        "init_image": src_path,
+        "prompt": prompt,
+        "negative": negative,
+        "steps": _clamp_int("steps", 24, 8, 60),
+        "cfg": cfg,
+        "seed": _clamp_int("seed", -1, -1, 2**31 - 1),
+        # **画风中立**：立绘绝不能挂 presets 的公共契约（sprite 的
+        # photo/3d render 负向词会压掉写实/3D 画风，跟角色中心立绘一致）。
+        "preset": "none",
+        "matte": False,                       # 默认不偷偷抠图
+        "publish": {
+            "character": safe,
+            "costume": costume,
+            "emotion": emotion_tag,
+            "kind": "portrait",
+            "stage": str(req.stage or ""),
+            "matte": False,
+        },
+    }
+    job_id = uuid.uuid4().hex[:12]
+    _jobs[job_id] = {"job_id": job_id, "workflow": "w2", "params": params,
+                     "status": "queued", "created": time.time(),
+                     "progress": {"done": 0, "total": 1, "current": ""}}
+    _q.put((job_id, "w2", params))
+    _prune(_jobs, JOB_KEEP)
+    return {"job_id": job_id, "status": "queued", "position": _q.qsize(),
+            "before": _asset_url(src_path), "kind": kind, "prompt": prompt}
+
+
 @app.post("/characters/{name}/prompt")
 def character_prompt_api(name: str, req: CharacterPromptReq) -> Dict[str, Any]:
     """把 character_info + 风格拼成官方结构的 prompt。

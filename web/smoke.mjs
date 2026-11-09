@@ -409,6 +409,17 @@ function makeFetch() {
       }) }
     }
     // 立绘列表（Portraits/，跟动作帧分开）。带 ?stage= 也要命中
+    // 立绘工具箱「换装 / 换表情」：真出图，走单卡队列返回 job_id
+    if (String(url).includes('/portraits/variant')) {
+      let b = {}
+      try { b = JSON.parse(init.body || '{}') } catch { /* 忽略坏 body */ }
+      const kind = String(b.kind || 'outfit')
+      return { ok: true, json: async () => ({
+        job_id: 'job-variant', status: 'queued', position: 1,
+        before: '/files/p3.png', kind,
+        prompt: kind === 'emotion' ? "Make character's face emotion smile" : 'Change ONLY the character\'s outfit',
+      }) }
+    }
     // 立绘悬浮工具箱：处理（生成新的一份）/ 删除。
     // **必须排在 /portraits 之前**，否则会被 includes('/portraits') 抢走当列表请求
     if (String(url).includes('/portraits/process')) {
@@ -840,6 +851,9 @@ function makeFetch() {
           status: 'done',
           result: {
             file: 'D:\\x\\out.png',
+            // 立绘工具箱「放弃这份」要删的是收编进 Portraits/ 的那一份，
+            // 不是这张生成中间图。其它用例不读这个字段。
+            published: { path: '/p/portrait_variant.png', file: 'portrait_variant.png' },
             // extraMeta 由用例临时注入，模拟序列帧结果里的候选/闸门统计
             meta: { seed: 42, seconds: 1.5, peak_vram_gb: 2.6, ...(extraMeta || {}) },
           },
@@ -5478,11 +5492,15 @@ async function ccCreate(doc, win) {
   const dlgText = () => doc.querySelector('.cc-tool-dialog')?.textContent || ''
 
   check('每张立绘都有悬浮工具箱', !!card()?.querySelector('.cc-portrait-tools'))
-  check('工具箱是 扣背景 / 像素化 / 删除',
-    tools().length === 3
+  const delBtn = () => tools().find((b) => (b.textContent || '').includes('删除'))
+  const toolBtn = (t) => tools().find((b) => (b.textContent || '').includes(t))
+  check('工具箱是 扣背景 / 像素化 / 换装 / 换表情 / 删除',
+    tools().length === 5
     && tools()[0].textContent.includes('扣背景')
     && tools()[1].textContent.includes('像素化')
-    && tools()[2].textContent.includes('删除'),
+    && tools()[2].textContent.includes('换装')
+    && tools()[3].textContent.includes('换表情')
+    && tools()[4].textContent.includes('删除'),
     tools().map((b) => b.textContent).join('/'))
   check('点图仍然是看大图（工具箱不抢点击）',
     !!card()?.querySelector('.cc-portrait-view'))
@@ -5565,7 +5583,7 @@ async function ccCreate(doc, win) {
 
   // ---- 删除：必须确认 ----
   const before = calls.slice(c0).filter((c) => c.url.includes('/portraits/delete')).length
-  clickEl(tools()[2])
+  clickEl(delBtn())
   await ccWait(200)
   check('删除先弹确认框', !!doc.querySelector('.cc-tool-dialog.is-small')
     && !!dlgBtn('确认删除'))
@@ -5574,7 +5592,7 @@ async function ccCreate(doc, win) {
   await ccWait(150)
   check('点取消不会发删除请求',
     calls.slice(c0).filter((c) => c.url.includes('/portraits/delete')).length === before)
-  clickEl(tools()[2])
+  clickEl(delBtn())
   await ccWait(200)
   clickEl(dlgBtn('确认删除'))
   await ccWait(250)
@@ -5583,6 +5601,91 @@ async function ccCreate(doc, win) {
   check('删除请求带 confirm=true',
     String(dels[dels.length - 1]?.body || '').includes('"confirm":true'))
   check('工具箱场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 66) 立绘工具箱：真换装 / 真换表情（Qwen 出图 → 统一轮询 → 滑动比对）
+{
+  const { dom, doc, win, errors, c0 } = await ccBoot()
+  await ccCreate(doc, win)
+  ccStep(doc, win, 2)
+  await ccWait(400)
+  const clickEl = (el) => el?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  const tools = () => [...(doc.querySelector('.cc-portrait')
+    ?.querySelectorAll('.cc-portrait-tools button') || [])]
+  const toolBtn = (t) => tools().find((b) => (b.textContent || '').includes(t))
+  const dlgBtn = (t) => [...doc.querySelectorAll('.cc-tool-dialog button')]
+    .find((b) => (b.textContent || '').includes(t))
+  const dlgText = () => doc.querySelector('.cc-tool-dialog')?.textContent || ''
+  const reqs = () => calls.slice(c0).filter((c) => c.url.includes('/portraits/variant'))
+  const bodyOf = (c) => { try { return JSON.parse(c.body || '{}') } catch { return {} } }
+
+  // ---- 换装 ----
+  clickEl(toolBtn('换装'))
+  await ccWait(200)
+  check('换装弹窗给服装描述 / 归入服装 / 步数 / 种子',
+    dlgText().includes('服装描述') && dlgText().includes('归入服装')
+    && dlgText().includes('步数') && dlgText().includes('随机种子'))
+  check('没填描述时不能生成', !!dlgBtn('生成并比对')?.disabled)
+  const descEl = doc.querySelector('.cc-tool-form textarea')
+  Object.getOwnPropertyDescriptor(win.HTMLTextAreaElement.prototype, 'value')
+    .set.call(descEl, '赛博朋克护士服，白大褂 + 护目镜')
+  descEl?.dispatchEvent(new win.Event('input', { bubbles: true }))
+  await ccWait(150)
+  check('填了描述就能生成', !dlgBtn('生成并比对')?.disabled)
+  clickEl(dlgBtn('生成并比对'))
+  await ccWait(700)
+
+  const vb = bodyOf(reqs().pop())
+  check('换装请求带 kind=outfit 与服装描述',
+    vb.kind === 'outfit'
+    && String(vb.params?.description || '').includes('赛博朋克护士服'),
+    JSON.stringify(vb))
+  check('带上当前生命阶段（新立绘落回同一阶段）',
+    typeof vb.stage === 'string' && vb.stage.length > 0, JSON.stringify(vb.stage))
+  check('走 runTask 统一任务轮询',
+    calls.slice(c0).some((c) => c.url.includes('/jobs/')))
+  check('出图后弹窗切成滑动比对', !!doc.querySelector('.cc-compare'))
+  check('比对左右是处理前 / 处理后',
+    !!doc.querySelector('.cc-compare-tag.is-before')
+    && !!doc.querySelector('.cc-compare-tag.is-after'))
+  clickEl(dlgBtn('放弃这份'))
+  await ccWait(300)
+  check('放弃这份会删掉刚收编进 Portraits/ 的那一份',
+    calls.slice(c0).some((c) => c.url.includes('/portraits/delete')
+      && String(c.body || '').includes('/p/portrait_variant.png')))
+
+  // ---- 换表情 ----
+  clickEl(toolBtn('换表情'))
+  await ccWait(200)
+  check('换表情弹窗有表情输入（可自由填官方 safe_name）',
+    dlgText().includes('表情') && !!doc.querySelector('.cc-tool-form input[list]'))
+  clickEl(dlgBtn('生成并比对'))
+  await ccWait(700)
+  const eb = bodyOf(reqs().pop())
+  check('换表情请求带 kind=emotion 与表情名 / 标签',
+    eb.kind === 'emotion' && eb.params?.emotion_name === 'smile'
+    && eb.params?.emotion_tag === 'smile', JSON.stringify(eb))
+  check('换表情沿用原服装', typeof eb.params?.costume === 'string'
+    && eb.params.costume.length > 0)
+  check('换表情也出滑动比对', !!doc.querySelector('.cc-compare'))
+  clickEl(dlgBtn('完成'))
+  await ccWait(150)
+  check('完成后弹窗关闭', !doc.querySelector('.cc-tool-dialog'))
+
+  // ---- 静态契约：后端复用 w2、画风中立、官方模板、publish 收编 ----
+  const apppy = readFileSync(resolve('..', 'app.py'), 'utf8')
+  check('后端复用已有 w2 指令改图（不新增模型工作流）',
+    apppy.includes('"workflow": "w2", "params": params'))
+  check('画风中立：强制 preset=none，默认不抠图',
+    apppy.includes('"preset": "none"') && apppy.includes('"matte": False'))
+  check('换表情用官方 EMOTION_PROMPT_TEMPLATE / 负向词',
+    apppy.includes('emotiongen.EMOTION_PROMPT_TEMPLATE')
+    && apppy.includes('emotiongen.EMOTION_NEGATIVE_EXTRA'))
+  check('产物收编成同阶段的 portrait',
+    apppy.includes('"kind": "portrait"') && apppy.includes('"stage": str(req.stage'))
+
+  check('换装换表情场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 

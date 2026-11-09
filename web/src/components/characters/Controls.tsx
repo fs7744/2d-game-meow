@@ -8,8 +8,9 @@ import { useEffect, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import Lightbox from '../Lightbox'
 import { stylePreviewUrl, emotionIconUrl, type PortraitItem,
-  type PortraitOp } from '../../api'
-import { PortraitProcessDialog, PortraitDeleteDialog } from './PortraitTools'
+  type PortraitOp, type PortraitVariantKind } from '../../api'
+import { PortraitProcessDialog, PortraitDeleteDialog,
+  PortraitVariantDialog } from './PortraitTools'
 import {
   BG_COLOR_LABEL, COSTUME_LABEL, STYLE_GROUP_LABEL, tagLabel, zh,
 } from '../../labels'
@@ -349,6 +350,7 @@ const PORTRAIT_PAGE_SIZE = 8
  *  不让用户在一堆表单里猜"我刚才到底生成出来没有"。 */
 export function PortraitPane({
   character, portraits, task, doneFlash, onDismissFlash, onChanged,
+  stageId, runTask,
 }: {
   character: string
   portraits: PortraitItem[]
@@ -357,10 +359,17 @@ export function PortraitPane({
   onDismissFlash: () => void
   /** 立绘新增 / 删除后让父组件重新拉列表 */
   onChanged?: () => void
+  /** 当前生命阶段：换装/换表情生成的新立绘要落回同一个阶段 */
+  stageId?: string
+  /** 复用角色中心统一的 runTask 轮询（换装/换表情要跑模型） */
+  runTask?: (label: string, submit: () => Promise<unknown>,
+    onDone?: (job: unknown, result: unknown) => void) => Promise<void>
 }) {
   const [zoom, setZoom] = useState<string | null>(null)
   const [page, setPage] = useState(0)
   const [tool, setTool] = useState<{ op: PortraitOp; item: PortraitItem } | null>(null)
+  const [variant, setVariant] = useState<{ kind: PortraitVariantKind;
+    item: PortraitItem } | null>(null)
   const [deleting, setDeleting] = useState<PortraitItem | null>(null)
   const changed = onChanged ?? (() => {})
   const totalPages = Math.max(1, Math.ceil(portraits.length / PORTRAIT_PAGE_SIZE))
@@ -417,12 +426,19 @@ export function PortraitPane({
                   <img src={p.url} alt={p.name} loading="lazy" />
                   <span>{zh(COSTUME_LABEL, p.costume) || '默认'}</span>
                 </button>
-                {/* 悬浮工具箱：hover / 键盘聚焦才出现，三个动作都不改原图 */}
+                {/* 悬浮工具箱：hover / 键盘聚焦才出现。前四个都不改原图，
+                    生成新的一份；删除要二次确认。 */}
                 <div className="cc-portrait-tools">
                   <button type="button" title="扣背景（弹窗里挑参数）"
                     onClick={() => setTool({ op: 'matte', item: p })}>扣背景</button>
                   <button type="button" title="完美像素化（弹窗里挑参数）"
                     onClick={() => setTool({ op: 'pixel', item: p })}>像素化</button>
+                  <button type="button" title="真换装：Qwen 出一张新立绘"
+                    disabled={!runTask}
+                    onClick={() => setVariant({ kind: 'outfit', item: p })}>换装</button>
+                  <button type="button" title="真换表情：Qwen 出一张新立绘"
+                    disabled={!runTask}
+                    onClick={() => setVariant({ kind: 'emotion', item: p })}>换表情</button>
                   <button type="button" title="删除这张立绘" className="is-danger"
                     onClick={() => setDeleting(p)}>删除</button>
                 </div>
@@ -454,6 +470,11 @@ export function PortraitPane({
       {tool && (
         <PortraitProcessDialog character={character} item={tool.item} op={tool.op}
           onClose={() => setTool(null)} onChanged={changed} />
+      )}
+      {variant && runTask && (
+        <PortraitVariantDialog character={character} item={variant.item}
+          kind={variant.kind} stage={stageId || ''} task={task} runTask={runTask}
+          onClose={() => setVariant(null)} onChanged={changed} />
       )}
       {deleting && (
         <PortraitDeleteDialog character={character} item={deleting}

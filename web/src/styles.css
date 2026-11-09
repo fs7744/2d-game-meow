@@ -4614,3 +4614,17 @@ body.is-resizing, body.is-resizing * { cursor: col-resize !important; user-selec
   .cc-tool-body { grid-template-columns: minmax(0, 1fr); }
   .cc-compare { height: 260px; }
 }
+
+/* ---------- 立绘工具箱：换装 / 换表情（统一层内） ---------- */
+/* 原来三个按钮是 flex:1 平分一行；加到五个后「换表情」会被挤到溢出，
+   改成按内容宽 + 自动换行，两行也不挡住卡片主体。 */
+.chars.cc .cc-portrait-tools button {
+  flex: 0 0 auto; padding: 3px 5px; font-size: 10px;
+}
+.chars.cc .cc-portrait-tools button:disabled { opacity: 0.45; cursor: not-allowed; }
+/* 生成中：弹窗会盖住右栏统一任务条，得在弹窗里也看得见进度 */
+.cc-tool-progress {
+  margin: 0; padding: 8px 10px; border: 1px solid var(--cyan);
+  border-radius: var(--r-sm); background: rgba(108, 196, 239, 0.08);
+  font-size: 11px; line-height: 1.6; color: var(--cyan);
+}

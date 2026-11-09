@@ -298,6 +298,8 @@ export type JobState = {
   peakVram?: number
   path?: string          // 产物绝对路径（图生图要拿它当 init_image）
   raw?: string           // 后处理之前的原图路径（优先用它当源图）
+  /** worker 把产物收编进角色库的结果（立绘工具箱拿它做「放弃这份」） */
+  published?: { path?: string; file?: string; costume?: string; emotion?: string }
   subjects?: number      // 抠图后的前景块数；>1 说明画了多个主体
   /** 序列帧/姿态序列：每帧**实际**生成了几个候选（显存不足时会被后端降下来） */
   candidates?: number

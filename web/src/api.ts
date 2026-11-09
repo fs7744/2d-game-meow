@@ -928,6 +928,31 @@ export function deletePortrait(name: string, path: string,
     { method: 'POST', body: JSON.stringify({ path, confirm }) })
 }
 
+/* ---------------- 立绘工具箱：真换装 / 真换表情 ---------------- */
+
+export type PortraitVariantKind = 'outfit' | 'emotion'
+export type PortraitVariantResult = {
+  job_id: string
+  status: string
+  position: number
+  /** 原立绘 url，供弹窗滑动比对 */
+  before: string
+  kind: PortraitVariantKind
+  prompt: string
+}
+
+/** 提交换装 / 换表情：后端复用 w2 指令改图 + publish 收编成同阶段的新立绘。
+ *  走单卡队列，返回 job_id，剩下的交给 runTask 统一轮询。 */
+export function submitPortraitVariant(name: string, body: {
+  path: string
+  kind: PortraitVariantKind
+  params: Record<string, unknown>
+  stage?: string
+}): Promise<PortraitVariantResult> {
+  return req(`/characters/${encodeURIComponent(name)}/portraits/variant`,
+    { method: 'POST', body: JSON.stringify(body) })
+}
+
 /* ---------------- 角色生命阶段 ---------------- */
 
 /** 一个阶段 = 一套独立角色设定 + 自己的立绘。数组顺序即展示顺序。 */
@@ -1984,6 +2009,7 @@ export async function fetchJob(jobId: string): Promise<JobState> {
     subjects:
       typeof meta.subjects === 'number' ? (meta.subjects as number) : undefined,
     path: typeof file === 'string' ? file : undefined,
+    published: j.result?.published as JobState['published'] | undefined,
     raw: typeof meta.raw === 'string' ? (meta.raw as string) : undefined,
     candidates: num(meta.candidates),
     candidatesNote: typeof meta.candidates_note === 'string'
