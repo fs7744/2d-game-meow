@@ -192,6 +192,56 @@ def test_qwen_call_aligns_output_resolution(eng, monkeypatch):
     assert seen["output_resolution"] == 512
 
 
+def test_generator_follows_pipeline_execution_device(eng, monkeypatch):
+    """生成器必须跟管线**实际执行设备**一致，不能硬写 cuda。
+
+    2026-11-08 真机报错：`ValueError: Cannot generate a cpu tensor from a
+    generator of type cuda`。成因是 cpu offload 链掉了 → `_execution_device`
+    变 cpu、latent 在 cpu 上创建，而生成器还是 cuda 的。
+    """
+    seen = {}
+
+    class _Pipe:
+        _execution_device = "cpu"
+
+    class _Out:
+        def __init__(self, kw):
+            self.images = [Image.new("RGBA", (kw["width"], kw["height"]))]
+
+    monkeypatch.setattr(eng, "txt2img_pipe", lambda model=None: _Pipe())
+    monkeypatch.setattr(g, "_infer", lambda e, pipe, kw, **k: (seen.update(kw) or _Out(kw)))
+    g._qwen_call(eng, prompt="x", negative="n", width=256, height=256,
+                 steps=8, seed=7)
+    assert seen["generator"].device.type == "cpu", "管线在 cpu 上跑，生成器也得在 cpu"
+
+
+def test_engine_heals_broken_offload_chain(eng):
+    """offload 钩子被别人拆掉之后，取管线时要能自己重建（不用重启进程）。"""
+    import torch
+
+    class _Pipe:
+        def __init__(self):
+            self.components = {"vae": torch.nn.Linear(2, 2),
+                               "text_encoder": torch.nn.Linear(2, 2)}
+            self._all_hooks = []
+            self._exclude_from_cpu_offload = []
+            self._offload_device = "cuda"
+            self.calls = []
+
+        def enable_model_cpu_offload(self, device=None):
+            self.calls.append(device)
+
+    pipe = _Pipe()
+    eng._heal_offload(pipe)
+    assert pipe.calls, "链缺钩子时必须重建"
+
+    # 链还在 → 不许动它（每轮重建会把 offload 变成 no-op 且白搬权重）
+    pipe._all_hooks = [object()]
+    pipe.calls.clear()
+    eng._heal_offload(pipe)
+    assert not pipe.calls
+
+
 def test_qwen_inpaint_rejects_empty_prompt(eng, sandbox, tmp_path):
     with pytest.raises(ValueError):
         g.inpaint(eng, image=_src(tmp_path), mask=_mask(tmp_path), prompt="  ",

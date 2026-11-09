@@ -195,6 +195,45 @@ def test_engine_restore_drops_missing_files(lora_env):
     assert eng.active_loras() == []
 
 
+def test_set_user_loras_never_loads_pipeline(lora_env, monkeypatch):
+    """勾选 LoRA 只是「改设置」：不许为了挂 adapter 去加载 15GB 管线。
+
+    以前 `/loras/apply` 先 `txt2img_pipe()` 再挂 —— 后端一慢/权重缺失就 400，
+    界面上的表现是「勾了又弹回去」。这里钉住「不加载」。
+    """
+    from workflows.engine import Engine
+
+    _write(lora_env / "lora" / "good.safetensors", DIFF_KEYS)
+    eng = Engine(lora_env)
+
+    def boom(*_a, **_k):
+        raise AssertionError("勾选 LoRA 不该加载管线")
+
+    monkeypatch.setattr(eng, "txt2img_pipe", boom)
+    items = eng.set_user_loras([{"name": "good", "scale": 0.7}])
+    assert items == [{"name": "good", "scale": 0.7}]
+    assert eng._cache == {}, "不该往权重缓存里塞任何管线"
+    assert eng._loaded_sig is None, "还没同步到管线，等下一次生成再挂"
+    # 界面上要立刻能看到勾上（懒挂载期间也得报）
+    assert eng.active_loras() == [{"name": "good", "scale": 0.7}]
+
+
+def test_active_loras_ignores_stale_adapters_after_change(lora_env):
+    """刚取消勾选时不能把管线上残留的 adapter 报成「还挂着」。"""
+    from workflows.engine import Engine
+
+    _write(lora_env / "lora" / "good.safetensors", DIFF_KEYS)
+    eng = Engine(lora_env)
+    eng.set_user_loras([{"name": "good", "scale": 0.8}])
+    # 模拟「管线里还挂着别的/已卸的那条」，签名已失效
+    eng._active_loras = [{"name": "old", "adapter": "old", "scale": 1.0}]
+    eng._loaded_sig = None
+    assert [x["name"] for x in eng.active_loras()] == ["good"]
+
+    eng.set_user_loras([])
+    assert eng.active_loras() == [], "取消勾选后界面必须立刻显示未挂载"
+
+
 # ---------------- 目录扫描 / 就地转换 ----------------
 
 def test_scan_lists_every_file(lora_env):

@@ -3065,7 +3065,10 @@ input:disabled, select:disabled, textarea:disabled { opacity: 0.42; }
 .chars.cc .cc-inline-field select[multiple] option {
   padding: 5px 6px; line-height: 1.8; background: var(--bg-3);
 }
-.cc-inline-field input[type=number] { flex: 0 0 76px; min-width: 76px; }
+/* 数字框要**窄**，但不能用 flex-basis：`.cc-inline-field` 是 column 方向，
+   basis 量的是「高」——以前写 `flex: 0 0 76px`，年龄框被撑成 76px 高的方块，
+   旁边 30px 的性别/底色下拉显得像被挤扁。宽度只能用 width。 */
+.cc-inline-field input[type=number] { flex: none; width: 76px; min-width: 76px; }
 .cc-fields {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 9px;
 }
@@ -3202,6 +3205,47 @@ input:disabled, select:disabled, textarea:disabled { opacity: 0.42; }
   border: 1px solid var(--line-strong); border-radius: var(--r-sm);
   background: var(--bg-3); font-size: 11px;
 }
+
+/* 画风库弹窗：缩略图必须够大才看得出笔触差别（卡片里 88px 那种等于没预览）。
+   走 Portal 挂到 body，不受主区滚动容器裁剪。 */
+.cc-style-mask {
+  position: fixed; inset: 0; z-index: 220;
+  display: grid; place-items: center;
+  background: rgba(5, 7, 11, 0.78);
+}
+.cc-style-dialog {
+  display: flex; flex-direction: column; gap: 10px;
+  width: min(1180px, 94vw); height: min(88vh, 920px);
+  padding: 16px 18px 18px;
+  border: 1px solid var(--px-edge); border-radius: var(--r);
+  background: var(--bg-2); box-shadow: var(--shadow-hard);
+}
+.cc-style-dialog-head {
+  display: flex; align-items: baseline; gap: 10px;
+  padding-bottom: 8px; border-bottom: 1px solid var(--line);
+}
+.cc-style-dialog-head h2 { margin: 0; font-size: 14px; color: var(--white); }
+.cc-style-dialog-now { font-size: 11px; color: var(--muted-2); }
+.cc-style-dialog-now b { color: var(--green); }
+.cc-style-close {
+  width: 26px; height: 26px; padding: 0;
+  border: 1px solid var(--px-edge); border-radius: var(--r-sm);
+  background: var(--bg-3); color: var(--muted); font-size: 12px; line-height: 1;
+}
+.cc-style-close:hover { color: var(--white); border-color: var(--cyan); }
+/* 卡片 196px 起：一屏能横向铺 5~6 张，又能看清画风。 */
+.cc-style-dialog .chars-style-grid {
+  grid-template-columns: repeat(auto-fill, minmax(196px, 1fr));
+  gap: 10px; max-height: none; flex: 1; align-content: start;
+  overflow-y: auto; padding: 2px 4px 2px 2px;
+}
+.cc-style-dialog .chars-style-card { padding: 6px; gap: 6px; }
+.cc-style-dialog .chars-style-card:hover { border-color: var(--cyan); }
+.cc-style-dialog .chars-style-card img { aspect-ratio: 1 / 1; }
+.cc-style-dialog .chars-style-card span { font-size: 11.5px; }
+.cc-style-dialog .chars-style-card.on {
+  border-color: var(--green); box-shadow: 0 0 0 1px var(--green) inset;
+}
 .chars.cc .chars-style-grid { max-height: 260px; overflow: auto; }
 .chars.cc .chars-emo-grid { max-height: 280px; overflow: auto; }
 .chars.cc .chars-field-label { font-size: 10.5px; color: var(--muted); }
@@ -3226,11 +3270,45 @@ input:disabled, select:disabled, textarea:disabled { opacity: 0.42; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .cc-preview-stage { border: 1px solid var(--line); border-radius: var(--r-sm); overflow: hidden; }
-.cc-preview .sprite-preview { width: 100%; }
-.cc-preview .sprite-stage { height: 260px; }
+/* 右栏能拖宽，预览区就跟着长高：固定 260px 在 600px 宽栏里上下留一堆空白。
+   **用 flex 而不是 grid 居中**：grid 的行高是 auto（不确定），
+   `height/max-height: 100%` 会解析失败，图按宽度铺满后被 overflow 切掉底部。 */
+.cc-preview .sprite-preview { width: 100%; max-width: none; }
+.cc-preview .sprite-stage {
+  display: flex; align-items: center; justify-content: center;
+  height: clamp(300px, 42vh, 680px);
+}
 .cc-preview .sprite-stage img {
-  max-width: 100%; max-height: 100%; width: auto; height: auto;
+  width: auto; height: auto; max-width: 100%; max-height: 100%;
   object-fit: contain; image-rendering: pixelated;
+}
+/* 右栏「立绘」画廊：立绘是定妆图，一张张铺开看，点开是大图。
+   以前这里是精灵帧播放器（还带服装/表情下拉），把立绘当动画播，语义不对。 */
+.cc-preview-note { margin: 0; font-size: 10.5px; line-height: 1.6; color: var(--muted-2); }
+.cc-preview-count { font-family: var(--mono); font-size: 10.5px; color: var(--muted-2); }
+.cc-portrait-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+  gap: 8px; align-content: start;
+}
+.cc-portrait {
+  display: flex; flex-direction: column; gap: 4px; padding: 5px;
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--bg-3); cursor: zoom-in; min-width: 0;
+}
+.cc-portrait:hover { border-color: var(--cyan); }
+.cc-portrait img {
+  width: 100%; aspect-ratio: 9 / 16; object-fit: contain;
+  image-rendering: pixelated;
+  background-color: #1a1a20;
+  background-image:
+    linear-gradient(45deg, #26262e 25%, transparent 25%, transparent 75%, #26262e 75%),
+    linear-gradient(45deg, #26262e 25%, transparent 25%, transparent 75%, #26262e 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 8px 8px;
+}
+.cc-portrait span {
+  font-size: 10px; color: var(--muted); text-align: center;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .cc-preview-pick { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .cc-preview-pick label { display: flex; flex-direction: column; gap: 4px; font-size: 10.5px; color: var(--muted); }
@@ -3722,8 +3800,32 @@ button:disabled, .mini.wide:disabled, .cc-btn:disabled,
   background: var(--bg-2); box-shadow: var(--shadow-hard); font-size: 11.5px;
 }
 
-/* 工作台：返回条 + 两栏（不再有左侧角色库） */
-.chars.cc.is-workspace { grid-template-columns: minmax(0, 1fr) 300px; }
+/* 工作台：返回条 + 两栏（不再有左侧角色库）
+   右栏宽度是 CSS 变量（--cc-side-w），由 CharactersPage 的拖动条写进内联样式，
+   默认 420px —— 300px 看精灵帧太小，这里本来就是「结果优先」的位置。 */
+.chars.cc.is-workspace {
+  grid-template-columns: minmax(0, 1fr) 7px var(--cc-side-w, 420px);
+}
+/* 拖动条：视觉上是一条细缝，热区 7px；hover/拖动时才亮起来 */
+.cc-split {
+  position: relative; cursor: col-resize; touch-action: none;
+  background: var(--bg-1);
+}
+.cc-split::after {
+  content: ''; position: absolute; inset: 0 -3px;   /* 热区比视觉宽度大 */
+  background: transparent;
+}
+/* 中间一段虚点：否则用户根本不知道这条缝能拖 */
+.cc-split::before {
+  content: ''; position: absolute; left: 50%; top: 50%;
+  width: 3px; height: 36px; transform: translate(-50%, -50%);
+  background: repeating-linear-gradient(to bottom, var(--line-strong) 0 3px, transparent 3px 7px);
+}
+.cc-split:hover { background: rgba(108, 196, 239, 0.16); }
+.cc-split:hover::before, body.is-resizing .cc-split::before {
+  background: repeating-linear-gradient(to bottom, var(--cyan) 0 3px, transparent 3px 7px);
+}
+body.is-resizing, body.is-resizing * { cursor: col-resize !important; user-select: none; }
 .cc-backbar {
   display: flex; align-items: center; gap: 10px; flex: none;
   padding: 8px 18px; border-bottom: 1px solid var(--line);
@@ -3754,6 +3856,7 @@ button:disabled, .mini.wide:disabled, .cc-btn:disabled,
 @media (max-width: 1020px) {
   .chars.cc.is-workspace { grid-template-columns: minmax(0, 1fr); }
   .chars.cc.is-workspace .cc-preview { display: none; }
+  .chars.cc.is-workspace .cc-split { display: none; }
   .charlib-grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); }
 }
 
@@ -4141,3 +4244,15 @@ button:disabled, .mini.wide:disabled, .cc-btn:disabled,
 .pt-apply .pt-btn { height: 30px; padding: 0 12px; font-size: 11.5px; }
 .pt-btn:disabled { opacity: 0.42; cursor: not-allowed; }
 .pt-applied { font-size: 11px; color: var(--green); }
+
+/* ---------- 立绘画廊限量 / 任务条常驻（统一层内，不另起层） ---------- */
+/* 立绘一多，任务条放下面就被挤出视口 —— 排在画廊之前，滚动时也钉在顶部。 */
+.chars.cc .cc-preview > .cc-task { position: sticky; top: 0; z-index: 3; }
+/* 只默认铺前 8 张，其余等用户主动展开，避免首屏一次性解码几十张图。 */
+.cc-portrait-more {
+  width: 100%; padding: 8px; border: 1px dashed var(--line-strong);
+  border-radius: var(--r-sm); background: transparent;
+  color: var(--muted); font-size: 11px; cursor: pointer;
+}
+.cc-portrait-more:hover { border-color: var(--cyan); color: var(--cyan); }
+

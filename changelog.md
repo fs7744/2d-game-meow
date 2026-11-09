@@ -22,6 +22,64 @@
 
 ---
 
+## 2026-11-09 · 画风中立：公共提示词不碰画风 + 右栏画廊限量 / 进度条常驻
+
+用户反馈「Q 版画风生成效果不对，其他画风也不能被影响，公用的提示词应该不影响
+任何画风，画风由自己影响」。查下来不是一个 bug，而是一串「丢信息 / 掺风格」，
+顺手把中途追问「还有别的被丢了吗」也做了完整审计。
+
+### 1) 被丢的 / 被污染的东西（全部定位并修掉）
+
+| # | 问题 | 后果 |
+|---|---|---|
+| 1 | 中文模式 `structured_prompt` 把官方三段式画风压成**只剩一个中文画风名** | 画风库 358 条的 Visual description / Reference 全丢。Q 版 `chibi_anime` 最要紧的「大头压倒小身体、圆润线条、夸张大眼」没了，出图当然不像 Q 版 |
+| 2 | 公共段写死 `画风：… or 默认日式动画风格` +「按这个画风的笔触、轮廓、配色」 | 没选画风 / 译表查不到时**强加**一个日式动画风格，所有画风都被公共词干扰 |
+| 3 | `qi2_fields` 把官方 `race_features` 在 zh 下置空 | 用户只填「精灵」一个词时，尖耳朵等物种视觉特征真的没了 |
+| 4 | `custom_style` 全仓库只有默认值一处引用 | 存档里写了自定义画风，从不进 prompt |
+| 5 | PE 请求用 `rsplit("\nLoRA 触发词：")[0]` | 会砍掉 LoRA 行**之后所有内容**；画风段排在后面时改写过程看不到画风定义 |
+| 6 | PE 失败退回原文后又追加一次 LoRA | 触发词重复，会把 LoRA 权重拉偏 |
+| 7 | 立绘出图沿用 `gen.txt2img` 默认 `preset="sprite"` | 追加 `flat plain background / ample empty space`（跟立绘「占满画面高度」打架），且 `SPRITE_NEG_PAINT` 里有 **`photo, 3d render`** —— 选写实 / 3D 画风等于用负向词把自己压掉 |
+
+### 2) 修法：分层，画风段只引用画风库自己的定义
+
+- 新增 `charactergen.style_block(ref, lang)`：中文画风名 + 英文原名 +
+  **画风库自己的 Visual description / Reference 原文**，独立成段、放在属性行之前
+  （跟官方「风格在前」一致）；没选画风返回空串。
+- **公共段一个风格字都不写**：删掉「默认日式动画风格」兜底和那句泛化风格指令，
+  只留「请画一张角色立绘」+ 画质 / 构图 / 背景 / 属性。
+- **取舍**：画风描述保留官方英文原文 —— 它是画风库的**数据**，不是官方英文结构词
+  （结构标签中文化即可）。Qwen3-VL 中英双语原生支持，硬译 358 条反而失真；
+  信息完整优先于「整段纯中文」。
+- PE 请求改成**逐行删 LoRA**（不再 rsplit 切尾部）；PE 成功后照官方再补一次
+  完整画风段；PE 失败不重复追加 LoRA。
+- 恢复 `race_features`（独立「物种特征」行，原文照搬）、接通 `custom_style`
+  （加入 `QI2_LITERAL_FIELDS`，不被 PE 扩写掉）。**英文模板一字未改**。
+- `app.character_generate_api` 在 `params.update()` **之后**强制 `preset="none"`：
+  客户端手传 `preset=sprite` 也盖不掉，公共构图词与 `photo/3d render` 负向词
+  彻底不进角色立绘。画布那条 `/generate` 不受影响（精灵帧仍可用 sprite 契约）。
+
+### 3) 右栏 UI
+
+- 立绘是**一直累积**的（`publish_portrait` 不覆盖），一次铺几十上百张 `<img>`
+  首屏布局/解码全白做。`PortraitPane` 默认只铺最近 8 张，给「显示全部 N 张 /
+  收起」按钮，头部仍显示总数。
+- `TaskBar`（含完成提示）从画廊**之后**移到画廊**之前**，CSS 在统一层加
+  `position: sticky; top: 0`，立绘再多、滚动到哪儿都能看见生成进度。
+- 顺手删掉 `styles.css` 里重复了一整遍的画廊样式块。
+
+### 验证
+
+`tsc -b` / `vite build` ✓、`check-hints` 34/34、**`node smoke.mjs` 756/756**
+（新增用例 63：注入 23 张立绘 → 默认 8 张 → 展开 23 张 → 收起 8 张，
+并钉死任务条顺序与 sticky）；新增 `tests/test_style_neutral.py` **13 例**
+（逐条遍历 358 条画风断言视觉定义都在、公共段无风格词、PE 不砍画风、
+LoRA 不重复、`preset=none`）；后端 `test_style_neutral + test_characters +
+test_qwen_workflows + test_labels + test_api` **143 passed / 5 skipped**；
+真机截图 `tests/_out/ui_review/style_neutral/` 右栏布局正常。
+
+> ⚠️ 仍需 GPU 真跑：Q 版与其它画风的**视觉**改善幅度只能实拍对比确认；
+> 这里钉死的是「喂给模型的信息完整且不被公共词干扰」。
+
 ## 2026-11-07 · 设置彻底移出画布侧栏 + LoRA 强度每行常显
 
 上一轮我把设置提到顶栏，但**为了保住「6 个 `.rail-sec`」的 DOM 契约，又在侧栏

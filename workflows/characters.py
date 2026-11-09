@@ -37,6 +37,7 @@ import shutil
 import unicodedata
 import tempfile
 import threading
+import time
 import uuid
 from contextlib import contextmanager
 from typing import Any, Dict, Iterator, List, Optional
@@ -188,6 +189,21 @@ def sheets_dir(name: str, costume: str = "Naked", emotion: str = "neutral") -> s
                            ensure_safe_name(emotion, "表情名"))
 
 
+def portraits_dir(name: str, costume: str = "", emotion: str = "") -> str:
+    """**立绘**目录（跟动作帧分开）。
+
+    为什么必须分开（用户 2026-11-08 明确要求）：立绘是「这个角色长什么样」的定妆图，
+    动作帧是「这个角色怎么动」的素材。以前立绘被当成 `Sprites/<服装>/neutral/` 里的
+    第 1 帧，于是试玩台会把一张站桩图当动画播、图集导出里也混着它。
+    """
+    parts = [character_dir(name), "Portraits"]
+    if costume:
+        parts.append(ensure_safe_name(costume, "服装名"))
+    if emotion:
+        parts.append(ensure_safe_name(emotion, "表情名"))
+    return safe_join_under(*parts)
+
+
 def cache_dir(name: str) -> str:
     return safe_join_under(character_dir(name), "cache")
 
@@ -301,7 +317,11 @@ def _default_character_info(name: str) -> Dict[str, Any]:
         "negative_prompt": "bad quality,worst quality,low quality",
         "lora_prompt": "",
         "background_color": "green",
-        "framing": "",
+        # 游戏素材默认全身（官方默认是 cowboy_shot 半身，切精灵图会缺脚）
+        "framing": "full_body",
+        # 提示词语言：默认中文（Qwen-Image 的文本编码器是 Qwen3-VL，中文原生支持）；
+        # 想用官方英文模板的角色可以单独选 en
+        "prompt_language": "zh",
         "style": "ghibli_miyazaki",
         "custom_style": "",
         "seed": 0,
@@ -734,6 +754,85 @@ def publish_image(
         "path": out, "file": fname, "index": index, "cover": cover,
         "matte": matte_path or "", "matte_error": matte_err or "",
     }
+
+
+def publish_portrait(
+    name: str, src: str, costume: str = "Naked", emotion: str = "neutral",
+    matte: bool = False, set_cover: bool = True,
+) -> Dict[str, Any]:
+    """把一张**立绘**存进 `Portraits/<服装>/<表情>/`。
+
+    跟 `publish_image`（动作帧）的区别是**不覆盖**：同一套服装可以连出好几版立绘，
+    右边「立绘」栏要能看见全部，所以文件名带时间戳递增。
+    """
+    n = ensure_safe_name(name, "角色名")
+    c = ensure_safe_name(costume, "服装名")
+    e = ensure_safe_name(emotion, "表情名")
+    if not os.path.isfile(src):
+        raise FileNotFoundError(f"要收编的立绘不存在：{src}")
+    target = portraits_dir(n, c, e)
+    os.makedirs(target, exist_ok=True)
+    index = len(_images_in(target)) + 1
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    fname = f"portrait_{stamp}_{index:04d}.png"
+    out = os.path.join(target, fname)
+    while os.path.exists(out):                    # 同一秒连出两张
+        index += 1
+        fname = f"portrait_{stamp}_{index:04d}.png"
+        out = os.path.join(target, fname)
+    matte_path, matte_err = None, None
+    if matte:
+        try:
+            from workflows import matte_screen
+            matte_path, matte_err = matte_screen.matte_image_file(
+                src, out=os.path.join(target, f"portrait_{stamp}_{index:04d}_matte.png"))
+        except Exception as exc:                   # noqa: BLE001
+            matte_err = str(exc)
+    shutil.copy2(src, out)
+    cover = ""
+    if set_cover:
+        cd = cache_dir(n)
+        os.makedirs(cd, exist_ok=True)
+        cover = os.path.join(cd, "preview.png")
+        try:
+            shutil.copy2(out, cover)
+        except OSError:
+            cover = ""
+    return {
+        "character": n, "costume": c, "emotion": e, "kind": "portrait",
+        "path": out, "file": fname, "index": index, "cover": cover,
+        "matte": matte_path or "", "matte_error": matte_err or "",
+    }
+
+
+def list_portraits(name: str) -> List[Dict[str, Any]]:
+    """这个角色的**全部立绘**（新的在前）。
+
+    返回带服装/表情与落盘时间，前端右边「立绘」栏直接铺成画廊。
+    """
+    n = ensure_safe_name(name, "角色名")
+    root = portraits_dir(n)
+    if not os.path.isdir(root):
+        return []
+    out: List[Dict[str, Any]] = []
+    for dirpath, _dirs, files in os.walk(root):
+        for f in files:
+            if os.path.splitext(f)[1].lower() not in IMAGE_EXTS:
+                continue
+            if f.endswith("_matte.png"):          # 抠图副本不算独立立绘
+                continue
+            full = os.path.join(dirpath, f)
+            rel = os.path.relpath(dirpath, root).replace("\\", "/")
+            parts = rel.split("/") if rel != "." else []
+            out.append({
+                "file": full,
+                "name": f,
+                "costume": parts[0] if parts and parts[0] != "." else "",
+                "emotion": parts[1] if len(parts) > 1 else "",
+                "mtime": os.path.getmtime(full),
+            })
+    out.sort(key=lambda x: (x["mtime"], x["name"]), reverse=True)
+    return out
 
 
 _POSE_PREVIEW_EXTS = IMAGE_EXTS

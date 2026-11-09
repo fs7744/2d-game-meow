@@ -352,20 +352,26 @@ export default function App() {
 
   /** 挂载 / 卸载 LoRA（全局状态：挂上后对所有生成生效）。 */
   const changeLoras = useCallback(async (items: { name: string; scale: number }[]) => {
+    const next = items.map((x) => ({ name: x.name, scale: x.scale }))
+    // **先本地生效**：勾选只是改设置，后端也只记规格（不加载 15GB 管线）。
+    // 以前要等 /loras/apply 返回才更新，后端一慢或报错，复选框就看着勾不动。
+    setActiveLoras(next)
     try {
-      const r = await applyLoras(items)
+      const r = await applyLoras(next)
       setActiveLoras(r.items)
       // 全局设置落盘：重开应用时服务端会懒恢复这些挂载（不占显存）。
-      try { await putGlobalSettings({ loras: items }) } catch { /* 落盘失败不打断本次操作 */ }
+      try { await putGlobalSettings({ loras: next }) } catch { /* 落盘失败不打断本次操作 */ }
       setNotice(items.length
-        ? `已挂载 LoRA：${items.map((x) => x.name).join('、')}`
+        ? `已挂载 LoRA：${items.map((x) => x.name).join('、')}（下次生成时生效）`
         : '已卸载全部 LoRA')
       window.setTimeout(() => setNotice(''), 4000)
     } catch (e) {
+      // 失败就把勾选框退回服务端的真实状态，别让界面骗人
+      try { await reloadLoras() } catch { /* 忽略 */ }
       setNotice(`LoRA 操作失败：${e instanceof Error ? e.message : '未知错误'}`)
       window.setTimeout(() => setNotice(''), 6000)
     }
-  }, [])
+  }, [reloadLoras])
   const [uploadMsg, setUploadMsg] = useState('')
   const [notice, setNotice] = useState('')          // 底模切换之类的一次性提示
   const [pendingDelete, setPendingDelete] = useState<GenNode | null>(null)

@@ -286,7 +286,35 @@ class Engine:
         self._user_specs = [s for s in self._user_specs
                             if (d / f"{s.get('name')}.safetensors").is_file()]
         self._sync_loras(pipe)
+        self._heal_offload(pipe)
         return pipe
+
+    def _heal_offload(self, pipe) -> None:
+        """cpu offload 链掉了就重建。
+
+        正常没人会拆它，但**别的流程动过钩子又不小心没挂回去**（2026-11-08：
+        PE 里调 `maybe_free_model_hooks()` 失败）之后，`components` 全留在 cpu、
+        `_execution_device` 变 cpu，出图就报
+        `Cannot generate a cpu tensor from a generator of type cuda`。
+        这种坏状态会一直留着直到重启，所以在**每次取管线**时兜一下。
+        """
+        if os.environ.get("MEOW_QWEN_OFFLOAD", "1") == "0":
+            return
+        try:
+            hooks = getattr(pipe, "_all_hooks", None)
+            if hooks:
+                return                                # 链还在，别动
+            missing = [n for n, m in pipe.components.items()
+                       if isinstance(m, torch.nn.Module)
+                       and n not in getattr(pipe, "_exclude_from_cpu_offload", ())
+                       and not hasattr(m, "_hf_hook")]
+            if not missing:
+                return
+            log.warning("cpu offload 链不完整（缺 %s），重建", missing[:3])
+            pipe.enable_model_cpu_offload(
+                device=getattr(pipe, "_offload_device", None) or self.device)
+        except Exception as exc:                     # noqa: BLE001
+            log.warning("重建 cpu offload 失败：%s", exc)
 
     # ---------- Qwen-Image-2.1 ----------
 
@@ -361,6 +389,28 @@ class Engine:
         items = [s for s in items if s["name"] in have]
         self._user_specs = items
         self._loaded_sig = None
+        return items
+
+    def set_user_loras(self, specs: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """界面上勾选 / 取消 LoRA：**只改设置，不加载模型**。
+
+        以前 `/loras/apply` 先 `txt2img_pipe()` 再挂 —— 用户只是想勾一个复选框，
+        却要先把 15GB 管线读进显存（几十秒；权重没下好的机器直接 400）。
+        界面上的表现就是「勾了又弹回去」，看着像勾不动。
+
+        这里跟 `restore_loras` 做同一件事：过滤掉文件已不在的条目、记进
+        `_user_specs`、让签名失效。真正的 `load_lora_weights` 推迟到下一次
+        `txt2img_pipe()`（也就是用户点生成的时候）。
+        管线**已经**在显存里时顺手同步一次，让「取消勾选」立刻生效。
+        """
+        items = self.restore_loras(specs)
+        pipe = self._cache.get(f"txt2img:{self.DEFAULT_MODEL}")
+        if pipe is not None:
+            try:
+                self._sync_loras(pipe)
+            except Exception:                 # noqa: BLE001
+                # 同步失败就留在「待挂载」：下次生成会重试，不能因此拦住勾选
+                self._loaded_sig = None
         return items
 
     def forget_lora(self, name: str) -> None:
@@ -485,7 +535,14 @@ class Engine:
         里已经有用户上次挂的规格。只报前者的话，重开应用界面会显示「没挂任何
         LoRA」，而下一次生成却真的带着它们 —— 显示与行为不一致。所以把还没
         挂上管的规格也补进来；已挂的按真实状态优先。
+
+        签名失效时（刚改过设置、还没同步到管线）**只按规格报**：否则刚取消
+        勾选的那条会从 `_active_loras` 里冒出来，界面上的复选框又被打回去。
         """
+        if self._loaded_sig is None:
+            return [{"name": str(s.get("name")).strip(),
+                     "scale": float(s.get("scale") or 1.0)}
+                    for s in self._user_specs if str(s.get("name") or "").strip()]
         out = [dict(a) for a in (getattr(self, "_active_loras", []) or [])]
         seen = {a.get("name") for a in out}
         for s in self._user_specs:

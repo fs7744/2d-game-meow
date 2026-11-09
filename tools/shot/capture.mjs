@@ -420,6 +420,13 @@ async function main() {
           negative: 'blurry', resolution: [792, 1408],
           defaults: { steps: 25, cfg: 3, sampler: 'euler', scheduler: 'simple' },
         })
+        if (u.includes('/characters/') && u.endsWith('/portraits')) return json({
+          count: 3,
+          items: ['最新一版', 'Knight', 'Naked'].map((c, i) => ({
+            url: '/icon.png', path: `/icon.png#${i}`, name: `portrait_${i}.png`,
+            costume: i === 1 ? 'Knight' : 'Naked', emotion: 'neutral', mtime: 3 - i,
+          })),
+        })
         if (u.includes('/characters/') && u.endsWith('/atlas')) return json({
           character: chars[0].name, exists: true, frames: 12, animations: 7,
           directionAnimations: 4,
@@ -525,6 +532,38 @@ async function main() {
     await fp.evaluate(() => document.querySelector('.charlib-card')?.click())
     await sleep(800)
     await fshot('23-cc-workspace')
+    // ② 定形象：「外貌与基础设定」那行（性别 / 年龄 / 底色）高度要齐平
+    await fp.evaluate(() => document.querySelector('.cc-step[data-step="2"]')?.click())
+    await fshot('23b-cc-step2')
+    // 右栏可拖：往左拖 160px，成果区应变宽（真实 pointer 事件走一遍）
+    const sideBefore = await fp.evaluate(() =>
+      document.querySelector('.cc-preview')?.getBoundingClientRect().width || 0)
+    const grip = await fp.evaluate(() => {
+      const r = document.querySelector('.cc-split')?.getBoundingClientRect()
+      return r ? { x: r.x + r.width / 2, y: r.y + 220 } : null
+    })
+    if (grip) {
+      await fp.mouse.move(grip.x, grip.y)
+      await fp.mouse.down()
+      await fp.mouse.move(grip.x - 160, grip.y, { steps: 8 })
+      await fp.mouse.up()
+      await fshot('23d-cc-side-drag', 350)
+      const sideAfter = await fp.evaluate(() =>
+        document.querySelector('.cc-preview')?.getBoundingClientRect().width || 0)
+      console.log('  右栏宽度', Math.round(sideBefore), '→', Math.round(sideAfter))
+      // 双击恢复默认，后面的场景保持一致
+      await fp.evaluate(() => document.querySelector('.cc-split')
+        ?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })))
+      await sleep(200)
+    } else {
+      console.log('  ✗ 没找到 .cc-split 拖动条')
+    }
+    // 画风库弹窗：缩略图要够大才能比较笔触
+    await fp.evaluate(() => [...document.querySelectorAll('button')]
+      .find((b) => (b.textContent || '').includes('浏览画风库'))?.click())
+    await fshot('23c-cc-style-dialog', 900)
+    await fp.evaluate(() => document.querySelector('.cc-style-close')?.click())
+    await sleep(200)
     await fp.evaluate(() => document.querySelector('.cc-step[data-step="3"]')?.click())
     await fshot('24-cc-step3')
     await fp.evaluate(() => {

@@ -320,6 +320,20 @@ def _postprocess(img: Image.Image, eng: Engine, *, matte: bool, matte_backend: s
     return img, edge, subjects
 
 
+def _exec_device(pipe: Any) -> str:
+    """管线此刻到底在哪算东西：`cuda` / `cpu`。
+
+    `_execution_device` 在开了 model cpu offload 的管线上由 accelerate 钩子决定；
+    钩子链掉了它会变成 cpu（组件都在 cpu、`pipe.device` 也是 cpu）。生成器必须
+    跟它一致，否则 diffusers 会拿 cuda 生成器去 randn 一个 cpu 张量。
+    """
+    try:
+        dev = pipe._execution_device
+        return "cuda" if str(dev).startswith("cuda") else str(dev)
+    except Exception:                             # noqa: BLE001
+        return "cuda" if torch.cuda.is_available() else "cpu"
+
+
 def _infer(eng: Engine, pipe, kw: Dict[str, Any], *, shrink: bool = True,
            label: str = "") -> Any:
     """带 OOM 恢复的推理调用：清缓存 → 降分辨率 → 重试（最多两次）。
@@ -519,7 +533,11 @@ def _qwen_call(eng: Engine, *, prompt: str, negative: str, width: int, height: i
             # 快速模式关了 → 顺手清掉临时槽里残留的 Lightning
             # （清空后如果用户还挂着别的 LoRA，_sync_loras 会重新挂回它们）
             eng.unload_loras(pipe, scope="temp")
-    gen = torch.Generator("cuda").manual_seed(int(seed))
+    # 生成器必须建在**管线真正执行的那张卡**上：硬写 "cuda" 时，一旦管线
+    # 的 cpu-offload 链掉了（组件全在 cpu、`_execution_device` 变成 cpu），
+    # diffusers 会拿 cuda 生成器去 randn 一个 cpu 张量，报
+    # `Cannot generate a cpu tensor from a generator of type cuda`。
+    gen = torch.Generator(_exec_device(pipe)).manual_seed(int(seed))
     kw: Dict[str, Any] = dict(
         prompt=full,
         width=w, height=h,

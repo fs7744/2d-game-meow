@@ -76,6 +76,8 @@ function makeFetch() {
   // 库首页用例可以注入一批假角色 / 假画布（不影响其它用例的空库起点）
   let charactersOverride = null
   let canvasesOverride = null
+  /** 用例可注入任意数量的立绘，用来验「不一次性全铺」 */
+  let portraitsOverride = null
   // 全局设置（服务端权威副本）：用例可注入，用来验「重开应用不丢」
   let settings = { base_model: 'qwen-image-2.1', matte_backend: 'auto',
     loras: [], fast_mode: false }
@@ -314,6 +316,14 @@ function makeFetch() {
           resolve(here, 'public/vnccs/emotions/emotions.json'), 'utf8')),
       }
     }
+    // 官方画风库：不 mock 的话画风卡片永远是 0 张，弹窗用例会假失败
+    if (String(url).includes('/vnccs/character_template/character_styles.json')) {
+      return {
+        ok: true,
+        json: async () => JSON.parse(readFileSync(
+          resolve(here, 'public/vnccs/character_template/character_styles.json'), 'utf8')),
+      }
+    }
 
     // ---- 元数据写入端点（SQLite；只存标签/备注，不碰文件）----
     if ((init.method || 'GET') === 'PATCH' && String(url).endsWith('/meta')
@@ -368,6 +378,27 @@ function makeFetch() {
         }),
       }
     }
+    // 立绘列表（Portraits/，跟动作帧分开）
+    if (String(url).includes('/characters/') && String(url).endsWith('/portraits')) {
+      if (portraitsOverride) {
+        return { ok: true, json: async () => ({
+          count: portraitsOverride.length, items: portraitsOverride }) }
+      }
+      return {
+        ok: true,
+        json: async () => ({
+          count: 3,
+          items: [
+            { url: '/files/p3.png', path: '/p3.png', name: 'portrait_3.png',
+              costume: 'Naked', emotion: 'neutral', mtime: 3 },
+            { url: '/files/p2.png', path: '/p2.png', name: 'portrait_2.png',
+              costume: 'Knight', emotion: 'neutral', mtime: 2 },
+            { url: '/files/p1.png', path: '/p1.png', name: 'portrait_1.png',
+              costume: 'Naked', emotion: 'neutral', mtime: 1 },
+          ],
+        }),
+      }
+    }
     // 角色出图：拼 prompt（不跑模型）/ 提交生成
     if (String(url).includes('/characters/') && String(url).endsWith('/prompt')) {
       const b = JSON.parse(init.body || '{}')
@@ -375,9 +406,12 @@ function makeFetch() {
         ok: true,
         json: async () => ({
           name: 'Alice', style: b.style || 'ghibli_miyazaki',
-          // 官方结构：每个字段一行
-          prompt: 'Draw an image of a character in the following style: Test.\n'
-            + 'The image contains one character.\nGender: female\nAge: 18 years old',
+          // 默认中文（prompt_language 默认 zh），每个字段一行
+          prompt: b.enhance
+            ? '一位银发红瞳的精灵少女站在纯绿色背景前，从头到脚完整入画。'
+            : '请画一张角色立绘，画风：Test。\n画面里只有一个角色。\n性别：女\n年龄：18 岁',
+          raw_prompt: '请画一张角色立绘，画风：Test。\n画面里只有一个角色。\n性别：女\n年龄：18 岁',
+          enhanced: !!b.enhance,
           negative: 'bad quality',
           resolution: [792, 1408],
           defaults: { steps: 25, cfg: 3, sampler: 'euler', scheduler: 'simple' },
@@ -1027,6 +1061,7 @@ function makeFetch() {
   fetchFn.setLoraInspect = (v) => { loraInspect = { ...loraInspect, ...v } }
   fetchFn.getLastLoraCommit = () => lastLoraCommit
   fetchFn.setCanvases = (v) => { canvasesOverride = v }
+  fetchFn.setPortraits = (v) => { portraitsOverride = v }
   return fetchFn
 }
 
@@ -3965,10 +4000,10 @@ async function openSettings(doc, win) {
   await new Promise((r) => setTimeout(r, 300))
 }
 
-async function ccBoot() {
+async function ccBoot(opts = {}) {
   // 快照必须在 boot 之前：角色中心一挂载就会发 /characters、静态目录等请求
   const c0 = calls.length
-  const { dom, errors } = await boot('')
+  const { dom, errors } = await boot('', undefined, opts)
   const doc = dom.window.document
   const win = dom.window
   await ccWait(400)
@@ -4045,8 +4080,13 @@ async function ccCreate(doc, win) {
     calls.slice(c0).some((c) => c.url.includes('/characters/Alice') && c.method === 'GET'))
   check('角色名挂在步骤条下方（知道自己在改谁）',
     (doc.querySelector('.cc-charhead')?.textContent || '').includes('Alice'))
-  check('成果区常驻右栏（结果优先，不用切页找）',
-    !!doc.querySelector('.cc-preview .sprite-preview'))
+  check('右栏是「立绘」（定妆图，不是动作帧播放器）',
+    (doc.querySelector('.cc-preview-head')?.textContent || '').includes('立绘'))
+  check('左右两栏之间有可拖动的分隔条（成果区宽度自己定）',
+    !!doc.querySelector('.cc-split'))
+  check('右栏宽度由 CSS 变量控制（拖动条改它）',
+    (doc.querySelector('.chars.cc.is-workspace')?.getAttribute('style') || '')
+      .includes('--cc-side-w'))
   const steps = [...doc.querySelectorAll('.cc-step')]
   check('只有 4 个步骤（旧版 5 个并列 tab 已收编）',
     steps.length === 4, steps.map((x) => x.textContent).join('/'))
@@ -4086,34 +4126,41 @@ async function ccCreate(doc, win) {
   check('向后端要了拼好的 prompt',
     calls.slice(c0).some((c) => c.url.includes('/characters/Alice/prompt')))
   const ta = doc.querySelector('textarea.chars-prompt')
-  check('prompt 显示出来了（官方结构化格式）',
-    (ta?.value || '').includes('The image contains one character.')
-    && (ta?.value || '').includes('Gender: female'),
+  check('prompt 显示出来了（结构化格式，默认中文）',
+    (ta?.value || '').includes('请画一张角色立绘')
+    && (ta?.value || '').includes('性别：女'),
   (ta?.value || '').slice(0, 60))
   const body = () => doc.querySelector('.chars-body')?.textContent || ''
   check('显示官方默认参数（25 步 / cfg 3）', body().includes('25 步'), body().slice(0, 60))
   check('显示官方公式算出的分辨率 792×1408', body().includes('792×1408'))
-  const peBox = doc.querySelector('.chars-check input[type=checkbox]')
-  check('有 Prompt Enhancement 开关（收在进阶里）', !!peBox)
-  check('PE 默认开（官方默认开）', peBox?.checked === true)
-  check('PE 说明里写清了用的是图像模型自己的 Qwen3-VL',
-    (doc.querySelector('.chars-check')?.textContent || '').includes('Qwen3-VL'))
-  peBox?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await ccWait(350)
-  const peCall = calls.slice(c0).filter((c) => c.url.includes('/characters/Alice/prompt')).pop()
-  check('关掉 PE 后重新拼 prompt 带上 enhance=false',
-    !!peCall && JSON.parse(peCall.body || '{}').enhance === false, peCall?.body)
+  // PE 只在点按钮时跑：初次拼 prompt 必须带 enhance=false，别自己偷偷跑 40 秒
+  const firstPrompt = calls.slice(c0)
+    .filter((c) => c.url.includes('/characters/Alice/prompt'))[0]
+  check('打开页面时拼 prompt 不跑 PE（enhance=false）',
+    !!firstPrompt && JSON.parse(firstPrompt.body || '{}').enhance === false,
+    firstPrompt?.body)
+  check('有「润色提示词」按钮（点了才跑 PE）', ccClick(doc, win, '润色提示词'))
+  await ccWait(400)
+  const peCall = calls.slice(c0)
+    .filter((c) => c.url.includes('/characters/Alice/prompt')).pop()
+  check('点润色时请求 enhance=true',
+    !!peCall && JSON.parse(peCall.body || '{}').enhance === true, peCall?.body)
+  check('润色结果直接替换成改写版',
+    (doc.querySelector('textarea.chars-prompt')?.value || '').includes('从头到脚'),
+    (doc.querySelector('textarea.chars-prompt')?.value || '').slice(0, 40))
 
-  check('有「生成第一张立绘」这个唯一主 CTA',
-    ccClick(doc, win, '生成第一张立绘'))
+  check('有「生成立绘」这个唯一主 CTA',
+    ccClick(doc, win, '生成立绘'))
   await ccWait(250)
   const genCall = calls.slice(c0).find((c) => c.url.endsWith('/characters/Alice/generate'))
   check('提交到 /characters/Alice/generate', !!genCall, genCall?.url)
   if (genCall) {
     const b = JSON.parse(genCall.body)
     check('文生图工作流 w1', b.workflow === 'w1', b.workflow)
-    check('提交的是后端拼好的结构化 prompt',
-      (b.prompt || '').includes('Gender:'), (b.prompt || '').slice(0, 50))
+    check('提交的是界面上那段 prompt（中文）',
+      (b.prompt || '').includes('请画一张角色立绘') || (b.prompt || '').includes('从头到脚'),
+      (b.prompt || '').slice(0, 50))
+    check('出图时不再让后端重复跑 PE', b.enhance === false, String(b.enhance))
     check('负向词一起提交', b.negative === 'bad quality', b.negative)
     check('抠背景默认关（模型自带透明底）', b.matte === false, String(b.matte))
   }
@@ -4135,6 +4182,9 @@ async function ccCreate(doc, win) {
   await ccWait(300)
 
   check('有「从图片反推属性」入口', ccClick(doc, win, '从图片反推属性'))
+  check('反推的图源可以自己选（本地 file input）',
+    !!doc.querySelector('input[type=file][accept^="image"]'),
+    '缺 file input')
   await ccWait(350)
   check('调用了 /analyze',
     calls.slice(c0).some((c) => c.url.includes('/characters/Alice/analyze')))
@@ -4158,6 +4208,43 @@ async function ccCreate(doc, win) {
     (doc.querySelector('.chars-analyze')?.textContent || '').includes('elf'))
 
   check('反推/一句话场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 48c) 画风库是弹窗：缩略图放大才看得出笔触差别；点卡片即选中并关窗
+{
+  const { dom, doc, win, errors } = await ccBoot()
+  await ccCreate(doc, win)
+  ccStep(doc, win, 2)
+  await ccWait(300)
+
+  check('画风区有「浏览画风库」入口', ccClick(doc, win, '浏览画风库'))
+  await ccWait(250)
+  const dlg = doc.querySelector('.cc-style-dialog')
+  check('画风库在弹窗里打开（不再摊在卡片里）', !!dlg)
+  const cards = dlg ? [...dlg.querySelectorAll('.chars-style-card')] : []
+  check('弹窗里列出画风卡片', cards.length > 0, String(cards.length))
+  check('卡片带大缩略图', !!cards[0]?.querySelector('img'))
+  if (cards.length > 0) {
+    cards[0].dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+    await ccWait(250)
+    check('点卡片选中后弹窗关闭', !doc.querySelector('.cc-style-dialog'))
+    check('选中结果写进角色档案',
+      calls.some((c) => /\/characters\/Alice\/info/.test(c.url) && (c.method || '') === 'PUT'),
+      String(calls.filter((c) => /\/info$/.test(c.url)).length))
+  }
+  // Esc 也要能关（标题上写着呢）
+  ccClick(doc, win, '浏览画风库')
+  await ccWait(250)
+  const reopened = !!doc.querySelector('.cc-style-dialog')
+  if (reopened) {
+    win.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await ccWait(250)
+    check('Esc 能关画风弹窗', !doc.querySelector('.cc-style-dialog'))
+  } else {
+    check('画风弹窗能再次打开（Esc 用例的前提）', false)
+  }
+  check('画风弹窗无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 
@@ -4396,51 +4483,35 @@ async function ccCreate(doc, win) {
   dom.window.close()
 }
 
-// 52) 成果常驻右栏：翻帧、灯箱、缩略图、单帧提示
+// 52) 右栏「立绘」：列出**全部**立绘、点开看大图；动作帧不在这里播
+//
+// 立绘（定妆图）和动作帧（第 ③ 步的精灵帧）是两类东西：以前立绘被塞进
+// Sprites/neutral 当第 1 帧，试玩台会把一张站桩图当动画播。现在立绘在
+// Portraits/，右栏只铺立绘画廊。
 {
   const { dom, doc, win, errors, c0 } = await ccBoot()
   await ccCreate(doc, win)
   await ccWait(400)
-  check('先看 meta 拿帧数（不是一次性拉回所有图）',
-    calls.slice(c0).some((c) => c.url.includes('/characters/Alice/poses/meta')))
-  check('成果区常驻，不随步骤切换消失',
-    !!doc.querySelector('.cc-preview .sprite-preview'))
-  const img = doc.querySelector('.sprite-stage img')
-  check('按帧号单张取图（index=0）',
-    (img?.getAttribute('src') || '').includes('index=0'), img?.getAttribute('src'))
-  check('src 带时间戳（重生成后不拿浏览器旧图）',
-    (img?.getAttribute('src') || '').includes('t='))
-  check('多帧时显示计数 1/3',
-    (doc.querySelector('.sprite-count')?.textContent || '') === '1/3',
-    doc.querySelector('.sprite-count')?.textContent)
-  ;[...doc.querySelectorAll('.sprite-nav button')][1]
-    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await ccWait(250)
-  check('点下一帧后计数变 2/3',
-    (doc.querySelector('.sprite-count')?.textContent || '') === '2/3')
-  check('翻页后 src 的 index 跟着变',
-    (doc.querySelector('.sprite-stage img')?.getAttribute('src') || '').includes('index=1'))
-  doc.querySelector('.sprite-stage img')
-    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
-  await ccWait(150)
-  check('点精灵帧能打开灯箱', !!doc.querySelector('.lightbox'))
-  check('灯箱里有缩放工具条', !!doc.querySelector('.lightbox-zoomctl'))
+  check('打开角色就拉立绘列表',
+    calls.slice(c0).some((c) => c.url.includes('/characters/Alice/portraits')))
+  check('右栏标题是「立绘」',
+    (doc.querySelector('.cc-preview-head')?.textContent || '').includes('立绘'))
+  const cards = [...doc.querySelectorAll('.cc-portrait')]
+  check('列出全部立绘（不是只显示最新一张）', cards.length === 3, String(cards.length))
+  check('每张都带缩略图', cards.every((b) => !!b.querySelector('img')))
+  check('右栏没有服装 / 表情下拉（那是动作帧的维度）',
+    !doc.querySelector('.cc-preview-pick'))
+  check('右栏没有翻帧按钮（立绘不是动画）', !doc.querySelector('.sprite-nav'))
+  cards[0]?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await ccWait(200)
+  check('点立绘能打开大图', !!doc.querySelector('.lightbox'))
   win.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
   await ccWait(150)
-  check('Esc 关掉灯箱', !doc.querySelector('.lightbox'))
-  check('缩略图条列出全部 3 帧',
-    (doc.querySelector('.chars-asset-row')?.querySelectorAll('img').length || 0) === 3,
-    String(doc.querySelector('.chars-asset-row')?.querySelectorAll('img').length))
-  const emoSel = doc.querySelectorAll('.cc-preview-pick select')[1]
-  ccSetSelect(win, emoSel, 'angry')
-  await ccWait(500)
-  check('只有一帧时不显示翻页按钮', !doc.querySelector('.sprite-nav'))
-  check('单帧时明说只有一帧',
-    (doc.querySelector('.cc-preview')?.textContent || '').includes('只有这一帧'))
+  check('Esc 关掉大图', !doc.querySelector('.lightbox'))
   check('统一任务条最多一条（旧版 9 条小字各说各的）',
     doc.querySelectorAll('.cc-task').length <= 1,
     String(doc.querySelectorAll('.cc-task').length))
-  check('素材翻看场景无脚本错误', errors.length === 0, errors[0] || '')
+  check('立绘栏场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 
@@ -5117,6 +5188,53 @@ async function ccCreate(doc, win) {
   const apppy = readFileSync(resolve('..', 'app.py'), 'utf8')
   check('上传端点写主体数 sidecar', apppy.includes('posesubjects.write_subjects(out, n_subjects)'))
   check('多主体契约场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 63) 立绘画廊不再一次全铺；任务进度条排在画廊之前且 sticky
+//
+// 立绘会一直累积（publish_portrait 不覆盖），几十张 <img> 一次铺开既拖首屏，
+// 又把原来放在最底下的任务条挤出视口 —— 生成中根本看不见进度。
+{
+  const many = Array.from({ length: 23 }, (_, i) => ({
+    url: `/files/many_${i}.png`, path: `/many_${i}.png`,
+    name: `portrait_${i}.png`, costume: 'Naked', emotion: 'neutral',
+    mtime: 100 - i,
+  }))
+  const { dom, doc, win, errors } = await ccBoot({
+    setupFetch: (f) => f.setPortraits(many),
+  })
+  await ccCreate(doc, win)
+  await ccWait(400)
+  const cards = () => doc.querySelectorAll('.cc-portrait')
+  check('23 张立绘默认只铺 8 张', cards().length === 8, String(cards().length))
+  check('头部仍显示总数 23 张',
+    (doc.querySelector('.cc-preview-count')?.textContent || '').includes('23'))
+  const more = doc.querySelector('.cc-portrait-more')
+  check('给出「显示全部」入口', !!more && /23/.test(more.textContent || ''),
+    more?.textContent)
+  check('默认不给收起按钮（还没展开）',
+    !(more?.textContent || '').includes('收起'))
+
+  more?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await ccWait(180)
+  check('展开后能看到全部 23 张', cards().length === 23, String(cards().length))
+  const collapse = doc.querySelector('.cc-portrait-more')
+  collapse?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await ccWait(180)
+  check('收起后回到 8 张', cards().length === 8, String(cards().length))
+
+  // 任务条顺序：有 task 时它必须排在画廊之前；源码层也钉死，避免 task 为 null
+  // 时 DOM 里看不到就漏测。
+  const ctl = readFileSync(resolve(here, 'src', 'components', 'characters', 'Controls.tsx'), 'utf8')
+  const iTask = ctl.indexOf('<TaskBar task={task} />')
+  const iGrid = ctl.indexOf('className="cc-portrait-grid"')
+  check('任务条 JSX 排在画廊之前（进度不会被挤到最下面）',
+    iTask > 0 && iGrid > 0 && iTask < iGrid, `task=${iTask} grid=${iGrid}`)
+  const css = readFileSync(resolve(here, 'src', 'styles.css'), 'utf8')
+  check('任务条在右栏滚动时 sticky 常驻',
+    /\.chars\.cc \.cc-preview > \.cc-task \{[^}]*position: sticky/.test(css))
+  check('画廊限量场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 

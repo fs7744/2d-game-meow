@@ -312,7 +312,11 @@ def _run(job_id: str, workflow: str, params: Dict[str, Any]) -> None:
         if isinstance(pub, dict) and isinstance(job.get("result"), dict):
             src = job["result"].get("raw") or job["result"].get("file") or ""
             try:
-                job["result"]["published"] = characters.publish_image(
+                # 立绘走 Portraits/（跟动作帧分开），别的一律进 Sprites/
+                publish = (characters.publish_portrait
+                           if str(pub.get("kind") or "") == "portrait"
+                           else characters.publish_image)
+                job["result"]["published"] = publish(
                     name=str(pub.get("character") or ""), src=str(src),
                     costume=str(pub.get("costume") or "Naked"),
                     emotion=str(pub.get("emotion") or "neutral"),
@@ -454,16 +458,22 @@ def list_loras() -> Dict[str, Any]:
 
 @app.post("/loras/apply")
 def apply_loras(req: LoraReq) -> Dict[str, Any]:
-    """挂载 LoRA（状态式：一直生效，直到下次 apply 或 unload）。
+    """勾选 / 取消 LoRA（**只改设置，不加载模型**）。
 
-    `items`：`[{"name": "qwen21_anyangle", "scale": 0.8}]`
+    `items`：`[{"name": "qwen21_anyangle", "scale": 0.8}]`，空数组 = 全卸。
+
+    这里以前先 `txt2img_pipe()` 再挂：用户只是想勾一个复选框，却要等 15GB
+    管线进显存（几十秒；权重缺失时直接 400，界面表现为「勾了又弹回去」）。
+    现在只把规格记进引擎（`Engine.set_user_loras`），真正的挂载推迟到下一次
+    生成的 `txt2img_pipe()` —— 与 `PUT /settings` 的懒恢复同一条路。
     """
     try:
-        pipe = engine.txt2img_pipe(engine.DEFAULT_MODEL)
-        active = engine.apply_loras(pipe, req.items)
+        engine.set_user_loras(req.items)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(400, f"挂载 LoRA 失败：{exc}") from exc
-    return {"active": active, "items": engine.active_loras()}
+    active = engine.active_loras()
+    return {"active": [a.get("adapter") or a["name"] for a in active],
+            "items": active}
 
 
 class FastModeReq(BaseModel):
@@ -486,10 +496,9 @@ def set_fast_mode(req: FastModeReq) -> Dict[str, Any]:
 
 @app.post("/loras/unload")
 def unload_loras() -> Dict[str, Any]:
-    """卸掉全部 LoRA，回到基座模型。"""
+    """卸掉全部 LoRA，回到基座模型（同样只改设置，不加载模型）。"""
     try:
-        pipe = engine.txt2img_pipe(engine.DEFAULT_MODEL)
-        engine.unload_loras(pipe)
+        engine.set_user_loras([])
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(400, f"卸载 LoRA 失败：{exc}") from exc
     return {"active": [], "items": []}
@@ -1722,12 +1731,16 @@ def character_analyze_api(name: str, req: CharacterAnalyzeReq) -> Dict[str, Any]
 
     raw_path = str(req.image or "").strip()
     if not raw_path:
-        # 没指定就取这个角色最新的一张精灵帧（常见用法：看自己刚出的图）
-        for costume in characters.list_costumes(safe):
-            images = characters.list_pose_preview_files(safe, costume, None)
-            if images:
-                raw_path = images[-1]
-                break
+        # 没指定就取这个角色最新的一张立绘（没有立绘的老角色再退回动作帧）
+        portraits = characters.list_portraits(safe)
+        if portraits:
+            raw_path = portraits[0]["file"]
+        else:
+            for costume in characters.list_costumes(safe):
+                images = characters.list_pose_preview_files(safe, costume, None)
+                if images:
+                    raw_path = images[-1]
+                    break
         if not raw_path:
             raise HTTPException(400, "这个角色还没有图可分析：先在「出图」页生成一张")
     if raw_path.startswith("/files/"):
@@ -1855,6 +1868,32 @@ def character_from_image_api(req: CharacterFromImageReq) -> Dict[str, Any]:
     }
 
 
+@app.get("/characters/{name}/portraits")
+def character_portraits_api(name: str) -> Dict[str, Any]:
+    """这个角色的**全部立绘**（新的在前）。
+
+    立绘以前混在 `Sprites/<服装>/neutral/` 里，被当成第 1 帧播进试玩台。
+    现在单独放 `Portraits/`：这里只列立绘，试玩台/图集只认动作帧。
+    """
+    try:
+        safe = characters.ensure_safe_name(name, "角色名")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not characters.character_exists(safe):
+        raise HTTPException(404, f"没有这个角色：{safe}")
+    items = []
+    for p in characters.list_portraits(safe):
+        items.append({
+            "url": _asset_url(p["file"]),
+            "path": p["file"],
+            "name": p["name"],
+            "costume": p["costume"],
+            "emotion": p["emotion"],
+            "mtime": p["mtime"],
+        })
+    return {"count": len(items), "items": items}
+
+
 @app.post("/characters/{name}/prompt")
 def character_prompt_api(name: str, req: CharacterPromptReq) -> Dict[str, Any]:
     """把 character_info + 风格拼成官方结构的 prompt。
@@ -1872,8 +1911,9 @@ def character_prompt_api(name: str, req: CharacterPromptReq) -> Dict[str, Any]:
     style = req.style or str(info.get("style") or "")
     # PE 用图像模型自己的 Qwen3-VL 文本编码器，**不新增权重**；
     # 但它要常驻 GPU 跑自回归解码——显存紧或没装好时静默退回未扩写版。
+    # 中文提示词模式不走 PE（官方改写器只输出英文），也就没必要去加载管线。
     pipe = None
-    if req.enhance:
+    if charactergen.pe_eligible(info, req.enhance):
         try:
             pipe = engine.txt2img_pipe()
         except Exception as exc:                   # noqa: BLE001
@@ -1919,7 +1959,7 @@ def character_generate_api(name: str, req: CharacterGenerateReq) -> Dict[str, An
         prompt = req.prompt.strip()
     else:
         pipe = None
-        if req.enhance:
+        if charactergen.pe_eligible(info, req.enhance):
             try:
                 pipe = engine.txt2img_pipe()
             except Exception as exc:               # noqa: BLE001
@@ -1942,20 +1982,36 @@ def character_generate_api(name: str, req: CharacterGenerateReq) -> Dict[str, An
         "transparent": str(info.get("background_color") or "").lower()
         == "transparent",
         "publish": {"character": safe, "costume": costume, "emotion": emotion,
+                    # 立绘是「长什么样」，跟动作帧不是一类东西
+                    "kind": "portrait",
                     # 没给就按幕布色决定：绿/蓝/品红自动抠，白/灰不动
                     # （白底会把白毛白甲一起判成背景，这条我们踩过）
                     "matte": matte_screen.should_auto_matte(
                         str(info.get("background_color") or ""), req.matte)},
     }
     if req.workflow == "w2":
-        # 换装：底图取当前这套服装里已有的最新一张（没有就退回 Naked）
-        refs = characters.list_sprite_images(safe, costume, "neutral") \
-            or characters.list_sprite_images(safe, "Naked", "neutral")
-        if not refs:
-            raise HTTPException(400, "换装需要一张底图：先在「属性」页生成一张")
-        params["image_path"] = req.init_image.strip() or refs[-1]
+        # 换装：底图优先用这套服装的**最新立绘**（立绘才是定妆图），
+        # 没有立绘的老角色再退回动作帧。
+        all_p = characters.list_portraits(safe)          # 新的在前
+        same = [p["file"] for p in all_p if p["costume"] == costume]
+        base = (same or [p["file"] for p in all_p] or [""])[0]
+        if not base:
+            # 老角色（立绘还躺在 Sprites 里）：取序号最大那张
+            sprites = (characters.list_sprite_images(safe, costume, "neutral")
+                       or characters.list_sprite_images(safe, "Naked", "neutral"))
+            base = sprites[-1] if sprites else ""
+        if not base and not req.init_image.strip():
+            raise HTTPException(400, "换装需要一张底图：先在「属性」页生成立绘")
+        params["image_path"] = req.init_image.strip() or base
     params.update({k: v for k, v in (req.params or {}).items()
                    if k not in ("prompt", "negative", "publish")})
+    # **画风只由画风库自己那条定义决定**：立绘绝不能挂 presets 的公共契约。
+    # gen.txt2img 默认 preset="sprite"，会追加 "flat plain background /
+    # ample empty space around" 这类构图词（跟立绘「占满画面高度」直接打架），
+    # 更糟的是 SPRITE_NEG_PAINT 里写着 "photo, 3d render" —— 用户选写实 /
+    # 3D 渲染画风时，等于用负向词把自己选的画风压掉。Q 版等风格同理被拉平。
+    # 放在 params.update 之后：客户端手传的 preset 也盖不掉这个约束。
+    params["preset"] = "none"
 
     job_id = uuid.uuid4().hex[:12]
     _jobs[job_id] = {"job_id": job_id, "workflow": req.workflow, "params": params,

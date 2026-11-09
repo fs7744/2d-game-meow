@@ -193,7 +193,13 @@ def test_prompt_is_official_structured():
     from workflows import charactergen as cg
     info = {"name": "Alice", "sex": "female", "age": 22, "race": "elf",
             "hair": "blonde hair", "eyes": "blue eyes", "background_color": "green",
-            "framing": "full_body", "aesthetics": "masterpiece"}
+            "framing": "full_body", "aesthetics": "masterpiece",
+            # 空字段现在不占行，所以每个字段都要给值才能钉住所有官方行
+            "skin_color": "fair skin", "face": "freckles", "body": "slim build",
+            "breast_size": "medium breasts", "additional_details": "long hair",
+            "lora_prompt": "vnccs_style",
+            # 这条钉的是**官方英文模板**的字段行，所以显式要英文
+            "prompt_language": "en"}
     p = cg.character_prompt(info, "ghibli_miyazaki")
     for key in ("Draw an image of a character in the following style:",
                 "Style reference:", "Style description:",
@@ -210,10 +216,98 @@ def test_prompt_is_official_structured():
     assert "Breast size:" not in male
 
 
+def test_framing_defaults_to_full_body():
+    """默认取景必须是**全身**：官方默认 cowboy_shot（半身），切精灵图会缺脚。"""
+    from workflows import charactergen as cg
+
+    en = {"prompt_language": "en"}
+    framing = cg.qi2_fields({"sex": "female", **en})["framing"]
+    assert "head to toe" in framing, "没写 framing 时要按全身出图"
+    assert "cowboy" not in framing.lower()
+    # 中文（现在的默认）也是全身
+    assert "从头到脚" in cg.qi2_fields({"sex": "female"})["framing"]
+    # 显式选了就照办（半身 / 头像都留着给用户）
+    assert "upper-thigh" in cg.qi2_fields({"framing": "cowboy_shot", **en})["framing"]
+    assert "head and shoulders" in cg.qi2_fields(
+        {"image_type": "portrait", **en})["framing"]
+
+
+def test_chinese_prompt_mode():
+    """中文模式：结构词中文，属性值原样（标签库就是英文 trait）。"""
+    from workflows import charactergen as cg
+
+    info = {"sex": "female", "age": 22, "hair": "blonde hair",
+            "eyes": "blue eyes", "background_color": "green",
+            "prompt_language": "zh"}
+    p = cg.character_prompt(info, "ghibli_miyazaki")
+    for key in ("请画一张角色立绘", "取景：", "背景：纯绿色背景",
+                "性别：女", "年龄：22 岁", "头发：金发", "眼睛：蓝眼"):
+        assert key in p, f"中文模式缺：{key}"
+    assert "从头到脚" in p, "中文模式同样要全身构图词"
+    assert "Draw an image" not in p and "Framing:" not in p
+    # 语言跟角色走：显式选 en 时回到官方英文模板
+    assert "Draw an image" in cg.character_prompt({**info, "prompt_language": "en"},
+                                                  "ghibli_miyazaki")
+
+
+def test_pe_runs_in_chinese_mode(monkeypatch):
+    """中文模式**照样跑 PE**，只是要求它输出中文（不再因为「只出英文」而跳过）。"""
+    from workflows import charactergen as cg, qwen_text
+
+    # 1) 中文 system prompt：把「一律英文」换成「一律中文」，其余结构照官方
+    zh = qwen_text.system_prompt_of("t2i", "zh")
+    assert "简体中文" in zh
+    assert "always in English" not in zh
+    assert "Output format" in zh and "rewritten_prompt" in zh, "JSON 输出格式不能丢"
+    en = qwen_text.system_prompt_of("t2i", "en")
+    assert "always in English" in en, "英文模式仍是官方原文"
+
+    # 2) enhance 把 lang 透到 system prompt
+    seen = {}
+    monkeypatch.setattr(qwen_text, "generate_text",
+                        lambda pipe, req, sp="", **kw: (seen.update(sp=sp) or "x"))
+    monkeypatch.setattr(qwen_text, "system_prompt_of",
+                        lambda kind="t2i", lang="en": seen.update(lang=lang) or "SYS")
+    qwen_text.enhance(None, "req", kind="t2i", lang="zh")
+    assert seen["lang"] == "zh"
+
+    # 3) 中文角色改写成功 → applied=1，正文是中文
+    monkeypatch.setattr(cg.qwen_text, "enhance",
+                        lambda pipe, req, kind="t2i", lang="en", **kw:
+                        "一位银发红瞳的精灵女剑士站在纯绿色背景前，全身入画。")
+    r = cg.enhance_character_prompt(_FakePipe(), {"prompt_language": "zh", "hair": "blonde"},
+                                    "", enhance=True)
+    assert r["applied"] == "1"
+    assert "精灵女剑士" in r["prompt"]
+    assert cg.pe_eligible({"prompt_language": "zh"}, True) is True, "中文模式不再跳过 PE"
+
+
+def test_breast_size_reaches_prompt():
+    """胸围选了就得进提示词。
+
+    官方 `_qi2_character_fields` 的字段清单**漏了 breast_size**，但结构化模板里
+    又打印 `Breast size:` —— 于是那一行永远是空的（官方 bug）。我们补上字段，
+    并且空属性不再占行，避免界面上看到「胸围：」后面什么都没有。
+    """
+    from workflows import charactergen as cg
+
+    zh = cg.character_prompt({"sex": "female", "breast_size": "medium breasts"})
+    assert "胸围：中等胸型" in zh, zh
+    en = cg.character_prompt({"sex": "female", "breast_size": "medium breasts",
+                              "prompt_language": "en"})
+    assert "Breast size: medium breasts" in en
+    # 男性不出这一行（官方同样只在 female 时加）
+    assert "胸围" not in cg.character_prompt({"sex": "male", "breast_size": "medium breasts"})
+    # 没填就不占行
+    assert "胸围" not in cg.character_prompt({"sex": "female"})
+
+
 def test_prompt_transparent_background():
     from workflows import charactergen as cg
-    p = cg.character_prompt({"background_color": "transparent"})
-    assert cg.QI2_ALPHA_BACKGROUND_PROMPT in p
+    assert "透明背景" in cg.character_prompt({"background_color": "transparent"})
+    p_en = cg.character_prompt({"background_color": "transparent",
+                                "prompt_language": "en"})
+    assert cg.QI2_ALPHA_BACKGROUND_PROMPT in p_en
 
 
 def test_resolution_uses_official_formula():
@@ -336,6 +430,71 @@ def _pe(monkeypatch, out: str):
                         lambda pipe, req, kind="t2i", **kw: out)
 
 
+def _tiny_text_model():
+    """CPU 上的迷你「文本编码器」：带 embedding（有 weight）+ 一个空参数模块。"""
+    import torch
+
+    class Tiny(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embed = torch.nn.Embedding(16, 8)
+            self.linear = torch.nn.Linear(8, 8)
+            self.register_buffer("scale", torch.ones(4))
+
+        def get_input_embeddings(self):
+            return self.embed
+
+    return Tiny().eval()
+
+
+def test_pe_device_helpers():
+    """自检用的小工具：设备清点 + 体积估算（meta 骨架要跳过）。"""
+    import torch
+
+    m = _tiny_text_model()
+    assert qwen_text._off_device(m, "cpu") == []
+    assert qwen_text._embed_device(m) == torch.device("cpu")
+    assert qwen_text._weight_gb(m) > 0
+    # fp8 加载中间会留下 meta 张量，那不是「混设备」，不能误报
+    m._buffers["scale"] = torch.ones(4, device="meta")
+    assert qwen_text._off_device(m, "cpu") == []
+
+
+def test_pe_ondevice_unhooks_and_restores():
+    """`_OnDevice` 进出要把 accelerate 的 offload 钩子摘掉再挂回来。
+
+    这是 2026-11-08 那个 `wrapper_CUDA__index_select` 的根因：钩子只搬模块
+    不搬输入。测试不依赖 GPU，用执行设备=cpu 的 AlignDevicesHook 验证生命周期。
+    """
+    from accelerate.hooks import AlignDevicesHook, add_hook_to_module
+
+    m = _tiny_text_model()
+    add_hook_to_module(m, AlignDevicesHook(execution_device="cpu", io_same_device=True))
+    assert getattr(m, "_hf_hook", None) is not None
+    hook = m._hf_hook
+
+    with qwen_text._OnDevice(m, device="cpu") as inner:
+        assert inner is m
+        assert getattr(m, "_hf_hook", None) is None, "generate 期间不该还有钩子搬来搬去"
+        assert qwen_text._off_device(m, "cpu") == [], "搬完必须整块在同设备上"
+    assert getattr(m, "_hf_hook", None) is hook, "出来要把原来的钩子挂回去"
+
+
+@pytest.mark.skipif(not __import__("torch").cuda.is_available(), reason="需要 GPU")
+def test_pe_ondevice_moves_everything_to_cuda():
+    """fp8 的 w_fp8 是 buffer：只搬参数不搬 buffer 就是混设备的源头。"""
+    import torch
+
+    m = _tiny_text_model()
+    with qwen_text._OnDevice(m, device="cuda"):
+        assert qwen_text._off_device(m, "cuda") == []
+        assert all(str(t.device).startswith("cuda")
+                   for t in list(m.parameters()) + list(m.buffers()))
+    # 出来后回到原来的 cpu，别把显存留着
+    assert all(str(t.device) == "cpu"
+               for t in list(m.parameters()) + list(m.buffers()))
+
+
 def test_pe_returns_raw_when_disabled():
     """不启用 PE 就是结构化原文，applied=0（前端要据此显示"未扩写"）。"""
     r = cg.enhance_character_prompt(None, {"name": "A"}, "", enhance=False)
@@ -351,7 +510,7 @@ def test_pe_rewrites_then_appends_style_and_lora(monkeypatch):
     """
     _pe(monkeypatch, "A lone elven girl stands in a sunlit clearing.")
     info = {"name": "Alice", "background_color": "transparent",
-            "lora_prompt": "vnccs_style"}
+            "lora_prompt": "vnccs_style", "prompt_language": "en"}
     r = cg.enhance_character_prompt(_FakePipe(), info, "ghibli_miyazaki")
     assert r["applied"] == "1"
     p = r["prompt"]
@@ -367,12 +526,35 @@ def test_pe_rewrites_then_appends_style_and_lora(monkeypatch):
 
 
 def test_pe_falls_back_when_rewriting_fails(monkeypatch):
-    """PE 是增强不是依赖：改写失败（返回空/带 think/JSON）就退回原文。"""
-    for bad in ("", "   ", "<think>想一下</think>结果", '{"rewritten_prompt": "x"}', "```json\n{}\n```"):
+    """PE 是增强不是依赖：改写失败（空 / 带未闭合 think / 空 JSON / 代码块）就退回原文。"""
+    for bad in ("", "   ", "<think>想一下</think>", "<think>没闭合",
+                "```json\n{}\n```", '{"foo": 1}'):
         _pe(monkeypatch, bad)
         r = cg.enhance_character_prompt(_FakePipe(), {"name": "A"}, "")
         assert r["applied"] == "0", f"这种输出不该算改写成功：{bad!r}"
         assert r["prompt"] == r["raw"]
+
+
+def test_pe_parses_official_json_output(monkeypatch):
+    """官方 t2i 提示词要求回 JSON —— 必须解析，不能见到 `{` 就判失败。
+
+    以前这里直接 reject，于是每次 PE 都白跑（没有报错，界面只显示「未扩写」）。
+    官方 `character_creator_v2.py:1015 _qi2_json_result` 就是干这个的。
+    """
+    _pe(monkeypatch, '{"rewritten_prompt": "A lone elf stands in a clearing.", "wh_ratio": "3:2"}')
+    r = cg.enhance_character_prompt(_FakePipe(), {"name": "A"}, "")
+    assert r["applied"] == "1"
+    assert r["prompt"] == "A lone elf stands in a clearing."
+
+    # think 头 + 合法 JSON：只取 JSON
+    _pe(monkeypatch, 'thinking...\n</think>\n{"rewritten_prompt": "Second version.", "wh_ratio": "1:1"}')
+    r = cg.enhance_character_prompt(_FakePipe(), {"name": "A"}, "")
+    assert r["prompt"] == "Second version."
+
+    # 没有 JSON 的纯段落照样能用（老提示词 / 模型不听话）
+    _pe(monkeypatch, "A plain prose rewrite, no braces.")
+    r = cg.enhance_character_prompt(_FakePipe(), {"name": "A"}, "")
+    assert r["prompt"] == "A plain prose rewrite, no braces."
 
 
 def test_pe_request_excludes_lora_line(monkeypatch):
@@ -447,10 +629,14 @@ def test_tag_picker_values_round_trip_through_prompt():
     from workflows import charactergen as cg
     info = {"name": "A", "sex": "female", "age": 18, "race": "elf",
             "hair": "bob haircut, black hair", "eyes": "blue eyes, green eyes"}
-    p = cg.character_prompt(info, "")
+    p = cg.character_prompt({**info, "prompt_language": "en"}, "")
     assert "Typical species features" in p, "选择器写的 elf 没被认出来"
     assert "Hair: bob haircut, black hair" in p
     assert "Eyes: blue eyes, green eyes" in p
+    # 中文（默认）：属性值也走译表；没收录的（bob haircut）原样保留
+    zh = cg.character_prompt(info, "")
+    assert "头发：波波头, 黑发" in zh
+    assert "眼睛：蓝眼, 绿眼" in zh
 
 
 # ---------------------------------------------------------------- 名字校验（中文）
@@ -529,3 +715,41 @@ def test_chinese_name_survives_api(client):
     assert got.status_code == 200, got.text
     assert ch.character_exists(name)
     client.delete(f"/characters/{quote(name)}?remove_files=1")
+
+
+def test_portraits_are_separate_from_action_frames():
+    """立绘放 `Portraits/`，**不进** `Sprites/`。
+
+    这是 2026-11-08 用户点出来的：立绘是「长什么样」的定妆图，动作帧是「怎么动」
+    的素材。以前立绘被当第 1 帧塞进 Sprites/neutral，于是试玩台把一张站桩图
+    当动画播、图集导出里也混着它。
+    """
+    import shutil
+    from pathlib import Path
+    if ch.character_exists("Port"):
+        ch.delete_character("Port")
+    ch.create_character("Port")
+    src = Path(paths.CHARACTERS_DIR, "_tmp_portrait.png")
+    src.parent.mkdir(parents=True, exist_ok=True)
+    src.write_bytes(b"p1")
+    try:
+        p1 = ch.publish_portrait("Port", str(src), "Naked", "neutral")
+        src.write_bytes(b"p2")
+        p2 = ch.publish_portrait("Port", str(src), "Knight", "neutral")
+        assert "Portraits" in Path(p1["path"]).parts
+        assert Path(p1["path"]).read_bytes() == b"p1", "立绘是追加，不覆盖"
+        assert Path(p2["path"]).read_bytes() == b"p2"
+        # 动作帧目录里一张都不该有
+        assert ch.list_sprite_images("Port", "Naked", "neutral") == []
+        assert ch.list_pose_preview_files("Port") == []
+        # 全部立绘都能列出来（新的在前）
+        items = ch.list_portraits("Port")
+        assert len(items) == 2, items
+        assert items[0]["mtime"] >= items[1]["mtime"]
+        assert {i["costume"] for i in items} == {"Naked", "Knight"}
+    finally:
+        shutil.rmtree(Path(paths.CHARACTERS_DIR, "_tmp_portrait.png").parent
+                      / "Port", ignore_errors=True)
+        src.unlink(missing_ok=True)
+        if ch.character_exists("Port"):
+            ch.delete_character("Port")

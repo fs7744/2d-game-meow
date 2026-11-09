@@ -188,3 +188,36 @@ def test_translations_are_actually_chinese() -> None:
             assert val.strip(), f"{name}[{key!r}] 的译文是空的"
             has_cjk = any("\u4e00" <= ch <= "\u9fff" for ch in val)
             assert has_cjk, f"{name}[{key!r}] = {val!r} 没有中文"
+
+
+def test_character_tags_fully_translated() -> None:
+    """属性选择器用的第二份官方库 `character_tags.json` 也要全中文。
+
+    这份库按 hair_color / hairstyles / races / details 分组，tag 是下划线写法。
+    以前只校验 `character_presets_v2.json`，于是选择器里发色 / 发型 / 种族那一排
+    悄悄全是英文（2026-11-08 用户直接看到的）。
+    """
+    tables = parse_label_tables()
+    data = _load(TEMPLATE / "character_tags.json")
+    missing: List[str] = []
+    for items in (data.get("tags") or {}).values():
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if isinstance(item, dict) and item.get("tag") not in tables["TAG_LABEL"]:
+                missing.append(str(item.get("tag")))
+    assert not missing, f"这些属性标签没翻译：{sorted(set(missing))}"
+
+
+def test_backend_labels_json_in_sync() -> None:
+    """`workflows/labels_zh.json` 必须跟 `labels.ts` 一致。
+
+    后端拼中文提示词要靠这份 JSON（`tools/build_labels_zh.py` 导出）。
+    改了 labels.ts 忘了重跑脚本，提示词里就会冒出英文 —— 这里直接拦住。
+    同步办法：`python tools/build_labels_zh.py`
+    """
+    tables = parse_label_tables()
+    exported = _load(ROOT / "workflows" / "labels_zh.json")
+    for name in ("TAG_LABEL", "STYLE_LABEL", "STYLE_GROUP_LABEL", "BG_COLOR_LABEL"):
+        assert exported.get(name) == tables.get(name), (
+            f"{name} 与 labels.ts 不同步，跑 python tools/build_labels_zh.py")

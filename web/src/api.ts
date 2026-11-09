@@ -882,6 +882,22 @@ export function fetchCharacterPrompt(
     { method: 'POST', body: JSON.stringify({ style, info: info || {}, enhance }) })
 }
 
+/** 这个角色的全部立绘（新的在前）。立绘在 `Portraits/`，跟动作帧分开。 */
+export type PortraitItem = {
+  url: string
+  path: string
+  name: string
+  costume: string
+  emotion: string
+  mtime: number
+}
+
+export async function fetchPortraits(name: string): Promise<PortraitItem[]> {
+  const r = await req<{ count: number; items: PortraitItem[] }>(
+    `/characters/${encodeURIComponent(name)}/portraits`)
+  return r.items || []
+}
+
 /** 给角色出图；出完后端自动按官方命名收进角色目录 */
 export function generateForCharacter(
   name: string, body: {

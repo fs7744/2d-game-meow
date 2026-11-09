@@ -24,7 +24,10 @@
  *
  * 所有英文标识仍按原值传给服务端，中文只在渲染处映射。
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  useCallback, useEffect, useMemo, useRef, useState,
+  type CSSProperties, type PointerEvent as ReactPointerEvent,
+} from 'react'
 import {
   type CharacterDetail, type CharacterSummary, type StyleCatalog,
   type EmotionCatalog,
@@ -33,7 +36,8 @@ import {
   fetchStyleCatalog, fetchEmotionCatalog,
   fetchCharacterPrompt, generateForCharacter, fetchJob, fetchCharacterTags,
   detectEmotionFaces, generateEmotions, type EmotionFrame,
-  analyzeCharacter, wizardCharacter, designClothes, clothesWizard,
+  analyzeCharacter, wizardCharacter, designClothes, clothesWizard, uploadImage,
+  fetchPortraits, type PortraitItem,
   generatePoses, fetchPoseDirs, exportAtlas, fetchAtlasInfo, designUnderwear,
   runPipeline, type PoseDir, type AtlasInfo,
   type CharacterPrompt, type TagCatalog,
@@ -46,7 +50,7 @@ import {
   BG_COLOR_LABEL, COSTUME_LABEL, STYLE_GROUP_LABEL, STYLE_LABEL, emotionLabel, zh,
 } from '../labels'
 import {
-  Adv, Blocker, Card, CostumeForm, EmotionGrid, FieldChips, PreviewPane,
+  Adv, Blocker, Card, CostumeForm, EmotionGrid, FieldChips, PortraitPane,
   StepBar, StepHead, StylePicker,
   type EmotionOption, type StyleOption,
 } from './characters/Controls'
@@ -63,6 +67,13 @@ type Props = {
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+/** 取景（官方 framing）。**默认全身**：半身图切精灵帧会缺脚。值原样传给后端。 */
+const FRAMING_OPTIONS: Array<[string, string]> = [
+  ['full_body', '全身（游戏素材默认）'],
+  ['cowboy_shot', '半身（到大腿）'],
+  ['portrait', '头像 / 胸像'],
+]
 
 /** 全局抠图方式 → 勾选项后面那一小截说明（值原样来自 /settings）。 */
 const MATTE_SHORT: Record<string, string> = {
@@ -102,15 +113,26 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
   /** 单一「当前服装」：预览、换装、表情、姿势、流水线全都用它。
    *  旧版 costume / browseCostume 两套状态会让「服装页选 A、素材页跑 B」。 */
   const [costume, setCostume] = useState('Naked')
-  const [browseEmotion, setBrowseEmotion] = useState('neutral')
-  const [browseFiles, setBrowseFiles] = useState<string[]>([])
+  /** 全部立绘（右侧「立绘」栏）。立绘在 Portraits/，跟动作帧分开。 */
+  const [portraits, setPortraits] = useState<PortraitItem[]>([])
   /** 单一「抠背景」开关，默认关 —— 模型自带透明底，跑分割是用户的选择。
    *  旧版出图 / 表情 / 流水线 / 后端四处默认值各不相同。 */
   const [matte, setMatte] = useState(false)
-  /** Prompt Enhancement 官方默认开；代价写在进阶设置里，不再埋在折叠小字。 */
-  const [enhance, setEnhance] = useState(true)
-  const enhanceRef = useRef(enhance)
-  enhanceRef.current = enhance
+  /** Prompt Enhancement：**只有用户点按钮才跑**。中文角色出来就是中文描述。 */
+  const [enhancing, setEnhancing] = useState(false)
+  const doEnhancePrompt = useCallback(async () => {
+    if (!sel || enhancing) return
+    setEnhancing(true)
+    try {
+      const p = await fetchCharacterPrompt(sel, '', undefined, true)
+      setCPrompt(p)
+      onNotice(p.enhanced
+        ? '提示词已润色（Qwen3-VL 改写），可以直接出图'
+        : '润色没生效，已保留原始提示词')
+    } catch (e) {
+      setErr(`润色失败：${explainError(e)}`)
+    } finally { setEnhancing(false) }
+  }, [sel, enhancing, onNotice])
 
   /* ------------------------------------------------------- 步骤与任务 */
   const [userStep, setUserStep] = useState<StepId | null>(null)
@@ -123,8 +145,38 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
   const [styleQuery, setStyleQuery] = useState('')
   const [styleGroup, setStyleGroup] = useState('')
   const [styleOpen, setStyleOpen] = useState(false)
+  /** 右栏「角色成果」宽度：可拖动，记在本地（不同机器窗口大小差别很大）。 */
+  const [sideW, setSideW] = useState<number>(() => {
+    const v = Number(localStorage.getItem('meow.cc.sideW'))
+    return Number.isFinite(v) && v >= 280 ? v : 420
+  })
+  const splitRef = useRef<HTMLDivElement | null>(null)
+  const dragRef = useRef<{ x: number; w: number } | null>(null)
+  const startSideDrag = useCallback((e: ReactPointerEvent) => {
+    if (window.innerWidth <= 1020) return        // 窄屏是单栏，别让人拖出个空条
+    dragRef.current = { x: e.clientX, w: sideW }
+    ;(e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId)
+    document.body.classList.add('is-resizing')
+  }, [sideW])
+  const moveSideDrag = useCallback((e: ReactPointerEvent) => {
+    const st = dragRef.current
+    if (!st) return
+    const host = splitRef.current?.parentElement
+    const total = host?.clientWidth ?? window.innerWidth
+    // 右栏宽度 = 指针到容器右边的距离；主区至少留 460px，右栏 280~总宽-500
+    const next = Math.round(st.w + (st.x - e.clientX))
+    setSideW(Math.max(280, Math.min(next, Math.max(320, total - 460))))
+  }, [])
+  const endSideDrag = useCallback(() => {
+    if (!dragRef.current) return
+    dragRef.current = null
+    document.body.classList.remove('is-resizing')
+    localStorage.setItem('meow.cc.sideW', String(sideW))
+  }, [sideW])
   const [wizText, setWizText] = useState('')
   const [anaResult, setAnaResult] = useState<Record<string, unknown> | null>(null)
+  /** 「选本地图片反推」的隐藏 file input */
+  const analyzeRef = useRef<HTMLInputElement | null>(null)
   const [clothText, setClothText] = useState('')
   const [costumeDraft, setCostumeDraft] = useState<Record<string, string>>({})
   const [newCostume, setNewCostume] = useState('')
@@ -159,12 +211,19 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
     setDraft(d.config.character_info ?? {})
     const info = await fetchAtlasInfo(name).catch(() => null)
     setAtlasInfo(info)
+    setPortraits(await fetchPortraits(name).catch(() => []))
     await reload()
     return d
   }, [reload])
 
-  const refreshPrompt = useCallback((name: string, withEnhance = enhanceRef.current) => {
-    void fetchCharacterPrompt(name, '', undefined, withEnhance)
+  /**
+   * 重新拼 prompt（**不跑 PE**）。
+   *
+   * PE 要跑一次 8B 自回归解码（10~40s），只能是用户点「润色」时才动 ——
+   * 以前打开这一步就自动跑，页面像卡住，而且用户没得选。
+   */
+  const refreshPrompt = useCallback((name: string) => {
+    void fetchCharacterPrompt(name, '', undefined, false)
       .then(setCPrompt).catch(() => setCPrompt(null))
   }, [])
 
@@ -182,11 +241,12 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
   useEffect(() => {
     if (!sel) {
       setDetail(null); setCPrompt(null); setDraft({}); setAtlasInfo(null)
+      setPortraits([])
       return
     }
     let alive = true
     setUserStep(null); setTask(null); setDoneFlash(null); setAnaResult(null)
-    setEmoFrames(null); setEmoSel([]); setBrowseEmotion('neutral')
+    setEmoFrames(null); setEmoSel([])
     void fetchCharacter(sel)
       .then((d) => {
         if (!alive) return
@@ -196,6 +256,8 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
       .catch((e) => { if (alive) setErr(explainError(e)) })
     refreshPrompt(sel)
     void fetchAtlasInfo(sel).then((i) => { if (alive) setAtlasInfo(i) }).catch(() => {})
+    void fetchPortraits(sel).then((p) => { if (alive) setPortraits(p) }).catch(() => {})
+    void fetchPortraits(sel).then((p) => { if (alive) setPortraits(p) }).catch(() => {})
     return () => { alive = false }
   }, [sel, refreshPrompt])
 
@@ -253,22 +315,17 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
 
   const progress = useMemo(() => computeProgress({
     hasCharacter: !!sel && !!detail,
+    portraits: portraits.length,
     frames: assetStats.frames,
     groups: assetStats.groups,
     hasAtlas: !!atlasInfo?.exists,
-  }), [sel, detail, assetStats, atlasInfo])
+  }), [sel, detail, portraits, assetStats, atlasInfo])
   const activeStep: StepId = userStep ?? progress.firstUndone
-  const hasSprite = assetStats.frames > 0
-  const browseEmotions = useMemo(() => {
-    const had = Object.keys(detail?.assets?.[costume] || {})
-    return had.length ? had : ['neutral']
-  }, [detail, costume])
-
-  /** 必须稳定：SpritePreview 的 loadMeta 把它列进依赖，内联箭头函数会让
-   *  每次 render 都重新拉 meta、把翻到的第二帧弹回第一帧。 */
-  const handlePreviewMeta = useCallback(
-    (m: { count: number; files: string[] }) => setBrowseFiles(m.files), [])
-
+  /** 「有立绘」= 能拿它当底图（换装 / 出姿势 / 白内衣起稿）。 */
+  const hasPortrait = portraits.length > 0
+  /** 「有动作帧」= 表情叠加 / 导出图集 / 试玩台才有东西可看。立绘不算动作帧。 */
+  const hasFrames = assetStats.frames > 0
+  const hasSprite = hasPortrait || hasFrames
   const poseFrameCount = poseDirs.find((d) => d.path === poseDir)?.count ?? 4
   const pipelineEstimate = estimateSeconds(poseFrameCount, pipeEmotions.length)
 
@@ -399,11 +456,24 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
     })
   }, [sel, wizText, busy, runInline])
 
-  const doAnalyze = useCallback(async () => {
+  /**
+   * 从图片反推属性。
+   *
+   * `file` 传了就先上传这张本地图，用它反推；不传则用角色最新的一张立绘
+   * （后端默认行为）。**两种都要支持**：用户可能拿别人的设定图来抄属性，
+   * 也可能只是想重读自己刚出的图。
+   */
+  const doAnalyze = useCallback(async (file?: File) => {
     if (!sel || busy) return
-    await runInline('从图片反推属性', async () => {
+    await runInline(file ? `从「${file.name}」反推属性` : '从图片反推属性', async () => {
+      let image = ''
+      if (file) {
+        const up = await uploadImage(file)
+        image = up.path
+      }
       const r = await analyzeCharacter(sel, {
         background_color: String(draft.background_color ?? ''),
+        ...(image ? { image } : {}),
       })
       setAnaResult(r.fields)
       return `读完了（${r.seconds}s）——确认无误再点「用这些属性」`
@@ -422,17 +492,19 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
     void saveInfo(patch)
   }, [anaResult, saveInfo])
 
-  /** 出第一张立绘（w1）/ 以立绘为基础再画一张（w2）。 */
+  /** 生成立绘（w1）/ 基于最新立绘再画一张（w2）。 */
   const doGenerate = useCallback((workflow: 'w1' | 'w2') => {
     if (!sel) return
-    void runTask(workflow === 'w1' ? '生成第一张立绘' : '再画一张立绘',
+    void runTask(workflow === 'w1' ? '生成立绘' : '再画一张立绘',
       () => generateForCharacter(sel, {
         workflow, costume, emotion: 'neutral',
         prompt: cPrompt?.prompt || '', negative: cPrompt?.negative || '',
-        enhance, matte,
+        // 界面上这段 prompt 就是最终要喂的（润色过就是润色版）；
+        // 再让后端跑一次 PE 等于把已经改好的文字再改一遍，纯浪费 40 秒。
+        enhance: false, matte,
       }),
-      () => { setBrowseEmotion('neutral') })
-  }, [sel, runTask, costume, cPrompt, enhance, matte])
+      () => {})
+  }, [sel, runTask, costume, cPrompt, matte])
 
   /* --------------------------------------------------- 第 ③ 步：出素材 */
   const doCreateCostume = useCallback(async () => {
@@ -497,7 +569,7 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
       const r = await detectEmotionFaces(sel, { costume })
       setEmoFrames(r.items)
       const hit = r.items.filter((f) => f.detected).length
-      if (r.count === 0) return '没有源帧：先生成第一张立绘，表情是在它上面只改脸'
+      if (r.count === 0) return '没有动作帧：表情是在动作帧上只改脸，先在第 ③ 步出素材'
       return `${r.count} 张源帧，${hit} 张检出脸框`
         + (hit < r.count ? '（没检出的会整图重画）' : '')
     })
@@ -515,7 +587,6 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
         setTask((t) => t ? { ...t, message: `完成 ${res.count ?? 0} 张，`
           + `${res.failed!.length} 张失败：${res.failed![0]?.error || ''}` } : t)
       }
-      setBrowseEmotion(emoSel[0])
     })
   }, [sel, runTask, costume, emoSel, emoParams, matte])
 
@@ -562,7 +633,8 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
   }
 
   return (
-    <div className="chars cc is-workspace">
+    <div className="chars cc is-workspace"
+      style={{ '--cc-side-w': `${sideW}px` } as CSSProperties}>
       {/* ---------------- 中：唯一主线 ------------- */}
       <main className="chars-detail cc-main">
         <div className="cc-backbar">
@@ -640,7 +712,7 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
               <div className="cc-how">
                 <b>接下来会发生什么</b>
                 <ol>
-                  <li>定形象：选外貌与画风，出第一张立绘</li>
+                  <li>定形象：选外貌与画风，生成立绘</li>
                   <li>出素材：一键生成整套姿势、表情、换装</li>
                   <li>导出：打包图集，直接进游戏引擎</li>
                 </ol>
@@ -651,7 +723,7 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
           {/* ============================ ② 定形象 ============================ */}
           {activeStep === 2 && sel && detail && (
             <>
-              <StepHead step={2} sub="这一步定的是「这个角色长什么样」。定完生成的立绘会作为后面所有素材的基准。" />
+              <StepHead step={2} sub="这一步定的是「这个角色长什么样」。立绘是定妆图，会一直留在右边；动作素材在第 ③ 步才产出。" />
               <Card title="不想一项项选？直接说一句话" note="AI 会拆成结构化设定，先给你看，确认后才写进角色。">
                 <div className="cc-row">
                   <input className="chars-wizard-input" value={wizText}
@@ -662,7 +734,22 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
                     disabled={busy || !wizText.trim()}>一句话生成</button>
                   <button type="button" className="cc-btn ghost" onClick={() => void doAnalyze()}
                     disabled={busy}>从图片反推属性</button>
+                  {/* 图源自己选：当前立绘（上面那个按钮）或本地任意一张 */}
+                  <button type="button" className="cc-btn ghost"
+                    onClick={() => analyzeRef.current?.click()}
+                    disabled={busy}>选本地图片反推…</button>
+                  <input ref={analyzeRef} type="file" accept="image/*"
+                    className="lora-file-input"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0]
+                      e.target.value = ''            // 允许重复选同一张
+                      if (f) void doAnalyze(f)
+                    }} />
                 </div>
+                <p className="chars-sub">
+                  「从图片反推属性」读的是当前最新立绘；想用别的图（参考设定图、别处存的角色图）
+                  就点「选本地图片反推…」。
+                </p>
                 {anaResult && (
                   <div className="chars-analyze">
                     <table><tbody>
@@ -731,11 +818,46 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
                   下面是按角色档案拼好的结构化提示词（每个字段一行）。
                   改了就用你这份出图；不确定就别动。
                 </p>
+                {/* 取景 / 语言：以前取景只跟官方默认（半身到大腿），
+                    游戏素材要的是全身；语言默认英文，但 Qwen-Image 中文原生支持。 */}
+                <div className="cc-row">
+                  <label className="cc-inline-field">取景
+                    <select value={String(draft.framing || 'full_body')}
+                      onChange={(e) => {
+                        setDraft((d) => ({ ...d, framing: e.target.value }))
+                        void saveInfo({ framing: e.target.value })
+                      }}>
+                      {FRAMING_OPTIONS.map(([v, label]) => (
+                        <option key={v} value={v}>{label}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="cc-inline-field">提示词语言
+                    <select value={String(draft.prompt_language || 'zh')}
+                      onChange={(e) => {
+                        setDraft((d) => ({ ...d, prompt_language: e.target.value }))
+                        void saveInfo({ prompt_language: e.target.value })
+                      }}>
+                      <option value="zh">中文（默认）</option>
+                      <option value="en">英文（官方模板）</option>
+                    </select>
+                  </label>
+                  <span className="chars-sub">
+                    取景选全身，切精灵图才不会缺脚。中文模式连润色也出中文，
+                    直接喂 Qwen-Image（它的文本编码器就是 Qwen3-VL）。
+                  </span>
+                </div>
+                <div className="cc-row">
+                  <span className="chars-sub">
+                    分辨率 {cPrompt ? `${cPrompt.resolution[0]}×${cPrompt.resolution[1]}` : '—'}
+                    · {cPrompt ? `${cPrompt.defaults.steps} 步 / cfg ${cPrompt.defaults.cfg}` : ''}
+                  </span>
+                </div>
                 <label className="chars-field">正向 prompt
                   <textarea className="chars-prompt" value={cPrompt?.prompt ?? ''}
                     onChange={(e) => setCPrompt((p) => (p ? { ...p, prompt: e.target.value } : p))} />
                   <PromptZoom value={cPrompt?.prompt ?? ''} label="正向 prompt" disabled={!cPrompt}
-                    hint="英文描述效果更稳。改完直接出图，不用重拼。"
+                    hint="中英文都行：Qwen-Image 的文本编码器原生支持中文。改完直接出图，不用重拼。"
                     onChange={(v) => setCPrompt((p) => (p ? { ...p, prompt: v } : p))} />
                 </label>
                 <label className="chars-field">负向词
@@ -746,23 +868,21 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
                     onChange={(v) => setCPrompt((p) => (p ? { ...p, negative: v } : p))} />
                 </label>
                 <div className="cc-row">
-                  <span className="chars-sub">
-                    分辨率 {cPrompt ? `${cPrompt.resolution[0]}×${cPrompt.resolution[1]}` : '—'}
-                    · {cPrompt ? `${cPrompt.defaults.steps} 步 / cfg ${cPrompt.defaults.cfg}` : ''}
-                  </span>
-                  <button type="button" className="cc-btn ghost" onClick={() => sel && refreshPrompt(sel)}>
-                    重拼 prompt
+                  <button type="button" className="cc-btn"
+                    onClick={() => void doEnhancePrompt()}
+                    disabled={busy || enhancing || !sel}>
+                    {enhancing ? '润色中…（10~40 秒）' : '✨ 润色提示词'}
                   </button>
-                </div>
-                <label className="chars-check">
-                  <input type="checkbox" checked={enhance}
-                    onChange={(e) => { setEnhance(e.target.checked); refreshPrompt(sel, e.target.checked) }} />
-                  让模型自己润色提示词（Prompt Enhancement）
+                  <button type="button" className="cc-btn ghost"
+                    onClick={() => sel && refreshPrompt(sel)} disabled={busy || enhancing}>
+                    还原结构化原文
+                  </button>
                   <span className="chars-sub">
-                    用图像模型自带的 <b>Qwen3-VL</b> 改写，措辞更贴近训练分布；
-                    代价是编码器要常驻显存、每次多花一点时间。失败会自动退回原始 prompt。
+                    {cPrompt?.enhanced
+                      ? '当前是润色后的版本（再点一次会用原文重写）'
+                      : '当前是结构化原文；润色只在点按钮时跑，用图像模型自带的 Qwen3-VL 改写'}
                   </span>
-                </label>
+                </div>
                 <label className="chars-check">
                   <input type="checkbox" checked={matte} onChange={(e) => setMatte(e.target.checked)} />
                   额外抠一次纯色背景
@@ -790,17 +910,17 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
               <div className="cc-actions">
                 <button type="button" className="cc-btn primary cc-cta"
                   onClick={() => doGenerate('w1')} disabled={busy || !cPrompt}>
-                  生成第一张立绘
+                  生成立绘
                 </button>
                 <button type="button" className="cc-btn ghost" onClick={() => doGenerate('w2')}
-                  disabled={busy || !cPrompt || !hasSprite}
-                  title={hasSprite ? '以现有立绘为基础再画一张' : '要先生成第一张立绘'}>
-                  以立绘为基础再画一张
+                  disabled={busy || !cPrompt || !hasPortrait}
+                  title={hasPortrait ? '以最新那张立绘为基础再画一张' : '要先有一张立绘'}>
+                  基于这张再生一张
                 </button>
                 <span className="cc-cost">单张约 25 秒 · 显存峰值 11~15GB</span>
               </div>
-              {!hasSprite && (
-                <p className="cc-tip">还没有立绘。第 ③ 步的整套素材都要以它为基准，先生成这一张。</p>
+              {!hasPortrait && (
+                <p className="cc-tip">还没有立绘。第 ③ 步的整套动作素材都要以它为基准，先立一张。</p>
               )}
             </>
           )}
@@ -945,7 +1065,7 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
                   </div>
                   <div className="cc-actions">
                     <button type="button" className="cc-btn" onClick={doGenerateEmotions}
-                      disabled={busy || emoSel.length === 0 || !hasSprite}>
+                      disabled={busy || emoSel.length === 0 || !hasFrames}>
                       批量生成（{emoSel.length} 个表情）
                     </button>
                   </div>
@@ -981,7 +1101,7 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
                 note="所有帧会统一到同一画布并做水平居中 + 底边对齐，动画里角色才不会上下抖。">
                 <div className="cc-actions">
                   <button type="button" className="cc-btn primary cc-cta"
-                    onClick={doExportAtlas} disabled={busy || !hasSprite}>导出图集</button>
+                    onClick={doExportAtlas} disabled={busy || !hasFrames}>导出图集</button>
                   <span className="cc-cost">
                     输出 atlas.png + atlas.json · 帧率 {atlasFrameRate} fps
                     {atlasFrameRate !== 8 && '（来自试玩验收）'}
@@ -1044,21 +1164,27 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
         )}
       </main>
 
+      {/* 拖动条：左右两栏自由分配宽度（右栏成果区要大还是要小，用户自己定） */}
+      <div ref={splitRef} className="cc-split" role="separator" aria-orientation="vertical"
+        aria-label="拖动调整成果区宽度" title="拖动调整宽度（双击恢复默认）"
+        onPointerDown={startSideDrag}
+        onPointerMove={moveSideDrag}
+        onPointerUp={endSideDrag}
+        onPointerCancel={endSideDrag}
+        onDoubleClick={() => { setSideW(420); localStorage.setItem('meow.cc.sideW', '420') }} />
+
       {/* ---------------- 右：常驻成果 + 统一任务状态 ------------- */}
       {sel && detail ? (
-        <PreviewPane
-          character={detail.name} costume={costume} emotion={browseEmotion}
-          costumes={detail.costumes} emotions={browseEmotions} files={browseFiles}
-          task={task} doneFlash={doneFlash} onDismissFlash={() => setDoneFlash(null)}
-          onCostume={setCostume} onEmotion={setBrowseEmotion}
-          onMeta={handlePreviewMeta} atlasInfo={atlasInfo} />
+        <PortraitPane
+          character={detail.name} portraits={portraits}
+          task={task} doneFlash={doneFlash} onDismissFlash={() => setDoneFlash(null)} />
       ) : (
         <aside className="cc-preview cc-preview-idle">
-          <div className="cc-preview-head"><b>角色成果</b></div>
+          <div className="cc-preview-head"><b>立绘</b></div>
           <div className="cc-preview-empty">
             <span className="cc-preview-empty-icon">◧</span>
-            <p>这里会一直显示这个角色的最新成果。</p>
-            <p>从选定形象开始，生成的每一张立绘、每一套精灵帧都能立刻翻看。</p>
+            <p>立绘是角色的定妆图，跟动作帧分开。</p>
+            <p>选定一个角色后，这里会列出它全部的立绘，点开能看大图。</p>
           </div>
           <div className="cc-how">
             <b>四步做出一整套素材</b>

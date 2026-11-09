@@ -4,11 +4,12 @@
  * 全部是纯展示：状态与业务动作留在 CharactersPage，这里只负责「长什么样」。
  * 拆出来的目的很实际 —— 以前 1900 行一个文件，改一个按钮要在一堆轮询循环里找 JSX。
  */
-import { type ReactNode } from 'react'
-import SpritePreview from '../SpritePreview'
-import { stylePreviewUrl, emotionIconUrl, type AtlasInfo } from '../../api'
+import { useEffect, useState, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
+import Lightbox from '../Lightbox'
+import { stylePreviewUrl, emotionIconUrl, type PortraitItem } from '../../api'
 import {
-  BG_COLOR_LABEL, COSTUME_LABEL, STYLE_GROUP_LABEL, emotionLabel, zh,
+  BG_COLOR_LABEL, COSTUME_LABEL, STYLE_GROUP_LABEL, tagLabel, zh,
 } from '../../labels'
 import { BG_COLORS, STEPS, type StepId, type TaskState } from './model'
 
@@ -167,7 +168,10 @@ export function FieldChips({ label, value, onPick }: {
       <div className="chars-field-label">{label}</div>
       <div className="chars-tags">
         {chips.length === 0 && <span className="chars-tags-empty">未设置</span>}
-        {chips.map((c) => <span className="chars-tag" key={c}>{c}</span>)}
+        {/* 显示中文，值（title）保留英文原样 —— 写进 prompt 的仍是存档值 */}
+        {chips.map((c) => (
+          <span className="chars-tag" key={c} title={c}>{tagLabel(c)}</span>
+        ))}
         <button type="button" className="mini" onClick={onPick} title="从标签库里选（可多选）">
           {chips.length ? '改' : '选'}
         </button>
@@ -203,6 +207,15 @@ export function StylePicker({
       || s.group.toLowerCase().includes(q) || s.zhGroup.toLowerCase().includes(q)
   })
   const currentLabel = options.find((s) => s.id === current)?.zhLabel || current
+  /** Esc 关窗：弹窗上写了「关闭（Esc）」，就得真的能按。 */
+  useEffect(() => {
+    if (!open) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onToggle() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [open, onToggle])
+  /** 点卡片 = 选中并关窗：一步到位，不用再点「确定」。 */
+  const pickAndClose = (id: string) => { onPick(id); onToggle() }
   return (
     <div className="chars-style cc-style">
       <div className="chars-style-head">
@@ -211,8 +224,8 @@ export function StylePicker({
           <b>{currentLabel || '尚未选择（默认画风）'}</b>
         </div>
         <span className="spacer" />
-        <button type="button" className="cc-btn ghost" onClick={onToggle}>
-          {open ? '收起画风库' : '浏览画风'}
+        <button type="button" className="cc-btn" onClick={onToggle}>
+          浏览画风库（{options.length}）
         </button>
       </div>
       <div className="cc-style-quick">
@@ -224,32 +237,44 @@ export function StylePicker({
           </button>
         ))}
       </div>
-      {open && (
-        <>
-          <div className="chars-style-toolbar">
-            <input className="chars-style-search" type="search"
-              placeholder="搜索画风（中文名 / 英文名 / 分类）…"
-              value={query} onChange={(e) => onQuery(e.target.value)} />
-            <select value={group} onChange={(e) => onGroup(e.target.value)}>
-              <option value="">全部分类</option>
-              {groups.map((g) => <option key={g} value={g}>{zh(STYLE_GROUP_LABEL, g)}</option>)}
-            </select>
-            <span className="chars-sub">{filtered.length} 条</span>
+      {/* 画风库是**弹窗**：以前摊在卡片里，缩略图只有 100px 宽，
+          根本看不出笔触差别。弹窗里能放大到 200px+，还能边搜边比。 */}
+      {open && createPortal(
+        <div className="cc-style-mask" onClick={onToggle}>
+          <div className="cc-style-dialog" onClick={(e) => e.stopPropagation()}>
+            <div className="cc-style-dialog-head">
+              <h2>选画风</h2>
+              <span className="cc-style-dialog-now">
+                当前：<b>{currentLabel || '默认画风'}</b>
+              </span>
+              <span className="spacer" />
+              <button type="button" className="cc-style-close" onClick={onToggle}
+                title="关闭（Esc）">✕</button>
+            </div>
+            <div className="chars-style-toolbar">
+              <input className="chars-style-search" type="search" autoFocus
+                placeholder="搜索画风（中文名 / 英文名 / 分类）…"
+                value={query} onChange={(e) => onQuery(e.target.value)} />
+              <select value={group} onChange={(e) => onGroup(e.target.value)}>
+                <option value="">全部分类</option>
+                {groups.map((g) => <option key={g} value={g}>{zh(STYLE_GROUP_LABEL, g)}</option>)}
+              </select>
+              <span className="chars-sub">{filtered.length} 条</span>
+            </div>
+            <div className="chars-style-grid">
+              {filtered.map((s) => (
+                <button type="button" key={s.id}
+                  className={`chars-style-card${current === s.id ? ' on' : ''}`}
+                  title={`${s.zhGroup} · ${s.zhLabel}`}
+                  onClick={() => pickAndClose(s.id)}>
+                  <img src={stylePreviewUrl(s.id)} alt={s.zhLabel} loading="lazy" />
+                  <span>{s.zhLabel}</span>
+                </button>
+              ))}
+            </div>
+            {filtered.length === 0 && <p className="chars-sub">没有匹配的画风，换个词试试。</p>}
           </div>
-          <div className="chars-style-grid">
-            {filtered.map((s) => (
-              <button type="button" key={s.id}
-                className={`chars-style-card${current === s.id ? ' on' : ''}`}
-                title={`${s.zhGroup} · ${s.zhLabel}`}
-                onClick={() => onPick(s.id)}>
-                <img src={stylePreviewUrl(s.id)} alt={s.zhLabel} loading="lazy" />
-                <span>{s.zhLabel}</span>
-              </button>
-            ))}
-          </div>
-          {filtered.length === 0 && <p className="chars-sub">没有匹配的画风，换个词试试。</p>}
-        </>
-      )}
+        </div>, document.body)}
     </div>
   )
 }
@@ -312,66 +337,41 @@ export function CostumeForm({ fields, onChange, onSave }: {
 
 /* ------------------------------------------------------------ 右栏：预览 */
 
+/** 右栏默认只铺这么多张。
+ *  立绘是**一直累积**的（publish_portrait 不覆盖），一次铺几十上百张 <img>，
+ *  首屏的布局与解码全白做；更要命的是把下面的任务进度条挤出视口。 */
+const PORTRAIT_PREVIEW = 8
+
 /** 常驻成果区。业界同类产品的共同点：画布/结果始终在视野里，
  *  不让用户在一堆表单里猜"我刚才到底生成出来没有"。 */
-export function PreviewPane({
-  character, costume, emotion, costumes, emotions, files, task,
-  doneFlash, onDismissFlash, onCostume, onEmotion, onMeta, atlasInfo,
+export function PortraitPane({
+  character, portraits, task, doneFlash, onDismissFlash,
 }: {
   character: string
-  costume: string
-  emotion: string
-  costumes: string[]
-  emotions: string[]
-  files: string[]
+  portraits: PortraitItem[]
   task: TaskState | null
   doneFlash: { text: string; at: number } | null
   onDismissFlash: () => void
-  onCostume: (v: string) => void
-  onEmotion: (v: string) => void
-  onMeta: (m: { count: number; files: string[] }) => void
-  atlasInfo: AtlasInfo | null
 }) {
+  const [zoom, setZoom] = useState<string | null>(null)
+  const [showAll, setShowAll] = useState(false)
+  const shown = showAll ? portraits : portraits.slice(0, PORTRAIT_PREVIEW)
+  const hidden = portraits.length - shown.length
   return (
     <aside className="cc-preview">
       <div className="cc-preview-head">
-        <b>角色成果</b>
+        <b>立绘</b>
         <span className="cc-preview-name" title={character}>{character}</span>
+        <span className="spacer" />
+        <span className="cc-preview-count">{portraits.length} 张</span>
       </div>
+      <p className="cc-preview-note">
+        立绘是「这个角色长什么样」的定妆图；动作帧在第 ③ 步产出，两者互不混用。
+      </p>
 
-      <div className="cc-preview-stage">
-        <SpritePreview character={character} costume={costume} emotion={emotion} onMeta={onMeta} />
-      </div>
-
-      <div className="cc-preview-pick">
-        <label>服装
-          <select value={costume} onChange={(e) => onCostume(e.target.value)}>
-            {costumes.map((c) => <option key={c} value={c}>{zh(COSTUME_LABEL, c)}</option>)}
-          </select>
-        </label>
-        <label>表情
-          <select value={emotion} onChange={(e) => onEmotion(e.target.value)}>
-            {emotions.map((e) => <option key={e} value={e}>{emotionLabel(e, e)}</option>)}
-          </select>
-        </label>
-      </div>
-
-      {files.length > 0 && (
-        <div className="chars-asset-row cc-asset-row">
-          <span className="chars-asset-label">这套共 {files.length} 帧</span>
-          {files.map((u, i) => (
-            <img key={u} src={u} alt={`第 ${i + 1} 帧`} loading="lazy"
-              title={`第 ${i + 1} 帧`} />
-          ))}
-        </div>
-      )}
-
-      <div className="cc-preview-stats">
-        <div><b>{costumes.length}</b><span>套服装</span></div>
-        <div><b>{files.length}</b><span>当前套帧数</span></div>
-        <div><b>{atlasInfo?.exists ? '已导出' : '未导出'}</b><span>图集</span></div>
-      </div>
-
+      {/* 任务状态必须排在画廊**之前**：放底下时立绘一多就被挤出视口，
+          生成中根本看不见进度。CSS 再给一条 sticky，滚动时也跟着。 */}
+      <TaskBar task={task} />
       {doneFlash && (
         <div className="chars-done cc-done" key={doneFlash.at}>
           <span className="chars-done-icon">✓</span>
@@ -379,7 +379,34 @@ export function PreviewPane({
           <button type="button" className="mini" onClick={onDismissFlash}>✕</button>
         </div>
       )}
-      <TaskBar task={task} />
+
+      {portraits.length === 0 ? (
+        <div className="cc-preview-empty">
+          <span className="cc-preview-empty-icon">◧</span>
+          <p>还没有立绘。</p>
+          <p>第 ② 步点「生成立绘」，出的每一张都会留在这里。</p>
+        </div>
+      ) : (
+        <>
+          <div className="cc-portrait-grid">
+            {shown.map((p) => (
+              <button type="button" key={p.url} className="cc-portrait"
+                title={`${p.name}（点开看大图）`} onClick={() => setZoom(p.url)}>
+                <img src={p.url} alt={p.name} loading="lazy" />
+                <span>{zh(COSTUME_LABEL, p.costume) || '默认'}</span>
+              </button>
+            ))}
+          </div>
+          {(hidden > 0 || showAll) && (
+            <button type="button" className="cc-portrait-more"
+              onClick={() => setShowAll((v) => !v)}>
+              {showAll ? `收起（只看最近 ${PORTRAIT_PREVIEW} 张）`
+                : `显示全部 ${portraits.length} 张（还有 ${hidden} 张）`}
+            </button>
+          )}
+        </>
+      )}
+      {zoom && <Lightbox url={zoom} name={character} onClose={() => setZoom(null)} />}
     </aside>
   )
 }
