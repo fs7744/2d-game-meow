@@ -155,3 +155,99 @@ def test_endpoint_queues_wparts(client, monkeypatch):
     assert job["params"]["method"] == "explode"
     assert job["params"]["params"]["overlap"] == 5
     assert job["params"]["src"] == os.path.realpath(src)
+
+
+# ---------------- 产物归属生命阶段 ----------------
+
+def test_parts_land_under_stage_dir():
+    """产物按生命阶段分目录：默认阶段在 `Parts/`，其它阶段在 `Parts/s_<id>/`。"""
+    name = _fresh("PartsStageProbe")
+    src = _seed(name)
+
+    d = partsplit.split(name, src, "explode", {})
+    assert d["stage"] == "default"
+    assert partsplit.parts_root(name, "default") == partsplit.parts_root(name)
+    assert os.path.isdir(os.path.join(partsplit.parts_root(name), d["id"]))
+
+    s = partsplit.split(name, src, "explode", {}, stage_id="stage_abc")
+    assert s["stage"] == "stage_abc"
+    root = partsplit.parts_root(name, "stage_abc")
+    assert root.endswith(os.path.join("Parts", "s_stage_abc")), root
+    assert os.path.isdir(os.path.join(root, s["id"]))
+    # 两份产物在**不同**目录里（默认阶段那份不在 s_stage_abc 下）
+    assert partsplit.parts_root(name, "stage_abc") != partsplit.parts_root(name)
+
+
+def test_list_results_filters_by_stage():
+    """列表按阶段过滤：默认阶段不能把 `s_*` 里的产物混进来。"""
+    name = _fresh("PartsStageListProbe")
+    src = _seed(name)
+    d = partsplit.split(name, src, "explode", {})
+    s = partsplit.split(name, src, "explode", {}, stage_id="stage_abc")
+
+    ids = {x["id"] for x in partsplit.list_results(name, "default")}
+    assert d["id"] in ids and s["id"] not in ids, ids
+    ids2 = {x["id"] for x in partsplit.list_results(name, "stage_abc")}
+    assert s["id"] in ids2 and d["id"] not in ids2, ids2
+    assert all(x["stage"] == "stage_abc"
+               for x in partsplit.list_results(name, "stage_abc"))
+
+
+def test_manifest_detail_is_stage_scoped(client):
+    """详情按阶段取：拿错阶段就是 404（防止在阶段 A 看到阶段 B 的层）。"""
+    name = _fresh("PartsStageDetailProbe")
+    src = _seed(name)
+    s = partsplit.split(name, src, "explode", {}, stage_id="stage_abc")
+    base = f"/characters/{quote(name)}/parts/{s['id']}"
+    assert client.get(f"{base}?stage=stage_abc").status_code == 200
+    assert client.get(base).status_code == 404
+
+
+def test_endpoint_passes_stage_and_delete_needs_confirm(client, monkeypatch):
+    name = _fresh("PartsStageApiProbe")
+    src = _seed(name)
+    fake = {"id": "fake_1", "method": "explode", "layers": [],
+            "psd": None, "canvas": [256, 384]}
+    monkeypatch.setattr(appmod.partsplit, "split", lambda *a, **k: dict(fake))
+
+    r = client.post(f"/characters/{quote(name)}/parts/split",
+                    json={"path": src, "method": "explode",
+                          "stage": "stage_abc"})
+    assert r.status_code == 200, r.text
+    job = appmod._jobs[r.json()["job_id"]]
+    assert job["params"]["stage"] == "stage_abc", "阶段要随任务传下去"
+
+    # 列表带 stage 回显
+    lst = client.get(f"/characters/{quote(name)}/parts?stage=stage_abc")
+    assert lst.status_code == 200
+    assert lst.json()["stage"] == "stage_abc"
+
+    # 删除：不确认不下手
+    dele = f"/characters/{quote(name)}/parts/delete"
+    assert client.post(dele, json={"path": "x", "stage": "stage_abc"}).status_code == 400
+    assert client.post(dele, json={"path": "x", "stage": "stage_abc",
+                                   "confirm": True}).status_code == 404
+
+
+def test_delete_result_is_stage_scoped():
+    name = _fresh("PartsStageDeleteProbe")
+    src = _seed(name)
+    s = partsplit.split(name, src, "explode", {}, stage_id="stage_abc")
+    # 拿默认阶段删不到阶段产物
+    assert partsplit.delete_result(name, s["id"], "default") is False
+    assert partsplit.delete_result(name, s["id"], "stage_abc") is True
+    assert not os.path.isdir(os.path.join(
+        partsplit.parts_root(name, "stage_abc"), s["id"]))
+
+
+def test_list_all_stages_really_scans_each_stage():
+    """`stage_id=None` 要真的扫全部阶段（默认阶段 + 每个 `s_*`），别只扫根。"""
+    name = _fresh("PartsStageScanProbe")
+    src = _seed(name)
+    d = partsplit.split(name, src, "explode", {})
+    s = partsplit.split(name, src, "explode", {}, stage_id="stage_abc")
+    allx = partsplit.list_results(name)
+    ids = {x["id"] for x in allx}
+    assert {d["id"], s["id"]} <= ids, ids
+    stages = {x["stage"] for x in allx}
+    assert stages == {"default", "stage_abc"}, stages

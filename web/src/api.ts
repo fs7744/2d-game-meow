@@ -982,23 +982,39 @@ export type PartsSummary = {
   canvas: [number, number] | null
   source: string
   notice?: string
+  /** 这份产物归属的生命阶段（拆件按阶段分目录） */
+  stage?: string
 }
 
-export function fetchParts(name: string): Promise<{
+/** 拆件产物按**生命阶段**列：产物落在 `Parts[/s_<id>]/`，这里只列该阶段的。 */
+export function fetchParts(name: string, stage = ''): Promise<{
   available: PartsAvailability
+  stage: string
   items: PartsSummary[]
 }> {
-  return req(`/characters/${encodeURIComponent(name)}/parts`)
+  const q = stage ? `?stage=${encodeURIComponent(stage)}` : ''
+  return req(`/characters/${encodeURIComponent(name)}/parts${q}`)
 }
 
-export function fetchPart(name: string, rid: string): Promise<PartsManifest> {
-  return req(`/characters/${encodeURIComponent(name)}/parts/${encodeURIComponent(rid)}`)
+export function fetchPart(name: string, rid: string,
+  stage = ''): Promise<PartsManifest> {
+  const q = stage ? `?stage=${encodeURIComponent(stage)}` : ''
+  return req(`/characters/${encodeURIComponent(name)}/parts/${encodeURIComponent(rid)}${q}`)
+}
+
+/** 删一次拆件产物（整目录）；跟立绘删除一样必须 confirm。 */
+export function deletePart(name: string, rid: string,
+  stage = '', confirm = true): Promise<{ deleted: string }> {
+  return req(`/characters/${encodeURIComponent(name)}/parts/delete`,
+    { method: 'POST', body: JSON.stringify({ path: rid, stage, confirm }) })
 }
 
 /** 拆部件走单卡队列（See-Through 要 2~3 分钟），返回 job_id 交给 runTask。 */
 export function splitParts(name: string, body: {
   path: string
   method: 'seethrough' | 'explode'
+  /** 产物归属的生命阶段（拆部件页属于当前阶段） */
+  stage?: string
   params?: Record<string, unknown>
 }): Promise<{ job_id: string; status: string; position: number
   before: string; method: string }> {

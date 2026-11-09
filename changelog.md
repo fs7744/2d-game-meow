@@ -22,6 +22,49 @@
 
 ---
 
+## 2026-11-09 · 拆部件产物归到生命阶段 + 页面加产物列表
+
+用户要求：拆部件的 PSD 应该存在**生命阶段**下面，并在拆部件页有列表展示。
+
+### 落盘：按阶段分目录
+
+以前所有产物都堆在 `assets/characters/<角色>/Parts/<时间戳_方法>/`，分不清是哪套
+设定的。现在跟 `Portraits/` 用同一条规则（复用 `stages.stage_dir_name`）：
+
+- 默认阶段（`default`）→ `Parts/<时间戳_方法>/`，**老产物原地不动**；
+- 其它阶段 → `Parts/s_<id>/<时间戳_方法>/`。
+
+manifest 里多记一个 `stage`，`parts_root(name, stage_id)` / `load_manifest(...)` /
+`delete_result(...)` 全部带上阶段参数。`list_results(name, stage)` 只列该阶段；
+`stage=None` 才扫全部（默认阶段要跳过 `s_*` 子目录，否则别的阶段会混进来）。
+
+### 页面：正式的产物列表
+
+原来是「历史产物」一排小按钮，只在超过 1 份时才出现。改成独立一段
+**「这个阶段的拆件产物」**，放在参数区之后、分层预览之前：
+
+- 每行：缩略图 + 拆法名 + 时间 / 层数 / 耗时，右侧「PSD」直接下载、「删除」；
+- 标题旁写明产物存在 `Parts[/s_<stage>]/` 下，换阶段时列表跟着换；
+- 没有产物时给空态说明，不是一片空白；
+- 删除走 `POST /characters/{n}/parts/delete`，必须 `confirm=true`（跟立绘删除
+  一致），前端先变成「确认删除 / 取消」再真的删。
+
+### 验证
+
+真机实测：`split(stage_id="stage_x")` → 落
+`Parts/s_stage_x/20261109_161427_explode/model.psd`（402 KB，psd_tools 可读），
+manifest `stage=stage_x`；默认阶段列表 0 条、`stage_x` 列表 1 条，互不串。
+`tsc -b` / `vite build` ✓、`check-hints` 34/34、**`node smoke.mjs` 887/887**
+（用例 67 扩展：空态列表 → 提交带 `stage` → 拆完出现 1 行（缩略图 / 层数 /
+PSD 下载）→ 删除先二次确认、确认后才发请求 → 删完回空态），
+`tests/test_partsplit.py` **12 例**（新增：默认阶段与 `s_<id>` 分目录、列表按
+阶段过滤、详情拿错阶段 404、删除带阶段、`stage_id=None` 真的扫每个阶段），
+后端 `test_partsplit + test_api + test_stages + test_characters`
+**104 passed / 5 skipped**。截图 `tests/_out/ui_review/partsstage2/23f-cc-parts.png`。
+
+> 顺带修了截图工具的假数据：列表与详情现在都带 `?stage=`，正则前要先剥 query，
+> 否则请求会掉到 `/characters/` 宽泛分支返回角色详情，前端拿它当 manifest 会白屏。
+
 ## 2026-11-09 · 立绘工具箱：换表情支持多选 / 批量
 
 用户要求把「表情多选 / 批量」加进来。

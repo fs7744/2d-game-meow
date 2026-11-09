@@ -2215,6 +2215,8 @@ def delete_portrait_api(name: str, req: PortraitDeleteReq) -> Dict[str, Any]:
 class PartsSplitReq(BaseModel):
     #: 要拆的立绘（必须在角色 Portraits/ 下）
     path: str
+    #: 这份产物归属的生命阶段（空 = 默认阶段）；决定落 `Parts[/s_<id>]/`
+    stage: str = ""
     #: seethrough = See-Through 语义分层；explode = 爆炸图 / 几何切件
     method: str = "seethrough"
     params: Dict[str, Any] = Field(default_factory=dict)
@@ -2243,8 +2245,12 @@ _PORTRAIT_EMOTION_EXTRA = (
 
 
 @app.get("/characters/{name}/parts")
-def character_parts_api(name: str) -> Dict[str, Any]:
-    """已拆过的产物 + 两种拆法在本机能不能用（前端据此灰掉按钮）。"""
+def character_parts_api(name: str, stage: str = "") -> Dict[str, Any]:
+    """该生命阶段已拆过的产物 + 两种拆法在本机能不能用。
+
+    `stage` 缺省 = 默认阶段（只看 `Parts/` 根，不看 `s_*`）：
+    拆部件页属于某个阶段，列的就是这个阶段的历史，别把别的阶段的产物混进来。
+    """
     try:
         safe = characters.ensure_safe_name(name, "角色名")
     except ValueError as exc:
@@ -2252,20 +2258,48 @@ def character_parts_api(name: str) -> Dict[str, Any]:
     if not characters.character_exists(safe):
         raise HTTPException(404, f"没有这个角色：{safe}")
     return {"available": partsplit.available(),
-            "items": partsplit.list_results(safe)}
+            "stage": stage or "default",
+            "items": partsplit.list_results(safe, stage or "default")}
 
 
 @app.get("/characters/{name}/parts/{rid}")
-def character_part_api(name: str, rid: str) -> Dict[str, Any]:
+def character_part_api(name: str, rid: str, stage: str = "") -> Dict[str, Any]:
     """单次拆件的完整清单（分层预览要层的坐标 / 文件 / 顺序）。"""
     try:
         safe = characters.ensure_safe_name(name, "角色名")
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    mf = partsplit.load_manifest(safe, rid)
+    mf = partsplit.load_manifest(safe, rid, stage or "default")
     if not mf:
         raise HTTPException(404, f"没有这次拆件产物：{rid}")
     return mf
+
+
+class PartsDeleteReq(BaseModel):
+    path: str          # 兼容前端统一传 path；这里只认目录名（rid）
+    stage: str = ""
+    confirm: bool = False
+
+
+@app.post("/characters/{name}/parts/delete")
+def character_part_delete_api(name: str, req: PartsDeleteReq) -> Dict[str, Any]:
+    """删一次拆件产物（整目录）。跟立绘删除一样必须 `confirm=true`。"""
+    if not req.confirm:
+        raise HTTPException(400, "删除必须带 confirm=true")
+    try:
+        safe = characters.ensure_safe_name(name, "角色名")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    rid = os.path.basename(str(req.path or "").strip().rstrip("/\\"))
+    if not rid or rid in (".", ".."):
+        raise HTTPException(400, "要删哪一份？")
+    try:
+        ok = partsplit.delete_result(safe, rid, req.stage or "default")
+    except partsplit.PartsError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not ok:
+        raise HTTPException(404, f"没有这次拆件产物：{rid}")
+    return {"deleted": rid}
 
 
 @app.post("/characters/{name}/parts/split")
@@ -2291,6 +2325,7 @@ def character_parts_split_api(name: str, req: PartsSplitReq) -> Dict[str, Any]:
             raise HTTPException(400, av["reason"])
     params: Dict[str, Any] = {
         "character": safe, "src": src, "method": method,
+        "stage": str(req.stage or "default"),
         "params": dict(req.params or {}),
     }
     job_id = uuid.uuid4().hex[:12]

@@ -897,8 +897,8 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
 
           {/* ===== 拆部件：选图 → 选拆法 → 分层 PSD + 预览（与角色设定同级） ===== */}
           {view === 'parts' && sel && detail && (
-            <PartsPanel character={detail.name} portraits={portraits}
-              task={task} runTask={runTask} />
+            <PartsPanel character={detail.name} stage={stageId}
+              portraits={portraits} task={task} runTask={runTask} />
           )}
 
           {/* ===== 阶段编辑：角色设定（原「定形象」内容，用户要求改名） ===== */}

@@ -4743,16 +4743,6 @@ body.is-resizing, body.is-resizing * { cursor: col-resize !important; user-selec
 }
 .cc-parts-eye:hover { color: var(--cyan); }
 
-.cc-parts-history {
-  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
-  font-size: 10.5px; color: var(--muted-2);
-}
-.cc-parts-history button {
-  padding: 3px 7px; border: 1px solid var(--line); border-radius: 3px;
-  background: var(--bg-2); color: var(--muted); font: inherit; cursor: pointer;
-}
-.cc-parts-history button:hover { border-color: var(--line-strong); }
-.cc-parts-history button.is-on { border-color: var(--cyan); color: var(--cyan); }
 @media (max-width: 1080px) {
   .cc-parts-view { grid-template-columns: minmax(0, 1fr); }
   .cc-parts-layers { max-height: 260px; }
@@ -4800,3 +4790,36 @@ body.is-resizing, body.is-resizing * { cursor: col-resize !important; user-selec
 }
 .cc-variant-thumb.is-on { border-color: var(--cyan); }
 .cc-variant-thumb.is-on span { color: var(--cyan); }
+
+/* ---------- 拆部件：按生命阶段的产物列表（统一层内） ---------- */
+.cc-parts-out > h3 code {
+  font-family: var(--mono); font-size: 10px; padding: 1px 4px;
+  border-radius: 3px; background: var(--bg-4); color: var(--muted);
+}
+.cc-parts-list { list-style: none; margin: 0; padding: 0;
+  display: flex; flex-direction: column; gap: 6px; }
+.cc-parts-list li {
+  display: flex; align-items: center; gap: 8px; padding: 6px 8px;
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--bg-2);
+}
+.cc-parts-list li.is-on { border-color: var(--cyan);
+  background: rgba(108, 196, 239, 0.08); }
+.cc-parts-item {
+  display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;
+  padding: 0; border: 0; background: transparent;
+  color: inherit; font: inherit; text-align: left; cursor: pointer;
+}
+.cc-parts-item img, .cc-parts-item-ph {
+  width: 34px; height: 34px; flex: none; object-fit: contain;
+  border: 1px solid var(--line); border-radius: 4px; background: var(--bg-4);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 9px; color: var(--muted-2);
+}
+.cc-parts-item-txt { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.cc-parts-item-txt b { font-size: 11.5px; color: var(--white); font-weight: 600; }
+.cc-parts-item-txt span {
+  font-family: var(--mono); font-size: 10px; color: var(--muted-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cc-parts-item-ops { display: flex; align-items: center; gap: 5px; flex: none; }

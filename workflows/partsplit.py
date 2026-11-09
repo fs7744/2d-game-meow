@@ -35,6 +35,7 @@ from typing import Any, Dict, List, Optional
 from PIL import Image
 
 from . import paths
+from . import stages as stages_mod
 from . import rigbuild
 
 #: See-Through 仓库（独立 venv + 权重）
@@ -59,9 +60,18 @@ class PartsError(RuntimeError):
 # ---------------------------------------------------------------- 路径 / 探测
 
 
-def parts_root(name: str) -> str:
-    """`assets/characters/<角色>/Parts/`（跟 Portraits / Sprites 平级）。"""
-    return str(paths.CHARACTERS_DIR / name / "Parts")
+def parts_root(name: str, stage_id: str = "") -> str:
+    """拆件产物目录，**按生命阶段分**（跟 `Portraits/` 同一条规则）。
+
+    - 默认阶段（`""` / `"default"`）→ `Parts/` 根，老产物原地不动；
+    - 其它阶段 → `Parts/s_<id>/`，这样「成年 / 幼年」的拆件不会混在一块。
+
+    用户 2026-11-09 要求 PSD 归到生命阶段下：拆部件本来就是「这个阶段这套设定」
+    的产物，混在角色根目录里既分不清来源，也没法在阶段页里列出本阶段的历史。
+    """
+    root = paths.CHARACTERS_DIR / name / "Parts"
+    sub = stages_mod.stage_dir_name(stage_id) if stage_id else ""
+    return str(root / sub if sub else root)
 
 
 def _url(p: str | Path) -> str:
@@ -110,8 +120,9 @@ def _manifest_path(root: str, rid: str) -> str:
     return str(Path(root) / rid / "manifest.json")
 
 
-def load_manifest(name: str, rid: str) -> Optional[Dict[str, Any]]:
-    p = _manifest_path(parts_root(name), rid)
+def load_manifest(name: str, rid: str,
+                  stage_id: str = "") -> Optional[Dict[str, Any]]:
+    p = _manifest_path(parts_root(name, stage_id), rid)
     if not os.path.isfile(p):
         return None
     try:
@@ -120,14 +131,50 @@ def load_manifest(name: str, rid: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def list_results(name: str) -> List[Dict[str, Any]]:
-    """这个角色已拆过的产物（新的在前）。只读磁盘，不跑任何模型。"""
-    root = parts_root(name)
-    if not os.path.isdir(root):
+def _read_manifest_at(folder: str, rid: str) -> Optional[Dict[str, Any]]:
+    p = _manifest_path(folder, rid)
+    if not os.path.isfile(p):
+        return None
+    try:
+        return json.loads(Path(p).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _rids_in(folder: str, reverse: bool = True) -> List[str]:
+    if not os.path.isdir(folder):
         return []
+    return [n for n in sorted(os.listdir(folder), reverse=reverse)
+            if os.path.isdir(os.path.join(folder, n))]
+
+
+def list_results(name: str,
+                 stage_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """已拆过的产物（新的在前），按生命阶段过滤。只读磁盘，不跑模型。
+
+    `stage_id=None` 扫**全部阶段**（诊断用），给了就只看那一个。
+    产物按阶段落 `Parts/`（默认阶段）与 `Parts/s_<id>/`（其它阶段），所以
+    默认阶段要**跳过 `s_*` 子目录**，否则别的阶段的产物会混进来。
+    """
+    base = parts_root(name)
+    if not os.path.isdir(base):
+        return []
+    prefix = stages_mod._STAGE_DIR_PREFIX
+    pairs: List[tuple] = []            # (rid, 所在目录)
+    if stage_id is None:
+        for n in _rids_in(base):
+            full = os.path.join(base, n)
+            if n.startswith(prefix):    # 阶段目录 → 里面的才是产物
+                pairs += [(rid, full) for rid in _rids_in(full)]
+            else:
+                pairs.append((n, base))
+    else:
+        folder = parts_root(name, stage_id)
+        pairs = [(rid, folder) for rid in _rids_in(folder)]
+
     out: List[Dict[str, Any]] = []
-    for rid in sorted(os.listdir(root), reverse=True):
-        mf = load_manifest(name, rid)
+    for rid, folder in pairs:
+        mf = _read_manifest_at(folder, rid)
         if not mf:
             continue
         out.append({
@@ -144,7 +191,10 @@ def list_results(name: str) -> List[Dict[str, Any]]:
             "canvas": mf.get("canvas"),
             "source": mf.get("source"),
             "notice": mf.get("notice"),
+            "stage": mf.get("stage") or (stage_id or "default"),
         })
+    # 目录名带时间戳，但跨阶段合并后仍按 created 排一次更稳
+    out.sort(key=lambda x: (x["created"], x["id"]), reverse=True)
     return out
 
 
@@ -309,13 +359,14 @@ def _to_psd_tool() -> Path:
 
 def split(name: str, src: str, method: str,
           params: Optional[Dict[str, Any]] = None,
-          job: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """拆一张立绘，产物落 `Parts/<时间戳_方法>/`，返回统一 manifest。"""
+          job: Optional[Dict[str, Any]] = None,
+          stage_id: str = "") -> Dict[str, Any]:
+    """拆一张立绘，产物落该阶段的 `Parts[/s_<id>]/<时间戳_方法>/`。"""
     method = str(method or "").strip().lower()
     if method not in ("seethrough", "explode"):
         raise PartsError(f"不支持的拆法：{method}")
     p = params or {}
-    root = parts_root(name)
+    root = parts_root(name, stage_id)
     os.makedirs(root, exist_ok=True)
     rid = time.strftime("%Y%m%d_%H%M%S") + "_" + method
     out_dir = str(Path(root) / rid)
@@ -331,6 +382,9 @@ def split(name: str, src: str, method: str,
     manifest: Dict[str, Any] = {
         "id": rid,
         "method": method,
+        # 这份产物属于哪个生命阶段（列表页据此分组，拆件页也据此过滤）
+        "stage": (str(stage_id)
+                  if stages_mod.stage_dir_name(stage_id) else "default"),
         "source": _url(src),
         "sourceName": Path(src).name,
         "canvas": res["canvas"],
@@ -368,12 +422,13 @@ def split_job(_engine: Any = None, params: Optional[Dict[str, Any]] = None,
         method=str(p.get("method") or ""),
         params=p.get("params") or {},
         job=job,
+        stage_id=str(p.get("stage") or ""),
     )
 
 
-def delete_result(name: str, rid: str) -> bool:
+def delete_result(name: str, rid: str, stage_id: str = "") -> bool:
     """删一次拆件产物（整目录）。路径先做 realpath 校验，挡 `..`。"""
-    root = os.path.realpath(parts_root(name))
+    root = os.path.realpath(parts_root(name, stage_id))
     target = os.path.realpath(str(Path(root) / rid))
     if not (target == root or target.startswith(root + os.sep)) or target == root:
         raise PartsError("只能删这个角色 Parts/ 下的产物")

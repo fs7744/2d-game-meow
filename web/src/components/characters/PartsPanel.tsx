@@ -12,7 +12,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
-  fetchPart, fetchParts, splitParts,
+  deletePart, fetchPart, fetchParts, splitParts,
   type PartsAvailability, type PartsManifest, type PartsSummary,
   type PortraitItem,
 } from '../../api'
@@ -20,6 +20,8 @@ import type { TaskState } from './model'
 
 type Props = {
   character: string
+  /** 当前生命阶段：产物按阶段落 `Parts[/s_<id>]/`，列表也只列这个阶段的 */
+  stage: string
   /** 当前生命阶段的立绘（拆部件的输入只能从这里选） */
   portraits: PortraitItem[]
   task: TaskState | null
@@ -36,7 +38,7 @@ function stamp(sec: number): string {
   return `${d.getMonth() + 1}/${d.getDate()} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
 
-export function PartsPanel({ character, portraits, task, runTask }: Props) {
+export function PartsPanel({ character, stage, portraits, task, runTask }: Props) {
   const [avail, setAvail] = useState<PartsAvailability | null>(null)
   const [items, setItems] = useState<PartsSummary[]>([])
   const [selPath, setSelPath] = useState('')
@@ -51,28 +53,43 @@ export function PartsPanel({ character, portraits, task, runTask }: Props) {
   const [mf, setMf] = useState<PartsManifest | null>(null)
   const [hidden, setHidden] = useState<Set<string>>(new Set())
   const [active, setActive] = useState('')
+  /** 列表里正在等二次确认的那一份 */
+  const [delId, setDelId] = useState('')
 
   const openResult = useCallback(async (rid: string) => {
     try {
-      const m = await fetchPart(character, rid)
+      const m = await fetchPart(character, rid, stage)
       setMf(m); setHidden(new Set()); setActive('')
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
     }
-  }, [character])
+  }, [character, stage])
 
   const reload = useCallback(async (openLatest = true) => {
     try {
-      const r = await fetchParts(character)
+      const r = await fetchParts(character, stage)
       setAvail(r.available)
       setItems(r.items)
       if (openLatest && r.items[0]) await openResult(r.items[0].id)
+      else if (!r.items.length) setMf(null)
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
     }
-  }, [character, openResult])
+  }, [character, stage, openResult])
 
+  // 换角色 / 换生命阶段都要重新拉：产物是按阶段分目录的
   useEffect(() => { void reload() }, [reload])
+
+  const removeOne = async (rid: string) => {
+    setErr('')
+    try {
+      await deletePart(character, rid, stage, true)
+      setDelId('')
+      await reload(false)
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    }
+  }
 
   // 默认选第一张立绘；换角色 / 换阶段时重选
   useEffect(() => {
@@ -92,7 +109,7 @@ export function PartsPanel({ character, portraits, task, runTask }: Props) {
       ? { resolution: res, steps, seed, lrsplit }
       : { overlap }
     void runTask('拆部件',
-      () => splitParts(character, { path: selPath, method, params }),
+      () => splitParts(character, { path: selPath, method, stage, params }),
       async () => {
         // wparts 的 job.result 就是 manifest，但 fetchJob 只透传有限字段；
         // 统一从磁盘再拉一次列表 + 详情，保证和历史产物同一条路径。
@@ -231,6 +248,62 @@ export function PartsPanel({ character, portraits, task, runTask }: Props) {
         )}
       </section>
 
+      {/* ---------------- 这个生命阶段的产物列表 ---------------- */}
+      <section className="cc-parts-sec cc-parts-out">
+        <h3>
+          这个阶段的拆件产物
+          <span className="cc-parts-meta">
+            {items.length} 份 · 存在{' '}
+            <code>Parts{stage && stage !== 'default' ? `/s_${stage}` : ''}/</code> 下
+          </span>
+        </h3>
+        {items.length === 0 ? (
+          <p className="cc-parts-note">
+            还没有拆过。选一张立绘、挑一种拆法，点「开始拆」——产物与标准分层 PSD
+            会归到这个生命阶段下，并出现在这个列表里。
+          </p>
+        ) : (
+          <ul className="cc-parts-list">
+            {items.map((it) => (
+              <li key={it.id} className={mf?.id === it.id ? 'is-on' : ''}>
+                <button type="button" className="cc-parts-item"
+                  onClick={() => void openResult(it.id)}>
+                  {it.preview
+                    ? <img src={it.preview} alt="" loading="lazy" />
+                    : <span className="cc-parts-item-ph">PSD</span>}
+                  <span className="cc-parts-item-txt">
+                    <b>{it.methodLabel}</b>
+                    <span>
+                      {stamp(it.created)} · {it.layers} 层
+                      {it.seconds ? ` · ${it.seconds}s` : ''}
+                    </span>
+                  </span>
+                </button>
+                <span className="cc-parts-item-ops">
+                  {it.psd ? (
+                    <a className="cc-btn ghost" href={it.psd}
+                      download={it.psdName || undefined}>PSD</a>
+                  ) : (
+                    <span className="cc-parts-note">{it.notice || '无 PSD'}</span>
+                  )}
+                  {delId === it.id ? (
+                    <>
+                      <button type="button" className="cc-btn danger"
+                        onClick={() => void removeOne(it.id)}>确认删除</button>
+                      <button type="button" className="cc-btn ghost"
+                        onClick={() => setDelId('')}>取消</button>
+                    </>
+                  ) : (
+                    <button type="button" className="cc-btn ghost"
+                      onClick={() => setDelId(it.id)}>删除</button>
+                  )}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
       {/* ---------------- 结果：分层预览 ---------------- */}
       {mf && (
         <section className="cc-parts-sec">
@@ -297,19 +370,6 @@ export function PartsPanel({ character, portraits, task, runTask }: Props) {
           <p className="cc-parts-note">
             点层可以在画布上单独高亮；◼ / ◻ 控制显隐。PSD 里的层名与顺序和这里一致。
           </p>
-
-          {items.length > 1 && (
-            <div className="cc-parts-history">
-              <b>历史产物</b>
-              {items.map((it) => (
-                <button type="button" key={it.id}
-                  className={mf.id === it.id ? 'is-on' : ''}
-                  onClick={() => void openResult(it.id)}>
-                  {stamp(it.created)} · {it.methodLabel} · {it.layers} 层
-                </button>
-              ))}
-            </div>
-          )}
         </section>
       )}
     </div>

@@ -31,7 +31,7 @@ const PARTS_LAYERS = [
   ['头（head）', 'head', 70, 24, 117, 94],
 ]
 const partsManifest = () => ({
-  id: 'p1', method: 'explode', source: '/files/p3.png',
+  id: 'p1', method: 'explode', stage: 'default', source: '/files/p3.png',
   sourceName: 'portrait_3.png', canvas: [256, 384],
   psd: '/files/characters/Alice/Parts/p1/model.psd', psdName: 'model.psd',
   preview: null, created: 1794200000, seconds: 1.2, notice: '', options: {},
@@ -44,7 +44,8 @@ const partsSummary = () => ({
   id: 'p1', method: 'explode', methodLabel: '爆炸图 · 几何切件',
   created: 1794200000, seconds: 1.2, layers: 6,
   psd: '/files/characters/Alice/Parts/p1/model.psd', psdName: 'model.psd',
-  preview: null, canvas: [256, 384], source: '/files/p3.png', notice: '',
+  preview: '/files/p3.png', canvas: [256, 384], source: '/files/p3.png',
+  notice: '', stage: 'default',
 })
 
 function makeFetch() {
@@ -105,6 +106,9 @@ function makeFetch() {
   /** 用例可注入任意数量的立绘，用来验「不一次性全铺」 */
   let portraitsOverride = null
   let partsSplitDone = false
+  /** 最近一次拆件提交的 stage / 删除的产物 id */
+  let partsStage = ''
+  let partsDeleted = ''
   /** 最近一次「换装 / 换表情」提交的表情数组：>1 时 job 返回批量 items */
   let variantEmotions = []
   /** 生命阶段（每个 fetch 一份），PUT 全量覆盖 */
@@ -451,15 +455,27 @@ function makeFetch() {
         prompt: kind === 'emotion' ? "Make character's face emotion smile" : 'Change ONLY the character\'s outfit',
       }) }
     }
-    // 拆部件：列表 / 详情 / 提交
+    // 拆部件：列表 / 详情 / 提交 / 删除
     {
-      const u = String(url)
+      // **先剥 query**：列表与详情都带 ?stage=，带 query 时 `$` 锚点匹配不上
+      const u = String(url).split('?')[0]
+      const q = new URL(String(url), 'http://x').searchParams
+      const stage = q.get('stage') || ''
       if (u.endsWith('/parts/split') && (init.method || 'GET') === 'POST') {
         partsSplitDone = true
+        partsStage = stage
+        try { partsStage = JSON.parse(init.body || '{}').stage || stage }
+        catch { /* 忽略坏 body */ }
         return { ok: true, json: async () => ({
           job_id: 'job-parts', status: 'queued', position: 1,
           before: '/files/p3.png', method: 'explode',
         }) }
+      }
+      if (u.endsWith('/parts/delete') && (init.method || 'GET') === 'POST') {
+        try { partsDeleted = JSON.parse(init.body || '{}').path || '' }
+        catch { partsDeleted = '?' }
+        partsSplitDone = false
+        return { ok: true, json: async () => ({ deleted: partsDeleted }) }
       }
       if (/\/characters\/[^/]+\/parts$/.test(u)) {
         return { ok: true, json: async () => ({
@@ -468,7 +484,9 @@ function makeFetch() {
             explode: { ok: true, reason: '' },
             psd: { ok: true, reason: '' },
           },
-          items: partsSplitDone ? [partsSummary()] : [],
+          stage: stage || 'default',
+          // 没拆过 / 刚删过 → 空列表；拆完才有一份
+          items: partsSplitDone && !partsDeleted ? [partsSummary()] : [],
         }) }
       }
       if (/\/characters\/[^/]+\/parts\/[^/]+$/.test(u)
@@ -5846,6 +5864,15 @@ async function ccCreate(doc, win) {
     (doc.querySelector('.cc-crumb')?.textContent || '').includes('拆部件'))
   check('有选图区（只能从当前阶段立绘里选）',
     doc.querySelectorAll('.cc-parts-pick-item').length > 0)
+  check('有「这个阶段的拆件产物」列表（与角色设定同级页里的正式列表）',
+    (doc.querySelector('.cc-parts-out')?.textContent || '')
+      .includes('这个阶段的拆件产物'))
+  check('列表写明产物存在哪个阶段目录下',
+    (doc.querySelector('.cc-parts-out')?.textContent || '').includes('Parts'))
+  check('没拆过时列表是空态提示',
+    (doc.querySelector('.cc-parts-out')?.textContent || '').includes('还没有拆过')
+    && doc.querySelectorAll('.cc-parts-list li').length === 0)
+
   check('两种拆法都列出来',
     doc.querySelectorAll('.cc-parts-method').length === 2
     && (doc.querySelector('.cc-parts-methods')?.textContent || '')
@@ -5873,6 +5900,9 @@ async function ccCreate(doc, win) {
     typeof body.path === 'string' && body.path.length > 0
     && body.method === 'explode' && 'overlap' in (body.params || {}),
     JSON.stringify(body))
+  check('提交带上当前生命阶段（产物按阶段落盘）',
+    typeof body.stage === 'string' && body.stage.length > 0,
+    JSON.stringify(body.stage))
   check('拆部件走统一任务轮询',
     calls.slice(c0).some((c) => c.url.includes('/jobs/')))
 
@@ -5884,10 +5914,20 @@ async function ccCreate(doc, win) {
   check('层列表按 PSD 习惯顶层在上（head 在第一行）',
     (doc.querySelector('.cc-parts-layers li span')?.textContent || '').includes('head'),
     doc.querySelector('.cc-parts-layers li span')?.textContent)
-  const dl = doc.querySelector('a[download]')
-  check('有 PSD 下载（标准分层 PSD）',
+  const rows = () => [...doc.querySelectorAll('.cc-parts-list li')]
+  check('拆完后产物出现在列表里（1 行）', rows().length === 1, String(rows().length))
+  check('列表行显示拆法 / 层数 / 耗时',
+    (rows()[0]?.textContent || '').includes('爆炸图')
+    && (rows()[0]?.textContent || '').includes('6 层')
+    && (rows()[0]?.textContent || '').includes('1.2s'),
+    rows()[0]?.textContent)
+  check('列表行有缩略图', !!rows()[0]?.querySelector('.cc-parts-item img'))
+  const dl = rows()[0]?.querySelector('a[download]')
+  check('列表行能直接下 PSD（标准分层 PSD）',
     !!dl && (dl.getAttribute('href') || '').includes('.psd'),
     dl?.getAttribute('href'))
+  check('点列表行能加载那一份的分层预览',
+    (rows()[0]?.textContent || '').includes('爆炸图'))
 
   // 显隐 + 单层高亮
   click(doc.querySelector('.cc-parts-eye'))
@@ -5910,6 +5950,26 @@ async function ccCreate(doc, win) {
   const tool = readFileSync(resolve('..', 'tools', 'parts_to_psd.py'), 'utf8')
   check('PSD 用 psd_tools 写标准分层',
     tool.includes('PSDImage.new') && tool.includes('create_pixel_layer'))
+
+  // 删除要二次确认（第一次只是把按钮换成「确认删除」）
+  const delBtn = () => [...(rows()[0]?.querySelectorAll('button') || [])]
+    .find((b) => (b.textContent || '') === '删除')
+  click(delBtn())
+  await ccWait(150)
+  check('点删除先要二次确认（不直接发请求）',
+    [...(rows()[0]?.querySelectorAll('button') || [])]
+      .some((b) => (b.textContent || '').includes('确认删除'))
+    && !calls.slice(c0).some((c) => c.url.includes('/parts/delete')))
+  click([...(rows()[0]?.querySelectorAll('button') || [])]
+    .find((b) => (b.textContent || '').includes('确认删除')))
+  await ccWait(500)
+  const delReq = calls.slice(c0).filter((c) => c.url.includes('/parts/delete')).pop()
+  const delBody = (() => {
+    try { return JSON.parse(delReq?.body || '{}') } catch { return {} }
+  })()
+  check('确认后带的 confirm=true 与阶段', delBody.confirm === true
+    && typeof delBody.stage === 'string', JSON.stringify(delBody))
+  check('删完列表回到空态', rows().length === 0 && !!doc.querySelector('.cc-parts-out'))
 
   check('拆部件场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()

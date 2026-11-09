@@ -436,19 +436,21 @@ async function main() {
               portrait_count: 0, portraits: [] },
           ],
         })
-        // 带 ?stage= 也要命中（阶段编辑页只取该阶段的立绘）
-        // 拆部件：列表 / 详情（必须排在 /characters/ 宽泛分支之前）
-        if (/\/characters\/[^/]+\/parts$/.test(u)) return json({
+        // 拆部件：列表 / 详情（必须排在 /characters/ 宽泛分支之前）。
+        // **两者都带 `?stage=`**，正则前先剥 query，否则 `$` 锚点匹配不上，
+        // 请求会掉到宽泛分支返回角色详情 —— 前端拿它当 manifest 会直接崩。
+        if (/\/characters\/[^/]+\/parts$/.test(u.split('?')[0])) return json({
           available: { seethrough: { ok: true, reason: '' },
             explode: { ok: true, reason: '' }, psd: { ok: true, reason: '' } },
+          stage: 'default',
           items: [{ id: 'p1', method: 'seethrough',
             methodLabel: 'See-Through 语义分层', created: 1794200000,
             seconds: 168, layers: 7, psd: '/icon.png', psdName: 'model.psd',
             preview: '/icon.png', canvas: [512, 768], source: '/icon.png',
-            notice: '' }],
+            notice: '', stage: 'default' }],
         })
-        if (/\/characters\/[^/]+\/parts\/[^/]+$/.test(u)) return json({
-          id: 'p1', method: 'seethrough', source: '/icon.png',
+        if (/\/characters\/[^/]+\/parts\/[^/]+$/.test(u.split('?')[0])) return json({
+          id: 'p1', method: 'seethrough', stage: 'default', source: '/icon.png',
           sourceName: 'portrait_0.png', canvas: [512, 768], psd: '/icon.png',
           psdName: 'model.psd', preview: '/icon.png', created: 1794200000,
           seconds: 168, notice: '', options: {},
