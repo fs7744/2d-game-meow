@@ -420,7 +420,24 @@ async function main() {
           negative: 'blurry', resolution: [792, 1408],
           defaults: { steps: 25, cfg: 3, sampler: 'euler', scheduler: 'simple' },
         })
-        if (u.includes('/characters/') && u.endsWith('/portraits')) return json({
+        // 生命阶段（GET 列表 / PUT 全量保存），截图里能看到三行不同阶段的立绘
+        if (u.includes('/characters/') && u.includes('/stages')) return json({
+          name: chars[0].name,
+          description: '白毛猫耳骑士，幼年与成年是两套不同设定',
+          active_stage: 'default',
+          stages: [
+            { id: 'default', title: '初始设定', description: '银发红瞳 · 常服', info: {},
+              portrait_count: 3,
+              portraits: [0, 1, 2].map((i) => ({ url: '/icon.png', name: `p${i}.png` })) },
+            { id: 'child', title: '幼年', description: '短发，还没拿到铠甲', info: {},
+              portrait_count: 2,
+              portraits: [0, 1].map((i) => ({ url: '/icon.png', name: `c${i}.png` })) },
+            { id: 'adult', title: '成年 · 觉醒', description: '', info: {},
+              portrait_count: 0, portraits: [] },
+          ],
+        })
+        // 带 ?stage= 也要命中（阶段编辑页只取该阶段的立绘）
+        if (u.includes('/characters/') && u.includes('/portraits')) return json({
           count: 3,
           items: ['最新一版', 'Knight', 'Naked'].map((c, i) => ({
             url: '/icon.png', path: `/icon.png#${i}`, name: `portrait_${i}.png`,

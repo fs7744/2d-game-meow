@@ -4362,3 +4362,102 @@ body.is-resizing, body.is-resizing * { cursor: col-resize !important; user-selec
   .cc-stage-row { grid-template-columns: 22px 22px minmax(120px, 1fr) auto; }
   .cc-stage-thumbs { grid-column: 3 / -1; }
 }
+
+/* ---------- 角色中心二次修正：头部 / 阶段列表（2026-11-09，统一层内） ---------- */
+/* 顶部只有角色名 + 更小的描述，最右是修改与编辑时间；服装画风属于角色设定 */
+.cc-topbar {
+  display: flex; align-items: center; gap: 10px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--line);
+}
+.cc-topbar-id { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.cc-topbar-name { font-size: 15px; color: var(--white); }
+.cc-topbar-desc {
+  max-width: 460px; font-size: 10.5px; color: var(--muted-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cc-topbar-meta { font-family: var(--mono); font-size: 10px; color: var(--muted-2); white-space: nowrap; }
+.cc-crumb {
+  display: flex; align-items: center; gap: 6px;
+  padding: 8px 0 2px; font-size: 11px; color: var(--muted);
+}
+.cc-crumb-link {
+  padding: 0; border: 0; background: transparent;
+  color: var(--cyan); font: inherit; cursor: pointer;
+}
+.cc-crumb-sep { color: var(--muted-2); }
+.cc-crumb b { color: var(--white); font-weight: 600; }
+
+/* 生命阶段列表页没有右栏：每行已经在展示该阶段的立绘 */
+.chars.cc.is-workspace.is-stages { grid-template-columns: minmax(0, 1fr); }
+
+/* 「修改」弹窗（角色级：名字 / 描述 / 档案 / 删除） */
+.cc-edit-mask {
+  position: fixed; inset: 0; z-index: 50;
+  display: flex; align-items: center; justify-content: center; padding: 20px;
+  background: rgba(6, 8, 12, 0.72);
+}
+.cc-edit-dialog {
+  display: flex; flex-direction: column; gap: 10px;
+  width: min(460px, 100%); max-height: 84vh; overflow: auto; padding: 18px;
+  border: 1px solid var(--line-strong); border-radius: var(--r);
+  background: var(--bg-1);
+}
+.cc-edit-dialog h2 { margin: 0; font-size: 14px; color: var(--white); }
+.cc-edit-field {
+  display: flex; flex-direction: column; gap: 5px;
+  font-size: 11px; color: var(--muted);
+}
+.cc-edit-field input, .cc-edit-field textarea {
+  width: 100%; padding: 7px 9px; border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm); background: var(--bg-3); color: var(--white);
+  font: inherit; font-size: 12px; resize: vertical;
+}
+.cc-edit-meta {
+  display: flex; flex-wrap: wrap; gap: 10px;
+  font-family: var(--mono); font-size: 10px; color: var(--muted-2);
+}
+.cc-edit-tags, .cc-edit-note {
+  margin: 0; font-size: 10.5px; line-height: 1.6; color: var(--muted-2);
+}
+.cc-edit-actions { display: flex; align-items: center; gap: 7px; }
+
+/* 阶段行：以立绘为主，文字与操作退到紧凑的一列 */
+.cc-stage-row {
+  grid-template-columns: 20px minmax(180px, 1fr) minmax(140px, 190px) auto;
+  gap: 12px; align-items: center; padding: 10px 12px;
+}
+.cc-stage-thumbs { flex-wrap: nowrap; gap: 8px; overflow: hidden; }
+.cc-stage-thumbs img {
+  width: 58px; height: 82px; flex: none;
+  object-fit: contain; background: var(--bg-4);
+  border: 1px solid var(--line); border-radius: 4px;
+}
+.cc-stage-nopreview {
+  display: flex; align-items: center; justify-content: center;
+  width: 58px; height: 82px; border: 1px dashed var(--line-strong);
+  border-radius: 4px; font-size: 9px; color: var(--muted-2); text-align: center;
+}
+.cc-stage-info { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.cc-stage-line { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.cc-stage-line .cc-stage-title { flex: 1; }
+.cc-stage-idx { flex: none; }
+.cc-stage-title, .cc-stage-desc {
+  width: 100%; min-width: 0; padding: 3px 5px;
+  border: 1px solid transparent; border-radius: 3px;
+  background: transparent; color: var(--white); font: inherit; font-size: 12px;
+}
+.cc-stage-title { font-weight: 600; }
+.cc-stage-desc { font-size: 10.5px; color: var(--muted); }
+.cc-stage-title:hover, .cc-stage-desc:hover,
+.cc-stage-title:focus, .cc-stage-desc:focus {
+  border-color: var(--line-strong); background: var(--bg-3); outline: none;
+}
+.cc-stage-count { font-size: 10px; color: var(--muted-2); }
+.cc-stage-ops { flex-direction: column; align-items: stretch; gap: 5px; }
+.cc-stage-ops .cc-btn { white-space: nowrap; }
+@media (max-width: 1080px) {
+  .cc-stage-row { grid-template-columns: 20px minmax(140px, 1fr) auto; }
+  .cc-stage-thumbs { grid-column: 2 / 3; }
+  .cc-stage-info { grid-column: 2 / 3; }
+  .cc-stage-ops { grid-column: 3 / 4; }
+}

@@ -4059,10 +4059,18 @@ function ccClick(doc, win, text, sel = 'button') {
   if (el) el.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
   return !!el
 }
-/** 旧用例按步骤号切页：现在映射到三层导航。
- *  ① / ② 是生命阶段列表与角色设定，③ / ④ 的内容都在待处理页（原样保留）。 */
+/** 旧用例按步骤号切页：现在只有「生命阶段 / 待处理」两个导航入口。
+ *  「角色设定」属于某个生命阶段，要点该行的「进入设定」才能进去；
+ *  ③ / ④ 的内容都原样保留在待处理页。 */
 function ccStep(doc, win, id) {
-  const label = { 1: '生命阶段', 2: '角色设定', 3: '待处理', 4: '待处理' }[id]
+  if (id === 2) {
+    const row = doc.querySelector('.cc-stage-row')
+    const b = [...(row?.querySelectorAll('button') || [])]
+      .find((x) => (x.textContent || '').includes('进入设定'))
+    if (b) b.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+    return !!b
+  }
+  const label = id === 1 ? '生命阶段' : '待处理'
   const b = [...doc.querySelectorAll('.cc-viewnav button')]
     .find((x) => (x.textContent || '').includes(label))
   if (b && !b.disabled) b.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
@@ -4109,41 +4117,60 @@ async function ccCreate(doc, win) {
   await ccCreate(doc, win)
   const created = calls.slice(c0).find((c) => c.url.endsWith('/characters') && c.method === 'POST')
   check('建角色打到服务端 POST /characters', !!created, created?.body)
-  check('创建后进入四步工作台', !!doc.querySelector('.chars.cc.is-workspace'))
-  check('工作台有「← 角色库」返回入口',
-    (doc.querySelector('.cc-backbar')?.textContent || '').includes('角色库'))
+  check('创建后进入角色中心', !!doc.querySelector('.chars.cc.is-workspace'))
+  check('顶部有「← 角色库」返回入口',
+    (doc.querySelector('.cc-topbar')?.textContent || '').includes('角色库'))
   check('选中角色后拉详情',
     calls.slice(c0).some((c) => c.url.includes('/characters/Alice') && c.method === 'GET'))
-  check('角色名挂在步骤条下方（知道自己在改谁）',
-    (doc.querySelector('.cc-charhead')?.textContent || '').includes('Alice'))
-  check('右栏是「立绘」（定妆图，不是动作帧播放器）',
-    (doc.querySelector('.cc-preview-head')?.textContent || '').includes('立绘'))
-  check('左右两栏之间有可拖动的分隔条（成果区宽度自己定）',
-    !!doc.querySelector('.cc-split'))
-  check('右栏宽度由 CSS 变量控制（拖动条改它）',
+  check('顶部主角是角色名',
+    (doc.querySelector('.cc-topbar-name')?.textContent || '').includes('Alice'))
+  check('角色名下面有更小的描述',
+    !!doc.querySelector('.cc-topbar-desc')
+    && (doc.querySelector('.cc-topbar-desc')?.textContent || '').length > 0)
+  check('顶部最右有「修改」与编辑时间',
+    (doc.querySelector('.cc-topbar')?.textContent || '').includes('修改')
+    && (doc.querySelector('.cc-topbar-meta')?.textContent || '').includes('最后编辑'))
+  check('不显示「当前服装」那一行（那是角色设定的一部分）',
+    !doc.querySelector('.cc-charhead')
+    && !(doc.querySelector('.chars.cc')?.textContent || '').includes('当前服装'))
+  check('列表页没有右栏立绘面板（每行自己展示立绘）',
+    !doc.querySelector('.cc-preview') && !doc.querySelector('.cc-split'))
+  check('列表页用单列布局', !!doc.querySelector('.chars.cc.is-workspace.is-stages'))
+  check('右栏宽度变量仍在（进入阶段后生效）',
     (doc.querySelector('.chars.cc.is-workspace')?.getAttribute('style') || '')
       .includes('--cc-side-w'))
   const navs = [...doc.querySelectorAll('.cc-viewnav button')]
-  check('三层导航：生命阶段 / 角色设定 / 待处理',
-    navs.length === 3, navs.map((x) => x.textContent).join('/'))
-  check('导航里是「角色设定」，不再叫定形象',
-    navs.map((x) => x.textContent).join('|').includes('角色设定')
+  check('导航只有生命阶段与待处理两项',
+    navs.length === 2, navs.map((x) => x.textContent).join('/'))
+  check('「角色设定」不再与生命阶段同等级',
+    !navs.map((x) => x.textContent).join('|').includes('角色设定')
     && navs.map((x) => x.textContent).join('|').includes('生命阶段')
     && navs.map((x) => x.textContent).join('|').includes('待处理'))
   check('进角色后默认停在生命阶段列表',
     !!doc.querySelector('.cc-stages-head') && !!doc.querySelector('.cc-stage-list'))
+  check('列表页不再塞「待处理」卡片与「角色档案」',
+    !(doc.querySelector('.chars-body')?.textContent || '').includes('打开待处理页')
+    && !(doc.querySelector('.chars-body')?.textContent || '').includes('角色档案'))
   const row = doc.querySelector('.cc-stage-row')
   check('每行含标题、描述、立绘缩略图与进入按钮',
-    (row?.querySelector('input')?.value || '').includes('初始设定')
-    && !!row?.querySelector('.cc-stage-fields textarea')
+    (row?.querySelector('.cc-stage-title')?.value || '').includes('初始设定')
+    && !!row?.querySelector('.cc-stage-desc')
     && !!row?.querySelector('.cc-stage-thumbs')
     && [...(row?.querySelectorAll('button') || [])]
       .some((b) => (b.textContent || '').includes('进入设定')))
+  check('行以立绘为主（有缩略图或占位）',
+    !!row?.querySelector('.cc-stage-thumbs img')
+    || !!row?.querySelector('.cc-stage-nopreview'))
   check('有「新建阶段」入口',
     [...doc.querySelectorAll('button')].some((b) => (b.textContent || '').includes('新建阶段')))
 
-  check('点导航能进角色设定', ccStep(doc, win, 2))
-  await ccWait(250)
+  check('点行内「进入设定」能进角色设定', ccStep(doc, win, 2))
+  await ccWait(300)
+  check('进入阶段后面包屑是 角色名 / 阶段名',
+    (doc.querySelector('.cc-crumb')?.textContent || '').includes('Alice')
+    && (doc.querySelector('.cc-crumb')?.textContent || '').includes('初始设定'))
+  check('阶段编辑页右栏立绘回来（立绘属于角色设定）',
+    !!doc.querySelector('.cc-preview') && !!doc.querySelector('.cc-split'))
   check('角色设定页有画风区', (doc.querySelector('.chars-style')?.textContent || '').includes('画风'))
   check('主流程每步只有一个主按钮',
     doc.querySelectorAll('.cc-cta').length <= 1,

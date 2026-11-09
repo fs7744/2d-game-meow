@@ -106,7 +106,6 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
   /** 试玩验收台调好的帧率，写回图集导出（一个来源，别在三处各填一遍） */
   const [atlasFrameRate, setAtlasFrameRate] = useState(8)
   const [renameText, setRenameText] = useState('')
-  const [renameOpen, setRenameOpen] = useState(false)
   const [pendingDelete, setPendingDelete] = useState<string | null>(null)
 
   /* --------------------------------------------------- 当前角色的配置 */
@@ -127,6 +126,9 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
   const [dragId, setDragId] = useState<string | null>(null)
   const [importFrom, setImportFrom] = useState('')
   const [stageErr, setStageErr] = useState('')
+  /** 顶部「修改」弹窗：改名 / 改描述 / 删除角色 / 只读档案 */
+  const [editOpen, setEditOpen] = useState(false)
+  const [descDraft, setDescDraft] = useState('')
   /** 单一「抠背景」开关，默认关 —— 模型自带透明底，跑分割是用户的选择。
    *  旧版出图 / 表情 / 流水线 / 后端四处默认值各不相同。 */
   const [matte, setMatte] = useState(false)
@@ -317,9 +319,6 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
   }, [emotions])
 
   const currentStyle = String(draft.style ?? '')
-  const currentStyleLabel = useMemo(
-    () => flatStyles.find((s) => s.id === currentStyle)?.zhLabel ?? currentStyle,
-    [flatStyles, currentStyle])
 
   /** 步骤完成标记只认磁盘上的真实产物。 */
   const assetStats = useMemo(() => {
@@ -517,15 +516,40 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
     setImportFrom('')
   }, [sel, stageData, stageId, importFrom, persistStages, refresh, refreshPrompt, onNotice])
 
+  /** 顶部「修改」：角色名与描述是角色级信息，不属于任何生命阶段。 */
+  const openEdit = useCallback(() => {
+    setRenameText(detail?.name || sel || '')
+    setDescDraft(stageData?.description || '')
+    setPendingDelete(null)
+    setEditOpen(true)
+  }, [detail, sel, stageData])
+
   const doRename = useCallback(async () => {
     if (!sel || !renameText.trim() || renameText.trim() === sel) return
     try {
       await renameCharacter(sel, renameText.trim())
-      setRenameOpen(false)
+      setEditOpen(false)
       await reload()
       setSel(renameText.trim())
     } catch (e) { setErr(`改名失败：${explainError(e)}`) }
   }, [sel, renameText, reload])
+
+  const saveEdit = useCallback(async () => {
+    if (!sel) return
+    try {
+      if (renameText.trim() && renameText.trim() !== sel) await doRename()
+      if (stageData && descDraft.trim() !== stageData.description) {
+        const r = await saveStages(sel, {
+          stages: stageData.stages,
+          active_stage: stageData.active_stage,
+          description: descDraft.trim(),
+        })
+        setStageData(r)
+      }
+      setEditOpen(false)
+      onNotice('角色信息已更新')
+    } catch (e) { setStageErr(explainError(e)) }
+  }, [sel, renameText, doRename, stageData, descDraft, onNotice])
 
   const doDelete = useCallback(async (name: string) => {
     try {
@@ -732,56 +756,42 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
   }
 
   return (
-    <div className="chars cc is-workspace"
+    <div className={`chars cc is-workspace${view === 'stages' ? ' is-stages' : ''}`}
       style={{ '--cc-side-w': `${sideW}px` } as CSSProperties}>
-      {/* ---------------- 中：唯一主线 ------------- */}
       <main className="chars-detail cc-main">
-        <div className="cc-backbar">
+        {/* 顶部只有角色名 + 更小的描述；最右是「修改」与编辑时间。
+            服装 / 画风属于角色设定，不再出现在这一层。 */}
+        <div className="cc-topbar">
           <button type="button" className="cc-btn ghost" onClick={backToLibrary}>← 角色库</button>
-          <span>角色库 / <b>{sel || ''}</b>
-            {view === 'stages' && ' / 生命阶段'}
-            {view === 'stage' && ` / ${currentStage?.title || '角色设定'}`}
-            {view === 'pending' && ' / 待处理'}
-          </span>
+          <div className="cc-topbar-id">
+            <b className="cc-topbar-name">{detail?.name || sel || ''}</b>
+            <span className="cc-topbar-desc">{stageData?.description || '还没有角色描述'}</span>
+          </div>
           <span className="spacer" />
-          {currentSummary?.updated_at ? (
-            <span className="cc-backbar-meta">
-              最后编辑 {new Date(currentSummary.updated_at * 1000).toLocaleDateString('zh-CN')}
-            </span>
-          ) : null}
+          <span className="cc-topbar-meta">最后编辑 {fmtStamp(currentSummary?.updated_at)}</span>
+          <button type="button" className="cc-btn ghost" onClick={openEdit}>修改</button>
         </div>
+
+        {/* 面包屑只在进入某个生命阶段（或待处理页）后出现 */}
+        {view !== 'stages' && (
+          <div className="cc-crumb">
+            <button type="button" className="cc-crumb-link"
+              onClick={() => setView('stages')}>{detail?.name || sel || ''}</button>
+            <span className="cc-crumb-sep">/</span>
+            <b>{view === 'stage' ? (currentStage?.title || '角色设定') : '待处理'}</b>
+          </div>
+        )}
         {err && <div className="chars-err">⚠ {err}</div>}
         {stageErr && <div className="chars-err">⚠ {stageErr}</div>}
+
+        {/* 只有「生命阶段」和「待处理」两个入口：角色设定属于某个生命阶段，不同级 */}
         <div className="cc-viewnav">
-          <button type="button" className={view === 'stages' ? 'is-on' : ''}
+          <button type="button"
+            className={(view === 'stages' || view === 'stage') ? 'is-on' : ''}
             onClick={() => setView('stages')}>生命阶段</button>
-          <button type="button" className={view === 'stage' ? 'is-on' : ''}
-            disabled={!stageId}
-            onClick={() => stageId && setView('stage')}>角色设定</button>
           <button type="button" className={view === 'pending' ? 'is-on' : ''}
             onClick={() => setView('pending')}>待处理 · 出素材 / 导出</button>
         </div>
-
-        {sel && detail && (
-          <div className="cc-charhead">
-            <b>{detail.name}</b>
-            <span className="cc-charhead-meta">
-              当前服装：{zh(COSTUME_LABEL, costume)} · 画风：{currentStyleLabel || '默认'}
-            </span>
-            <span className="spacer" />
-            {renameOpen ? (
-              <>
-                <input className="cc-rename" value={renameText}
-                  onChange={(e) => setRenameText(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === 'Enter') void doRename() }} />
-                <button type="button" className="cc-btn ghost" onClick={() => void doRename()}>保存</button>
-              </>
-            ) : (
-              <button type="button" className="cc-btn ghost"
-                onClick={() => { setRenameText(detail.name); setRenameOpen(true) }}>改名</button>
-            )}
-          </div>
-        )}
 
         <div className="chars-body cc-panel">
           {/* ============================ 生命阶段列表 ============================ */}
@@ -796,9 +806,6 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
                 <button type="button" className="cc-btn primary"
                   onClick={() => setStageNewOpen(true)}>＋ 新建阶段</button>
               </div>
-              {stageData?.description && (
-                <p className="cc-char-desc">角色描述：{stageData.description}</p>
-              )}
               {stageNewOpen && (
                 <div className="cc-stage-new">
                   <label>阶段名称
@@ -825,28 +832,35 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
                     <span className="cc-stage-drag" draggable
                       onDragStart={() => setDragId(st.id)}
                       onDragEnd={() => setDragId(null)} title="拖拽排序">⠿</span>
-                    <span className="cc-stage-idx">{i + 1}</span>
-                    <div className="cc-stage-fields">
-                      <input value={st.title} aria-label="阶段名称"
-                        onChange={(e) => patchStage(st.id, { title: e.target.value })}
-                        onBlur={() => void commitStage()} />
-                      <textarea rows={2} value={st.description} aria-label="阶段描述"
-                        placeholder="这个阶段的描述…"
-                        onChange={(e) => patchStage(st.id, { description: e.target.value })}
-                        onBlur={() => void commitStage()} />
-                    </div>
+                    {/* 这一行以立绘为主：缩略图放大铺开，文字退到紧凑的一列 */}
                     <div className="cc-stage-thumbs">
-                      {st.portraits.slice(0, 4).map((img) => (
+                      {st.portraits.slice(0, 5).map((img) => (
                         <img key={img.url} src={img.url} alt={img.name} loading="lazy" />
                       ))}
-                      <span>{st.portrait_count} 张立绘</span>
+                      {!st.portraits.length && (
+                        <span className="cc-stage-nopreview">暂无立绘</span>
+                      )}
+                    </div>
+                    <div className="cc-stage-info">
+                      <div className="cc-stage-line">
+                        <span className="cc-stage-idx">{i + 1}</span>
+                        <input className="cc-stage-title" value={st.title}
+                          aria-label="阶段名称"
+                          onChange={(e) => patchStage(st.id, { title: e.target.value })}
+                          onBlur={() => void commitStage()} />
+                        {stageData?.active_stage === st.id && (
+                          <span className="cc-stage-active">当前</span>
+                        )}
+                      </div>
+                      <input className="cc-stage-desc" value={st.description}
+                        aria-label="阶段描述" placeholder="补一句描述（可选）"
+                        onChange={(e) => patchStage(st.id, { description: e.target.value })}
+                        onBlur={() => void commitStage()} />
+                      <span className="cc-stage-count">{st.portrait_count} 张立绘</span>
                     </div>
                     <div className="cc-stage-ops">
                       <button type="button" className="cc-btn primary"
                         onClick={() => void openStage(st.id)}>进入设定 →</button>
-                      {stageData?.active_stage === st.id && (
-                        <span className="cc-stage-active">当前阶段</span>
-                      )}
                       <button type="button" className="cc-btn ghost"
                         onClick={() => void removeStage(st.id)}>删除</button>
                     </div>
@@ -858,44 +872,7 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
                   </div>
                 )}
               </div>
-              <Card title="待处理：出素材 / 导出"
-                note="这两块内容先原样保留在单独的待处理页，后面再参考调整。">
-                <button type="button" className="cc-btn ghost"
-                  onClick={() => setView('pending')}>打开待处理页 →</button>
-              </Card>
-              <details className="cc-stage-archive">
-                <summary>角色档案（改名 / 删除 / 标签 / 备注）</summary>
-                <Card title="角色档案"
-                  note="标签、时间、备注来自本地 SQLite 元数据；生成用的属性 config 与图片仍在磁盘上。">
-                  <div className="cc-profile">
-                    <div><span>名字</span><b>{detail?.name}</b></div>
-                    <div><span>创建时间</span><b>{fmtStamp(currentSummary?.created_at)}</b></div>
-                    <div><span>最后编辑</span><b>{fmtStamp(currentSummary?.updated_at)}</b></div>
-                    <div><span>服装</span><b>{detail?.costumes.map((c) => zh(COSTUME_LABEL, c)).join(' / ') || '—'}</b></div>
-                    <div><span>已有素材</span><b>{assetStats.frames} 帧</b></div>
-                    <div><span>标签</span><b className="cc-profile-tags">
-                      {[...(currentSummary?.tags || []), ...(currentSummary?.custom_tags || [])]
-                        .map(tagLabel).join('、') || '—'}
-                    </b></div>
-                  </div>
-                  {currentSummary?.note && <p className="cc-profile-note">备注：{currentSummary.note}</p>}
-                  <div className="cc-actions">
-                    <button type="button" className="cc-btn ghost"
-                      onClick={() => { setRenameText(detail?.name || ''); setRenameOpen(true) }}>改名</button>
-                    <button type="button" className="cc-btn ghost"
-                      onClick={() => setPendingDelete(detail?.name || '')}>删除角色</button>
-                  </div>
-                </Card>
-                {pendingDelete && (
-                  <div className="cc-confirm">
-                    <p>删掉「{pendingDelete}」？所有立绘、服装、表情会一起删。</p>
-                    <button type="button" className="cc-btn ghost"
-                      onClick={() => setPendingDelete(null)}>取消</button>
-                    <button type="button" className="cc-btn danger"
-                      onClick={() => void doDelete(pendingDelete)}>确认删除</button>
-                  </div>
-                )}
-              </details>
+              {/* 生命阶段列表页只放阶段本身：待处理在导航里，角色档案在「修改」弹窗里 */}
             </>
           )}
 
@@ -1356,37 +1333,82 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
         )}
       </main>
 
-      {/* 拖动条：左右两栏自由分配宽度（右栏成果区要大还是要小，用户自己定） */}
-      <div ref={splitRef} className="cc-split" role="separator" aria-orientation="vertical"
-        aria-label="拖动调整成果区宽度" title="拖动调整宽度（双击恢复默认）"
-        onPointerDown={startSideDrag}
-        onPointerMove={moveSideDrag}
-        onPointerUp={endSideDrag}
-        onPointerCancel={endSideDrag}
-        onDoubleClick={() => { setSideW(420); localStorage.setItem('meow.cc.sideW', '420') }} />
+      {/* 生命阶段列表页不要右栏：每行已经在显示该阶段的立绘，
+          再放一个全局立绘面板反而分不清属于哪个阶段。
+          立绘是「角色设定」的一部分，只在进入某个阶段后出现。 */}
+      {view !== 'stages' && (
+        <>
+          <div ref={splitRef} className="cc-split" role="separator" aria-orientation="vertical"
+            aria-label="拖动调整成果区宽度" title="拖动调整宽度（双击恢复默认）"
+            onPointerDown={startSideDrag}
+            onPointerMove={moveSideDrag}
+            onPointerUp={endSideDrag}
+            onPointerCancel={endSideDrag}
+            onDoubleClick={() => { setSideW(420); localStorage.setItem('meow.cc.sideW', '420') }} />
 
-      {/* ---------------- 右：常驻成果 + 统一任务状态 ------------- */}
-      {(view === 'stage' || view === 'pending') && sel && detail ? (
-        <PortraitPane
-          character={detail.name} portraits={portraits}
-          task={task} doneFlash={doneFlash} onDismissFlash={() => setDoneFlash(null)} />
-      ) : (
-        <aside className="cc-preview cc-preview-idle">
-          <div className="cc-preview-head"><b>立绘</b></div>
-          <div className="cc-preview-empty">
-            <span className="cc-preview-empty-icon">◧</span>
-            <p>立绘是角色的定妆图，跟动作帧分开。</p>
-            <p>进入某个生命阶段后，这里只显示该阶段的立绘设定图。</p>
+          {sel && detail ? (
+            <PortraitPane
+              character={detail.name} portraits={portraits}
+              task={task} doneFlash={doneFlash} onDismissFlash={() => setDoneFlash(null)} />
+          ) : (
+            <aside className="cc-preview cc-preview-idle">
+              <div className="cc-preview-head"><b>立绘</b></div>
+              <div className="cc-preview-empty">
+                <span className="cc-preview-empty-icon">◧</span>
+                <p>立绘是角色设定的一部分，跟动作帧分开。</p>
+                <p>进入某个生命阶段后，这里只显示该阶段的立绘设定图。</p>
+              </div>
+            </aside>
+          )}
+        </>
+      )}
+
+      {/* 「修改」弹窗：角色级信息（名字 / 描述 / 档案 / 删除），不属于任何生命阶段 */}
+      {editOpen && (
+        <div className="cc-edit-mask" onClick={() => setEditOpen(false)}>
+          <div className="cc-edit-dialog" onClick={(e) => e.stopPropagation()}>
+            <h2>修改角色</h2>
+            <label className="cc-edit-field">角色名
+              <input value={renameText}
+                onChange={(e) => setRenameText(e.target.value)} />
+            </label>
+            <label className="cc-edit-field">描述
+              <textarea rows={3} value={descDraft}
+                placeholder="这个角色是谁…"
+                onChange={(e) => setDescDraft(e.target.value)} />
+            </label>
+            <div className="cc-edit-meta">
+              <span>创建 {fmtStamp(currentSummary?.created_at)}</span>
+              <span>最后编辑 {fmtStamp(currentSummary?.updated_at)}</span>
+              <span>已有素材 {assetStats.frames} 帧</span>
+            </div>
+            <p className="cc-edit-tags">标签：{[
+              ...(currentSummary?.tags || []),
+              ...(currentSummary?.custom_tags || []),
+            ].map(tagLabel).join('、') || '—'}</p>
+            {currentSummary?.note && (
+              <p className="cc-edit-note">备注：{currentSummary.note}</p>
+            )}
+            {pendingDelete && (
+              <div className="cc-confirm">
+                <p>删掉「{pendingDelete}」？所有立绘、服装、表情会一起删。</p>
+                <button type="button" className="cc-btn ghost"
+                  onClick={() => setPendingDelete(null)}>取消</button>
+                <button type="button" className="cc-btn danger"
+                  onClick={() => void doDelete(pendingDelete)}>确认删除</button>
+              </div>
+            )}
+            <div className="cc-edit-actions">
+              <button type="button" className="cc-btn ghost"
+                onClick={() => setPendingDelete(detail?.name || '')}>删除角色</button>
+              <span className="spacer" />
+              <button type="button" className="cc-btn ghost"
+                onClick={() => setEditOpen(false)}>取消</button>
+              <button type="button" className="cc-btn primary"
+                onClick={() => void saveEdit()}>保存</button>
+            </div>
           </div>
-          <div className="cc-how">
-            <b>角色中心的三层</b>
-            <ol>
-              <li>生命阶段：一个角色多套设定，可拖拽排序</li>
-              <li>角色设定：外貌、画风、提示词与该阶段立绘</li>
-              <li>待处理：出素材 / 导出（内容保留，后面再定）</li>
-            </ol>
-          </div>
-        </aside>
+        </div>
       )}
 
       <TagPicker
