@@ -95,6 +95,7 @@ from workflows import paths
 from workflows import poselib
 from workflows import playtest
 from workflows import posesubjects
+from workflows import partsplit
 from workflows import poseset
 from workflows import projectio
 from workflows import projectstore
@@ -251,6 +252,14 @@ def _run(job_id: str, workflow: str, params: Dict[str, Any]) -> None:
             from workflows import clothesgen as _clothes
             with _gpu_lock:                # 单卡不并发
                 job["result"] = _clothes.run_design(engine, params, job=job)
+            job["status"] = "done"
+            return
+        if workflow == "wparts":
+            # **拆部件**：See-Through 在独立 venv 的子进程里跑 2~3 分钟，
+            # 但占的是同一块 GPU，照样要拿 `_gpu_lock`，别跟 Qwen 抢显存。
+            # 进度由 partsplit 直接写 `job["progress"]`（阶段上报）。
+            with _gpu_lock:
+                job["result"] = partsplit.split_job(engine, params, job=job)
             job["status"] = "done"
             return
         if workflow == "wemo":
@@ -2133,6 +2142,14 @@ def delete_portrait_api(name: str, req: PortraitDeleteReq) -> Dict[str, Any]:
     return {"ok": ok, "deleted": os.path.basename(target)}
 
 
+class PartsSplitReq(BaseModel):
+    #: 要拆的立绘（必须在角色 Portraits/ 下）
+    path: str
+    #: seethrough = See-Through 语义分层；explode = 爆炸图 / 几何切件
+    method: str = "seethrough"
+    params: Dict[str, Any] = Field(default_factory=dict)
+
+
 class PortraitVariantReq(BaseModel):
     path: str
     #: outfit = 换装，emotion = 换表情
@@ -2154,6 +2171,67 @@ _PORTRAIT_EMOTION_EXTRA = (
     " Change ONLY the facial expression. Keep the same pose, clothes, hair, "
     "background and art style."
 )
+
+
+@app.get("/characters/{name}/parts")
+def character_parts_api(name: str) -> Dict[str, Any]:
+    """已拆过的产物 + 两种拆法在本机能不能用（前端据此灰掉按钮）。"""
+    try:
+        safe = characters.ensure_safe_name(name, "角色名")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not characters.character_exists(safe):
+        raise HTTPException(404, f"没有这个角色：{safe}")
+    return {"available": partsplit.available(),
+            "items": partsplit.list_results(safe)}
+
+
+@app.get("/characters/{name}/parts/{rid}")
+def character_part_api(name: str, rid: str) -> Dict[str, Any]:
+    """单次拆件的完整清单（分层预览要层的坐标 / 文件 / 顺序）。"""
+    try:
+        safe = characters.ensure_safe_name(name, "角色名")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    mf = partsplit.load_manifest(safe, rid)
+    if not mf:
+        raise HTTPException(404, f"没有这次拆件产物：{rid}")
+    return mf
+
+
+@app.post("/characters/{name}/parts/split")
+def character_parts_split_api(name: str, req: PartsSplitReq) -> Dict[str, Any]:
+    """拆部件：产出**标准分层 PSD + 分层预览清单**，走单卡队列。
+
+    See-Through 要在它自己的 venv 里跑 2~3 分钟（17G 权重、torch 2.11），
+    爆炸图是纯 PIL、几秒；两者都返回 job_id，前端用统一任务轮询。
+    """
+    try:
+        safe = characters.ensure_safe_name(name, "角色名")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not characters.character_exists(safe):
+        raise HTTPException(404, f"没有这个角色：{safe}")
+    src = _checked_portrait(safe, req.path)
+    method = str(req.method or "").strip().lower()
+    if method not in ("seethrough", "explode"):
+        raise HTTPException(400, f"不支持的拆法：{method}")
+    if method == "seethrough":
+        av = partsplit.seethrough_available()
+        if not av["ok"]:
+            raise HTTPException(400, av["reason"])
+    params: Dict[str, Any] = {
+        "character": safe, "src": src, "method": method,
+        "params": dict(req.params or {}),
+    }
+    job_id = uuid.uuid4().hex[:12]
+    _jobs[job_id] = {"job_id": job_id, "workflow": "wparts", "params": params,
+                     "status": "queued", "created": time.time(),
+                     "progress": {"done": 0, "total": 100, "current": "排队中…"}}
+    _q.put((job_id, "wparts", params))
+    _prune(_jobs, JOB_KEEP)
+    return {"job_id": job_id, "status": "queued", "position": _q.qsize(),
+            "before": _asset_url(src), "method": method}
 
 
 @app.post("/characters/{name}/portraits/variant")

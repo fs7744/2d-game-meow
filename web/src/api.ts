@@ -928,6 +928,84 @@ export function deletePortrait(name: string, path: string,
     { method: 'POST', body: JSON.stringify({ path, confirm }) })
 }
 
+/* ---------------- 拆部件（See-Through / 爆炸图）→ 分层 PSD ---------------- */
+
+export type PartsAvailability = {
+  seethrough: { ok: boolean; reason: string }
+  explode: { ok: boolean; reason: string }
+  psd: { ok: boolean; reason: string }
+  seeThroughDir?: string
+}
+
+/** 拆出来的一层。坐标是**画布像素**，预览按 canvas 换算成百分比叠回去。 */
+export type PartsLayer = {
+  name: string
+  role?: string
+  file: string
+  url: string
+  x: number
+  y: number
+  width: number
+  height: number
+  box?: number[]
+  depth?: number | null
+  /** 0 = 最底；数组本身也是从底到顶 */
+  order: number
+}
+
+export type PartsManifest = {
+  id: string
+  method: 'seethrough' | 'explode' | string
+  source: string
+  sourceName: string
+  canvas: [number, number]
+  psd: string | null
+  psdName: string | null
+  preview: string | null
+  created: number
+  seconds: number
+  notice: string
+  options: Record<string, unknown>
+  layers: PartsLayer[]
+}
+
+export type PartsSummary = {
+  id: string
+  method: string
+  methodLabel: string
+  created: number
+  seconds?: number
+  layers: number
+  psd: string | null
+  psdName: string | null
+  preview: string | null
+  canvas: [number, number] | null
+  source: string
+  notice?: string
+}
+
+export function fetchParts(name: string): Promise<{
+  available: PartsAvailability
+  items: PartsSummary[]
+}> {
+  return req(`/characters/${encodeURIComponent(name)}/parts`)
+}
+
+export function fetchPart(name: string, rid: string): Promise<PartsManifest> {
+  return req(`/characters/${encodeURIComponent(name)}/parts/${encodeURIComponent(rid)}`)
+}
+
+/** 拆部件走单卡队列（See-Through 要 2~3 分钟），返回 job_id 交给 runTask。 */
+export function splitParts(name: string, body: {
+  path: string
+  method: 'seethrough' | 'explode'
+  params?: Record<string, unknown>
+}): Promise<{ job_id: string; status: string; position: number
+  before: string; method: string }> {
+  return req(`/characters/${encodeURIComponent(name)}/parts/split`,
+    { method: 'POST', body: JSON.stringify(body) })
+}
+
 /* ---------------- 立绘工具箱：真换装 / 真换表情 ---------------- */
 
 export type PortraitVariantKind = 'outfit' | 'emotion'

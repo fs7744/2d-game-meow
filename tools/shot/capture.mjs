@@ -437,6 +437,34 @@ async function main() {
           ],
         })
         // 带 ?stage= 也要命中（阶段编辑页只取该阶段的立绘）
+        // 拆部件：列表 / 详情（必须排在 /characters/ 宽泛分支之前）
+        if (/\/characters\/[^/]+\/parts$/.test(u)) return json({
+          available: { seethrough: { ok: true, reason: '' },
+            explode: { ok: true, reason: '' }, psd: { ok: true, reason: '' } },
+          items: [{ id: 'p1', method: 'seethrough',
+            methodLabel: 'See-Through 语义分层', created: 1794200000,
+            seconds: 168, layers: 7, psd: '/icon.png', psdName: 'model.psd',
+            preview: '/icon.png', canvas: [512, 768], source: '/icon.png',
+            notice: '' }],
+        })
+        if (/\/characters\/[^/]+\/parts\/[^/]+$/.test(u)) return json({
+          id: 'p1', method: 'seethrough', source: '/icon.png',
+          sourceName: 'portrait_0.png', canvas: [512, 768], psd: '/icon.png',
+          psdName: 'model.psd', preview: '/icon.png', created: 1794200000,
+          seconds: 168, notice: '', options: {},
+          layers: [
+            ['back hair', 60, 40, 392, 700],
+            ['legwear', 150, 420, 212, 330],
+            ['topwear', 140, 240, 232, 220],
+            ['handwear-l', 80, 250, 70, 200],
+            ['handwear-r', 362, 250, 70, 200],
+            ['face', 190, 60, 132, 180],
+            ['front hair', 150, 30, 212, 220],
+          ].map(([name, x, y, width, height], i) => ({
+            name, file: `layers/${i}.png`, url: '/icon.png',
+            x, y, width, height, order: i,
+          })),
+        })
         // 立绘悬浮工具箱（必须排在 /portraits 之前，否则被 includes 抢走）
         if (u.includes('/portraits/process')) {
           let b = {}
@@ -607,6 +635,10 @@ async function main() {
     await fp.evaluate(() => document.querySelector('.cc-style-close')?.click())
     await sleep(200)
     // 出素材 / 导出都原样保留在「待处理」页（同一页同时渲染两段内容）
+    // 拆部件页：与角色设定同级，切过去右栏立绘应隐藏、分层预览铺满
+    await fp.evaluate(() => [...document.querySelectorAll('.cc-viewnav button')]
+      .find((b) => (b.textContent || '').includes('拆部件'))?.click())
+    await fshot('23f-cc-parts', 700)
     await fp.evaluate(() => [...document.querySelectorAll('.cc-viewnav button')]
       .find((b) => (b.textContent || '').includes('待处理'))?.click())
     await fshot('24-cc-step3')

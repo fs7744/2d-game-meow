@@ -22,6 +22,59 @@
 
 ---
 
+## 2026-11-09 · 新增「拆部件」页：See-Through / 爆炸图 → 标准分层 PSD
+
+用户要求：加一个与「角色设定」同级的 tab 页面，内容是拆部件；切过去右侧立绘隐藏；
+拆成业界通用 PSD；功能是选图、选 See-Through 还是爆炸图；拆完要有 PSD 标准的分层预览。
+
+### 页面
+
+- 导航从两项变三项：`生命阶段|角色设定 / 拆部件 / 待处理`。「拆部件」与
+  「角色设定」同级（都属于当前生命阶段），面包屑变成 `角色名 / 拆部件`。
+- 切到拆部件页：**右栏立绘与拖动条整块不渲染**，容器加 `.is-parts` 走单列，
+  选图与分层预览占满宽度。
+- 三段式操作：① 选图（只列**当前阶段**的立绘）② 选拆法（两个卡片，不可用的
+  直接灰掉并显示原因）③ 参数（See-Through：分辨率 / 步数 / 种子 / 额外左右拆分；
+  爆炸图：切区重叠）→「开始拆」→ 进度条（走统一 `runTask` 轮询）。
+
+### 两种拆法
+
+| | See-Through 语义分层 | 爆炸图 · 几何切件 |
+|---|---|---|
+| 实现 | 子进程调 pixelforge 现成的 `tools/see_through_export.py`（它自己的 venv + 17G 权重） | `rigbuild.split_image()` 按人形比例切 6 块（纯 PIL） |
+| 产出 | `model.psd` + `layers/*.png` + `manifest.json`，每层补全被遮挡区域、按深度排序 | 6 层 PNG + 合成 PSD |
+| 耗时 | 2~3 分钟（1024px/25 步） | 几秒 |
+
+两条路都整理成**同一份清单**（`layers` 从底到顶、`order`=索引、画布像素坐标），
+前端完全不关心底层用的哪种拆法。See-Through 的仓库与导出脚本路径可用
+`MEOWCUTE_SEETHROUGH_DIR` / `MEOW_PARTS_EXPORT` 覆盖。
+
+### 标准分层 PSD
+
+- 主环境没装 psd_tools（原本也不需要），写 PSD 交给 `tools/parts_to_psd.py`
+  在 see-through 的 venv 里跑（`psd_tools 1.26` 的 `PSDImage.new` +
+  `create_pixel_layer`）。没有那个 venv 时优雅降级：只出分层 PNG + 预览，
+  并在结果区写明原因。
+- **PSD 层名必须 ASCII**：psd-tools 写层名走 `mac_roman`，中文会直接抛
+  `charmap` 异常（实测踩到）。中文显示名只放在 manifest 的 `name` 里给前端。
+
+### 分层预览
+
+左：按画布比例叠所有层（`position:absolute` + 百分比坐标 + `z-index=order`，
+棋盘格底）；右：层列表（顶层在上，缩略图 + 名称 + 尺寸 + ◼/◻ 显隐），
+点一层可以在画布上单独高亮、其它层变淡。右上角是 **PSD 下载**；
+多次拆解的历史产物可以切换查看。
+
+### 验证
+
+`tsc -b` / `vite build` ✓、`check-hints` 34/34、**`node smoke.mjs` 859/859**
+（用例 46 改为三项导航；新增用例 67：同层级 tab / 隐藏右栏 / 选图 / 两种拆法 /
+参数切换 / 提交体 / 统一轮询 / 6 层预览 / 顶层在上 / PSD 下载 / 显隐与高亮 /
+后端静态契约）、新增 `tests/test_partsplit.py` **6 例**（爆炸图 6 层坐标不越界、
+标准 PSD 能被 psd_tools 读回 6 层、列表读回、删除挡越界、端点 400、wparts 入队）、
+后端回归 **125 passed / 5 skipped**。真机截图
+`tests/_out/ui_review/parts/23f-cc-parts.png`。
+
 ## 2026-11-09 · 立绘工具箱：真换装 / 真换表情
 
 用户要求把「换装 / 换表情」也做成立绘悬浮工具箱里的动作，形态跟扣背景 /

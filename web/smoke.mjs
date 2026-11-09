@@ -21,6 +21,32 @@ let jobSeq = 0
  * 前一个用例往磁盘上写了项目，后一个用例启动时就会拉到它，画布不再是空的，
  * 于是「新建出 X 节点」这类断言全错（而且错得莫名其妙）。
  */
+/** 拆部件的假数据：6 层、从底到顶、坐标在 256×384 画布内 */
+const PARTS_LAYERS = [
+  ['左腿（leg_l）', 'leg_l', 70, 211, 62, 160],
+  ['右腿（leg_r）', 'leg_r', 124, 211, 63, 160],
+  ['左臂（arm_l）', 'arm_l', 70, 122, 36, 128],
+  ['右臂（arm_r）', 'arm_r', 151, 122, 36, 128],
+  ['躯干（torso）', 'torso', 102, 110, 53, 109],
+  ['头（head）', 'head', 70, 24, 117, 94],
+]
+const partsManifest = () => ({
+  id: 'p1', method: 'explode', source: '/files/p3.png',
+  sourceName: 'portrait_3.png', canvas: [256, 384],
+  psd: '/files/characters/Alice/Parts/p1/model.psd', psdName: 'model.psd',
+  preview: null, created: 1794200000, seconds: 1.2, notice: '', options: {},
+  layers: PARTS_LAYERS.map(([name, role, x, y, width, height], i) => ({
+    name, role, file: `layers/${role}.png`, url: `/parts/${role}.png`,
+    x, y, width, height, order: i,
+  })),
+})
+const partsSummary = () => ({
+  id: 'p1', method: 'explode', methodLabel: '爆炸图 · 几何切件',
+  created: 1794200000, seconds: 1.2, layers: 6,
+  psd: '/files/characters/Alice/Parts/p1/model.psd', psdName: 'model.psd',
+  preview: null, canvas: [256, 384], source: '/files/p3.png', notice: '',
+})
+
 function makeFetch() {
   const serverProjects = new Map()
   let serverCurrent = ''
@@ -78,6 +104,7 @@ function makeFetch() {
   let canvasesOverride = null
   /** 用例可注入任意数量的立绘，用来验「不一次性全铺」 */
   let portraitsOverride = null
+  let partsSplitDone = false
   /** 生命阶段（每个 fetch 一份），PUT 全量覆盖 */
   let stagesOverride = null
   const defaultStages = () => ({
@@ -419,6 +446,31 @@ function makeFetch() {
         before: '/files/p3.png', kind,
         prompt: kind === 'emotion' ? "Make character's face emotion smile" : 'Change ONLY the character\'s outfit',
       }) }
+    }
+    // 拆部件：列表 / 详情 / 提交
+    {
+      const u = String(url)
+      if (u.endsWith('/parts/split') && (init.method || 'GET') === 'POST') {
+        partsSplitDone = true
+        return { ok: true, json: async () => ({
+          job_id: 'job-parts', status: 'queued', position: 1,
+          before: '/files/p3.png', method: 'explode',
+        }) }
+      }
+      if (/\/characters\/[^/]+\/parts$/.test(u)) {
+        return { ok: true, json: async () => ({
+          available: {
+            seethrough: { ok: true, reason: '' },
+            explode: { ok: true, reason: '' },
+            psd: { ok: true, reason: '' },
+          },
+          items: partsSplitDone ? [partsSummary()] : [],
+        }) }
+      }
+      if (/\/characters\/[^/]+\/parts\/[^/]+$/.test(u)
+        && (init.method || 'GET') === 'GET') {
+        return { ok: true, json: async () => partsManifest() }
+      }
     }
     // 立绘悬浮工具箱：处理（生成新的一份）/ 删除。
     // **必须排在 /portraits 之前**，否则会被 includes('/portraits') 抢走当列表请求
@@ -4180,11 +4232,12 @@ async function ccCreate(doc, win) {
     (doc.querySelector('.chars.cc.is-workspace')?.getAttribute('style') || '')
       .includes('--cc-side-w'))
   const navs = [...doc.querySelectorAll('.cc-viewnav button')]
-  check('导航只有生命阶段与待处理两项',
-    navs.length === 2, navs.map((x) => x.textContent).join('/'))
-  check('「角色设定」不再与生命阶段同等级',
+  check('导航三项：生命阶段 / 拆部件 / 待处理',
+    navs.length === 3, navs.map((x) => x.textContent).join('/'))
+  check('列表页没有「角色设定」入口（它属于某个生命阶段）',
     !navs.map((x) => x.textContent).join('|').includes('角色设定')
     && navs.map((x) => x.textContent).join('|').includes('生命阶段')
+    && navs.map((x) => x.textContent).join('|').includes('拆部件')
     && navs.map((x) => x.textContent).join('|').includes('待处理'))
   check('进角色后默认停在生命阶段列表',
     !!doc.querySelector('.cc-stages-head') && !!doc.querySelector('.cc-stage-list'))
@@ -5686,6 +5739,98 @@ async function ccCreate(doc, win) {
     apppy.includes('"kind": "portrait"') && apppy.includes('"stage": str(req.stage'))
 
   check('换装换表情场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 67) 拆部件页：与角色设定同级 / 隐藏右栏 / 两种拆法 / 分层预览 / PSD
+{
+  const { dom, doc, win, errors, c0 } = await ccBoot()
+  await ccCreate(doc, win)
+  ccStep(doc, win, 2)
+  await ccWait(600)
+  const navs = () => [...doc.querySelectorAll('.cc-viewnav button')]
+  const navBtn = (t) => navs().find((b) => (b.textContent || '').includes(t))
+  const click = (el) => el?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+
+  check('导航里有拆部件（与角色设定同级）', !!navBtn('拆部件'))
+  click(navBtn('拆部件'))
+  await ccWait(600)
+
+  check('切到拆部件页', !!doc.querySelector('.cc-parts'))
+  check('拆部件页隐藏右栏立绘与拖动条',
+    !doc.querySelector('.cc-preview') && !doc.querySelector('.cc-split'))
+  check('拆部件页是单列布局',
+    !!doc.querySelector('.chars.cc.is-workspace.is-parts'))
+  check('面包屑是 角色名 / 拆部件',
+    (doc.querySelector('.cc-crumb')?.textContent || '').includes('拆部件'))
+  check('有选图区（只能从当前阶段立绘里选）',
+    doc.querySelectorAll('.cc-parts-pick-item').length > 0)
+  check('两种拆法都列出来',
+    doc.querySelectorAll('.cc-parts-method').length === 2
+    && (doc.querySelector('.cc-parts-methods')?.textContent || '')
+      .includes('See-Through')
+    && (doc.querySelector('.cc-parts-methods')?.textContent || '')
+      .includes('爆炸图'))
+
+  // 选爆炸图（See-Through 要 2~3 分钟，这一步只验参数与链路）
+  const exp = [...doc.querySelectorAll('.cc-parts-method')]
+    .find((m) => (m.textContent || '').includes('爆炸图'))
+  click(exp)
+  await ccWait(150)
+  check('选爆炸图后参数换成切区重叠',
+    (doc.querySelector('.cc-parts-params')?.textContent || '').includes('切区重叠'))
+
+  click([...doc.querySelectorAll('.cc-parts-actions button')]
+    .find((b) => (b.textContent || '').includes('开始拆')))
+  await ccWait(1600)
+
+  const req = calls.slice(c0).filter((c) => c.url.includes('/parts/split')).pop()
+  const body = (() => {
+    try { return JSON.parse(req?.body || '{}') } catch { return {} }
+  })()
+  check('提交带选中的图 / 拆法 / 参数',
+    typeof body.path === 'string' && body.path.length > 0
+    && body.method === 'explode' && 'overlap' in (body.params || {}),
+    JSON.stringify(body))
+  check('拆部件走统一任务轮询',
+    calls.slice(c0).some((c) => c.url.includes('/jobs/')))
+
+  check('分层预览列出 6 层',
+    doc.querySelectorAll('.cc-parts-layers li').length === 6,
+    String(doc.querySelectorAll('.cc-parts-layers li').length))
+  check('画布上叠了 6 层图',
+    doc.querySelectorAll('.cc-parts-layer').length === 6)
+  check('层列表按 PSD 习惯顶层在上（head 在第一行）',
+    (doc.querySelector('.cc-parts-layers li span')?.textContent || '').includes('head'),
+    doc.querySelector('.cc-parts-layers li span')?.textContent)
+  const dl = doc.querySelector('a[download]')
+  check('有 PSD 下载（标准分层 PSD）',
+    !!dl && (dl.getAttribute('href') || '').includes('.psd'),
+    dl?.getAttribute('href'))
+
+  // 显隐 + 单层高亮
+  click(doc.querySelector('.cc-parts-eye'))
+  await ccWait(150)
+  check('眼睛能隐藏一层',
+    [...doc.querySelectorAll('.cc-parts-layer')]
+      .some((i) => i.style.opacity === '0'))
+  click(doc.querySelectorAll('.cc-parts-layers li')[1])
+  await ccWait(150)
+  check('点层能单独高亮（其它层变淡）',
+    [...doc.querySelectorAll('.cc-parts-layer')]
+      .some((i) => i.style.opacity === '0.22'))
+
+  // 静态契约：两种拆法 / PSD 写入 / ASCII 层名
+  const ps = readFileSync(resolve('..', 'workflows', 'partsplit.py'), 'utf8')
+  check('后端两种拆法都在（See-Through 子进程 + 几何切件）',
+    ps.includes('_split_seethrough') && ps.includes('rigbuild.split_image'))
+  check('PSD 层名用 ASCII（psd-tools 走 mac_roman）',
+    ps.includes('psdName') && ps.includes('mac_roman'))
+  const tool = readFileSync(resolve('..', 'tools', 'parts_to_psd.py'), 'utf8')
+  check('PSD 用 psd_tools 写标准分层',
+    tool.includes('PSDImage.new') && tool.includes('create_pixel_layer'))
+
+  check('拆部件场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 

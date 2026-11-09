@@ -4628,3 +4628,132 @@ body.is-resizing, body.is-resizing * { cursor: col-resize !important; user-selec
   border-radius: var(--r-sm); background: rgba(108, 196, 239, 0.08);
   font-size: 11px; line-height: 1.6; color: var(--cyan);
 }
+
+/* ---------- 拆部件页（与角色设定同级；统一层内） ---------- */
+/* 拆部件只要单列：选图 + 分层预览占满宽度，右边不再挂立绘 */
+.chars.cc.is-workspace.is-parts { grid-template-columns: minmax(0, 1fr); }
+.cc-parts { display: flex; flex-direction: column; gap: 16px; }
+.cc-parts-head h2 { margin: 0 0 5px; font-size: 15px; color: var(--white); }
+.cc-parts-head p { margin: 0; font-size: 11px; line-height: 1.7; color: var(--muted); }
+.cc-parts-sec { display: flex; flex-direction: column; gap: 8px; }
+.cc-parts-sec > h3 {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin: 0; padding-bottom: 5px; border-bottom: 1px solid var(--line);
+  font-size: 12px; font-weight: 600; color: var(--white);
+}
+.cc-parts-meta { font-family: var(--mono); font-size: 10px;
+  font-weight: 400; color: var(--muted-2); }
+.cc-parts-note { margin: 0; font-size: 10.5px; line-height: 1.6; color: var(--muted-2); }
+
+/* 选图：横排缩略图，选中的描边 */
+.cc-parts-pick { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
+.cc-parts-pick-item {
+  flex: none; width: 54px; height: 76px; padding: 3px;
+  border: 1px solid var(--line); border-radius: 4px;
+  background: var(--bg-3); cursor: pointer;
+}
+.cc-parts-pick-item img { width: 100%; height: 100%; object-fit: contain; }
+.cc-parts-pick-item.is-on { border-color: var(--cyan);
+  box-shadow: 0 0 0 1px var(--cyan) inset; }
+
+/* 两种拆法 */
+.cc-parts-methods {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 8px;
+}
+.cc-parts-method {
+  display: flex; flex-direction: column; gap: 5px; padding: 10px;
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--bg-2); text-align: left; cursor: pointer; font: inherit;
+}
+.cc-parts-method:hover { border-color: var(--line-strong); }
+.cc-parts-method.is-on {
+  border-color: var(--cyan); background: rgba(108, 196, 239, 0.08);
+}
+.cc-parts-method:disabled { opacity: 0.5; cursor: not-allowed; }
+.cc-parts-method b { font-size: 12px; color: var(--white); }
+.cc-parts-method span { font-size: 10.5px; line-height: 1.65; color: var(--muted); }
+.cc-parts-method em { font-style: normal; font-size: 10px; color: var(--pink); }
+.cc-parts-params { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.cc-parts-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+.cc-parts-progress {
+  display: flex; flex-direction: column; gap: 5px; padding: 8px 10px;
+  border: 1px solid var(--line-strong); border-radius: var(--r-sm);
+  background: var(--bg-2); font-size: 11px; color: var(--muted);
+}
+.cc-parts-progress b { color: var(--cyan); font-weight: 600; }
+.cc-parts-bar { height: 4px; border-radius: 2px; background: var(--bg-4);
+  overflow: hidden; }
+.cc-parts-bar i { display: block; height: 100%; background: var(--cyan);
+  transition: width 0.3s ease; }
+
+/* 分层预览：左画布叠层 + 右层列表 */
+.cc-parts-view {
+  display: grid; grid-template-columns: minmax(0, 1fr) 268px;
+  gap: 12px; align-items: start;
+}
+.cc-parts-canvas {
+  position: relative; width: 100%; margin: 0 auto; overflow: hidden;
+  border: 1px solid var(--line-strong); border-radius: var(--r-sm);
+  background-color: #1a1a20;
+  background-image:
+    linear-gradient(45deg, #26262e 25%, transparent 25%, transparent 75%, #26262e 75%),
+    linear-gradient(45deg, #26262e 25%, transparent 25%, transparent 75%, #26262e 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 8px 8px;
+}
+.cc-parts-layer {
+  position: absolute; image-rendering: pixelated; pointer-events: none;
+  transition: opacity 0.12s linear;
+}
+.cc-parts-empty {
+  position: absolute; inset: 0; display: flex;
+  align-items: center; justify-content: center;
+  font-size: 11px; color: var(--muted-2);
+}
+.cc-parts-layers {
+  list-style: none; margin: 0; padding: 3px;
+  display: flex; flex-direction: column; gap: 1px;
+  max-height: 520px; overflow: auto;
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--bg-2);
+}
+.cc-parts-layers li {
+  display: flex; align-items: center; gap: 6px;
+  padding: 3px 5px; border-radius: 3px;
+  font-size: 10.5px; color: var(--muted); cursor: pointer;
+}
+.cc-parts-layers li:hover { background: var(--bg-3); }
+.cc-parts-layers li.is-on { background: rgba(108, 196, 239, 0.14); color: var(--white); }
+.cc-parts-layers img {
+  width: 24px; height: 24px; flex: none; object-fit: contain;
+  background: var(--bg-4); border-radius: 3px;
+}
+.cc-parts-layers span {
+  flex: 1; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.cc-parts-layers em { font-style: normal; font-family: var(--mono);
+  font-size: 9px; color: var(--muted-2); }
+.cc-parts-eye {
+  width: 18px; height: 18px; flex: none; padding: 0;
+  border: 0; background: transparent; color: var(--muted);
+  font-size: 12px; line-height: 1; cursor: pointer;
+}
+.cc-parts-eye:hover { color: var(--cyan); }
+
+.cc-parts-history {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  font-size: 10.5px; color: var(--muted-2);
+}
+.cc-parts-history button {
+  padding: 3px 7px; border: 1px solid var(--line); border-radius: 3px;
+  background: var(--bg-2); color: var(--muted); font: inherit; cursor: pointer;
+}
+.cc-parts-history button:hover { border-color: var(--line-strong); }
+.cc-parts-history button.is-on { border-color: var(--cyan); color: var(--cyan); }
+@media (max-width: 1080px) {
+  .cc-parts-view { grid-template-columns: minmax(0, 1fr); }
+  .cc-parts-layers { max-height: 260px; }
+}

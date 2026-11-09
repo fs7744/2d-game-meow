@@ -45,6 +45,7 @@ import {
 } from '../api'
 import CharacterLibrary, { tagLabel } from './CharacterLibrary'
 import CharacterPlaytest from './CharacterPlaytest'
+import { PartsPanel } from './characters/PartsPanel'
 import PromptZoom from './PromptZoom'
 import TagPicker from './TagPicker'
 import {
@@ -92,9 +93,10 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
   const [items, setItems] = useState<CharacterSummary[]>([])
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState('')
-  /** library=全屏角色库；stages=生命阶段列表；stage=角色设定；pending=待处理页 */
-  /** 四层：全屏库 → 生命阶段列表 → 阶段编辑（角色设定）→ 待处理页。 */
-  const [view, setView] = useState<'library' | 'stages' | 'stage' | 'pending'>('library')
+  /** library=全屏角色库；stages=生命阶段列表；stage=角色设定；
+   *  parts=拆部件（与角色设定同级）；pending=待处理页 */
+  const [view, setView] = useState<
+    'library' | 'stages' | 'stage' | 'parts' | 'pending'>('library')
   const [sel, setSel] = useState<string | null>(null)
   const [detail, setDetail] = useState<CharacterDetail | null>(null)
   const [styles, setStyles] = useState<StyleCatalog | null>(null)
@@ -762,7 +764,8 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
   }
 
   return (
-    <div className={`chars cc is-workspace${view === 'stages' ? ' is-stages' : ''}`}
+    <div className={`chars cc is-workspace${view === 'stages' ? ' is-stages' : ''}`
+      + `${view === 'parts' ? ' is-parts' : ''}`}
       style={{ '--cc-side-w': `${sideW}px` } as CSSProperties}>
       <main className="chars-detail cc-main">
         {/* 顶部只有角色名 + 更小的描述；最右是「修改」与编辑时间。
@@ -784,7 +787,8 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
             <button type="button" className="cc-crumb-link"
               onClick={() => setView('stages')}>{detail?.name || sel || ''}</button>
             <span className="cc-crumb-sep">/</span>
-            <b>{view === 'stage' ? (currentStage?.title || '角色设定') : '待处理'}</b>
+            <b>{view === 'stage' ? (currentStage?.title || '角色设定')
+              : view === 'parts' ? '拆部件' : '待处理'}</b>
           </div>
         )}
         {err && <div className="chars-err">⚠ {err}</div>}
@@ -801,6 +805,9 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
               : '生命阶段列表'}>
             {view === 'stage' ? '角色设定' : '生命阶段'}
           </button>
+          <button type="button" className={view === 'parts' ? 'is-on' : ''}
+            disabled={!stageId}
+            onClick={() => stageId && setView('parts')}>拆部件</button>
           <button type="button" className={view === 'pending' ? 'is-on' : ''}
             onClick={() => setView('pending')}>待处理 · 出素材 / 导出</button>
         </div>
@@ -886,6 +893,12 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
               </div>
               {/* 生命阶段列表页只放阶段本身：待处理在导航里，角色档案在「修改」弹窗里 */}
             </>
+          )}
+
+          {/* ===== 拆部件：选图 → 选拆法 → 分层 PSD + 预览（与角色设定同级） ===== */}
+          {view === 'parts' && sel && detail && (
+            <PartsPanel character={detail.name} portraits={portraits}
+              task={task} runTask={runTask} />
           )}
 
           {/* ===== 阶段编辑：角色设定（原「定形象」内容，用户要求改名） ===== */}
@@ -1348,7 +1361,8 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
       {/* 生命阶段列表页不要右栏：每行已经在显示该阶段的立绘，
           再放一个全局立绘面板反而分不清属于哪个阶段。
           立绘是「角色设定」的一部分，只在进入某个阶段后出现。 */}
-      {view !== 'stages' && (
+      {/* 拆部件页也要单列：选图 + 分层预览占满宽度，右边不再挂立绘 */}
+      {view !== 'stages' && view !== 'parts' && (
         <>
           <div ref={splitRef} className="cc-split" role="separator" aria-orientation="vertical"
             aria-label="拖动调整成果区宽度" title="拖动调整宽度（双击恢复默认）"
