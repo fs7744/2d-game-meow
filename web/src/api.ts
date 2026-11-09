@@ -1022,6 +1022,93 @@ export function splitParts(name: string, body: {
     { method: 'POST', body: JSON.stringify(body) })
 }
 
+/* ---------------- 角色中心 · 骨骼动画（内嵌工作台） ---------------- */
+
+/** 一份骨骼动画产物。formats 的 key 就是导出文件名，value 是 /files/ URL。 */
+export type RigAnimSummary = {
+  id: string
+  created: number
+  stage: string
+  source: { kind?: string; label?: string; name?: string }
+  bones: number
+  slots: number
+  animations: number
+  constraints: number
+  animationNames: string[]
+  warnings: string[]
+  formats: Record<string, string>
+  godot: string | null
+}
+
+/** 只列当前生命阶段的产物（跟拆部件一个规则）。编辑器编译进前端，available 恒为可用。 */
+export function fetchRigAnims(name: string, stage = ''): Promise<{
+  available: { editor: boolean; reason: string }
+  stage: string
+  items: RigAnimSummary[]
+}> {
+  const q = stage ? `?stage=${encodeURIComponent(stage)}` : ''
+  return req(`/characters/${encodeURIComponent(name)}/riganim${q}`)
+}
+
+/** 用户自己导入的分层 PSD。请求体是原始字节，后端只回文件名（不给绝对路径）。 */
+export async function uploadRigPsd(name: string, file: File,
+  stage = ''): Promise<{ id: string; name: string; url: string }> {
+  const q = `?stage=${encodeURIComponent(stage)}&filename=${encodeURIComponent(file.name)}`
+  const r = await fetch(`${base}/characters/${encodeURIComponent(name)}/riganim/psd${q}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: file,
+  })
+  if (!r.ok) {
+    let msg = `HTTP ${r.status}`
+    try { const j = await r.json(); if (typeof j?.detail === 'string') msg = j.detail } catch { /* noop */ }
+    throw new Error(msg)
+  }
+  return r.json()
+}
+
+/**
+ * 把内嵌编辑器生成的全部导出文件发布到当前生命阶段。
+ * 用 FormData（不是 req）：文件是二进制，且 Content-Type 要留给浏览器设 boundary。
+ */
+export async function publishRigAnim(name: string, stage: string,
+  source: { kind: string; label: string; name: string },
+  meta: Record<string, unknown>,
+  files: Record<string, Uint8Array | Blob>): Promise<{
+    ok: boolean; id: string; stage: string; formats: Record<string, string>
+  }> {
+  const fd = new FormData()
+  fd.append('stage', stage)
+  fd.append('sourceKind', source.kind)
+  fd.append('sourceLabel', source.label)
+  fd.append('sourceName', source.name)
+  fd.append('meta', JSON.stringify(meta))
+  for (const [fn, data] of Object.entries(files)) {
+    fd.append('files', data instanceof Blob ? data : new Blob([data as BlobPart]), fn)
+  }
+  const r = await fetch(`${base}/characters/${encodeURIComponent(name)}/riganim/publish`,
+    { method: 'POST', body: fd })
+  if (!r.ok) {
+    let msg = `HTTP ${r.status}`
+    try { const j = await r.json(); if (typeof j?.detail === 'string') msg = j.detail } catch { /* noop */ }
+    throw new Error(msg)
+  }
+  return r.json()
+}
+
+export function deleteRigAnim(name: string, rid: string,
+  stage = '', confirm = true): Promise<{ deleted: string }> {
+  return req(`/characters/${encodeURIComponent(name)}/riganim/delete`,
+    { method: 'POST', body: JSON.stringify({ path: rid, stage, confirm }) })
+}
+
+/** 生成 Godot 4.3+ 工程包 zip（addon + 骨骼产物 + 示例场景）。 */
+export function exportRigGodot(name: string, rid: string,
+  stage = ''): Promise<{ url: string; name: string }> {
+  return req(`/characters/${encodeURIComponent(name)}/riganim/godot`,
+    { method: 'POST', body: JSON.stringify({ path: rid, stage }) })
+}
+
 /* ---------------- 立绘工具箱：真换装 / 真换表情 ---------------- */
 
 export type PortraitVariantKind = 'outfit' | 'emotion'

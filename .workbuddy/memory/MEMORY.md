@@ -60,10 +60,24 @@
 - 试玩台播放与位移**共用一个 rAF**（双时钟会滑步）；`GET /characters/{name}/playtest` 只读扫盘。
 
 ## 角色中心（**别写回四步工作台**）
-- 五层 `library / stages / stage / parts / pending`。默认全屏库 → 生命阶段列表 → 角色设定；「拆部件」与「待处理」同级。UI 上「项目」叫**画布**（内部 `/projects`）。
-- **层级（用户逐条钉过）**：顶部只有**角色名 + 更小描述 + 修改 + 编辑时间**，不许出现「当前服装/画风」行；改名/改描述/删除/只读档案都在「修改」弹窗。导航只有**生命阶段 / 拆部件 / 待处理**三项；「角色设定」属于某阶段、不是同级入口（进入后第一项文字变「角色设定」并高亮，正文不许再有大标题）。面包屑只在进入后出现。
+- 六层 `library / stages / stage / parts / riganim / pending`。默认全屏库 → 生命阶段列表 → 角色设定；「拆部件」「骨骼动画」「待处理」同级。UI 上「项目」叫**画布**（内部 `/projects`）。
+- **层级（用户逐条钉过）**：顶部只有**角色名 + 更小描述 + 修改 + 编辑时间**，不许出现「当前服装/画风」行；改名/改描述/删除/只读档案都在「修改」弹窗。导航为**生命阶段 / 拆部件 / 骨骼动画 / 待处理**四项（2026-11-09 用户要求新增第四项，旧「三项」约定已作废）；「角色设定」属于某阶段、不是同级入口（进入后第一项文字变「角色设定」并高亮，正文不许再有大标题）。面包屑只在进入后出现。
 - **列表页无右栏与拖动条**（`.is-stages` 单列），不塞待处理卡片/角色档案；每行以立绘为主（58×82、最多 5 张）。左边距：`cc-main` 是 `padding:0`，统一层把 `.cc-topbar/.cc-crumb/.cc-viewnav/.cc-panel/.cc-next/.chars-err` 统一到 **24px**。
 - 右栏 `PortraitPane` 是**固定分页**（每页 8 张 + 页码，数量变了回第 1 页），**不许留「显示全部」入口**；`TaskBar` 排在画廊**之前**且 `sticky top:0`。画风库是弹窗（点卡片即选中并关窗）。右栏可拖宽 `.cc-split` + `--cc-side-w`（默认 420，`localStorage meow.cc.sideW`）。预览图必须 flex 居中。
+- **对照 rigby2d 审查后钉死的 UI 契约（别再写错）**：`core/` + `io/` 与上游 byte 一致，
+  问题只会出在自己写的 UI 层。① 影片画质档位是 0/1/2 → `QUALITY` 的 low/medium/high，
+  别再乘 2；编码要循环排空 `encodeQueueSize>8` 并 `color.sort(time)`（上游 offline.js 就这么做）。
+  ② `lipsync.readTiming` **只认** Papagayo / Rhubarb(TSV|JSON) / ElevenLabs / 词时间 JSON；
+  返回 `{kind, words}` 或 `{kind, cues}`，**cues 必须存下来直接用**，SRT 与「单词 起 止」
+  要在 UI 层归一化成词时间数组再喂进去。③ `retarget()` 自己已写进 `target.animations`，
+  report 字段是 `keys/unmatched/skipped`，别再 push 一次。④ `Pose.apply` 的关键帧语义是
+  rotate/translate 加 setup、scale 乘 setup。⑤ 发布后端按 `riganim.EXPECTED_FILES` **七个文件全查**，
+  缺 4.2/4.3/project.rigby 也不能静默落盘。
+- **顶栏一级视图是三个**：画布 / 角色中心 / 骨骼动画（`App.tsx` 的 `view` 联合类型）。
+  骨骼动画工作台是 `web/src/components/RigStudioPage.tsx`（角色 + 生命阶段选择器、内嵌编辑器、
+  五块高级工作区、产物列表）；角色中心的「骨骼动画」tab 仍保留按阶段归档的产物页，两者共用后端。
+  加 tab 时记得同步 `web/smoke.mjs` 的「顶栏三个一级视图」断言。
+- **骨骼动画编辑器（2026-11-09 用户定稿，别再改回独立应用）**：入口是角色中心第四项「骨骼动画」，但编辑器**内嵌在当前项目的 React 页里**（`web/src/components/characters/rig/`），不是独立应用 / iframe / 新标签页。核心算法一比一放在 `web/src/rig/`：`core/` 是 rigby2d `src/core` 的逐字副本，`io/` 是上游不依赖 UI/Tauri 的纯逻辑（PSD 导入、Spine JSON/.skel/图集导出、工作文件 ZIP）；`facade.js` 做命名空间聚合，TS 侧 `facade.d.ts` 给宽松声明。UI 自己写，但所有骨骼/动画/约束计算都调 core 的真实 API，不许重写。产物仍由 `workflows/riganim.py` 按 `RigAnim[/s_<阶段>]/` 归档。
 - **生命阶段**：`workflows/stages.py`；阶段数组/排序/描述存角色 `config.json`（数组顺序即展示顺序），`active_stage` 的 info 始终是顶层 `character_info` 的**镜像**，所以出图 API 不用带 stage。`GET/PUT /characters/{n}/stages` 全量提交；立绘按 `Portraits/s_<id>/` 分目录、默认阶段用老位置；删阶段**不删磁盘文件**；老角色自动补「初始设定」。导入设定**只复制 info，绝不导入立绘**。
 
 ## 立绘工具箱 / 拆部件

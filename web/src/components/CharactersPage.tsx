@@ -46,6 +46,7 @@ import {
 import CharacterLibrary, { tagLabel } from './CharacterLibrary'
 import CharacterPlaytest from './CharacterPlaytest'
 import { PartsPanel } from './characters/PartsPanel'
+import { RigAnimPanel } from './characters/RigAnimPanel'
 import PromptZoom from './PromptZoom'
 import TagPicker from './TagPicker'
 import {
@@ -94,9 +95,9 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState('')
   /** library=全屏角色库；stages=生命阶段列表；stage=角色设定；
-   *  parts=拆部件（与角色设定同级）；pending=待处理页 */
+   *  parts=拆部件、riganim=骨骼动画（都与角色设定同级）；pending=待处理页 */
   const [view, setView] = useState<
-    'library' | 'stages' | 'stage' | 'parts' | 'pending'>('library')
+    'library' | 'stages' | 'stage' | 'parts' | 'riganim' | 'pending'>('library')
   const [sel, setSel] = useState<string | null>(null)
   const [detail, setDetail] = useState<CharacterDetail | null>(null)
   const [styles, setStyles] = useState<StyleCatalog | null>(null)
@@ -765,7 +766,8 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
 
   return (
     <div className={`chars cc is-workspace${view === 'stages' ? ' is-stages' : ''}`
-      + `${view === 'parts' ? ' is-parts' : ''}`}
+      + `${view === 'parts' ? ' is-parts' : ''}`
+      + `${view === 'riganim' ? ' is-riganim' : ''}`}
       style={{ '--cc-side-w': `${sideW}px` } as CSSProperties}>
       <main className="chars-detail cc-main">
         {/* 顶部只有角色名 + 更小的描述；最右是「修改」与编辑时间。
@@ -788,13 +790,14 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
               onClick={() => setView('stages')}>{detail?.name || sel || ''}</button>
             <span className="cc-crumb-sep">/</span>
             <b>{view === 'stage' ? (currentStage?.title || '角色设定')
-              : view === 'parts' ? '拆部件' : '待处理'}</b>
+              : view === 'parts' ? '拆部件'
+                : view === 'riganim' ? '骨骼动画' : '待处理'}</b>
           </div>
         )}
         {err && <div className="chars-err">⚠ {err}</div>}
         {stageErr && <div className="chars-err">⚠ {stageErr}</div>}
 
-        {/* 只有两个入口。进入某个阶段后，第一项就是**当前所在的「角色设定」**，
+        {/* 阶段内四个入口。进入某个阶段后，第一项就是**当前所在的「角色设定」**，
             名字只在这里出现一次，正文不再重复一个大标题。列表页仍叫「生命阶段」，
             点它（或面包屑里的角色名 / 底部返回按钮）回到阶段列表。 */}
         <div className="cc-viewnav">
@@ -808,6 +811,9 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
           <button type="button" className={view === 'parts' ? 'is-on' : ''}
             disabled={!stageId}
             onClick={() => stageId && setView('parts')}>拆部件</button>
+          <button type="button" className={view === 'riganim' ? 'is-on' : ''}
+            disabled={!stageId}
+            onClick={() => stageId && setView('riganim')}>骨骼动画</button>
           <button type="button" className={view === 'pending' ? 'is-on' : ''}
             onClick={() => setView('pending')}>待处理 · 出素材 / 导出</button>
         </div>
@@ -899,6 +905,12 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
           {view === 'parts' && sel && detail && (
             <PartsPanel character={detail.name} stage={stageId}
               portraits={portraits} task={task} runTask={runTask} />
+          )}
+
+          {/* ===== 骨骼动画：选 PSD → 完整 rigby2d 编辑器 → 按阶段归档 ===== */}
+          {view === 'riganim' && sel && detail && (
+            <RigAnimPanel character={detail.name} stage={stageId}
+              stageTitle={currentStage?.title || ''} />
           )}
 
           {/* ===== 阶段编辑：角色设定（原「定形象」内容，用户要求改名） ===== */}
@@ -1362,7 +1374,7 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
           再放一个全局立绘面板反而分不清属于哪个阶段。
           立绘是「角色设定」的一部分，只在进入某个阶段后出现。 */}
       {/* 拆部件页也要单列：选图 + 分层预览占满宽度，右边不再挂立绘 */}
-      {view !== 'stages' && view !== 'parts' && (
+      {view !== 'stages' && view !== 'parts' && view !== 'riganim' && (
         <>
           <div ref={splitRef} className="cc-split" role="separator" aria-orientation="vertical"
             aria-label="拖动调整成果区宽度" title="拖动调整宽度（双击恢复默认）"

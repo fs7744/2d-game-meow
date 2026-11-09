@@ -31,6 +31,7 @@ import ConfirmDialog from './components/ConfirmDialog'
 import Lightbox from './components/Lightbox'
 import LibraryDrawer, { type LibraryTab } from './components/LibraryDrawer'
 import CharactersPage from './components/CharactersPage'
+import RigStudioPage from './components/RigStudioPage'
 import CanvasLibrary from './components/CanvasLibrary'
 import GlobalSettingsDialog from './components/GlobalSettings'
 import type { PoseDir } from './api'
@@ -284,7 +285,7 @@ export default function App() {
   /** 资料库浏览面板。tab 决定打开时先看哪个库 */
   const [libraryOpen, setLibraryOpen] = useState(false)
   /** 一级视图：**画布** 与 **角色中心** 同级（角色库不属于任何一个画布） */
-  const [view, setView] = useState<'canvas' | 'characters'>('canvas')
+  const [view, setView] = useState<'canvas' | 'characters' | 'rig'>('canvas')
   /** 画布侧同样先看到全屏列表，点卡片才进节点编辑器。
    *  `?editor=1` 是直接打开编辑器的深链（分享 / 恢复上次画布 / 冒烟用）。 */
   const [canvasView, setCanvasView] = useState<'library' | 'editor'>(() =>
@@ -1810,9 +1811,11 @@ export default function App() {
           {/* **项目名仍挂在 .brand 下**：它不是装饰，是"我现在改的是哪个项目"
               的唯一提示；视图 tab 只是加在旁边，不能把它挤出 brand。 */}
           <span className="sub">
-            {view === 'characters'
-              ? '角色中心 · 生命阶段 / 角色设定 / 待处理'
-              : canvasView === 'library'
+            {view === 'rig'
+              ? '骨骼动画 · 编辑器 / 影片 / 口型 / 场景 / 重定向'
+              : view === 'characters'
+                ? '角色中心 · 生命阶段 / 角色设定 / 待处理'
+                : canvasView === 'library'
                 ? `画布库 · ${projectMeta.length} 张画布`
                 : `${projectMeta.find((p) => p.id === currentId)?.name ?? '画布'} · 节点编辑器`}
           </span>
@@ -1831,6 +1834,13 @@ export default function App() {
             title="角色中心：生命阶段 → 角色设定 → 待处理（出素材 / 导出）"
           >
             角色中心
+          </button>
+          <button
+            className={`view-tab${view === 'rig' ? ' on' : ''}`}
+            onClick={() => setView('rig')}
+            title="骨骼动画编辑器：绑定、动画、影片渲染、口型同步、场景、重定向与外部工程导入"
+          >
+            骨骼动画
           </button>
         </div>
         {/* 资料库在侧栏最底部（18 个节点条目之后），以前只能滚到底才找得到。 */}
@@ -1885,7 +1895,9 @@ export default function App() {
       />
 
       <main className="stage">
-        {view === 'characters' ? (
+        {view === 'rig' ? (
+          <RigStudioPage onNotice={setNotice} />
+        ) : view === 'characters' ? (
           <CharactersPage onNotice={setNotice} matteBackend={matteBackend} />
         ) : canvasView === 'library' ? (
           <CanvasLibrary

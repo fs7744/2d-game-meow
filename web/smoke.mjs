@@ -105,6 +105,24 @@ function makeFetch() {
   let canvasesOverride = null
   /** 用例可注入任意数量的立绘，用来验「不一次性全铺」 */
   let portraitsOverride = null
+  // 骨骼动画：列表里放一份已发布的产物，删掉后回空态
+  let rigAnimDeleted = false
+  const rigAnimSummary = () => ({
+    id: 'r1', created: 1794220000, stage: 'default',
+    source: { kind: 'part', label: '拆部件 PSD', name: 'model.psd' },
+    bones: 31, slots: 12, animations: 2, constraints: 4,
+    animationNames: ['walk', 'idle'], warnings: [],
+    formats: {
+      'skeleton-3.8.json': '/files/rig/skeleton-3.8.json',
+      'skeleton-4.2.json': '/files/rig/skeleton-4.2.json',
+      'skeleton-4.3.json': '/files/rig/skeleton-4.3.json',
+      'skeleton.skel': '/files/rig/skeleton.skel',
+      'skeleton.atlas': '/files/rig/skeleton.atlas',
+      'skeleton.png': '/files/rig/skeleton.png',
+      'project.rigby': '/files/rig/project.rigby',
+    },
+    godot: null,
+  })
   let partsSplitDone = false
   /** 最近一次拆件提交的 stage / 删除的产物 id */
   let partsStage = ''
@@ -454,6 +472,33 @@ function makeFetch() {
         before: '/files/p3.png', kind,
         prompt: kind === 'emotion' ? "Make character's face emotion smile" : 'Change ONLY the character\'s outfit',
       }) }
+    }
+    // 骨骼动画：列表 / 上传 PSD / 开会话 / 删除 / 导出 Godot。
+    // **必须排在 /characters/{name} 的宽泛 GET 前面**，否则会被抢走当角色详情。
+    {
+      const u = String(url).split('?')[0]
+      const q = new URL(String(url), 'http://x').searchParams
+      const stage = q.get('stage') || 'default'
+      const method = init.method || 'GET'
+      if (/\/characters\/[^/]+\/riganim\/godot$/.test(u) && method === 'POST') {
+        return { ok: true, json: async () => ({ url: '/files/rig/godot.zip', name: 'Alice_godot.zip' }) }
+      }
+      if (/\/characters\/[^/]+\/riganim\/publish$/.test(u) && method === 'POST') {
+        return { ok: true, json: async () => ({ ok: true, id: 'r2', stage, formats: {} }) }
+      }
+      if (/\/characters\/[^/]+\/riganim\/psd$/.test(u) && method === 'POST') {
+        return { ok: true, json: async () => ({ id: 'up1.psd', name: 'up1.psd', url: '/files/rig/up1.psd' }) }
+      }
+      if (/\/characters\/[^/]+\/riganim\/delete$/.test(u) && method === 'POST') {
+        rigAnimDeleted = true
+        return { ok: true, json: async () => ({ deleted: 'r1' }) }
+      }
+      if (/\/characters\/[^/]+\/riganim$/.test(u) && method === 'GET') {
+        return { ok: true, json: async () => ({
+          available: { editor: true, reason: '' }, stage,
+          items: rigAnimDeleted ? [] : [rigAnimSummary()],
+        }) }
+      }
     }
     // 拆部件：列表 / 详情 / 提交 / 删除
     {
@@ -4221,9 +4266,10 @@ async function ccCreate(doc, win) {
 {
   const { dom, doc, win, errors, c0 } = await ccBoot()
   const tabs = [...doc.querySelectorAll('.view-tab')]
-  check('顶栏有「画布 / 角色中心」两个一级视图',
-    tabs.length === 2 && tabs[0].textContent.includes('画布')
-    && tabs[1].textContent.includes('角色中心'),
+  check('顶栏有「画布 / 角色中心 / 骨骼动画」三个一级视图',
+    tabs.length === 3 && tabs[0].textContent.includes('画布')
+    && tabs[1].textContent.includes('角色中心')
+    && tabs[2].textContent.includes('骨骼动画'),
     tabs.map((t) => t.textContent).join('/'))
   check('切到角色中心后画布节点不见了', !doc.querySelector('.node'))
   check('一进角色中心就是全屏角色库', !!doc.querySelector('.charlib'))
@@ -4273,8 +4319,9 @@ async function ccCreate(doc, win) {
     (doc.querySelector('.chars.cc.is-workspace')?.getAttribute('style') || '')
       .includes('--cc-side-w'))
   const navs = [...doc.querySelectorAll('.cc-viewnav button')]
-  check('导航三项：生命阶段 / 拆部件 / 待处理',
-    navs.length === 3, navs.map((x) => x.textContent).join('/'))
+  check('导航四项：生命阶段 / 拆部件 / 骨骼动画 / 待处理',
+    navs.length === 4 && navs.map((x) => x.textContent).join('/').includes('骨骼动画'),
+    navs.map((x) => x.textContent).join('/'))
   check('列表页没有「角色设定」入口（它属于某个生命阶段）',
     !navs.map((x) => x.textContent).join('|').includes('角色设定')
     && navs.map((x) => x.textContent).join('|').includes('生命阶段')
@@ -5972,6 +6019,65 @@ async function ccCreate(doc, win) {
   check('删完列表回到空态', rows().length === 0 && !!doc.querySelector('.cc-parts-out'))
 
   check('拆部件场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 68) 骨骼动画页：与拆部件同级 / 单列 / 全格式列表 / Godot 导出
+{
+  const { dom, doc, win, errors, c0 } = await ccBoot()
+  await ccCreate(doc, win)
+  ccStep(doc, win, 2)
+  await ccWait(600)
+  const navs = () => [...doc.querySelectorAll('.cc-viewnav button')]
+  const navBtn = (t) => navs().find((b) => (b.textContent || '').includes(t))
+  const click = (el) => el?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+
+  check('导航里有骨骼动画（与拆部件同级）', !!navBtn('骨骼动画'))
+  click(navBtn('骨骼动画'))
+  await ccWait(600)
+
+  check('切到骨骼动画页', !!doc.querySelector('.cc-rig'))
+  check('骨骼动画页隐藏右栏立绘与拖动条',
+    !doc.querySelector('.cc-preview') && !doc.querySelector('.cc-split'))
+  check('骨骼动画页是单列布局',
+    !!doc.querySelector('.chars.cc.is-workspace.is-riganim'))
+  check('面包屑是 角色名 / 骨骼动画',
+    (doc.querySelector('.cc-crumb')?.textContent || '').includes('骨骼动画'))
+  check('三种 PSD 来源都在（拆部件 / 自己导入 / 空白工程）',
+    doc.querySelectorAll('.cc-rig-mode').length === 3)
+  check('有「这个阶段的骨骼动画」列表',
+    (doc.querySelector('.cc-rig-out')?.textContent || '')
+      .includes('这个阶段的骨骼动画'))
+  check('列表写明产物存在 RigAnim 阶段目录下',
+    (doc.querySelector('.cc-rig-out')?.textContent || '').includes('RigAnim'))
+  // 拆件历史可能已被上个场景删空：切到「空项目」保证一定有一个可用来源，
+  // 这样这条断言只验「编辑器构建好了就能打开」，不依赖别的用例留下的状态。
+  click([...doc.querySelectorAll('.cc-rig-mode')]
+    .find((b) => (b.textContent || '').includes('空白工程')))
+  await ccWait(250)
+  check('编辑器可用时能打开编辑器',
+    !![...doc.querySelectorAll('.cc-rig-actions button')]
+      .find((b) => (b.textContent || '').includes('打开骨骼动画编辑器'))
+    && !doc.querySelector('.cc-rig-actions button')?.disabled,
+    String(doc.querySelector('.cc-rig-actions button')?.disabled))
+  check('编辑器内嵌在本页（不再跳转外部应用）',
+    (doc.querySelector('.cc-rig-actions .cc-rig-note')?.textContent || '').includes('内嵌')
+    && !(doc.querySelector('.cc-rig')?.textContent || '').includes('/editor/'))
+  const links = [...doc.querySelectorAll('.cc-rig-formats a')].map((a) => a.textContent)
+  check('七种导出格式都能下载（3.8 / 4.2 / 4.3 / .skel / 图集 / 工程）',
+    links.length === 7 && links.includes('JSON 3.8') && links.includes('JSON 4.2')
+    && links.includes('JSON 4.3') && links.includes('.skel')
+    && links.includes('可编辑工程'), links.join('/'))
+  check('列表项有继续编辑与导出 Godot',
+    (doc.querySelector('.cc-rig-ops')?.textContent || '').includes('继续编辑')
+    && (doc.querySelector('.cc-rig-ops')?.textContent || '').includes('导出 Godot'))
+  click([...doc.querySelectorAll('.cc-rig-ops button')]
+    .find((b) => (b.textContent || '').includes('导出 Godot')))
+  await ccWait(400)
+  check('导出 Godot 打了 POST /riganim/godot',
+    calls.slice(c0).some((c) => c.url.includes('/riganim/godot') && c.method === 'POST'),
+    calls.slice(c0).map((c) => c.url).slice(-3).join())
+  check('骨骼动画场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 

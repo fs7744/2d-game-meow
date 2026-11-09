@@ -52,6 +52,7 @@ import mimetypes
 import os
 import shutil
 import subprocess
+import tempfile
 import sys
 import unicodedata
 
@@ -96,6 +97,7 @@ from workflows import poselib
 from workflows import playtest
 from workflows import posesubjects
 from workflows import partsplit
+from workflows import riganim
 from workflows import poseset
 from workflows import projectio
 from workflows import projectstore
@@ -2336,6 +2338,163 @@ def character_parts_split_api(name: str, req: PartsSplitReq) -> Dict[str, Any]:
     _prune(_jobs, JOB_KEEP)
     return {"job_id": job_id, "status": "queued", "position": _q.qsize(),
             "before": _asset_url(src), "method": method}
+
+
+# ---------------- 角色中心 · 骨骼动画（内嵌编辑器） ----------------
+#
+# 编辑器是 web/src/components/characters/rig/ 里的 React 工作台，核心算法来自
+# web/src/rig/core（rigby2d 的运行时，一比一搬入）。后端只负责上传分层 PSD、
+# 归档发布产物、按生命阶段列历史、导出 Godot 工程包。没有独立应用、没有 iframe、
+# 没有一次性会话：前端直接把生成的字节 POST 到 /riganim/publish。
+
+
+def _rig_character(name: str) -> str:
+    try:
+        safe = characters.ensure_safe_name(name, "角色名")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not characters.character_exists(safe):
+        raise HTTPException(404, f"没有这个角色：{safe}")
+    return safe
+
+
+class RigAnimDeleteReq(BaseModel):
+    path: str          # 只认目录名（rid），跟拆部件删除一致
+    stage: str = ""
+    confirm: bool = False
+
+
+class RigAnimGodotReq(BaseModel):
+    path: str
+    stage: str = ""
+
+
+@app.get("/characters/{name}/riganim")
+def character_riganim_api(name: str, stage: str = "") -> Dict[str, Any]:
+    """该生命阶段的骨骼动画产物。核心库已编译进前端，无需额外构建。"""
+    safe = _rig_character(name)
+    st = stage or "default"
+    return {"available": {"editor": True, "reason": ""},
+            "stage": st,
+            "items": riganim.list_results(safe, st)}
+
+
+@app.post("/characters/{name}/riganim/psd")
+async def character_riganim_psd_api(name: str, request: Request,
+                                    stage: str = "", filename: str = "") -> Dict[str, Any]:
+    """用户自己导入的分层 PSD（请求体是原始字节，跟 /upload 一个约定）。"""
+    safe = _rig_character(name)
+    data = await request.body()
+    try:
+        r = riganim.save_upload(safe, stage or "default",
+                                filename or "layered.psd", data)
+    except riganim.RigAnimError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"id": Path(r["path"]).name, "name": filename or "layered.psd",
+            "url": r["url"]}
+
+
+@app.post("/characters/{name}/riganim/publish")
+async def character_riganim_publish_api(name: str, request: Request) -> Dict[str, Any]:
+    """接收内嵌编辑器生成的 3.8/4.2/4.3 JSON、.skel、图集与工程文件，落到生命阶段。"""
+    safe = _rig_character(name)
+    form = await request.form()
+    stage = str(form.get("stage") or "default")
+    source = {
+        "kind": str(form.get("sourceKind") or "")[:32],
+        "label": str(form.get("sourceLabel") or "")[:200],
+        "name": str(form.get("sourceName") or "")[:200],
+    }
+    try:
+        meta = json.loads(str(form.get("meta") or "{}"))
+    except (ValueError, TypeError):
+        meta = {}
+    if not isinstance(meta, dict):
+        meta = {}
+    files: Dict[str, bytes] = {}
+    for item in form.getlist("files"):
+        fn = Path(str(getattr(item, "filename", "") or "")).name
+        if not fn:
+            continue
+        files[fn] = await item.read()
+    try:
+        out = riganim.save_result(safe, stage, source, files, meta)
+    except riganim.RigAnimError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, **out}
+
+
+@app.post("/characters/{name}/riganim/delete")
+def character_riganim_delete_api(name: str, req: RigAnimDeleteReq) -> Dict[str, Any]:
+    """删一份产物（整目录）。跟立绘 / 拆部件一样必须 confirm=true。"""
+    if not req.confirm:
+        raise HTTPException(400, "删除必须带 confirm=true")
+    safe = _rig_character(name)
+    rid = os.path.basename(str(req.path or "").strip().rstrip("/\\"))
+    if not rid or rid in (".", ".."):
+        raise HTTPException(400, "要删哪一份？")
+    try:
+        ok = riganim.delete_result(safe, rid, req.stage or "default")
+    except riganim.RigAnimError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not ok:
+        raise HTTPException(404, f"没有这份骨骼动画产物：{rid}")
+    return {"deleted": rid}
+
+
+@app.post("/rig/transcribe")
+async def rig_transcribe_api(request: Request, filename: str = "audio.wav") -> Dict[str, Any]:
+    """本地 Whisper 转写：返回带时间戳的词，供口型同步面板生成视位关键帧。
+
+    走独立子进程（tools/rig_whisper.py，固定 CPU），不占主进程、不抢生图显存。
+    模型未下载 / 缺音频解码依赖时会把真实原因回给前端，前端仍可粘贴时间戳文本。
+    """
+    data = await request.body()
+    if not data:
+        raise HTTPException(400, "空音频")
+    if len(data) > 80 * 1024 * 1024:
+        raise HTTPException(413, "音频太大（上限 80MB）")
+    suffix = Path(filename).suffix.lower()
+    if suffix not in (".wav", ".mp3", ".m4a", ".ogg", ".flac", ".webm"):
+        suffix = ".wav"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(data)
+        audio = tmp.name
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "rig_whisper.py"), audio],
+            capture_output=True, text=True, timeout=600,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1",
+                 "CUDA_VISIBLE_DEVICES": ""},
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(504, "本地 Whisper 转写超过 10 分钟，请换短音频或用时间戳文本") from exc
+    except OSError as exc:
+        raise HTTPException(500, f"启动转写进程失败：{exc}") from exc
+    finally:
+        try:
+            os.unlink(audio)
+        except OSError:
+            pass
+    line = (proc.stdout or "").strip().splitlines()
+    try:
+        out = json.loads(line[-1]) if line else {"ok": False, "error": "转写没有输出"}
+    except ValueError:
+        out = {"ok": False, "error": (proc.stdout or proc.stderr or "转写输出不是 JSON")[-600:]}
+    if not out.get("ok"):
+        raise HTTPException(400, str(out.get("error") or "转写失败"))
+    return out
+
+
+@app.post("/characters/{name}/riganim/godot")
+def character_riganim_godot_api(name: str, req: RigAnimGodotReq) -> Dict[str, Any]:
+    """导出 Godot 4.3+ 工程包（addon 配置 + 骨骼产物 + 示例场景）。"""
+    safe = _rig_character(name)
+    rid = os.path.basename(str(req.path or "").strip().rstrip("/\\"))
+    try:
+        return riganim.godot_bundle(safe, rid, req.stage or "default")
+    except riganim.RigAnimError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.post("/characters/{name}/portraits/variant")
