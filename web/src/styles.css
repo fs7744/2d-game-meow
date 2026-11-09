@@ -4461,3 +4461,14 @@ body.is-resizing, body.is-resizing * { cursor: col-resize !important; user-selec
   .cc-stage-info { grid-column: 2 / 3; }
   .cc-stage-ops { grid-column: 3 / 4; }
 }
+
+/* 顶部 / 面包屑 / 导航原本是 cc-main 的直接子元素，而 cc-main 是 padding:0，
+   所以整排贴着容器左边；下方 .cc-panel 只有 18px，既贴边又不对齐。
+   统一成 24px：头部、面包屑、导航、内容、返回条、错误条全部同一条左边界。
+   border-bottom 仍在最外圈，保持通栏分隔线。 */
+.chars.cc .cc-main > .cc-topbar { padding: 0 24px 10px; }
+.chars.cc .cc-main > .cc-crumb { padding: 8px 24px 2px; }
+.chars.cc .cc-main > .cc-viewnav { padding: 8px 24px; }
+.chars.cc .chars-body.cc-panel { padding-left: 24px; padding-right: 24px; }
+.chars.cc .cc-main > .cc-next { margin-left: 24px; margin-right: 24px; }
+.chars.cc .chars-err { margin-left: 24px; margin-right: 24px; }

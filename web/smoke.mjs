@@ -4130,6 +4130,12 @@ async function ccCreate(doc, win) {
   check('顶部最右有「修改」与编辑时间',
     (doc.querySelector('.cc-topbar')?.textContent || '').includes('修改')
     && (doc.querySelector('.cc-topbar-meta')?.textContent || '').includes('最后编辑'))
+  const ccCss = readFileSync(resolve(here, 'src', 'styles.css'), 'utf8')
+  check('头部 / 面包屑 / 导航 / 内容全部左对齐，且留白不小于 24px',
+    /\.chars\.cc \.cc-main > \.cc-topbar \{[^}]*24px/.test(ccCss)
+    && /\.chars\.cc \.cc-main > \.cc-crumb \{[^}]*24px/.test(ccCss)
+    && /\.chars\.cc \.cc-main > \.cc-viewnav \{[^}]*24px/.test(ccCss)
+    && /\.chars\.cc \.chars-body\.cc-panel \{[^}]*24px/.test(ccCss))
   check('不显示「当前服装」那一行（那是角色设定的一部分）',
     !doc.querySelector('.cc-charhead')
     && !(doc.querySelector('.chars.cc')?.textContent || '').includes('当前服装'))
