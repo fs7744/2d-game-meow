@@ -5673,26 +5673,27 @@ async function ccCreate(doc, win) {
   const reqs = () => calls.slice(c0).filter((c) => c.url.includes('/portraits/variant'))
   const bodyOf = (c) => { try { return JSON.parse(c.body || '{}') } catch { return {} } }
 
-  // ---- 换装 ----
+  // ---- 换装：恢复官方六字段 + AI 拆服装 + 保存服装 ----
   clickEl(toolBtn('换装'))
-  await ccWait(200)
-  check('换装弹窗给服装描述 / 归入服装 / 步数 / 种子',
-    dlgText().includes('服装描述') && dlgText().includes('归入服装')
-    && dlgText().includes('步数') && dlgText().includes('随机种子'))
-  check('没填描述时不能生成', !!dlgBtn('生成并比对')?.disabled)
-  const descEl = doc.querySelector('.cc-tool-form textarea')
-  Object.getOwnPropertyDescriptor(win.HTMLTextAreaElement.prototype, 'value')
-    .set.call(descEl, '赛博朋克护士服，白大褂 + 护目镜')
-  descEl?.dispatchEvent(new win.Event('input', { bubbles: true }))
+  await ccWait(300)
+  check('换装弹窗恢复六个服装字段（上装/下装/鞋/头部/脸部/不要出现）',
+    ['上装', '下装', '鞋', '头部', '脸部', '不要出现']
+      .every((t) => dlgText().includes(t)), dlgText().slice(0, 120))
+  check('有「AI 拆服装」与「保存服装」',
+    dlgText().includes('AI 拆服装') && dlgText().includes('保存服装'))
+  check('没填任何服装字段时不能生成', !!dlgBtn('生成并比对')?.disabled)
+
+  const fieldInput = (label) => [...doc.querySelectorAll('.cc-tool-dialog .chars-field')]
+    .find((f) => (f.textContent || '').startsWith(label))?.querySelector('input')
+  ccSetInput(win, fieldInput('上装'), '白大褂')
   await ccWait(150)
-  check('填了描述就能生成', !dlgBtn('生成并比对')?.disabled)
+  check('填了上装就能生成', !dlgBtn('生成并比对')?.disabled)
   clickEl(dlgBtn('生成并比对'))
   await ccWait(700)
 
   const vb = bodyOf(reqs().pop())
-  check('换装请求带 kind=outfit 与服装描述',
-    vb.kind === 'outfit'
-    && String(vb.params?.description || '').includes('赛博朋克护士服'),
+  check('换装请求带 kind=outfit 与六字段',
+    vb.kind === 'outfit' && String(vb.params?.fields?.top || '').includes('白大褂'),
     JSON.stringify(vb))
   check('带上当前生命阶段（新立绘落回同一阶段）',
     typeof vb.stage === 'string' && vb.stage.length > 0, JSON.stringify(vb.stage))
@@ -5708,17 +5709,30 @@ async function ccCreate(doc, win) {
     calls.slice(c0).some((c) => c.url.includes('/portraits/delete')
       && String(c.body || '').includes('/p/portrait_variant.png')))
 
-  // ---- 换表情 ----
+  // ---- 换表情：恢复官方表情库卡片 + 画质档 ----
   clickEl(toolBtn('换表情'))
-  await ccWait(200)
-  check('换表情弹窗有表情输入（可自由填官方 safe_name）',
-    dlgText().includes('表情') && !!doc.querySelector('.cc-tool-form input[list]'))
+  await ccWait(400)
+  const emoCards = () => [...doc.querySelectorAll('.cc-tool-dialog .chars-emo')]
+  check('换表情弹窗恢复官方表情库卡片',
+    emoCards().length > 1, String(emoCards().length))
+  check('有画质档（官方 target_size）', dlgText().includes('画质档'))
+  check('默认选中一个表情',
+    doc.querySelectorAll('.cc-tool-dialog .chars-emo.on').length === 1)
+  clickEl(emoCards()[1])
+  await ccWait(150)
+  check('点卡片能切换选中（单选）',
+    doc.querySelectorAll('.cc-tool-dialog .chars-emo.on').length === 1
+    && emoCards()[1].classList.contains('on'))
   clickEl(dlgBtn('生成并比对'))
   await ccWait(700)
   const eb = bodyOf(reqs().pop())
   check('换表情请求带 kind=emotion 与表情名 / 标签',
-    eb.kind === 'emotion' && eb.params?.emotion_name === 'smile'
-    && eb.params?.emotion_tag === 'smile', JSON.stringify(eb))
+    eb.kind === 'emotion' && typeof eb.params?.emotion_name === 'string'
+    && eb.params.emotion_name.length > 0
+    && eb.params?.emotion_tag === eb.params.emotion_name, JSON.stringify(eb))
+  check('带上官方画质档 target_size',
+    eb.params?.target_size === 2048 || eb.params?.target_size === 1024,
+    String(eb.params?.target_size))
   check('换表情沿用原服装', typeof eb.params?.costume === 'string'
     && eb.params.costume.length > 0)
   check('换表情也出滑动比对', !!doc.querySelector('.cc-compare'))
@@ -5726,17 +5740,19 @@ async function ccCreate(doc, win) {
   await ccWait(150)
   check('完成后弹窗关闭', !doc.querySelector('.cc-tool-dialog'))
 
-  // ---- 静态契约：后端复用 w2、画风中立、官方模板、publish 收编 ----
+  // ---- 静态契约：后端走专用链路（Clothes LoRA / 脸部局部重绘） ----
   const apppy = readFileSync(resolve('..', 'app.py'), 'utf8')
-  check('后端复用已有 w2 指令改图（不新增模型工作流）',
-    apppy.includes('"workflow": "w2", "params": params'))
-  check('画风中立：强制 preset=none，默认不抠图',
-    apppy.includes('"preset": "none"') && apppy.includes('"matte": False'))
-  check('换表情用官方 EMOTION_PROMPT_TEMPLATE / 负向词',
-    apppy.includes('emotiongen.EMOTION_PROMPT_TEMPLATE')
-    && apppy.includes('emotiongen.EMOTION_NEGATIVE_EXTRA'))
+  check('换装用官方 CLOTHES_NEGATIVE 与 LoRA 强度',
+    apppy.includes('CLOTHES_NEGATIVE') && apppy.includes('lora_scale'))
+  check('换装 / 换表情各走专用 workflow（wpo / wpe）',
+    apppy.includes('"wpo"') && apppy.includes('"wpe"'))
   check('产物收编成同阶段的 portrait',
     apppy.includes('"kind": "portrait"') && apppy.includes('"stage": str(req.stage'))
+  const genpy = readFileSync(resolve('..', 'workflows', 'generate.py'), 'utf8')
+  check('后端换装真的挂 Clothes Core LoRA',
+    genpy.includes('Engine.CLOTHES_LORA') && genpy.includes('def portrait_outfit'))
+  check('后端换表情真的只改脸（crop_generate 贴回）',
+    genpy.includes('def portrait_expression') && genpy.includes('eg.crop_generate'))
 
   check('换装换表情场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()

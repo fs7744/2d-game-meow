@@ -1,13 +1,13 @@
-"""立绘工具箱：换装 / 换表情（真换图，产出同阶段的新立绘）。
+"""立绘工具箱：换装 / 换表情（跟待处理页同源的专用链路）。
 
 钉住的契约：
-  · 复用已有 `w2` 指令改图链路，不新增模型工作流；
-  · 换表情用官方 `EMOTION_PROMPT_TEMPLATE` / `EMOTION_NEGATIVE_EXTRA`；
-  · **画风中立**：强制 `preset="none"`，默认不抠图；
+  · 换装走 `wpo`：官方 Clothes Core LoRA + 六字段拼出的 `Dress the character:`；
+  · 换表情走 `wpe`：官方脸部裁剪局部重绘（只改脸），带 target_size / feather；
   · `publish` 收编成 `kind=portrait` 并带上当前生命阶段；
   · 路径限制在角色 `Portraits/` 下；参数白名单夹取；走同一个单卡队列。
 
-测试把 `gen.img2img` 换成假的，只验「入队的参数」，绝不让 worker 真去加载 Qwen；队列本身保持真实，否则后台 worker 线程会被假队列抛死。
+测试把两个生成函数换成假的，只验「入队参数」，绝不让 worker 真加载 Qwen；
+**队列本身保持真实**（换成假队列会把后台 worker 线程抛死）。
 """
 from __future__ import annotations
 
@@ -18,13 +18,7 @@ from PIL import Image, ImageDraw
 
 import app as appmod
 from workflows import characters as ch
-from workflows import emotiongen
-
-
-def _fake_img2img(eng, **_kw):
-    """挡住真模型：worker 会立刻跑完，但 publish 找不到文件只会记一条
-    publish_error，不影响任务状态。返回的 file 故意留空。"""
-    return {"file": "", "meta": {"fake": True}}
+from workflows import charactergen
 
 
 def _fresh(name: str) -> str:
@@ -43,6 +37,16 @@ def _seed(name: str, filename: str = "portrait_seed.png") -> str:
     return path
 
 
+def _fake(*_a, **_kw):
+    return {"file": "", "meta": {"fake": True}}
+
+
+def _stub(monkeypatch):
+    """挡住真模型：worker 会立刻跑完，publish 找不到文件只记 publish_error。"""
+    monkeypatch.setattr(appmod.gen, "portrait_outfit", _fake)
+    monkeypatch.setattr(appmod.gen, "portrait_expression", _fake)
+
+
 def _post(client, name: str, path: str, kind: str,
           params=None, stage: str = ""):
     return client.post(f"/characters/{quote(name)}/portraits/variant",
@@ -50,77 +54,96 @@ def _post(client, name: str, path: str, kind: str,
                              "params": params or {}, "stage": stage})
 
 
-def _queued(monkeypatch):
-    """**不要**替换 `_q`：后台 worker 线程里 `_q.get()` 是模块全局查找，
-    换成假队列（没有阻塞 get）会把 worker 直接抛死，后面所有依赖真实队列
-    的测试都会挂。这里只把生成函数换成假的，队列保持原样。"""
-    monkeypatch.setattr(appmod.gen, "img2img", _fake_img2img)
-    return None
-
-
-def test_outfit_enqueues_w2_and_publishes_new_portrait(client, monkeypatch):
+def test_outfit_uses_clothes_fields_and_lora(client, monkeypatch):
     name = _fresh("VariantOutfitProbe")
     src = _seed(name)
-    _queued(monkeypatch)
+    _stub(monkeypatch)
 
-    r = _post(client, name, src, "outfit",
-              {"description": "赛博朋克护士服，白大褂 + 护目镜",
-               "costume": "Nurse", "steps": 28}, stage="stage_abc")
+    r = _post(client, name, src, "outfit", {
+        "fields": {"top": "白大褂", "bottom": "黑长裤", "shoes": "短靴",
+                   "head": "护目镜", "face": "", "negative_prompt": "no hat"},
+        "costume": "Nurse", "steps": 28, "cfg": 3.5, "lora_scale": 0.8,
+    }, stage="stage_abc")
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["kind"] == "outfit" and body["job_id"]
     assert body["before"].startswith("/files/"), body["before"]
+    # 换装提示词在端点就拼好了（前端也能预览）
+    assert "Dress the character:" in body["prompt"]
+    assert "白大褂" in body["prompt"] and "黑长裤" in body["prompt"]
 
     job = appmod._jobs[body["job_id"]]
-    assert job["workflow"] == "w2", "复用已有指令改图链路，别新造工作流"
+    assert job["workflow"] == "wpo", "换装要走挂 Clothes LoRA 的专用链路"
     params = job["params"]
-    assert params["init_image"] == os.path.realpath(src)
-    assert "赛博朋克护士服" in params["prompt"]
+    assert params["image"] == os.path.realpath(src)
+    assert "Dress the character:" in params["prompt"]
     assert "Keep the same face" in params["prompt"]
-    assert params["preset"] == "none", "画风中立：不许挂 sprite 公共契约"
-    assert params["matte"] is False, "默认不偷偷抠图"
-    assert params["steps"] == 28
+    # 官方负向词 + 用户「不要出现」
+    assert "bad quality" in params["negative"]
+    assert "no hat" in params["negative"]
+    assert params["lora_scale"] == 0.8
+    assert params["steps"] == 28 and params["cfg"] == 3.5
     pub = params["publish"]
     assert pub["kind"] == "portrait" and pub["character"] == name
     assert pub["costume"] == "Nurse" and pub["stage"] == "stage_abc"
-    assert pub["matte"] is False
     assert os.path.isfile(src), "原图不能被改"
 
 
-def test_emotion_uses_official_template_and_negative(client, monkeypatch):
+def test_outfit_requires_at_least_one_clothes_field(client, monkeypatch):
+    name = _fresh("VariantOutfitEmptyProbe")
+    src = _seed(name)
+    _stub(monkeypatch)
+    r = _post(client, name, src, "outfit", {"fields": {"top": "  ", "bottom": ""}})
+    assert r.status_code == 400, r.text
+
+
+def test_outfit_accepts_legacy_description(client, monkeypatch):
+    """旧调用只给一句描述也要能跑（不强制六字段）。"""
+    name = _fresh("VariantLegacyProbe")
+    src = _seed(name)
+    _stub(monkeypatch)
+    r = _post(client, name, src, "outfit", {"description": "护士服，白大褂"})
+    assert r.status_code == 200, r.text
+    job = appmod._jobs[r.json()["job_id"]]
+    assert "护士服" in job["params"]["prompt"]
+
+
+def test_emotion_uses_partial_redraw_pipeline(client, monkeypatch):
     name = _fresh("VariantEmotionProbe")
     src = _seed(name)
-    _queued(monkeypatch)
+    _stub(monkeypatch)
 
     r = _post(client, name, src, "emotion",
-              {"emotion_name": "smile", "costume": "Naked"}, stage="default")
+              {"emotion_name": "smile", "costume": "Naked",
+               "target_size": 1024}, stage="default")
     assert r.status_code == 200, r.text
     body = r.json()
-    assert "Make character's face emotion smile" in body["prompt"]
-    assert "Change only face" in body["prompt"], "官方模板原文要在"
-    assert "Change ONLY the facial expression" in body["prompt"]
+    assert body["kind"] == "emotion"
 
-    params = appmod._jobs[r.json()["job_id"]]["params"]
-    assert "facial droplet" in params["negative"], \
-        "官方 EMOTION_NEGATIVE_EXTRA 要接上（哭类表情别顺手画眼泪）"
+    job = appmod._jobs[body["job_id"]]
+    assert job["workflow"] == "wpe", "换表情要走脸部局部重绘链路"
+    params = job["params"]
+    assert params["emotion"] == "smile"
+    # prompt 交给 portrait_expression 用官方 emotiongen 拼，端点不自己造
+    assert "prompt" not in params
+    assert params["target_size"] == 1024
+    assert params["crop_max_side"] >= 512
+    assert "feather" in params
     assert params["publish"]["emotion"] == "smile"
     assert params["publish"]["stage"] == "default"
-    assert params["preset"] == "none"
-    # 官方常量确实被引用，而不是复制走样
-    assert "Make character's face emotion" in emotiongen.EMOTION_PROMPT_TEMPLATE
 
 
 def test_rejects_missing_params_bad_kind_and_bad_path(client, monkeypatch):
     name = _fresh("VariantRejectProbe")
     src = _seed(name)
-    _queued(monkeypatch)
+    _stub(monkeypatch)
 
-    assert _post(client, name, src, "outfit").status_code == 400
     assert _post(client, name, src, "emotion").status_code == 400
-    assert _post(client, name, src, "wat", {"description": "x"}).status_code == 400
+    assert _post(client, name, src, "wat",
+                 {"fields": {"top": "x"}}).status_code == 400
     cfg = ch.config_path(name)
     assert _post(client, name, cfg, "outfit",
-                 {"description": "x"}).status_code == 400
+                 {"fields": {"top": "x"}}).status_code == 400
     assert _post(client, name, "/tmp/not-mine.png", "emotion",
                  {"emotion_name": "smile"}).status_code == 400
 
@@ -128,14 +151,23 @@ def test_rejects_missing_params_bad_kind_and_bad_path(client, monkeypatch):
 def test_clamps_untrusted_params(client, monkeypatch):
     name = _fresh("VariantClampProbe")
     src = _seed(name)
-    _queued(monkeypatch)
+    _stub(monkeypatch)
 
     r = _post(client, name, src, "outfit",
-              {"description": "x" * 900, "steps": 99999, "seed": -999,
-               "cfg": "not-a-number"})
+              {"fields": {"top": "x" * 900}, "steps": 99999, "seed": -999,
+               "cfg": "not-a-number", "lora_scale": "bad"})
     assert r.status_code == 200, r.text
     params = appmod._jobs[r.json()["job_id"]]["params"]
     assert params["steps"] == 60, "步数要夹住，别让客户端拖死单卡"
     assert params["seed"] == -1
-    assert params["cfg"] == 1.0
-    assert len(params["prompt"]) < 600, "服装描述要截断"
+    assert params["cfg"] == 3.0
+    assert params["lora_scale"] == 1.0
+    # 单个字段最多 200 字
+    assert len(params["prompt"]) < 600
+
+
+def test_official_field_order_is_used():
+    """六字段按官方顺序拼（top / bottom / head / shoes / face），空值丢掉。"""
+    desc = charactergen.clothes_description(
+        {"top": "A", "bottom": "B", "head": "C", "shoes": "D", "face": ""})
+    assert desc.splitlines() == ["A", "B", "C", "D"]

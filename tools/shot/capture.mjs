@@ -605,6 +605,20 @@ async function main() {
     } else {
       console.log('  ✗ 没找到立绘卡片')
     }
+    // 换装弹窗：六字段 + AI 拆服装 + 保存服装（与待处理页同源）
+    await fp.evaluate(() => [...document.querySelectorAll('.cc-portrait-tools button')]
+      .find((b) => (b.textContent || '').includes('换装'))?.click())
+    await fshot('23g-portrait-outfit', 600)
+    await fp.evaluate(() => document.querySelector('.cc-tool-x')?.click())
+    await sleep(220)
+
+    // 换表情弹窗：官方表情库卡片 + 画质档
+    await fp.evaluate(() => [...document.querySelectorAll('.cc-portrait-tools button')]
+      .find((b) => (b.textContent || '').includes('换表情'))?.click())
+    await fshot('23h-portrait-emotion', 900)
+    await fp.evaluate(() => document.querySelector('.cc-tool-x')?.click())
+    await sleep(220)
+
     // 右栏可拖：往左拖 160px，成果区应变宽（真实 pointer 事件走一遍）
     const sideBefore = await fp.evaluate(() =>
       document.querySelector('.cc-preview')?.getBoundingClientRect().width || 0)

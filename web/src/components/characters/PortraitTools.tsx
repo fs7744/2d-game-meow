@@ -11,13 +11,16 @@
  * 「处理并比对」时后端已经把新文件落盘（同目录、不覆盖）；用户若不满意可以
  * 「放弃这份」把它删掉，或「改参数重做」自动丢弃上一份再调。
  */
-import { useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import {
-  deletePortrait, processPortrait, submitPortraitVariant,
+  clothesWizard, deletePortrait, fetchCharacter, fetchEmotionCatalog,
+  processPortrait, saveCostume, submitPortraitVariant,
   type PortraitItem, type PortraitOp, type PortraitProcessResult,
   type PortraitVariantKind,
 } from '../../api'
+import { emotionLabel } from '../../labels'
+import { CostumeForm, EmotionGrid, type EmotionOption } from './Forms'
 import type { TaskState } from './model'
 
 type CommonProps = {
@@ -270,10 +273,6 @@ export function PortraitProcessDialog({ character, item, op, onClose, onChanged 
     </div>, document.body)
 }
 
-/** 常用表情快捷项：官方表情库的 safe_name，也可以直接输入任意表情名
- *  （后端 `emotiongen.resolve_emotions` 认不出的会当自定义表情处理）。 */
-const QUICK_EMOTIONS = ['smile', 'angry', 'sad', 'surprised', 'wink',
-  'laugh', 'cry', 'neutral']
 
 type VariantProps = CommonProps & {
   kind: PortraitVariantKind
@@ -291,37 +290,125 @@ type VariantResult = {
   name?: string
 }
 
-/** 换装 / 换表情：跑 Qwen 真出图，产物收编成同阶段的新一份立绘。
- *  跟扣背景 / 像素化一样是「弹窗挑参数 → 生成 → 滑动比对 → 放弃 / 完成」。 */
+/** 官方六个服装字段（跟待处理页的 CostumeForm 是同一组） */
+const EMPTY_CLOTHES: Record<string, string> = {
+  top: '', bottom: '', shoes: '', head: '', face: '', negative_prompt: '',
+}
+/** 表情库加载失败时的兜底（官方 safe_name） */
+const FALLBACK_EMOTIONS = ['smile', 'angry', 'sad', 'surprised', 'wink',
+  'laugh', 'cry', 'neutral']
+
+/** 换装 / 换表情：跟待处理页那两块**同源**。
+ *
+ *  · 换装：六字段 + 一句话 AI 拆服装 + 保存服装，后端挂官方
+ *    Clothes Core LoRA（`VNCCS_QI2_ClothesCoreV2.6`），25 步 / cfg 3.0；
+ *  · 换表情：官方表情库卡片 + 画质档，后端走**脸部裁剪局部重绘后贴回**，
+ *    衣服 / 姿势 / 背景逐像素不变。
+ *  两者都产出同一个阶段下的新一份立绘，原图不动。 */
 export function PortraitVariantDialog({ character, item, kind, stage, task,
   runTask, onClose, onChanged }: VariantProps) {
-  const [desc, setDesc] = useState('')
+  const [fields, setFields] = useState<Record<string, string>>({ ...EMPTY_CLOTHES })
+  const [clothText, setClothText] = useState('')
   const [costume, setCostume] = useState(item.costume || 'Naked')
-  const [emotion, setEmotion] = useState('smile')
-  const [steps, setSteps] = useState(24)
+  const [emo, setEmo] = useState('smile')
+  const [emoOptions, setEmoOptions] = useState<EmotionOption[]>([])
+  const [steps, setSteps] = useState(25)
+  const [cfg, setCfg] = useState(3)
   const [seed, setSeed] = useState(-1)
+  const [loraScale, setLoraScale] = useState(1)
+  const [targetSize, setTargetSize] = useState(2048)
   const [busy, setBusy] = useState(false)
+  const [wiz, setWiz] = useState(false)
+  const [saved, setSaved] = useState('')
   const [result, setResult] = useState<VariantResult | null>(null)
   const [pos, setPos] = useState(50)
   const [err, setErr] = useState('')
 
+  // 预填这套服装已有的六个字段（跟待处理页看到的一致）
+  useEffect(() => {
+    let alive = true
+    void fetchCharacter(character).then((d) => {
+      if (!alive) return
+      const cur = (d.config?.costumes?.[item.costume] || {}) as Record<string, string>
+      setFields({ ...EMPTY_CLOTHES, ...cur })
+    }).catch(() => { /* 预填失败就空表单 */ })
+    return () => { alive = false }
+  }, [character, item.costume])
+
+  // 官方表情库（图标 + 中文名）；取不到就用常用 safe_name 兜底
+  useEffect(() => {
+    if (kind !== 'emotion') return
+    let alive = true
+    void fetchEmotionCatalog().then((cat) => {
+      if (!alive) return
+      const out: EmotionOption[] = []
+      for (const [, list] of Object.entries(cat)) {
+        for (const e of Array.isArray(list) ? list : []) {
+          out.push({
+            key: e.key, safe_name: e.safe_name,
+            label: emotionLabel(e.safe_name, e.key), prompt: e.natural_prompt,
+          })
+        }
+      }
+      setEmoOptions(out)
+      // 库里不一定有 smile：默认落到第一项，避免「一个都没选中」
+      setEmo((cur) => out.some((e) => e.safe_name === cur) ? cur
+        : (out[0]?.safe_name || ''))
+    }).catch(() => {
+      if (!alive) return
+      const fb = FALLBACK_EMOTIONS.map((s2) => ({
+        key: s2, safe_name: s2, label: s2, prompt: '',
+      }))
+      setEmoOptions(fb)
+      setEmo((cur) => fb.some((e) => e.safe_name === cur) ? cur : fb[0].safe_name)
+    })
+    return () => { alive = false }
+  }, [kind])
+
   const label = kind === 'outfit' ? '换装' : '换表情'
-  const ready = kind === 'outfit' ? !!desc.trim() : !!emotion.trim()
+  const filled = Object.entries(fields)
+    .some(([k, v]) => k !== 'negative_prompt' && !!v.trim())
+  const ready = kind === 'outfit' ? filled : !!emo
+
+  const doWizard = async () => {
+    if (!clothText.trim() || wiz) return
+    setWiz(true); setErr('')
+    try {
+      const r = await clothesWizard(character, clothText.trim())
+      const got: Record<string, string> = {}
+      for (const k of Object.keys(EMPTY_CLOTHES)) {
+        const v = (r.fields as Record<string, unknown>)[k]
+        if (typeof v === 'string') got[k] = v
+      }
+      setFields((f) => ({ ...f, ...got }))
+      setSaved('')
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally { setWiz(false) }
+  }
+
+  const saveFields = async (d: Record<string, string>) => {
+    try {
+      await saveCostume(character, costume.trim() || item.costume, d)
+      setFields(d); setSaved('已保存到这套服装')
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    }
+  }
 
   const run = () => {
     if (!ready || busy) return
-    setBusy(true); setErr('')
+    setBusy(true); setErr(''); setSaved('')
     const params = kind === 'outfit'
-      ? { description: desc.trim(), costume: costume.trim() || item.costume,
-        emotion_tag: item.emotion || 'neutral', steps, seed }
-      : { emotion_name: emotion.trim(), costume: item.costume,
-        emotion_tag: emotion.trim(), steps, seed }
+      ? { fields, costume: costume.trim() || item.costume,
+          emotion_tag: item.emotion || 'neutral',
+          steps, cfg, seed, lora_scale: loraScale }
+      : { emotion_name: emo, costume: item.costume, emotion_tag: emo,
+          steps, cfg, seed, target_size: targetSize }
     void runTask(label,
       () => submitPortraitVariant(character,
         { path: item.path, kind, params, stage }),
       (job) => {
-        // runTask 的 onDone 收到的是 fetchJob 结果：url 是生成图，
-        // published.path 是收编进 Portraits/ 的那一份（放弃时要删它）。
         const j = job as { url?: string; published?: { path?: string; file?: string } }
         setResult({ before: item.url, after: j.url || item.url,
           path: j.published?.path, name: j.published?.file })
@@ -351,50 +438,81 @@ export function PortraitVariantDialog({ character, item, kind, stage, task,
 
         {!result ? (
           <>
-            <div className="cc-tool-body">
-              <div className="cc-tool-form">
-                {kind === 'outfit' ? (
-                  <>
-                    <Field label="服装描述" hint="只改衣服，脸 / 姿势 / 画风保持不变">
-                      <textarea rows={3} value={desc}
-                        placeholder="例：赛博朋克护士服，白大褂 + 护目镜"
-                        onChange={(e) => setDesc(e.target.value)} />
-                    </Field>
-                    <Field label="归入服装" hint="留空 = 沿用当前服装">
-                      <input value={costume}
-                        onChange={(e) => setCostume(e.target.value)} />
-                    </Field>
-                  </>
-                ) : (
-                  <Field label="表情" hint="官方表情库 safe_name，也可直接输入">
-                    <input list="cc-emo-list" value={emotion}
-                      onChange={(e) => setEmotion(e.target.value)} />
-                    <datalist id="cc-emo-list">
-                      {QUICK_EMOTIONS.map((e) => <option key={e} value={e} />)}
-                    </datalist>
-                  </Field>
-                )}
-                <Field label="步数" hint="Qwen 768² 建议 24，低于 16 步会糊块">
-                  <input type="number" min={8} max={60} value={steps}
-                    onChange={(e) => setSteps(Number(e.target.value) || 24)} />
+            {kind === 'outfit' ? (
+              <div className="cc-variant-body">
+                <Field label="一句话描述" hint="AI 拆成下面六个字段，先给你看">
+                  <div className="cc-variant-row">
+                    <input value={clothText}
+                      placeholder="例：赛博朋克护士，白大褂 + 护目镜"
+                      onChange={(e) => setClothText(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') void doWizard() }} />
+                    <button type="button" className="cc-btn ghost"
+                      disabled={wiz || !clothText.trim()}
+                      onClick={() => void doWizard()}>
+                      {wiz ? '拆解中…' : 'AI 拆服装'}
+                    </button>
+                  </div>
                 </Field>
-                <Field label="随机种子" hint="-1 = 每次随机">
-                  <input type="number" value={seed}
-                    onChange={(e) => setSeed(Number(e.target.value) || -1)} />
+                <CostumeForm fields={fields} onChange={setFields}
+                  onSave={(d) => void saveFields(d)} />
+                {saved && <p className="cc-parts-note">{saved}</p>}
+                <Field label="归入服装" hint="留空 = 沿用当前服装">
+                  <input value={costume} onChange={(e) => setCostume(e.target.value)} />
                 </Field>
               </div>
+            ) : (
+              <div className="cc-variant-body">
+                <div className="cc-variant-sel">
+                  已选 <b>{emo || '（点头像选一个）'}</b>
+                </div>
+                <EmotionGrid options={emoOptions}
+                  selected={emo ? [emo] : []}
+                  onToggle={(name) => setEmo((cur) => cur === name ? '' : name)} />
+                <Field label="画质档" hint="官方 target_size（2.0MP = 2048）">
+                  <select value={targetSize}
+                    onChange={(e) => setTargetSize(Number(e.target.value))}>
+                    <option value={2048}>标准（2048）</option>
+                    <option value={1024}>快速（1024，约快一倍）</option>
+                  </select>
+                </Field>
+              </div>
+            )}
+
+            <div className="cc-variant-nums">
+              <Field label="步数">
+                <input type="number" min={8} max={60} value={steps}
+                  onChange={(e) => setSteps(Number(e.target.value) || 25)} />
+              </Field>
+              <Field label="CFG">
+                <input type="number" min={0.5} max={8} step={0.5} value={cfg}
+                  onChange={(e) => setCfg(Number(e.target.value) || 3)} />
+              </Field>
+              <Field label="种子" hint="-1 随机">
+                <input type="number" value={seed}
+                  onChange={(e) => setSeed(Number(e.target.value) || -1)} />
+              </Field>
+              {kind === 'outfit' && (
+                <Field label="LoRA 强度" hint="Clothes Core">
+                  <input type="number" min={0} max={2} step={0.1} value={loraScale}
+                    onChange={(e) => setLoraScale(Number(e.target.value))} />
+                </Field>
+              )}
             </div>
+
             {busy && (
               <p className="cc-tool-progress">
-                生成中… {task?.message || '单卡队列排队中，约 20~30 秒'}
+                生成中… {task?.message || '单卡队列排队中'}
               </p>
             )}
             {!busy && task?.status === 'failed' && (
               <p className="cc-tool-err">⚠ {task.message}</p>
             )}
             <p className="cc-tool-hint">
-              会跑 Qwen 生成<strong>一张新立绘</strong>（原图保持不变），
-              自动收进当前生命阶段，出完可以拖动分割线比对。
+              {kind === 'outfit'
+                ? <>挂官方 Clothes Core LoRA 生成<strong>一张新立绘</strong>
+                  （原图不变），自动收进当前阶段。</>
+                : <>只重画脸框内：衣服 / 姿势 / 背景逐像素不变；生成
+                  <strong>一张新立绘</strong>，原图不变。</>}
             </p>
             <div className="cc-tool-actions">
               <button type="button" className="cc-btn ghost" onClick={onClose}>取消</button>

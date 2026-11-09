@@ -22,6 +22,58 @@
 
 ---
 
+## 2026-11-09 · 修正：立绘工具箱的换装 / 换表情退回「跟待处理页同源」
+
+用户指出两处退化：换装原来有上装 / 下装 / 鞋 / 头部 / 脸部 / 不要出现六个字段，
+工具箱版本只剩一句描述；换表情原来有官方表情库卡片、画质档，而且**只改脸**。
+
+### 漏了什么（逐项核对）
+
+| | 原来（待处理页） | 上一版工具箱 | 现在 |
+|---|---|---|---|
+| 换装六字段 | ✅ CostumeForm | ❌ 一句描述 | ✅ 恢复 |
+| 一句话 AI 拆服装 | ✅ | ❌ | ✅ 恢复 |
+| 保存服装到角色 | ✅ | ❌ | ✅ 恢复（写回 `config.costumes`） |
+| 服装下拉 / 新建 | ✅ | ❌ | 归入服装输入（新建/删除仍留在待处理页） |
+| **Clothes Core LoRA** | ✅ `VNCCS_QI2_ClothesCoreV2.6` | ❌ 走 w2 没挂 | ✅ **恢复**，强度可调 |
+| 表情库卡片（图标+中文） | ✅ EmotionGrid | ❌ 自由输入 | ✅ 恢复 |
+| 画质档 target_size | ✅ 2048/1024 | ❌ | ✅ 恢复 |
+| **只改脸（衣服逐像素不变）** | ✅ 脸部 crop + 贴回 | ❌ 整图指令改图 | ✅ **恢复** |
+| 步数 / 种子 | ✅ 25 / 整批共用 | ✅ | ✅ 25 / -1 |
+
+### 改法
+
+- 后端新增两条专用生成路径（不再借道 `w2`）：
+  - `generate.portrait_outfit`（`wpo`）：`qwen_edit_image(lora=Engine.CLOTHES_LORA)`
+    —— 跟 Clothes Designer 同一套权重/强度，透明底立绘走原生 alpha。
+  - `generate.portrait_expression`（`wpe`）：完整复用官方 Emotion Studio 的单张流程
+    `detect_face → crop_generate → merge_emotion_rgba 贴回`，
+    **只有脸框内被重画**；画质档 / 裁剪边长 / 羽化都按官方默认值接上。
+  - 两条都在 `_run` 的分发表里，`publish` 照旧收编成同阶段新立绘。
+- 端点 `portraits/variant` 变化：
+  - 换装收 `fields` 六字段，用官方 `clothes_description()` 按
+    `top / bottom / head / shoes / face` 顺序拼，外套
+    `Dress the character:` + 保持项；负向词用官方 `CLOTHES_NEGATIVE` 并追加
+    用户填的「不要出现」。兼容旧的单句 `description`。
+  - 换表情改为传 `emotion` + `target_size / crop_max_side / feather`，
+    prompt 与负向词交给 `emotiongen` 官方函数拼，端点不再自己造。
+  - 默认值回到官方：25 步 / cfg 3.0。
+- 前端：`CostumeForm` / `EmotionGrid` 从 `Controls.tsx` 抽到
+  `characters/Forms.tsx`（Controls re-export，对外 API 不变），避免
+  Controls ↔ PortraitTools 循环依赖。弹窗恢复六字段 + AI 拆服装 + 保存服装、
+  表情库卡片 + 画质档；表情库加载失败时用常用 safe_name 兜底，并保证默认有一项选中。
+
+### 验证
+
+`tsc -b` / `vite build` ✓、`check-hints` 34/34、**`node smoke.mjs` 865/865**
+（用例 66 重写：六字段 / AI 拆服装 / 保存服装 / 提交体 `fields.top` /
+表情库卡片 / 单选切换 / 画质档 / 专用 workflow 静态契约）、
+`tests/test_portrait_variant.py` **7 例**（六字段拼 `Dress the character:`、
+官方负向词 + 用户负向词、LoRA 强度、表情走 `wpe` 且不带 prompt、
+缺字段 400、旧 description 兼容、参数夹取、官方字段顺序）、
+后端回归 **105 passed / 5 skipped**。真机截图
+`tests/_out/ui_review/variant/23g-portrait-outfit.png`、`23h-portrait-emotion.png`。
+
 ## 2026-11-09 · 新增「拆部件」页：See-Through / 爆炸图 → 标准分层 PSD
 
 用户要求：加一个与「角色设定」同级的 tab 页面，内容是拆部件；切过去右侧立绘隐藏；

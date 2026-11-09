@@ -4757,3 +4757,20 @@ body.is-resizing, body.is-resizing * { cursor: col-resize !important; user-selec
   .cc-parts-view { grid-template-columns: minmax(0, 1fr); }
   .cc-parts-layers { max-height: 260px; }
 }
+
+/* ---------- 立绘工具箱：换装 / 换表情表单（统一层内） ---------- */
+.cc-variant-body { display: flex; flex-direction: column; gap: 10px; }
+.cc-variant-row { display: flex; align-items: center; gap: 6px; }
+.cc-variant-row input { flex: 1; min-width: 0; }
+.cc-variant-row .cc-btn { flex: none; white-space: nowrap; }
+.cc-variant-sel { font-size: 11px; color: var(--muted); }
+.cc-variant-sel b { color: var(--cyan); }
+/* 表情库在弹窗里别把整屏顶满：固定高度内部滚动 */
+.cc-variant-body .chars-emo-grid { max-height: 260px; }
+/* 弹窗里的服装六字段比右栏宽，放宽一点 */
+.cc-variant-body .chars-costume { max-width: 100%; }
+.cc-variant-nums {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 10px;
+}
+.cc-variant-nums .cc-tool-field { min-width: 0; }

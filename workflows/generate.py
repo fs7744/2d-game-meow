@@ -1423,6 +1423,102 @@ def _swap_impl(eng: Engine, *, kind: str, base_image: str | Path,
     }, scope=scope)
 
 
+# ---------------- 立绘工具箱：单张立绘的换装 / 换表情 ----------------
+
+
+def portrait_outfit(eng: Engine, *, image: str | Path, prompt: str,
+                    negative: Optional[str] = None, steps: int = 25,
+                    cfg: float = 3.0, seed: int = -1, lora_scale: float = 1.0,
+                    model: str = DEFAULT_MODEL,
+                    scope: str = "", tag: str = "wpo") -> Dict[str, Any]:
+    """立绘换装：挂官方的 **Clothes Core LoRA** 做指令改图。
+
+    为什么不复用 `img2img`（w2）：待处理页的 Clothes Designer 一直是
+    `VNCCS_QI2_ClothesCoreV2.6` + 25 步 / cfg 3.0，不挂 LoRA 出来的衣服
+    版型和细节明显弱一档。这里用 `qwen_edit_image` 的同一条 LoRA 路径
+    （它自己会独占 LoRA 槽位，不叠快速模式蒸馏）。
+    """
+    eng.require(model, "portrait_outfit")
+    src = Image.open(image).convert("RGBA")
+    if seed < 0:
+        seed = int(torch.randint(0, 2**31 - 1, (1,)).item())
+    # 透明底立绘要走原生 alpha，否则模型会把透明区当白底重画
+    transparent = src.getchannel("A").getextrema()[0] < 250
+    torch.cuda.reset_peak_memory_stats()
+    dt = _timer()
+    img = qwen_edit_image(
+        eng, image=src, prompt=prompt, negative=negative or "",
+        seed=seed, steps=steps, cfg=cfg, transparent=transparent,
+        label=tag, model=model, lora=Engine.CLOTHES_LORA,
+        lora_scale=float(lora_scale))
+    img = img.convert("RGBA")
+    if img.size != src.size:
+        img = img.resize(src.size, Image.LANCZOS)
+    return _save(img, _stamp(tag), "wpo", {
+        "workflow": "wpo", "kind": "portrait_outfit",
+        "prompt": prompt, "negative": negative or "",
+        "lora": Engine.CLOTHES_LORA, "lora_scale": float(lora_scale),
+        "steps": steps, "cfg": cfg, "seed": seed,
+        "transparent": transparent,
+        "seconds": round(dt(), 2),
+        "peak_vram_gb": round(torch.cuda.max_memory_reserved() / 1024**3, 2),
+    }, scope=scope)
+
+
+def portrait_expression(eng: Engine, *, image: str | Path, emotion: str,
+                        negative: Optional[str] = None, steps: int = 25,
+                        cfg: float = 3.0, seed: int = -1,
+                        target_size: int = 2048, crop_max_side: int = 1024,
+                        feather: int = 50, model: str = DEFAULT_MODEL,
+                        scope: str = "", tag: str = "wpe") -> Dict[str, Any]:
+    """立绘换表情：**脸部裁剪局部重绘后贴回**（官方 Emotion Studio 的单张版）。
+
+    跟整图指令改图的区别是硬性的：只有脸框内被重画，衣服 / 姿势 / 背景
+    逐像素不变。流程完全复用 `emotiongen` 里已经在跑的那套
+    （detect_face → crop → qwen_edit_image → merge_emotion_rgba）。
+    """
+    from . import emotiongen as eg
+
+    eng.require(model, "portrait_expression")
+    emos = eg.resolve_emotions([emotion])
+    emo = emos[0]
+    src = Image.open(image).convert("RGBA")
+    transparent = eg.has_transparency(src)
+    prompt = eg.emotion_prompt(
+        emo.get("natural_prompt", ""), emo.get("description", ""),
+        emo.get("key") or emo.get("safe_name") or "", transparent=transparent)
+    neg = eg.negative_prompt(negative or "")
+    box = eg.detect_face(src)
+    if seed < 0:
+        seed = int.from_bytes(__import__("os").urandom(3), "big")
+
+    def _edit(img: Image.Image, p: str, n: str, s: int, st: int, cf: float
+              ) -> Image.Image:
+        return qwen_edit_image(
+            eng, image=img, prompt=p, negative=n, seed=s, steps=st, cfg=cf,
+            transparent=transparent, label=tag, model=model)
+
+    torch.cuda.reset_peak_memory_stats()
+    dt = _timer()
+    out = eg.crop_generate(
+        src, box=box, prompt=prompt, negative=neg, seed=seed, steps=steps,
+        cfg=cfg, target_size=target_size, max_side=crop_max_side,
+        feather=feather, edit=_edit, refine_alpha=transparent,
+        chroma_key=None, background="")
+    img = out["image"].convert("RGBA")
+    return _save(img, _stamp(tag), "wpe", {
+        "workflow": "wpe", "kind": "portrait_expression",
+        "prompt": prompt, "negative": neg, "emotion": emo["safe_name"],
+        "detected": bool(out.get("detected")), "box": list(out.get("box") or []),
+        "partial": True,          # 只改脸：贴回原图，衣服逐像素不变
+        "steps": steps, "cfg": cfg, "seed": seed,
+        "target_size": target_size, "feather": feather,
+        "transparent": transparent,
+        "seconds": round(dt(), 2),
+        "peak_vram_gb": round(torch.cuda.max_memory_reserved() / 1024**3, 2),
+    }, scope=scope)
+
+
 def outfit_swap(eng: Engine, *, image: str | Path,
                 outfit: Optional[str | Path] = None,
                 outfits: Optional[Sequence[str]] = None,

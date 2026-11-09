@@ -287,6 +287,8 @@ def _run(job_id: str, workflow: str, params: Dict[str, Any]) -> None:
               "topixel": gen.image_to_pixel,
               "wout": gen.outpaint,
               "woutfit": gen.outfit_swap, "wface": gen.face_swap,
+              # 立绘工具箱：换装（挂 Clothes LoRA）/ 换表情（脸部局部重绘）
+              "wpo": gen.portrait_outfit, "wpe": gen.portrait_expression,
               "wvnccs": gen.vnccs_pose,
               # 旧名保留：早期只用于动漫人物
               "wap": gen.image_to_pixel}[workflow]
@@ -1007,7 +1009,7 @@ def submit(job: Job) -> Dict[str, Any]:
     allowed = ("w1", "w2", "w3", "w4", "wbg", "w5", "wpx", "wpc",
                "wss", "topixel", "wap", "wvnccs",
                # 2026-10-30 新增
-               "wout", "woutfit", "wface")
+               "wout", "woutfit", "wface", "wpo", "wpe")
     if job.workflow not in allowed:
         raise HTTPException(
             400, f"workflow 必须是 {'/'.join(allowed)}（wap 是 topixel 的旧名）")
@@ -2160,8 +2162,7 @@ class PortraitVariantReq(BaseModel):
 
 
 #: 换装指令：只改衣服，其余全部保持（跟官方 swap 的「谁是身份」约束同思路）。
-_PORTRAIT_OUTFIT_INSTR = (
-    "Change ONLY the character's outfit to: {desc}. "
+_PORTRAIT_OUTFIT_KEEP = (
     "Keep the same face, hairstyle, hair colour, body proportions, pose, "
     "background, lighting and art style. Do not change anything except the clothing."
 )
@@ -2238,14 +2239,13 @@ def character_parts_split_api(name: str, req: PartsSplitReq) -> Dict[str, Any]:
 def portrait_variant_api(name: str, req: PortraitVariantReq) -> Dict[str, Any]:
     """对一张立绘**真换装 / 真换表情**，产出同一个阶段下的新一份立绘。
 
-    复用已有的 `w2`（Qwen 指令改图）链路和 `_run` 的 `publish` 收编机制：
-    源图当参考、提示词当指令，出图后由 worker 直接收进 `Portraits/<服装>/<表情>/`，
-    原图一个字节不改。走同一个单卡队列，所以立刻返回 `job_id`，前端轮询 `/jobs/<id>`。
-
-    **不新增模型工作流**：`woutfit` 要第二张服装参考图、`wemo` 只在动作帧上
-    批量改脸，两者都不适合「单张立绘 → 单张立绘」。表情提示词用官方
-    `EMOTION_PROMPT_TEMPLATE` 原文 + 额外区域约束，负向词用官方
-    `EMOTION_NEGATIVE_EXTRA`。
+    跟待处理页那两块**用同一套模型能力**，只是输入换成单张立绘：
+      · 换装 → `wpo`：官方 Clothes Core LoRA（`VNCCS_QI2_ClothesCoreV2.6`）
+        + 六字段拼出的 `Dress the character:` 提示词，25 步 / cfg 3.0；
+      · 换表情 → `wpe`：官方脸部裁剪局部重绘（detect_face → crop →
+        qwen_edit_image → 贴回），**衣服 / 姿势 / 背景逐像素不变**。
+    出图后由 worker 的 `publish` 收编进 `Portraits/<服装>/<表情>/`，
+    原图一个字节不改。走同一个单卡队列，立刻返回 `job_id`。
     """
     try:
         safe = characters.ensure_safe_name(name, "角色名")
@@ -2259,21 +2259,54 @@ def portrait_variant_api(name: str, req: PortraitVariantReq) -> Dict[str, Any]:
         raise HTTPException(400, f"不支持的变体：{kind}")
     p = req.params or {}
     emo = ""
+    fields: Dict[str, str] = {}
+    lora_scale = 1.0
+    target_size = int(emotiongen.EMOTION_DEFAULTS["target_size"])
+    crop_max_side = 1024
+    feather = int(emotiongen.EMOTION_DEFAULTS["feather"])
 
     if kind == "outfit":
-        desc = str(p.get("description") or "").strip()[:400]
+        # 六个结构化字段（上装 / 下装 / 鞋 / 头部 / 脸部 / 不要出现），
+        # 跟待处理页的 CostumeForm 是同一组，按官方顺序拼描述。
+        raw_fields = p.get("fields")
+        if isinstance(raw_fields, dict):
+            fields = {k: str(raw_fields.get(k) or "").strip()[:200]
+                      for k in characters.COSTUME_TEXT_FIELDS}
+        desc = charactergen.clothes_description(
+            {k: fields.get(k, "") for k in charactergen.CLOTHES_FIELDS})
         if not desc:
-            raise HTTPException(400, "换装要填一句服装描述")
-        prompt = _PORTRAIT_OUTFIT_INSTR.format(desc=desc)
-        negative = ""
+            # 兼容旧调用：只给一句描述也能跑
+            desc = str(p.get("description") or "").strip()[:400]
+        if not desc:
+            raise HTTPException(
+                400, "换装至少要填一个字段（上装 / 下装 / 鞋 / 头部 / 脸部）")
+        prompt = (f"Dress the character://n{desc}//n"
+                  + _PORTRAIT_OUTFIT_KEEP)
+        negative = charactergen.CLOTHES_NEGATIVE
+        extra_neg = fields.get("negative_prompt", "")
+        if extra_neg:
+            negative = f"{negative}, {extra_neg}"
+        try:
+            lora_scale = max(0.0, min(2.0, float(p.get("lora_scale", 1.0) or 1.0)))
+        except (TypeError, ValueError):
+            lora_scale = 1.0
     else:
         emo = str(p.get("emotion_name") or "").strip()[:80]
         if not emo:
             raise HTTPException(400, "换表情要选一个表情")
-        # 官方模板原文（emotiongen.py:50），只追加区域约束
-        prompt = (emotiongen.EMOTION_PROMPT_TEMPLATE.format(emotion=emo)
-                  + _PORTRAIT_EMOTION_EXTRA)
-        negative = emotiongen.EMOTION_NEGATIVE_EXTRA.strip().lstrip(",").strip()
+        # prompt / 负向词都交给 portrait_expression 用官方 emotiongen 拼，
+        # 这里只把角色自己的负面词带过去（官方会再追加 EMOTION_NEGATIVE_EXTRA）。
+        cfg0 = characters.load_config(safe) or {}
+        prompt = ""
+        negative = str((cfg0.get("character_info") or {})
+                       .get("negative_prompt") or "")
+        try:
+            target_size = max(512, min(4096, int(p.get("target_size", target_size))))
+            crop_max_side = max(512, min(1536, int(p.get("crop_max_side",
+                                                          crop_max_side))))
+            feather = max(0, min(200, int(p.get("feather", feather))))
+        except (TypeError, ValueError):
+            pass
 
     try:
         costume = characters.ensure_safe_name(
@@ -2291,21 +2324,17 @@ def portrait_variant_api(name: str, req: PortraitVariantReq) -> Dict[str, Any]:
             return default
 
     try:
-        cfg = max(0.5, min(8.0, float(p.get("cfg", 1.0) or 1.0)))
+        cfg = max(0.5, min(8.0, float(p.get("cfg", 3.0) or 3.0)))
     except (TypeError, ValueError):
-        cfg = 1.0
+        cfg = 3.0
 
+    workflow = "wpo" if kind == "outfit" else "wpe"
     params: Dict[str, Any] = {
-        "init_image": src_path,
-        "prompt": prompt,
+        "image": src_path,
         "negative": negative,
-        "steps": _clamp_int("steps", 24, 8, 60),
+        "steps": _clamp_int("steps", 25, 8, 60),
         "cfg": cfg,
         "seed": _clamp_int("seed", -1, -1, 2**31 - 1),
-        # **画风中立**：立绘绝不能挂 presets 的公共契约（sprite 的
-        # photo/3d render 负向词会压掉写实/3D 画风，跟角色中心立绘一致）。
-        "preset": "none",
-        "matte": False,                       # 默认不偷偷抠图
         "publish": {
             "character": safe,
             "costume": costume,
@@ -2315,11 +2344,17 @@ def portrait_variant_api(name: str, req: PortraitVariantReq) -> Dict[str, Any]:
             "matte": False,
         },
     }
+    if kind == "outfit":
+        params["prompt"] = prompt
+        params["lora_scale"] = lora_scale
+    else:
+        params.update({"emotion": emo, "target_size": target_size,
+                       "crop_max_side": crop_max_side, "feather": feather})
     job_id = uuid.uuid4().hex[:12]
-    _jobs[job_id] = {"job_id": job_id, "workflow": "w2", "params": params,
+    _jobs[job_id] = {"job_id": job_id, "workflow": workflow, "params": params,
                      "status": "queued", "created": time.time(),
                      "progress": {"done": 0, "total": 1, "current": ""}}
-    _q.put((job_id, "w2", params))
+    _q.put((job_id, workflow, params))
     _prune(_jobs, JOB_KEEP)
     return {"job_id": job_id, "status": "queued", "position": _q.qsize(),
             "before": _asset_url(src_path), "kind": kind, "prompt": prompt}
