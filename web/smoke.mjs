@@ -5191,10 +5191,10 @@ async function ccCreate(doc, win) {
   dom.window.close()
 }
 
-// 63) 立绘画廊不再一次全铺；任务进度条排在画廊之前且 sticky
+// 63) 立绘画廊**分页**：任何时刻只渲染一页；任务进度条排在画廊之前且 sticky
 //
-// 立绘会一直累积（publish_portrait 不覆盖），几十张 <img> 一次铺开既拖首屏，
-// 又把原来放在最底下的任务条挤出视口 —— 生成中根本看不见进度。
+// 立绘会一直累积（publish_portrait 不覆盖）。上一版「默认 8 张 + 显示全部」
+// 点一下又全铺了，用户明确要分页 —— 不提供任何一次性铺满的入口。
 {
   const many = Array.from({ length: 23 }, (_, i) => ({
     url: `/files/many_${i}.png`, path: `/many_${i}.png`,
@@ -5206,23 +5206,44 @@ async function ccCreate(doc, win) {
   })
   await ccCreate(doc, win)
   await ccWait(400)
-  const cards = () => doc.querySelectorAll('.cc-portrait')
-  check('23 张立绘默认只铺 8 张', cards().length === 8, String(cards().length))
+  const cards = () => [...doc.querySelectorAll('.cc-portrait')]
+  const firstSrc = () => cards()[0]?.querySelector('img')?.getAttribute('src') || ''
+  const btn = (label) => doc.querySelector(`[aria-label="${label}"]`)
+  const click = (el) => el?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  const pager = () => doc.querySelector('.cc-portrait-pager')
+
+  check('23 张立绘第 1 页只渲染 8 张', cards().length === 8, String(cards().length))
   check('头部仍显示总数 23 张',
     (doc.querySelector('.cc-preview-count')?.textContent || '').includes('23'))
-  const more = doc.querySelector('.cc-portrait-more')
-  check('给出「显示全部」入口', !!more && /23/.test(more.textContent || ''),
-    more?.textContent)
-  check('默认不给收起按钮（还没展开）',
-    !(more?.textContent || '').includes('收起'))
+  check('分页控件给出 1/3 页与总数',
+    /1\/3/.test(pager()?.textContent || '') && /共 23 张/.test(pager()?.textContent || ''),
+    pager()?.textContent)
+  check('不再给「显示全部」入口（不能一下铺满）',
+    !doc.querySelector('.cc-portrait-more')
+    && !/显示全部/.test(doc.querySelector('.cc-preview')?.textContent || ''))
+  check('第 1 页从最新的那张开始', firstSrc() === '/files/many_0.png', firstSrc())
+  check('第 1 页「上一页」禁用', btn('上一页')?.disabled === true)
+  check('当前页码高亮', !!pager()?.querySelector('.cc-page-btn.is-on'))
 
-  more?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  click(btn('下一页'))
   await ccWait(180)
-  check('展开后能看到全部 23 张', cards().length === 23, String(cards().length))
-  const collapse = doc.querySelector('.cc-portrait-more')
-  collapse?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  check('第 2 页仍是 8 张', cards().length === 8, String(cards().length))
+  check('第 2 页换了内容（从第 9 张开始）',
+    firstSrc() === '/files/many_8.png', firstSrc())
+  check('第 2 页信息更新', /2\/3/.test(pager()?.textContent || ''), pager()?.textContent)
+
+  click(btn('第 3 页'))
   await ccWait(180)
-  check('收起后回到 8 张', cards().length === 8, String(cards().length))
+  check('末页只渲染剩下的 7 张（23 = 8+8+7）',
+    cards().length === 7, String(cards().length))
+  check('末页从第 17 张开始', firstSrc() === '/files/many_16.png', firstSrc())
+  check('末页「下一页」禁用', btn('下一页')?.disabled === true)
+
+  click(btn('上一页'))
+  await ccWait(180)
+  check('返回上一页仍是 8 张', cards().length === 8, String(cards().length))
+  check('返回上一页内容对应第 2 页',
+    firstSrc() === '/files/many_8.png', firstSrc())
 
   // 任务条顺序：有 task 时它必须排在画廊之前；源码层也钉死，避免 task 为 null
   // 时 DOM 里看不到就漏测。
@@ -5234,7 +5255,7 @@ async function ccCreate(doc, win) {
   const css = readFileSync(resolve(here, 'src', 'styles.css'), 'utf8')
   check('任务条在右栏滚动时 sticky 常驻',
     /\.chars\.cc \.cc-preview > \.cc-task \{[^}]*position: sticky/.test(css))
-  check('画廊限量场景无脚本错误', errors.length === 0, errors[0] || '')
+  check('分页场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 

@@ -337,10 +337,11 @@ export function CostumeForm({ fields, onChange, onSave }: {
 
 /* ------------------------------------------------------------ 右栏：预览 */
 
-/** 右栏默认只铺这么多张。
- *  立绘是**一直累积**的（publish_portrait 不覆盖），一次铺几十上百张 <img>，
- *  首屏的布局与解码全白做；更要命的是把下面的任务进度条挤出视口。 */
-const PORTRAIT_PREVIEW = 8
+/** 每页固定这么多张。
+ *  立绘是**一直累积**的（publish_portrait 不覆盖），一次铺几十上百张 <img>
+ *  首屏布局/解码全白做，还会把进度条挤出视口。上一版是「默认 8 张 + 显示全部」，
+ *  但「显示全部」一点又全铺了 —— 用户要的是**分页**，任何时候都只渲染一页。 */
+const PORTRAIT_PAGE_SIZE = 8
 
 /** 常驻成果区。业界同类产品的共同点：画布/结果始终在视野里，
  *  不让用户在一堆表单里猜"我刚才到底生成出来没有"。 */
@@ -354,9 +355,22 @@ export function PortraitPane({
   onDismissFlash: () => void
 }) {
   const [zoom, setZoom] = useState<string | null>(null)
-  const [showAll, setShowAll] = useState(false)
-  const shown = showAll ? portraits : portraits.slice(0, PORTRAIT_PREVIEW)
-  const hidden = portraits.length - shown.length
+  const [page, setPage] = useState(0)
+  const totalPages = Math.max(1, Math.ceil(portraits.length / PORTRAIT_PAGE_SIZE))
+  // 立绘被删到页数变少时别停在越界页上
+  const safePage = Math.min(page, totalPages - 1)
+  const shown = portraits.slice(safePage * PORTRAIT_PAGE_SIZE,
+    (safePage + 1) * PORTRAIT_PAGE_SIZE)
+  // 新出一张立绘就回第一页：列表按时间倒序，最新的排最前，得让用户看见
+  useEffect(() => { setPage(0) }, [portraits.length])
+
+  // 页码窗口：页数多时只显示首尾 + 当前页附近，中间用省略号
+  const pageNums: (number | 'gap')[] = []
+  for (let i = 0; i < totalPages; i += 1) {
+    if (totalPages <= 7 || i === 0 || i === totalPages - 1
+      || Math.abs(i - safePage) <= 2) pageNums.push(i)
+    else if (pageNums[pageNums.length - 1] !== 'gap') pageNums.push('gap')
+  }
   return (
     <aside className="cc-preview">
       <div className="cc-preview-head">
@@ -397,12 +411,24 @@ export function PortraitPane({
               </button>
             ))}
           </div>
-          {(hidden > 0 || showAll) && (
-            <button type="button" className="cc-portrait-more"
-              onClick={() => setShowAll((v) => !v)}>
-              {showAll ? `收起（只看最近 ${PORTRAIT_PREVIEW} 张）`
-                : `显示全部 ${portraits.length} 张（还有 ${hidden} 张）`}
-            </button>
+          {totalPages > 1 && (
+            <div className="cc-portrait-pager" role="navigation" aria-label="立绘分页">
+              <button type="button" className="cc-page-btn" aria-label="上一页"
+                disabled={safePage === 0} onClick={() => setPage(safePage - 1)}>‹</button>
+              {pageNums.map((n, i) => n === 'gap'
+                ? <span className="cc-page-gap" key={`gap-${i}`}>…</span>
+                : <button type="button" key={n}
+                  className={`cc-page-btn${n === safePage ? ' is-on' : ''}`}
+                  aria-label={`第 ${n + 1} 页`}
+                  aria-current={n === safePage ? 'page' : undefined}
+                  onClick={() => setPage(n)}>{n + 1}</button>)}
+              <button type="button" className="cc-page-btn" aria-label="下一页"
+                disabled={safePage >= totalPages - 1}
+                onClick={() => setPage(safePage + 1)}>›</button>
+              <span className="cc-page-info">
+                第 {safePage + 1}/{totalPages} 页 · 共 {portraits.length} 张
+              </span>
+            </div>
           )}
         </>
       )}

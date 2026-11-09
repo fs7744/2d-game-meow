@@ -36,7 +36,7 @@
 - `--rail-w:252px` 与 `App.tsx`、`store/projects.ts` 的 `x:300,y:96` 同步。`SpritePreview.onMeta` 必须 `useCallback`。
 - 外观只改 `styles.css` 末尾「全站样式统一层」，不要再叠层；`:root` 只在顶部一次。像素风第一版被否（贴皮装饰），**别加回来**；画布网格 `GRID_BASE=32` 两边必须同步。
 - **column 弹性容器里别用 `flex: 0 0 Npx` 定宽**：主轴是纵向，basis 量的是高度（年龄输入框曾被撑成 76px 高的方块）。宽度只能写 `width` + `flex: none`。
-- 角色中心右栏（2026-11-09）：立绘一直累积，`PortraitPane` **默认只铺 8 张** + 「显示全部 N 张 / 收起」；`TaskBar` 与完成提示**排在画廊之前**且 `position: sticky; top: 0`（放底下会被挤出视口看不见进度）。外观只改 `styles.css` 末尾统一层。
+- 角色中心右栏（2026-11-09）：立绘一直累积，`PortraitPane` 是**固定分页**（每页 8 张 + 页码 / 上一下页，数量变了回第 1 页），**不许留「显示全部」入口**（用户明确否掉过一次）；`TaskBar` 与完成提示**排在画廊之前**且 `position: sticky; top: 0`。外观只改 `styles.css` 末尾统一层。前端改完用 `npx vite build --outDir dist` **直接重建 dist**（cp -r 只覆盖不删会堆旧 bundle，浏览器缓存旧 index.html 会加载旧逻辑）；别用 `rm -rf dist_next`（触发批量删除守卫），临时目录用 `mv` 移到 `tests/_out/`。
 - 角色中心（2026-11-08）：**画风库是弹窗**（`.cc-style-mask/dialog`，卡片 196px 起，点卡片即选中并关窗，Esc 可关），别再摊回卡片内联。右栏成果区**可拖宽**：`.cc-split` + `--cc-side-w`（默认 420，`localStorage meow.cc.sideW`，双击复位，≤1020px 隐藏）。预览图必须 **flex 居中**：grid 行高 auto 时 `max-height:100%` 解析失败，图会按宽度铺满被裁掉底部。反推属性支持**自选本地图**：`uploadImage()` → `/upload` 的 `path` → `/characters/{n}/analyze` 的 `image`。
 
 ## 全局设置 / LoRA（SQLite 权威）
