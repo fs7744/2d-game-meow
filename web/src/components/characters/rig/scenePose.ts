@@ -42,6 +42,64 @@ export function poseSceneActors(a: ScenePoseArgs): void {
   }
 }
 
+/** 点是否在（任意朝向的）四边形内：射线法，region 的四个角是有序的。 */
+function inQuad(p: number[], q: number[][]): boolean {
+  let inside = false
+  for (let i = 0, j = q.length - 1; i < q.length; j = i++) {
+    const [xi, yi] = q[i], [xj, yj] = q[j]
+    if ((yi > p[1]) !== (yj > p[1]) && p[0] < ((xj - xi) * (p[1] - yi)) / (yj - yi) + xi) inside = !inside
+  }
+  return inside
+}
+
+function inBox(p: number[], pts: number[][]): boolean {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity
+  for (const [x, y] of pts) {
+    if (x < x0) x0 = x
+    if (x > x1) x1 = x
+    if (y < y0) y0 = y
+    if (y > y1) y1 = y
+  }
+  return p[0] >= x0 && p[0] <= x1 && p[1] >= y0 && p[1] <= y1
+}
+
+/**
+ * 画布点选演员：从后往前测（后加的画在上面），命中就返回 `doc.scene.actors` 的下标。
+ * region 用四点多边形（能选中窄手臂），mesh 顶点是网格顺序、没有轮廓语义，退回包围盒。
+ * 透明度 ≤ 0 的四边形跳过 —— 隐藏的层点不中。
+ */
+export function pickActorIndex(doc: any, actors: Map<string, ActorRuntime>, p: number[]): number {
+  const list = doc.scene?.actors
+  if (!list?.length || !actors.size) return -1
+  for (let i = list.length - 1; i >= 0; i--) {
+    const rt = actors.get(list[i].id)
+    if (!rt) continue
+    for (const q of rt.pose.quads(rt.doc)) {
+      if ((q.color?.[3] ?? 1) <= 0 || !q.positions?.length) continue
+      if (q.positions.length === 4 ? inQuad(p, q.positions) : inBox(p, q.positions)) return i
+    }
+  }
+  return -1
+}
+
+/** 选中框用的世界包围盒 [x0, y0, x1, y1]（只算可见的四边形；没有可见内容返回 null）。 */
+export function actorBounds(rt: ActorRuntime): number[] | null {
+  let b: number[] | null = null
+  for (const q of rt.pose.quads(rt.doc)) {
+    if ((q.color?.[3] ?? 1) <= 0) continue
+    for (const [x, y] of q.positions) {
+      if (!b) b = [x, y, x, y]
+      else {
+        if (x < b[0]) b[0] = x
+        if (y < b[1]) b[1] = y
+        if (x > b[2]) b[2] = x
+        if (y > b[3]) b[3] = y
+      }
+    }
+  }
+  return b
+}
+
 /**
  * 自动取景的世界包围盒 [x0, y0, x1, y1]：上游 `output.animationBounds` 只看舞台，
  * 演员被放到舞台旁边时会被裁出画面。有演员时把他们的顶点并进来（算法没改，仍是

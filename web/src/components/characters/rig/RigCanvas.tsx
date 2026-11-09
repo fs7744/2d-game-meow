@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useRef } from 'react'
 import type { RigApi } from './useRig'
 import { drawScene } from './rigRender'
+import { pickActorIndex } from './scenePose'
 import { toWorld, type RigTool } from './types'
 
 function pointSegment(p: number[], a: number[], b: number[]): number {
@@ -15,7 +16,16 @@ function pointSegment(p: number[], a: number[], b: number[]): number {
 type Drag =
   | { kind: 'pan'; sx: number; sy: number; vx: number; vy: number }
   | { kind: 'bone'; index: number; tool: RigTool; sx: number; sy: number; lastAngle: number; lastDist: number }
+  | { kind: 'actor'; index: number; tool: RigTool; sx: number; sy: number; lastAngle: number; lastDist: number }
   | null
+
+/** HUD 里的选中提示：选中演员时显示演员名（选中骨骼 / 槽位时不占位）。 */
+function SelTag(rig: RigApi) {
+  if (rig.sel?.kind !== 'actor') return null
+  const a = rig.docRef.current.scene?.actors?.[rig.sel.index]
+  if (!a) return null
+  return <span className="rig-hud-actor">演员 {a.name}{a.flip ? ' · 已翻转' : ''}</span>
+}
 
 export function RigCanvas({ rig }: { rig: RigApi }) {
   const wrapRef = useRef<HTMLDivElement>(null)
@@ -99,6 +109,7 @@ export function RigCanvas({ rig }: { rig: RigApi }) {
           showBones: r.showBones, showMesh: r.showMesh, showImages: r.showImages,
           onion: r.onion, sel: r.sel, grid: r.grid,
           actors: r.actorRef.current,
+          selActor: r.sel?.kind === 'actor' ? r.sel.index : null,
         }, r.ghosts())
       }
       raf = requestAnimationFrame(loop)
@@ -128,19 +139,41 @@ export function RigCanvas({ rig }: { rig: RigApi }) {
     return best
   }, [rig.docRef, rig.poseRef, rig.view.zoom])
 
+  /** 演员的落位就是它锚骨的世界原点（旋转 / 缩放也以它为基准）。 */
+  const actorOrigin = useCallback((i: number): number[] => {
+    const bi = rig.actorBoneIndex(i)
+    const m = bi >= 0 ? rig.poseRef.current.world[bi] : null
+    return m ? m.apply([0, 0]) : [0, 0]
+  }, [rig])
+
   const onDown = (e: React.PointerEvent) => {
     const { p, sx, sy } = worldAt(e)
     const panning = e.button === 1 || e.shiftKey || e.altKey
     if (panning) {
       dragRef.current = { kind: 'pan', sx, sy, vx: rig.view.x, vy: rig.view.y }
     } else {
-      const i = rig.sel?.kind === 'bone' ? rig.sel.index : pickBone(p)
-      if (i >= 0) {
-        rig.setSel({ kind: 'bone', index: i })
-        const m = rig.poseRef.current.world[i]
+      // 优先级：精确点中骨骼 > 点中演员 > 拖动「已选中的骨骼」（点空白也能拖，老行为）> 新建 / 取消。
+      let bi = pickBone(p)
+      const ai = bi < 0 ? pickActorIndex(rig.docRef.current, rig.actorRef.current, p) : -1
+      if (ai >= 0) {
+        rig.setSel({ kind: 'actor', index: ai })
+        const o = actorOrigin(ai)
+        dragRef.current = {
+          kind: 'actor', index: ai, tool: rig.tool === 'select' ? 'translate' : rig.tool,
+          sx, sy,
+          lastAngle: Math.atan2(p[1] - o[1], p[0] - o[0]),
+          lastDist: Math.max(1, Math.hypot(p[0] - o[0], p[1] - o[1])),
+        }
+        ;(e.target as HTMLElement).setPointerCapture?.(e.pointerId)
+        return
+      }
+      if (bi < 0 && rig.sel?.kind === 'bone') bi = rig.sel.index
+      if (bi >= 0) {
+        rig.setSel({ kind: 'bone', index: bi })
+        const m = rig.poseRef.current.world[bi]
         const o = m ? m.apply([0, 0]) : [0, 0]
         dragRef.current = {
-          kind: 'bone', index: i, tool: rig.tool === 'select' ? 'rotate' : rig.tool,
+          kind: 'bone', index: bi, tool: rig.tool === 'select' ? 'rotate' : rig.tool,
           sx, sy,
           lastAngle: Math.atan2(p[1] - o[1], p[0] - o[0]),
           lastDist: Math.max(1, Math.hypot(p[0] - o[0], p[1] - o[1])),
@@ -163,8 +196,10 @@ export function RigCanvas({ rig }: { rig: RigApi }) {
       rig.setView({ ...rig.view, x: drag.vx + (sx - drag.sx), y: drag.vy + (sy - drag.sy) })
       return
     }
-    const m = rig.poseRef.current.world[drag.index]
-    const o = m ? m.apply([0, 0]) : [0, 0]
+    const m = drag.kind === 'actor'
+      ? null
+      : rig.poseRef.current.world[drag.index]
+    const o = drag.kind === 'actor' ? actorOrigin(drag.index) : (m ? m.apply([0, 0]) : [0, 0])
     const angle = Math.atan2(p[1] - o[1], p[0] - o[0])
     const distNow = Math.max(1, Math.hypot(p[0] - o[0], p[1] - o[1]))
     let da = angle - drag.lastAngle
@@ -174,9 +209,11 @@ export function RigCanvas({ rig }: { rig: RigApi }) {
     // 位移用屏幕增量换算成世界增量（Y 向上）
     const dx = (e.movementX || 0) / rig.view.zoom
     const dy = -(e.movementY || 0) / rig.view.zoom
-    rig.transformBone(drag.index, drag.tool, {
-      dx, dy, rotation: da * 180 / Math.PI, scale,
-    })
+    if (drag.kind === 'actor') {
+      rig.transformActor(drag.index, drag.tool, { dx, dy, rotation: da * 180 / Math.PI, scale })
+    } else {
+      rig.transformBone(drag.index, drag.tool, { dx, dy, rotation: da * 180 / Math.PI, scale })
+    }
     dragRef.current = { ...drag, lastAngle: angle, lastDist: distNow }
   }
 
@@ -197,6 +234,7 @@ export function RigCanvas({ rig }: { rig: RigApi }) {
         <span>缩放 {Math.round(rig.view.zoom * 100)}%</span>
         <span>{rig.docRef.current.bones.length} 骨 · {rig.docRef.current.slots.length} 槽</span>
         <span>{rig.mode === 'animate' ? `动画 ${rig.time.toFixed(2)}s` : '设定模式'}</span>
+        {SelTag(rig)}
         <button type="button" className="rig-mini" onClick={fit}>适配视图</button>
         <button type="button" className="rig-mini"
           onClick={() => rig.setView({ zoom: 1, x: 0, y: 0 })}>复位</button>

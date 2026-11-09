@@ -23,6 +23,8 @@ const our = {
   model: await import(pathToFileURL(path.join(ROOT, 'web/src/rig/core/model.js')).href),
   pose: await import(pathToFileURL(path.join(ROOT, 'web/src/rig/core/pose.js')).href),
   scene: await import(pathToFileURL(path.join(ROOT, 'web/src/rig/core/scene.js')).href),
+  math: await import(pathToFileURL(path.join(ROOT, 'web/src/rig/core/math.js')).href),
+  anim: await import(pathToFileURL(path.join(ROOT, 'web/src/rig/core/animation.js')).href),
 }
 const up = {
   pose: await import(pathToFileURL(path.join(UPSTREAM, 'src/core/pose.js')).href),
@@ -34,7 +36,7 @@ const built = await esbuild.build({
   entryPoints: [path.join(ROOT, 'web/src/components/characters/rig/scenePose.ts')],
   bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent',
 })
-const { poseSceneActors } = await import(
+const { poseSceneActors, pickActorIndex } = await import(
   'data:text/javascript;base64,' + Buffer.from(built.outputFiles[0].text).toString('base64'))
 
 const args = process.argv.slice(2)
@@ -196,5 +198,68 @@ const inBetween = iBack === 0 && logged.indexOf('front') > iBack && actorDraws >
   && logged.slice(iBack + 1, iFront).every((t) => t.startsWith('@a1/'))
 console.log(`  绘制顺序 ${inBetween ? 'ok' : 'FAIL'}（${logged.length} 次 drawImage：back → 演员 ${actorDraws} 张 → front）`)
 
-console.log(inBetween ? '\n通过：场景逐帧与上游一致，演员按槽位插画' : '\n不通过（绘制顺序）')
-process.exit(inBetween ? 0 : 1)
+// ---- 演员点选：点到演员身上必须选中它，点空白不能误选 ----------------------------------
+// 用同一份 fixture（舞台 drawOrder：back | 演员 | front），取演员一个可见 region 的中心点。
+const pickMap = new Map([['a1', { doc: actorDoc, pose: aPose }]])
+let inside = null
+for (const q of aPose.quads(actorDoc)) {
+  if ((q.color?.[3] ?? 1) <= 0 || q.positions.length !== 4) continue
+  inside = [
+    q.positions.reduce((s, p) => s + p[0], 0) / 4,
+    q.positions.reduce((s, p) => s + p[1], 0) / 4,
+  ]
+  break
+}
+const hitIdx = inside ? pickActorIndex(fx, pickMap, inside) : -2
+const missIdx = inside ? pickActorIndex(fx, pickMap, [inside[0] + 1e5, inside[1] + 1e5]) : -3
+// 后加的演员在上面：两个演员叠在一起时点中的是最后一个。
+const stack = [fx.scene.actors[0], { ...fx.scene.actors[0], id: 'a2' }]
+fx.scene.actors = stack
+pickMap.set('a2', { doc: actorDoc, pose: aPose })
+const topIdx = inside ? pickActorIndex(fx, pickMap, inside) : -4
+fx.scene.actors = [stack[0]]
+const pickOk = hitIdx === 0 && missIdx === -1 && topIdx === 1
+console.log(`  演员点选 ${pickOk ? 'ok' : 'FAIL'}（命中 ${hitIdx} / 空白 ${missIdx} / 叠放 ${topIdx}）`)
+
+// ---- 镜头运动：给 `camera` 骨打关键帧后，深度层按焦距视差（深层漂得少） ----------------
+// 上游的摄影机就是舞台上一根叫 camera 的顶层骨，镜头运动 = 这根骨的关键帧。这里验的是
+// 「关键帧真的驱动视差」以及幅度符合 depthFactor 的闭式解，防止 UI 那边写错骨名或通道。
+const camDoc = new our.model.Skeleton()
+camDoc.name = 'camera-fixture'
+camDoc.addBone(our.model.makeBone('near', null, our.math.transform(0, 0, 0), 40))
+camDoc.addBone(our.model.makeBone('far', null, our.math.transform(0, 200, 0), 40))
+const camIdx = camDoc.addBone(our.model.makeBone('camera', null, our.math.transform(0, 0, 0), 0))
+camDoc.scene = our.scene.emptyScene()
+camDoc.scene.focal = 1000
+camDoc.scene.depth = { near: 300, far: 900 }
+const camAnim = new our.anim.Animation('shot', 0.6)
+camDoc.animations.push(camAnim)
+const camTl = camAnim.boneTimelineMut(camIdx)
+our.anim.setKey(camTl.translate, 0, [0, 0], 'linear')
+our.anim.setKey(camTl.translate, 0.5, [200, 0], 'linear')
+
+const camPose = new our.pose.Pose(camDoc)
+const camRef = our.scene.setupCameraPosition(camDoc)
+const camPos = (t) => {
+  camPose.reset(camDoc)
+  camPose.apply(camDoc, camAnim, t, 1)
+  camPose.updateWorld(camDoc)
+  our.scene.applyParallax(camDoc, camDoc.scene, camPose, camRef)
+  const at = (n) => {
+    const i = camDoc.bones.findIndex((b) => b.name === n)
+    return camPose.world[i].apply([0, 0])[0]
+  }
+  return [at('near'), at('far')]
+}
+const c0 = camPos(0), c5 = camPos(0.5)
+const dNear = c5[0] - c0[0], dFar = c5[1] - c0[1]
+const expNear = 200 * (1 - 1000 / (1000 + 300))
+const expFar = 200 * (1 - 1000 / (1000 + 900))
+const camOk = Math.abs(dNear - expNear) < 1e-9 && Math.abs(dFar - expFar) < 1e-9
+  && Math.abs(dFar) > Math.abs(dNear)
+console.log(`  镜头视差 ${camOk ? 'ok' : 'FAIL'}（深度 300 → ${dNear.toFixed(2)} / 深度 900 → ${dFar.toFixed(2)}，`
+  + `闭式解 ${expNear.toFixed(2)} / ${expFar.toFixed(2)}）`)
+
+const ok = inBetween && pickOk && camOk
+console.log(ok ? '\n通过：场景逐帧与上游一致，演员按槽位插画，演员可点选，镜头关键帧驱动视差' : '\n不通过')
+process.exit(ok ? 0 : 1)

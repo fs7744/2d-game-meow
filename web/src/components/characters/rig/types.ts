@@ -1,6 +1,8 @@
 /** 内嵌骨骼编辑器的业务类型与显示用常量。核心数据结构本身由 rig/facade 里的 JS 运行时持有。 */
 export type Sel =
   | { kind: 'bone' | 'slot' | 'constraint' | 'event' | 'skin' | 'pose' | 'animation'; index: number }
+  /** 场景演员（索引指向 `doc.scene.actors`）：锚骨的 setup 变换就是它的位置 / 朝向 / 缩放。 */
+  | { kind: 'actor'; index: number }
   | null
 
 export type RigMode = 'setup' | 'animate'

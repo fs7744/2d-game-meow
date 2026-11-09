@@ -5,6 +5,7 @@
  * 坐标系与运行时一致：Y 向上，角度逆时针为正。屏幕变换用 scale(zoom, -zoom)。
  */
 import type { Sel, ViewState } from './types'
+import { actorBounds } from './scenePose'
 
 export type DrawOpts = {
   width: number
@@ -22,6 +23,8 @@ export type DrawOpts = {
    * `@<id>/<name>` 为键。
    */
   actors?: Map<string, { doc: any; pose: any }> | null
+  /** 当前选中的演员（`doc.scene.actors` 下标）：画虚线选框 + 名字，仅编辑器用。 */
+  selActor?: number | null
 }
 
 /**
@@ -226,5 +229,44 @@ export function drawScene(ctx: CanvasRenderingContext2D, doc: any, pose: any,
     }
   }
   if (o.showBones || o.sel?.kind === 'bone') drawBones(ctx, doc, pose, o)
+  drawActorSelection(ctx, doc, o)
+  ctx.restore()
+}
+
+/**
+ * 选中的演员：虚线选框 + 四角把手 + 名字标签。
+ * 这是「演员级」选中（移动 / 旋转 / 缩放 / 翻转整具人），与选中它的锚骨是两回事。
+ */
+function drawActorSelection(ctx: CanvasRenderingContext2D, doc: any, o: DrawOpts) {
+  if (o.selActor == null || !o.actors) return
+  const a = doc.scene?.actors?.[o.selActor]
+  const rt = a ? o.actors.get(a.id) : null
+  if (!a || !rt) return
+  const b = actorBounds(rt)
+  if (!b) return
+  const z = o.view.zoom
+  const pad = 6 / z
+  const x0 = b[0] - pad, y0 = b[1] - pad, x1 = b[2] + pad, y1 = b[3] + pad
+  ctx.save()
+  ctx.strokeStyle = '#ffce5c'
+  ctx.lineWidth = 1.6 / z
+  ctx.setLineDash([6 / z, 4 / z])
+  ctx.strokeRect(x0, y0, x1 - x0, y1 - y0)
+  ctx.setLineDash([])
+  const s = 3.5 / z
+  ctx.fillStyle = '#ffce5c'
+  for (const [cx, cy] of [[x0, y0], [x1, y0], [x0, y1], [x1, y1]]) {
+    ctx.fillRect(cx - s, cy - s, s * 2, s * 2)
+  }
+  // 标签画在框上方：外层是 scale(zoom, -zoom)，文字要单独翻回来才是正的。
+  ctx.translate(x0, y1 + 6 / z)
+  ctx.scale(1, -1)
+  const label = a.flip ? `${a.name}（已翻转）` : a.name
+  ctx.font = `${12 / z}px sans-serif`
+  const w = ctx.measureText(label).width
+  ctx.fillStyle = 'rgba(18,24,30,.82)'
+  ctx.fillRect(-3 / z, -15 / z, w + 8 / z, 19 / z)
+  ctx.fillStyle = '#ffce5c'
+  ctx.fillText(label, 1 / z, -2 / z)
   ctx.restore()
 }

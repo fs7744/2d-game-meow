@@ -369,6 +369,8 @@ function ScenePanel({ rig, items, character, stage }: WorkspaceProps) {
     } catch (e) { setErr(e instanceof Error ? e.message : String(e)) }
   }
   const clipOf = (a: any) => (shotName ? (a.clips?.[shotName]?.[0] || null) : null)
+  const camBone = rig.cameraBone()
+  const camPos = camBone >= 0 ? rig.cameraPos() : null
 
   return (
     <div className="rig-ws-panel">
@@ -378,6 +380,29 @@ function ScenePanel({ rig, items, character, stage }: WorkspaceProps) {
           <label className="rig-field"><span>焦距</span>
             <input type="number" min={100} step={50} value={sc.focal}
               onChange={(e) => { sc.focal = Number(e.target.value) || 1000; rig.commit() }} /></label>
+          <div className="rig-camera">
+            <span className="rig-camera-head">摄影机</span>
+            {camBone < 0 ? (
+              <button type="button" className="rig-mini" onClick={() => rig.ensureCamera()}>
+                ＋ 建摄影机骨
+              </button>
+            ) : (
+              <>
+                <label className="rig-field inline"><span>X</span>
+                  <input type="number" step={20} value={Math.round(camPos?.[0] ?? 0)}
+                    onChange={(e) => rig.setCameraPos(Number(e.target.value), camPos?.[1] ?? 0)} /></label>
+                <label className="rig-field inline"><span>Y</span>
+                  <input type="number" step={20} value={Math.round(camPos?.[1] ?? 0)}
+                    onChange={(e) => rig.setCameraPos(camPos?.[0] ?? 0, Number(e.target.value))} /></label>
+                <button type="button" className="rig-mini" onClick={() => rig.setSel({ kind: 'bone', index: camBone })}>
+                  选中
+                </button>
+                <button type="button" className="rig-mini primary" onClick={() => rig.keyCamera()}>
+                  打镜头关键帧
+                </button>
+              </>
+            )}
+          </div>
           <label className="rig-field"><span>新演员</span>
             <input value={actorName} onChange={(e) => setActorName(e.target.value)} /></label>
           <label className="rig-field"><span>来源工程</span>
@@ -402,9 +427,10 @@ function ScenePanel({ rig, items, character, stage }: WorkspaceProps) {
             const choices = anims.length ? anims : d.animations.map((x: any) => x.name)
             const loaded = anims.length > 0
             return (
-              <div className="rig-actor" key={a.id}>
+              <div className={`rig-actor${rig.sel?.kind === 'actor' && rig.sel.index === i ? ' is-sel' : ''}`}
+                key={a.id} onClick={() => rig.setSel({ kind: 'actor', index: i })}>
                 <b>{a.name}</b>
-                <em>{a.id} · 深度 {sc.depth[a.bone] ?? 0} · {loaded ? '已载入' : '未载入工程'}</em>
+                <em>{a.id} · 深度 {sc.depth[a.bone] ?? 0} · {loaded ? '已载入' : '未载入工程'}{a.flip ? ' · 已翻转' : ''}</em>
                 <div className="rig-row">
                   <label className="rig-field inline"><span>深度</span>
                     <input type="number" value={sc.depth[a.bone] ?? 0}
@@ -433,17 +459,19 @@ function ScenePanel({ rig, items, character, stage }: WorkspaceProps) {
                   <label className="rig-field inline"><span>交叉淡入</span>
                     <input type="number" step={0.05} value={c?.blend ?? 0.2}
                       onChange={(e) => setClip(i, { blend: Number(e.target.value) })} /></label>
-                  <button type="button" className="rig-mini danger" onClick={() => {
-                    rig.detachActor(a.id)
-                    sc.actors.splice(i, 1); rig.commit()
-                  }}>移除</button>
+                  <button type="button" className="rig-mini" onClick={() => rig.flipActor(i)}>
+                    {a.flip ? '取消翻转' : '翻转'}
+                  </button>
+                  <button type="button" className="rig-mini danger" onClick={() => rig.removeActor(i)}>移除</button>
                 </div>
               </div>
             )
           })}
           {!sc.actors.length && <p className="rig-hint">还没有演员。加进来后每个演员是一个锚骨 + 槽位，片段支持裁剪 / 速度 / 循环 / 交叉淡入，深度控制视差。</p>}
+          {!!sc.actors.length && <p className="rig-hint">在画布上点演员即可整具选中（黄色虚线框）：拖动 = 移动，切到旋转 / 缩放工具 = 转 / 缩，锚骨仍可用骨骼工具单独调。</p>}
         </div>
         <p className="rig-hint">舞台骨架：{d.bones.length} 骨 · 当前镜头 {shotName || '（未选动画）'} · 摄影机深度层 {Object.keys(sc.depth).length} 个 · 角色 {character} / 阶段 {stage}</p>
+        <p className="rig-hint">镜头运动 = 给摄影机骨打关键帧（写进当前镜头动画）。深度 0 的层完全不跟镜头走，数越大跟得越多（深度 = 焦距时跟一半）。</p>
       </>}
       {msg && <div className="rig-ok">{msg}</div>}
       {err && <div className="rig-err">{err}</div>}

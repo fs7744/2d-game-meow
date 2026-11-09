@@ -166,6 +166,7 @@ export function useRig() {
     docRef.current = d
     imagesRef.current = new images.Images()
     poseRef.current = new P.Pose(d)
+    actorRef.current.clear()
     timeRef.current = 0; animRef.current = -1
     setTimeState(0); setAnimationState(-1); setSel(null); setPlaying(false)
     if (src) setSource(src)
@@ -182,6 +183,8 @@ export function useRig() {
     docRef.current = r.doc
     imagesRef.current = imgs
     poseRef.current = new P.Pose(r.doc)
+    // 换掉舞台文档后旧演员（文档 + 图片）全部失效，留着会画出错位的幽灵。
+    actorRef.current.clear()
     timeRef.current = 0; animRef.current = -1
     setTimeState(0); setAnimationState(-1); setSel(null); setPlaying(false)
     if (src) setSource(src)
@@ -194,6 +197,7 @@ export function useRig() {
     docRef.current = d
     imagesRef.current = imgs
     poseRef.current = new P.Pose(d)
+    actorRef.current.clear()
     timeRef.current = 0; animRef.current = -1
     setTimeState(0); setAnimationState(-1); setSel(null); setPlaying(false)
     if (src) setSource(src)
@@ -393,14 +397,13 @@ export function useRig() {
     commit()
   }, [commit])
 
-  /** 把当前姿势写成一个关键帧（旋转 / 位移 / 缩放三条通道）。 */
-  const keyCurrent = useCallback(() => {
+  /** 把某根骨骼的当前姿势写成关键帧（旋转 / 位移 / 缩放三条通道）。 */
+  const keyBoneAt = useCallback((i: number): boolean => {
     const d = docRef.current
     const a = d.animations[animRef.current]
-    if (!a) { say('先新建一个动画'); return }
-    const i = sel?.kind === 'bone' ? sel.index : 0
+    if (!a) { say('先新建一个动画'); return false }
     const b = d.bones[i]
-    if (!b) return
+    if (!b) return false
     const L = poseRef.current.local[i] || math.cloneTransform(b.setup)
     const tl = a.boneTimelineMut(i)
     anim.setKey(tl.rotate, timeRef.current, L.rotation - b.setup.rotation, 'linear')
@@ -410,7 +413,13 @@ export function useRig() {
     a.duration = Math.max(a.duration || 0, timeRef.current + 1 / fps)
     commit()
     say(`已在 ${timeRef.current.toFixed(2)}s 给「${b.name}」打关键帧`)
-  }, [sel, fps, commit, say])
+    return true
+  }, [fps, commit, say])
+
+  /** 把当前姿势写成一个关键帧（选中骨，没有选中就第 0 根）。 */
+  const keyCurrent = useCallback(() => {
+    keyBoneAt(sel?.kind === 'bone' ? sel.index : 0)
+  }, [sel, keyBoneAt])
 
   const allKeys = useCallback(() => {
     const a = docRef.current.animations[animRef.current]
@@ -544,6 +553,65 @@ export function useRig() {
     return rt ? rt.doc.animations.map((a: any) => a.name) : []
   }, [])
 
+  /** 演员在舞台上的锚骨索引（-1 = 演员不存在或锚骨被删了）。 */
+  const actorBoneIndex = useCallback((index: number): number => {
+    const d = docRef.current
+    const a = d.scene?.actors?.[index]
+    if (!a) return -1
+    return d.bones.findIndex((b: any) => b.name === a.bone)
+  }, [])
+
+  /**
+   * 演员调度：位置 / 朝向 / 缩放都落在舞台的锚骨上（上游 `actorPlacement` 直接读锚骨世界矩阵），
+   * 所以这里改锚骨 setup 与 `actor.flip` / `ground`，不另存一套变换。
+   * `delta.dx/dy` 是**世界**增量，换算到锚骨父空间再写 setup。
+   */
+  const transformActor = useCallback((index: number, t: RigTool,
+    delta: { dx: number; dy: number; rotation: number; scale: number }) => {
+    const d = docRef.current
+    const bi = actorBoneIndex(index)
+    if (bi < 0) return
+    const b = d.bones[bi]
+    if (t === 'translate') {
+      const pw = b.parent >= 0 ? poseRef.current.world[b.parent] : null
+      const v = pw ? pw.inverse().applyVector([delta.dx, delta.dy]) : [delta.dx, delta.dy]
+      b.setup.x += v[0]
+      b.setup.y += v[1]
+    } else if (t === 'rotate') {
+      b.setup.rotation += delta.rotation
+    } else if (t === 'scale') {
+      b.setup.scale_x *= delta.scale
+      b.setup.scale_y *= delta.scale
+    } else return
+    commit()
+  }, [actorBoneIndex, commit])
+
+  const patchActor = useCallback((index: number, patch: Record<string, any>) => {
+    const a = docRef.current.scene?.actors?.[index]
+    if (!a) return
+    Object.assign(a, patch)
+    commit()
+  }, [commit])
+
+  const flipActor = useCallback((index: number) => {
+    const a = docRef.current.scene?.actors?.[index]
+    if (!a) return
+    a.flip = !a.flip
+    commit()
+  }, [commit])
+
+  /** 删演员：连带卸掉它的文档 / 图片引用，选中态也要一起清（否则画布还在画一个不存在的演员）。 */
+  const removeActor = useCallback((index: number) => {
+    const d = docRef.current
+    const a = d.scene?.actors?.[index]
+    if (!a) return
+    actorRef.current.delete(a.id)
+    d.scene.actors.splice(index, 1)
+    setSel((s) => (s?.kind === 'actor' && s.index === index ? null
+      : s?.kind === 'actor' && s.index > index ? { kind: 'actor', index: s.index - 1 } : s))
+    commit()
+  }, [commit])
+
   /**
    * 场景导出：舞台骨架 + 每个已载入演员的骨架 / 图集 + 场景清单（`.scene.json`）。
    * 走上游 `io.exportScene`；演员图片在共享库里带 `@<id>/` 前缀，这里按前缀包一层视图给它。
@@ -570,6 +638,50 @@ export function useRig() {
       missing: d.scene.actors.length - actorDocs.length,
     }
   }, [])
+
+  // ---------------------------------------------------------------- 摄影机
+
+  /**
+   * 摄影机就是舞台里一根叫 `camera` 的顶层骨（上游 `scene.cameraPosition()` 按名字找它，
+   * 深度层据它位移做视差）。所以「镜头运动」= 给这根骨打关键帧，不需要另存一套相机数据。
+   */
+  const cameraBone = useCallback((): number =>
+    docRef.current.bones.findIndex((b: any) => b.name === 'camera'), [])
+
+  const ensureCamera = useCallback((): number => {
+    const d = docRef.current
+    let i = d.bones.findIndex((b: any) => b.name === 'camera')
+    if (i < 0) {
+      const b = model.makeBone('camera', null, math.transform(0, 0, 0), 0)
+      b.color = 'ffee88ff'
+      i = d.addBone(b)
+      poseRef.current = new P.Pose(d)
+    }
+    setSel({ kind: 'bone', index: i })
+    commit()
+    return i
+  }, [commit])
+
+  const cameraPos = useCallback((): number[] | null => {
+    const i = cameraBone()
+    const m = i >= 0 ? poseRef.current.world[i] : null
+    return m ? m.apply([0, 0]) : null
+  }, [cameraBone])
+
+  /** 改摄影机位置：设定模式改设定位置，动画模式在当前时间写关键帧（与拖骨骼同一条路径）。 */
+  const setCameraPos = useCallback((x: number, y: number) => {
+    const i = cameraBone()
+    const L = i >= 0 ? poseRef.current.local[i] : null
+    if (!L) return
+    transformBone(i, 'translate', { dx: x - L.x, dy: y - L.y, rotation: 0, scale: 1 })
+  }, [cameraBone, transformBone])
+
+  /** 在当前时间给摄影机打一个镜头关键帧（没有相机骨就顺手建一根）。 */
+  const keyCamera = useCallback(() => {
+    const i = ensureCamera()
+    setMode('animate')
+    keyBoneAt(i)
+  }, [ensureCamera, keyBoneAt, setMode])
 
   // ---------------------------------------------------------------- 导出
 
@@ -655,6 +767,8 @@ export function useRig() {
     addEvent, removeEvent, patchEvent, addSkin, removeSkin,
     constraints, addConstraint, removeConstraint, addPose, applyPose,
     actorRef, loadActorDoc, attachActor, detachActor, actorAnimations, exportSceneBundle,
+    actorBoneIndex, transformActor, patchActor, flipActor, removeActor,
+    cameraBone, ensureCamera, cameraPos, setCameraPos, keyCamera, keyBoneAt,
     buildExports, renderFrames,
   }
 }

@@ -5068,7 +5068,15 @@ body.is-resizing, body.is-resizing * { cursor: col-resize !important; user-selec
 .rig-visemes b { color: var(--cyan); font-size: 10px; }
 .rig-ws-actors { display: flex; flex-direction: column; gap: 7px; }
 .rig-actor { display: flex; flex-direction: column; gap: 5px; padding: 7px 9px;
-  border: 1px solid var(--line); border-radius: 6px; background: var(--bg-4); }
+  border: 1px solid var(--line); border-radius: 6px; background: var(--bg-4); cursor: pointer; }
+.rig-actor.is-sel { border-color: #ffce5c; box-shadow: inset 0 0 0 1px rgba(255,206,92,.25); }
+.rig-actor.is-sel > b { color: #ffce5c; }
+.rig-canvas-hud .rig-hud-actor { color: #ffce5c; }
+.rig-camera { display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 6px 8px; border: 1px dashed rgba(255,206,92,.35); border-radius: 6px; }
+.rig-camera-head { font-size: 10px; color: #ffce5c; letter-spacing: .04em; }
+.rig-camera .rig-field.inline > span { width: 14px; }
+.rig-camera .rig-field.inline input { width: 62px; }
 .rig-actor > b { font-size: 11px; color: var(--white); }
 .rig-actor > em { font-style: normal; font-size: 9.5px; color: var(--muted-2); }
 .rig-ws-map { max-height: 240px; overflow-y: auto;
