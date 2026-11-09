@@ -4197,6 +4197,10 @@ async function ccCreate(doc, win) {
     && (doc.querySelector('.cc-crumb')?.textContent || '').includes('初始设定'))
   check('阶段编辑页右栏立绘回来（立绘属于角色设定）',
     !!doc.querySelector('.cc-preview') && !!doc.querySelector('.cc-split'))
+  check('进入阶段后导航第一项是「角色设定」（不再显示父级名字）',
+    (doc.querySelector('.cc-viewnav button.is-on')?.textContent || '').trim() === '角色设定',
+    doc.querySelector('.cc-viewnav button.is-on')?.textContent)
+  check('正文不再重复「角色设定」大标题', !doc.querySelector('.cc-stagehead h2'))
   check('角色设定页有画风区', (doc.querySelector('.chars-style')?.textContent || '').includes('画风'))
   check('主流程每步只有一个主按钮',
     doc.querySelectorAll('.cc-cta').length <= 1,
@@ -5426,8 +5430,9 @@ async function ccCreate(doc, win) {
     .find((b) => (b.textContent || '').includes('进入设定'))
   enter?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
   await ccWait(400)
-  check('阶段编辑页标题是「角色设定」',
-    (doc.querySelector('.cc-stagehead h2')?.textContent || '').includes('角色设定'))
+  check('阶段编辑页的名字只在导航出现一次（正文无重复大标题）',
+    (doc.querySelector('.cc-viewnav button.is-on')?.textContent || '').trim() === '角色设定'
+    && !doc.querySelector('.cc-stagehead h2'))
   check('有「从其它阶段导入设定」快捷方式',
     (doc.querySelector('.cc-import select')?.textContent || '').includes('从其它阶段导入设定'))
   check('明确写了不导入立绘',

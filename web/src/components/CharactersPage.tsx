@@ -790,11 +790,17 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
         {err && <div className="chars-err">⚠ {err}</div>}
         {stageErr && <div className="chars-err">⚠ {stageErr}</div>}
 
-        {/* 只有「生命阶段」和「待处理」两个入口：角色设定属于某个生命阶段，不同级 */}
+        {/* 只有两个入口。进入某个阶段后，第一项就是**当前所在的「角色设定」**，
+            名字只在这里出现一次，正文不再重复一个大标题。列表页仍叫「生命阶段」，
+            点它（或面包屑里的角色名 / 底部返回按钮）回到阶段列表。 */}
         <div className="cc-viewnav">
           <button type="button"
             className={(view === 'stages' || view === 'stage') ? 'is-on' : ''}
-            onClick={() => setView('stages')}>生命阶段</button>
+            onClick={() => { if (view !== 'stage') setView('stages') }}
+            title={view === 'stage' ? '当前在角色设定；返回列表请点上方角色名'
+              : '生命阶段列表'}>
+            {view === 'stage' ? '角色设定' : '生命阶段'}
+          </button>
           <button type="button" className={view === 'pending' ? 'is-on' : ''}
             onClick={() => setView('pending')}>待处理 · 出素材 / 导出</button>
         </div>
@@ -887,7 +893,7 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
             <>
               <div className="cc-stagehead">
                 <div>
-                  <h2>角色设定</h2>
+                  {/* 「角色设定」这个名字已经在导航里了，这里不再重复一个大标题 */}
                   <p>阶段「{currentStage?.title || ''}」的外貌、画风与提示词；立绘在右栏。</p>
                 </div>
                 <div className="cc-import">
