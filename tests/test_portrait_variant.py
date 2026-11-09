@@ -171,3 +171,97 @@ def test_official_field_order_is_used():
     desc = charactergen.clothes_description(
         {"top": "A", "bottom": "B", "head": "C", "shoes": "D", "face": ""})
     assert desc.splitlines() == ["A", "B", "C", "D"]
+
+
+# ---------------- 表情多选 / 批量 ----------------
+
+def test_emotion_batch_is_one_job_with_own_publish(client, monkeypatch):
+    """多选表情 → 一个 `wpebatch` 任务，进度总量就是张数。
+
+    批量**不带 publish**：worker 里每张查完立刻自己 `publish_portrait`，
+    走 `_run` 那段只会收编最后一张。
+    """
+    name = _fresh("VariantBatchProbe")
+    src = _seed(name)
+    _stub(monkeypatch)
+
+    r = _post(client, name, src, "emotion",
+              {"emotions": ["smile", "angry", "sad"], "costume": "Naked",
+               "target_size": 1024}, stage="stage_x")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["count"] == 3
+    job = appmod._jobs[body["job_id"]]
+    assert job["workflow"] == "wpebatch", "多选要走进一个任务里的批量分支"
+    assert job["progress"]["total"] == 3, "进度总量必须是张数"
+    params = job["params"]
+    assert params["emotions"] == ["smile", "angry", "sad"]
+    assert "publish" not in params, "批量自己落盘，不能留给 _run 的 publish 段"
+    assert params["character"] == name and params["costume"] == "Naked"
+    assert params["stage"] == "stage_x"
+    assert params["target_size"] == 1024
+
+
+def test_emotion_single_still_uses_wpe(client, monkeypatch):
+    """只选一个表情仍走 `wpe`（不因为新分支把老路径改掉）。"""
+    name = _fresh("VariantSingleProbe")
+    src = _seed(name)
+    _stub(monkeypatch)
+    r = _post(client, name, src, "emotion", {"emotions": ["smile"]})
+    assert r.status_code == 200, r.text
+    job = appmod._jobs[r.json()["job_id"]]
+    assert job["workflow"] == "wpe"
+    assert job["params"]["emotion"] == "smile"
+
+
+def test_emotion_batch_dedupes_and_caps(client, monkeypatch):
+    name = _fresh("VariantBatchCapProbe")
+    src = _seed(name)
+    _stub(monkeypatch)
+    lots = ["smile", "smile"] + [f"e{i}" for i in range(20)]
+    r = _post(client, name, src, "emotion", {"emotions": lots})
+    assert r.status_code == 200, r.text
+    params = appmod._jobs[r.json()["job_id"]]["params"]
+    assert params["emotions"].count("smile") == 1, "重复表情要去重"
+    assert len(params["emotions"]) == 12, "单任务上限 12 个，别让一张立绘跑一晚上"
+
+
+def test_batch_helper_publishes_each_and_survives_one_failure(monkeypatch):
+    """批量循环：每张各自收编；**一张失败不连累整批**。"""
+    calls = []
+    made = []
+
+    def fake_gen(_eng, *, image, emotion, **_kw):
+        if emotion == "boom":
+            raise RuntimeError("脸检测失败")
+        made.append(emotion)
+        return {"file": image, "meta": {"emotion": emotion, "seconds": 1.2}}
+
+    def fake_pub(**kw):
+        calls.append(kw)
+        return {"path": kw["src"], "file": f"portrait_{kw['emotion']}.png",
+                "emotion": kw["emotion"]}
+
+    monkeypatch.setattr(appmod.gen, "portrait_expression", fake_gen)
+    monkeypatch.setattr(appmod.characters, "publish_portrait", fake_pub)
+
+    job = {}
+    out = appmod._portrait_expression_batch(None, {
+        "image": "/tmp/x.png",
+        "emotions": ["smile", "boom", "angry"],
+        "character": "X", "costume": "Naked", "stage": "default",
+        "steps": 25, "cfg": 3.0, "seed": -1,
+        "target_size": 2048, "crop_max_side": 1024, "feather": 50,
+    }, job)
+
+    assert out["total"] == 3
+    assert [i["emotion"] for i in out["items"]] == ["smile", "angry"]
+    assert out["count"] == 2
+    assert [f["emotion"] for f in out["failed"]] == ["boom"]
+    assert "脸检测失败" in out["failed"][0]["error"]
+    assert [c["emotion"] for c in calls] == ["smile", "angry"], \
+        "每张都要自己收编（不用 _run 的 publish 段）"
+    assert all(c["stage_id"] == "default" for c in calls)
+    # 进度一路报到最后，前端才看得出「第 2/3 张」
+    assert job["progress"]["total"] == 3
+    assert job["progress"]["done"] == 3

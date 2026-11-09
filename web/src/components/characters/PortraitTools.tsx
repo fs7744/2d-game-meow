@@ -288,6 +288,8 @@ type VariantResult = {
   after: string
   path?: string
   name?: string
+  /** 批量换表情时这张对应哪个表情（做缩略图切换条） */
+  emotion?: string
 }
 
 /** 官方六个服装字段（跟待处理页的 CostumeForm 是同一组） */
@@ -310,7 +312,8 @@ export function PortraitVariantDialog({ character, item, kind, stage, task,
   const [fields, setFields] = useState<Record<string, string>>({ ...EMPTY_CLOTHES })
   const [clothText, setClothText] = useState('')
   const [costume, setCostume] = useState(item.costume || 'Naked')
-  const [emo, setEmo] = useState('smile')
+  // 表情库支持多选：批量时一个任务里逐个出图，每张单独收编
+  const [emoSel, setEmoSel] = useState<string[]>([])
   const [emoOptions, setEmoOptions] = useState<EmotionOption[]>([])
   const [steps, setSteps] = useState(25)
   const [cfg, setCfg] = useState(3)
@@ -320,7 +323,9 @@ export function PortraitVariantDialog({ character, item, kind, stage, task,
   const [busy, setBusy] = useState(false)
   const [wiz, setWiz] = useState(false)
   const [saved, setSaved] = useState('')
-  const [result, setResult] = useState<VariantResult | null>(null)
+  const [results, setResults] = useState<VariantResult[]>([])
+  // 多张结果时当前在比对哪一张（单张恒为 0，UI 跟以前一样）
+  const [cur, setCur] = useState(0)
   const [pos, setPos] = useState(50)
   const [err, setErr] = useState('')
 
@@ -352,15 +357,20 @@ export function PortraitVariantDialog({ character, item, kind, stage, task,
       }
       setEmoOptions(out)
       // 库里不一定有 smile：默认落到第一项，避免「一个都没选中」
-      setEmo((cur) => out.some((e) => e.safe_name === cur) ? cur
-        : (out[0]?.safe_name || ''))
+      setEmoSel((prev) => {
+        const keep = prev.filter((x) => out.some((e) => e.safe_name === x))
+        return keep.length ? keep : (out[0] ? [out[0].safe_name] : [])
+      })
     }).catch(() => {
       if (!alive) return
       const fb = FALLBACK_EMOTIONS.map((s2) => ({
         key: s2, safe_name: s2, label: s2, prompt: '',
       }))
       setEmoOptions(fb)
-      setEmo((cur) => fb.some((e) => e.safe_name === cur) ? cur : fb[0].safe_name)
+      setEmoSel((prev) => {
+        const keep = prev.filter((x) => fb.some((e) => e.safe_name === x))
+        return keep.length ? keep : [fb[0].safe_name]
+      })
     })
     return () => { alive = false }
   }, [kind])
@@ -368,7 +378,7 @@ export function PortraitVariantDialog({ character, item, kind, stage, task,
   const label = kind === 'outfit' ? '换装' : '换表情'
   const filled = Object.entries(fields)
     .some(([k, v]) => k !== 'negative_prompt' && !!v.trim())
-  const ready = kind === 'outfit' ? filled : !!emo
+  const ready = kind === 'outfit' ? filled : emoSel.length > 0
 
   const doWizard = async () => {
     if (!clothText.trim() || wiz) return
@@ -403,15 +413,35 @@ export function PortraitVariantDialog({ character, item, kind, stage, task,
       ? { fields, costume: costume.trim() || item.costume,
           emotion_tag: item.emotion || 'neutral',
           steps, cfg, seed, lora_scale: loraScale }
-      : { emotion_name: emo, costume: item.costume, emotion_tag: emo,
+      : { emotions: emoSel, emotion_name: emoSel[0],
+          costume: item.costume, emotion_tag: emoSel[0] || 'neutral',
           steps, cfg, seed, target_size: targetSize }
     void runTask(label,
       () => submitPortraitVariant(character,
         { path: item.path, kind, params, stage }),
       (job) => {
-        const j = job as { url?: string; published?: { path?: string; file?: string } }
-        setResult({ before: item.url, after: j.url || item.url,
-          path: j.published?.path, name: j.published?.file })
+        const j = job as {
+          url?: string
+          published?: { path?: string; file?: string }
+          result?: {
+            items?: Array<{ emotion?: string; url?: string
+              path?: string; file?: string }>
+            count?: number
+          }
+        }
+        const items = j.result?.items || []
+        if (items.length) {
+          // 批量：每个表情一条，弹窗里用缩略图切换逐张比对
+          setResults(items.map((it) => ({
+            before: item.url, after: it.url || item.url,
+            path: it.path, name: it.file || it.emotion, emotion: it.emotion,
+          })))
+          setCur(0)
+        } else {
+          setResults([{ before: item.url, after: j.url || item.url,
+            path: j.published?.path, name: j.published?.file }])
+          setCur(0)
+        }
         onChanged()
       }).catch((e) => {
         setErr(e instanceof Error ? e.message : String(e))
@@ -419,8 +449,10 @@ export function PortraitVariantDialog({ character, item, kind, stage, task,
   }
 
   const discard = async () => {
-    if (result?.path) {
-      try { await deletePortrait(character, result.path) } catch { /* 忽略 */ }
+    // 批量时把这一整批都撤掉（都是刚生成的）；逐张保留可以去画廊里单独删
+    for (const r of results) {
+      if (!r.path) continue
+      try { await deletePortrait(character, r.path) } catch { /* 忽略 */ }
     }
     onChanged(); onClose()
   }
@@ -436,7 +468,7 @@ export function PortraitVariantDialog({ character, item, kind, stage, task,
         </div>
         {err && <p className="cc-tool-err">⚠ {err}</p>}
 
-        {!result ? (
+        {results.length === 0 ? (
           <>
             {kind === 'outfit' ? (
               <div className="cc-variant-body">
@@ -463,11 +495,25 @@ export function PortraitVariantDialog({ character, item, kind, stage, task,
             ) : (
               <div className="cc-variant-body">
                 <div className="cc-variant-sel">
-                  已选 <b>{emo || '（点头像选一个）'}</b>
+                  已选 <b>{emoSel.length}</b> 个表情
+                  {emoSel.length > 1 && '（一个任务里逐个出图，各自收进对应表情目录）'}
+                  {emoSel.length === 0 && '（点头像选，可多选）'}
                 </div>
-                <EmotionGrid options={emoOptions}
-                  selected={emo ? [emo] : []}
-                  onToggle={(name) => setEmo((cur) => cur === name ? '' : name)} />
+                <EmotionGrid options={emoOptions} selected={emoSel}
+                  onToggle={(name) => setEmoSel((prev) => prev.includes(name)
+                    ? prev.filter((x) => x !== name)
+                    : [...prev, name])} />
+                {emoSel.length > 0 && (
+                  <div className="cc-variant-picked">
+                    {emoSel.map((name) => (
+                      <button type="button" key={name} className="cc-variant-tag"
+                        title={`点一下取消「${name}」`}
+                        onClick={() => setEmoSel((prev) => prev.filter((x) => x !== name))}>
+                        {emoOptions.find((e) => e.safe_name === name)?.label || name} ✕
+                      </button>
+                    ))}
+                  </div>
+                )}
                 <Field label="画质档" hint="官方 target_size（2.0MP = 2048）">
                   <select value={targetSize}
                     onChange={(e) => setTargetSize(Number(e.target.value))}>
@@ -511,8 +557,8 @@ export function PortraitVariantDialog({ character, item, kind, stage, task,
               {kind === 'outfit'
                 ? <>挂官方 Clothes Core LoRA 生成<strong>一张新立绘</strong>
                   （原图不变），自动收进当前阶段。</>
-                : <>只重画脸框内：衣服 / 姿势 / 背景逐像素不变；生成
-                  <strong>一张新立绘</strong>，原图不变。</>}
+                : <>只重画脸框内：衣服 / 姿势 / 背景逐像素不变；选几个表情
+                  就生成<strong>几张新立绘</strong>，原图不变。</>}
             </p>
             <div className="cc-tool-actions">
               <button type="button" className="cc-btn ghost" onClick={onClose}>取消</button>
@@ -523,14 +569,31 @@ export function PortraitVariantDialog({ character, item, kind, stage, task,
           </>
         ) : (
           <>
-            <CompareSlider before={result.before} after={result.after}
+            <CompareSlider before={results[cur].before} after={results[cur].after}
               pos={pos} onPos={setPos} />
+            {results.length > 1 && (
+              <div className="cc-variant-strip">
+                {results.map((r, i) => (
+                  <button type="button" key={`${r.emotion || ''}${i}`}
+                    className={`cc-variant-thumb${i === cur ? ' is-on' : ''}`}
+                    title={r.emotion || r.name}
+                    onClick={() => { setCur(i); setPos(50) }}>
+                    <img src={r.after} alt={r.emotion || r.name} loading="lazy" />
+                    <span>{r.emotion || `第 ${i + 1} 张`}</span>
+                  </button>
+                ))}
+              </div>
+            )}
             <p className="cc-tool-hint">
-              左：原图 · 右：新生成的立绘 <b>{result.name || '（已收进角色库）'}</b>
+              左：原图 · 右：新生成的立绘{' '}
+              <b>{results[cur].emotion || results[cur].name || '（已收进角色库）'}</b>
+              {results.length > 1 && `（共 ${results.length} 张，上面切换逐张看）`}
             </p>
             <div className="cc-tool-actions">
               <button type="button" className="cc-btn ghost"
-                onClick={() => void discard()}>放弃这份</button>
+                onClick={() => void discard()}>
+                {results.length > 1 ? `放弃这 ${results.length} 张` : '放弃这份'}
+              </button>
               <span className="spacer" />
               <button type="button" className="cc-btn primary" onClick={onClose}>完成</button>
             </div>

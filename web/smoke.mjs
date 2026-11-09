@@ -105,6 +105,8 @@ function makeFetch() {
   /** 用例可注入任意数量的立绘，用来验「不一次性全铺」 */
   let portraitsOverride = null
   let partsSplitDone = false
+  /** 最近一次「换装 / 换表情」提交的表情数组：>1 时 job 返回批量 items */
+  let variantEmotions = []
   /** 生命阶段（每个 fetch 一份），PUT 全量覆盖 */
   let stagesOverride = null
   const defaultStages = () => ({
@@ -441,6 +443,8 @@ function makeFetch() {
       let b = {}
       try { b = JSON.parse(init.body || '{}') } catch { /* 忽略坏 body */ }
       const kind = String(b.kind || 'outfit')
+      variantEmotions = Array.isArray(b.params?.emotions)
+        ? b.params.emotions : []
       return { ok: true, json: async () => ({
         job_id: 'job-variant', status: 'queued', position: 1,
         before: '/files/p3.png', kind,
@@ -887,6 +891,25 @@ function makeFetch() {
             result: {
               count: 4, total: 4, failed: [],
               items: [{ index: 1, emotion: 'angry' }, { index: 2, emotion: 'smile' }],
+            },
+          }),
+        }
+      }
+      // 立绘批量换表情：一个 job 出 N 张，每张一条（含收编后的 path）
+      if (String(url).includes('job-variant') && variantEmotions.length > 1) {
+        return {
+          ok: true,
+          json: async () => ({
+            job_id: 'job-variant', status: 'done',
+            progress: { done: variantEmotions.length,
+              total: variantEmotions.length, current: '' },
+            result: {
+              count: variantEmotions.length, total: variantEmotions.length,
+              failed: [],
+              items: variantEmotions.map((e, i) => ({
+                emotion: e, url: `/p/emo_${i}.png`,
+                path: `/p/portrait_${e}.png`, file: `portrait_${e}.png`,
+              })),
             },
           }),
         }
@@ -5709,35 +5732,77 @@ async function ccCreate(doc, win) {
     calls.slice(c0).some((c) => c.url.includes('/portraits/delete')
       && String(c.body || '').includes('/p/portrait_variant.png')))
 
-  // ---- 换表情：恢复官方表情库卡片 + 画质档 ----
+  // ---- 换表情：官方表情库 **多选** → 一个任务批量出图 ----
   clickEl(toolBtn('换表情'))
   await ccWait(400)
   const emoCards = () => [...doc.querySelectorAll('.cc-tool-dialog .chars-emo')]
+  const emoOn = () => [...doc.querySelectorAll('.cc-tool-dialog .chars-emo.on')]
   check('换表情弹窗恢复官方表情库卡片',
     emoCards().length > 1, String(emoCards().length))
   check('有画质档（官方 target_size）', dlgText().includes('画质档'))
-  check('默认选中一个表情',
-    doc.querySelectorAll('.cc-tool-dialog .chars-emo.on').length === 1)
+  check('默认选中一个表情', emoOn().length === 1, String(emoOn().length))
+
   clickEl(emoCards()[1])
   await ccWait(150)
-  check('点卡片能切换选中（单选）',
-    doc.querySelectorAll('.cc-tool-dialog .chars-emo.on').length === 1
-    && emoCards()[1].classList.contains('on'))
+  check('表情库能多选（再点一个变两个）',
+    emoOn().length === 2, String(emoOn().length))
+  check('已选数量显示为 2', dlgText().includes('2')
+    && dlgText().includes('个表情'))
+  check('已选表情出可点掉的标签',
+    doc.querySelectorAll('.cc-tool-dialog .cc-variant-tag').length === 2,
+    String(doc.querySelectorAll('.cc-tool-dialog .cc-variant-tag').length))
+
+  // 标签上的 ✕ 能单独取消
+  clickEl(doc.querySelectorAll('.cc-tool-dialog .cc-variant-tag')[0])
+  await ccWait(150)
+  check('点标签能取消一个表情', emoOn().length === 1, String(emoOn().length))
+  clickEl(emoCards()[0])
+  await ccWait(150)
+  check('取消后再点回来又是两个', emoOn().length === 2, String(emoOn().length))
+
   clickEl(dlgBtn('生成并比对'))
   await ccWait(700)
   const eb = bodyOf(reqs().pop())
-  check('换表情请求带 kind=emotion 与表情名 / 标签',
-    eb.kind === 'emotion' && typeof eb.params?.emotion_name === 'string'
-    && eb.params.emotion_name.length > 0
-    && eb.params?.emotion_tag === eb.params.emotion_name, JSON.stringify(eb))
+  check('批量请求带 emotions 数组（两个表情）',
+    eb.kind === 'emotion' && Array.isArray(eb.params?.emotions)
+    && eb.params.emotions.length === 2, JSON.stringify(eb.params?.emotions))
+  check('同时保留 emotion_name / emotion_tag 兼容单选路径',
+    typeof eb.params?.emotion_name === 'string'
+    && eb.params.emotion_name === eb.params.emotions[0]
+    && eb.params?.emotion_tag === eb.params.emotion_name, JSON.stringify(eb.params))
   check('带上官方画质档 target_size',
     eb.params?.target_size === 2048 || eb.params?.target_size === 1024,
     String(eb.params?.target_size))
   check('换表情沿用原服装', typeof eb.params?.costume === 'string'
     && eb.params.costume.length > 0)
-  check('换表情也出滑动比对', !!doc.querySelector('.cc-compare'))
-  clickEl(dlgBtn('完成'))
+  check('批量也出滑动比对', !!doc.querySelector('.cc-compare'))
+
+  const thumbs = () => [...doc.querySelectorAll('.cc-tool-dialog .cc-variant-thumb')]
+  check('批量结果给每个表情一条缩略图', thumbs().length === 2, String(thumbs().length))
+  check('默认比对第一张（缩略图高亮第一个）',
+    thumbs()[0]?.classList.contains('is-on'))
+  const hintBefore = doc.querySelector('.cc-tool-dialog .cc-tool-hint')?.textContent || ''
+  clickEl(thumbs()[1])
   await ccWait(150)
+  const hintAfter = doc.querySelector('.cc-tool-dialog .cc-tool-hint')?.textContent || ''
+  check('点缩略图能切到另一张比对',
+    thumbs()[1]?.classList.contains('is-on') && hintAfter !== hintBefore,
+    `${hintBefore} → ${hintAfter}`)
+  check('结果写明共几张', (doc.querySelector('.cc-tool-dialog .cc-tool-hint')
+    ?.textContent || '').includes('共 2 张'))
+
+  // 换装那一段已经删过一张，这里只数「点放弃」之后的请求
+  const delBefore = calls.length
+  clickEl(dlgBtn('放弃这 2 张'))
+  await ccWait(400)
+  const dels = calls.slice(delBefore)
+    .filter((c) => c.url.includes('/portraits/delete'))
+    .map((c) => { try { return JSON.parse(c.body || '{}') } catch { return {} } })
+  check('放弃整批会把刚生成的两张都删掉', dels.length === 2, String(dels.length))
+  check('删的是收编进 Portraits/ 的两个不同表情文件',
+    new Set(dels.map((d) => d.path)).size === 2
+    && dels.every((d) => String(d.path || '').includes('/p/portrait_')),
+    JSON.stringify(dels.map((d) => d.path)))
   check('完成后弹窗关闭', !doc.querySelector('.cc-tool-dialog'))
 
   // ---- 静态契约：后端走专用链路（Clothes LoRA / 脸部局部重绘） ----

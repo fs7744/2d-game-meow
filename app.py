@@ -186,6 +186,66 @@ def _pipeline_fns():
     return _cg.remove_clothes, _pg.run_batch, _eg.run_batch
 
 
+def _portrait_expression_batch(engine, params: Dict[str, Any],
+                               job: Dict[str, Any]) -> Dict[str, Any]:
+    """一张立绘 → N 个表情（官方脸部局部重绘，逐个出图、逐个收编）。
+
+    为什么放在**一个任务里循环**而不是让前端连发 N 次：单卡串行，N 次请求会
+    各自排一次队、各自冷启一次人脸检测；更要紧的是进度只有一份——用户要看
+    「第 2/6 张」，不是六个互不相干的进度条。
+
+    每张都复用 `portrait_expression`（detect_face → crop → 重绘 → 贴回），
+    所以衣服 / 姿势 / 背景逐像素不变；出完立刻 `publish_portrait` 进当前阶段。
+    一张失败只记进 `failed`，不连累整批。
+    """
+    emotions = [str(x) for x in (params.get("emotions") or []) if str(x).strip()]
+    total = max(1, len(emotions))
+    items: List[Dict[str, Any]] = []
+    failed: List[Dict[str, Any]] = []
+    t0 = time.time()
+    for i, emo in enumerate(emotions, 1):
+        job["progress"] = {"done": i - 1, "total": total,
+                           "current": f"表情 {i}/{total}：{emo}"}
+        try:
+            out = gen.portrait_expression(
+                engine, image=str(params.get("image") or ""), emotion=emo,
+                negative=str(params.get("negative") or ""),
+                steps=int(params.get("steps") or 25),
+                cfg=float(params.get("cfg") or 3.0),
+                seed=int(params.get("seed", -1)),
+                target_size=int(params.get("target_size") or 2048),
+                crop_max_side=int(params.get("crop_max_side") or 1024),
+                feather=int(params.get("feather", 50)),
+                scope=str(params.get("scope") or ""), tag="wpe",
+            )
+            meta = out.get("meta") or {}
+            # 落盘目录用**官方解析后**的 safe_name，别用前端原样传的字符串
+            real = str(meta.get("emotion") or emo)
+            pub = characters.publish_portrait(
+                name=str(params.get("character") or ""),
+                src=str(out.get("raw") or out.get("file") or ""),
+                costume=str(params.get("costume") or "Naked"),
+                emotion=real, matte=False,
+                stage_id=str(params.get("stage") or ""),
+            )
+            items.append({
+                "emotion": real,
+                "url": _asset_url(str(pub.get("path") or "")),
+                "path": pub.get("path"), "file": pub.get("file"),
+                "seconds": meta.get("seconds"),
+            })
+        except Exception as exc:                     # noqa: BLE001
+            failed.append({"emotion": emo,
+                           "error": f"{type(exc).__name__}: {exc}"})
+        job["progress"] = {"done": i, "total": total,
+                           "current": f"表情 {i}/{total}：{emo}"}
+    job["progress"] = {"done": total, "total": total,
+                       "current": f"完成 {len(items)}/{total}"}
+    return {"items": items, "failed": failed, "total": total,
+            "count": len(items), "kind": "portrait_expression_batch",
+            "seconds": round(time.time() - t0, 1)}
+
+
 def _run(job_id: str, workflow: str, params: Dict[str, Any]) -> None:
     job = _jobs[job_id]
     job.update(status="running", started=time.time())
@@ -260,6 +320,14 @@ def _run(job_id: str, workflow: str, params: Dict[str, Any]) -> None:
             # 进度由 partsplit 直接写 `job["progress"]`（阶段上报）。
             with _gpu_lock:
                 job["result"] = partsplit.split_job(engine, params, job=job)
+            job["status"] = "done"
+            return
+        if workflow == "wpebatch":
+            # **立绘批量换表情**：一个任务里按表情循环，每张走官方脸部局部重绘
+            # 并立刻收编进当前阶段。落盘在辅助函数里做，所以不走下面那段
+            # `publish`（否则只会收编最后一张）。
+            with _gpu_lock:                # 单卡不并发
+                job["result"] = _portrait_expression_batch(engine, params, job)
             job["status"] = "done"
             return
         if workflow == "wemo":
@@ -1009,7 +1077,7 @@ def submit(job: Job) -> Dict[str, Any]:
     allowed = ("w1", "w2", "w3", "w4", "wbg", "w5", "wpx", "wpc",
                "wss", "topixel", "wap", "wvnccs",
                # 2026-10-30 新增
-               "wout", "woutfit", "wface", "wpo", "wpe")
+               "wout", "woutfit", "wface", "wpo", "wpe", "wpebatch")
     if job.workflow not in allowed:
         raise HTTPException(
             400, f"workflow 必须是 {'/'.join(allowed)}（wap 是 topixel 的旧名）")
@@ -2259,6 +2327,7 @@ def portrait_variant_api(name: str, req: PortraitVariantReq) -> Dict[str, Any]:
         raise HTTPException(400, f"不支持的变体：{kind}")
     p = req.params or {}
     emo = ""
+    emos: List[str] = []          # 换装用不到，但返回值统一带它
     fields: Dict[str, str] = {}
     lora_scale = 1.0
     target_size = int(emotiongen.EMOTION_DEFAULTS["target_size"])
@@ -2291,9 +2360,21 @@ def portrait_variant_api(name: str, req: PortraitVariantReq) -> Dict[str, Any]:
         except (TypeError, ValueError):
             lora_scale = 1.0
     else:
+        # 表情库支持多选：`emotions` 给数组就走批量（一个任务里逐个出图）。
+        # `emotion_name` 保留为单选兼容路径。
+        raw_emos = p.get("emotions")
+        if isinstance(raw_emos, (list, tuple)):
+            for x in raw_emos:
+                v = str(x or "").strip()[:80]
+                if v and v not in emos:
+                    emos.append(v)
         emo = str(p.get("emotion_name") or "").strip()[:80]
-        if not emo:
-            raise HTTPException(400, "换表情要选一个表情")
+        if emo and emo not in emos:
+            emos.insert(0, emo)
+        emos = emos[:12]                     # 单任务上限：再多就跑一晚上了
+        emo = emos[0] if emos else ""
+        if not emos:
+            raise HTTPException(400, "换表情至少要选一个表情")
         # prompt / 负向词都交给 portrait_expression 用官方 emotiongen 拼，
         # 这里只把角色自己的负面词带过去（官方会再追加 EMOTION_NEGATIVE_EXTRA）。
         cfg0 = characters.load_config(safe) or {}
@@ -2328,7 +2409,9 @@ def portrait_variant_api(name: str, req: PortraitVariantReq) -> Dict[str, Any]:
     except (TypeError, ValueError):
         cfg = 3.0
 
-    workflow = "wpo" if kind == "outfit" else "wpe"
+    # 一次选多个表情 → 专用批量分支（一个 job、一份进度、逐个收编）
+    workflow = ("wpo" if kind == "outfit"
+                else ("wpebatch" if len(emos) > 1 else "wpe"))
     params: Dict[str, Any] = {
         "image": src_path,
         "negative": negative,
@@ -2347,17 +2430,32 @@ def portrait_variant_api(name: str, req: PortraitVariantReq) -> Dict[str, Any]:
     if kind == "outfit":
         params["prompt"] = prompt
         params["lora_scale"] = lora_scale
+    elif workflow == "wpebatch":
+        # 批量**自己落盘**（每张表情进各自的 `<表情>/` 目录），不走 `_run` 的
+        # publish 段——那段只会收编最后一张。所以这里直接给角色/服装/阶段。
+        params.pop("publish", None)
+        params.update({
+            "emotions": emos, "character": safe, "costume": costume,
+            "stage": str(req.stage or ""),
+            "target_size": target_size, "crop_max_side": crop_max_side,
+            "feather": feather,
+        })
     else:
         params.update({"emotion": emo, "target_size": target_size,
                        "crop_max_side": crop_max_side, "feather": feather})
+    total = len(emos) if workflow == "wpebatch" else 1
     job_id = uuid.uuid4().hex[:12]
     _jobs[job_id] = {"job_id": job_id, "workflow": workflow, "params": params,
                      "status": "queued", "created": time.time(),
-                     "progress": {"done": 0, "total": 1, "current": ""}}
+                     # 批量时 total 就是张数：前端进度条才有意义
+                     "progress": {"done": 0, "total": total,
+                                  "current": (f"{total} 个表情排队中…"
+                                              if total > 1 else "")}}
     _q.put((job_id, workflow, params))
     _prune(_jobs, JOB_KEEP)
     return {"job_id": job_id, "status": "queued", "position": _q.qsize(),
-            "before": _asset_url(src_path), "kind": kind, "prompt": prompt}
+            "before": _asset_url(src_path), "kind": kind, "prompt": prompt,
+            "count": total, "emotions": emos}
 
 
 @app.post("/characters/{name}/prompt")

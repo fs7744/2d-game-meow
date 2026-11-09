@@ -4774,3 +4774,29 @@ body.is-resizing, body.is-resizing * { cursor: col-resize !important; user-selec
   gap: 10px;
 }
 .cc-variant-nums .cc-tool-field { min-width: 0; }
+
+/* ---------- 立绘工具箱：表情多选 / 批量结果（统一层内） ---------- */
+.cc-variant-picked { display: flex; gap: 4px; flex-wrap: wrap; }
+.cc-variant-tag {
+  padding: 2px 7px; border: 1px solid var(--line-strong); border-radius: 999px;
+  background: var(--bg-3); color: var(--muted);
+  font: inherit; font-size: 10px; cursor: pointer;
+}
+.cc-variant-tag:hover { border-color: var(--pink); color: var(--pink); }
+/* 批量结果：一排缩略图切换当前比对的那张 */
+.cc-variant-strip { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px; }
+.cc-variant-thumb {
+  flex: none; width: 56px; display: flex; flex-direction: column; gap: 2px;
+  padding: 3px; border: 1px solid var(--line); border-radius: 4px;
+  background: var(--bg-3); cursor: pointer; font: inherit;
+}
+.cc-variant-thumb img {
+  width: 100%; aspect-ratio: 3 / 4; object-fit: contain;
+  background: var(--bg-4); border-radius: 3px;
+}
+.cc-variant-thumb span {
+  font-size: 9px; color: var(--muted-2); text-align: center;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cc-variant-thumb.is-on { border-color: var(--cyan); }
+.cc-variant-thumb.is-on span { color: var(--cyan); }

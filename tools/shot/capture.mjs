@@ -612,10 +612,16 @@ async function main() {
     await fp.evaluate(() => document.querySelector('.cc-tool-x')?.click())
     await sleep(220)
 
-    // 换表情弹窗：官方表情库卡片 + 画质档
+    // 换表情弹窗：官方表情库卡片（多选，出「已选 N 个表情」标签）+ 画质档
     await fp.evaluate(() => [...document.querySelectorAll('.cc-portrait-tools button')]
       .find((b) => (b.textContent || '').includes('换表情'))?.click())
-    await fshot('23h-portrait-emotion', 900)
+    await sleep(500)
+    await fp.evaluate(() => {
+      const cards = [...document.querySelectorAll('.cc-tool-dialog .chars-emo')]
+      cards[2]?.click()
+      cards[4]?.click()
+    })
+    await fshot('23h-portrait-emotion', 600)
     await fp.evaluate(() => document.querySelector('.cc-tool-x')?.click())
     await sleep(220)
 
