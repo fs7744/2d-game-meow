@@ -851,6 +851,40 @@ def list_portraits(name: str, stage_id: Optional[str] = None) -> List[Dict[str, 
     return out
 
 
+def portrait_variant_path(src: str, suffix: str) -> str:
+    """基于一张已有立绘，生成**同目录、不覆盖**的新文件路径。
+
+    悬浮工具箱里的「扣背景 / 完美像素化」都产出一个新版本，绝不改原图：
+    新文件落在原图所在目录（因此自动继承同一个生命阶段 / 服装 / 表情），
+    文件名带操作后缀（_bg / _px），且不会以 `_matte.png` 结尾——
+    `list_portraits` 会跳过 `_matte.png` 那种 publish 时生成的抠图副本，
+    用这个后缀才能保证新版本真的出现在画廊里。
+    """
+    src = os.path.abspath(src)
+    folder = os.path.dirname(src)
+    tag = "".join(c for c in str(suffix).lower() if c.isalnum() or c == "_")[:8] or "v"
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    index = len(_images_in(folder)) + 1
+    # 短随机码：同一秒里连续派生两份、且都还没落盘时也不会撞名
+    # （只靠 os.path.exists 会漏掉「已生成路径但尚未写文件」这种情况）
+    uid = uuid.uuid4().hex[:4]
+    while True:
+        out = os.path.join(folder,
+                           f"portrait_{stamp}_{index:04d}_{uid}_{tag}.png")
+        if not os.path.exists(out):
+            return out
+        index += 1
+
+
+def delete_portrait_file(path: str) -> bool:
+    """删一张立绘（只删文件，不动目录、不动别的图）。"""
+    target = os.path.abspath(path)
+    if not os.path.isfile(target):
+        return False
+    os.remove(target)
+    return True
+
+
 _POSE_PREVIEW_EXTS = IMAGE_EXTS
 
 

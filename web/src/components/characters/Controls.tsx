@@ -7,7 +7,9 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import Lightbox from '../Lightbox'
-import { stylePreviewUrl, emotionIconUrl, type PortraitItem } from '../../api'
+import { stylePreviewUrl, emotionIconUrl, type PortraitItem,
+  type PortraitOp } from '../../api'
+import { PortraitProcessDialog, PortraitDeleteDialog } from './PortraitTools'
 import {
   BG_COLOR_LABEL, COSTUME_LABEL, STYLE_GROUP_LABEL, tagLabel, zh,
 } from '../../labels'
@@ -346,16 +348,21 @@ const PORTRAIT_PAGE_SIZE = 8
 /** 常驻成果区。业界同类产品的共同点：画布/结果始终在视野里，
  *  不让用户在一堆表单里猜"我刚才到底生成出来没有"。 */
 export function PortraitPane({
-  character, portraits, task, doneFlash, onDismissFlash,
+  character, portraits, task, doneFlash, onDismissFlash, onChanged,
 }: {
   character: string
   portraits: PortraitItem[]
   task: TaskState | null
   doneFlash: { text: string; at: number } | null
   onDismissFlash: () => void
+  /** 立绘新增 / 删除后让父组件重新拉列表 */
+  onChanged?: () => void
 }) {
   const [zoom, setZoom] = useState<string | null>(null)
   const [page, setPage] = useState(0)
+  const [tool, setTool] = useState<{ op: PortraitOp; item: PortraitItem } | null>(null)
+  const [deleting, setDeleting] = useState<PortraitItem | null>(null)
+  const changed = onChanged ?? (() => {})
   const totalPages = Math.max(1, Math.ceil(portraits.length / PORTRAIT_PAGE_SIZE))
   // 立绘被删到页数变少时别停在越界页上
   const safePage = Math.min(page, totalPages - 1)
@@ -404,11 +411,22 @@ export function PortraitPane({
         <>
           <div className="cc-portrait-grid">
             {shown.map((p) => (
-              <button type="button" key={p.url} className="cc-portrait"
-                title={`${p.name}（点开看大图）`} onClick={() => setZoom(p.url)}>
-                <img src={p.url} alt={p.name} loading="lazy" />
-                <span>{zh(COSTUME_LABEL, p.costume) || '默认'}</span>
-              </button>
+              <div className="cc-portrait" key={p.url}>
+                <button type="button" className="cc-portrait-view"
+                  title={`${p.name}（点开看大图）`} onClick={() => setZoom(p.url)}>
+                  <img src={p.url} alt={p.name} loading="lazy" />
+                  <span>{zh(COSTUME_LABEL, p.costume) || '默认'}</span>
+                </button>
+                {/* 悬浮工具箱：hover / 键盘聚焦才出现，三个动作都不改原图 */}
+                <div className="cc-portrait-tools">
+                  <button type="button" title="扣背景（弹窗里挑参数）"
+                    onClick={() => setTool({ op: 'matte', item: p })}>扣背景</button>
+                  <button type="button" title="完美像素化（弹窗里挑参数）"
+                    onClick={() => setTool({ op: 'pixel', item: p })}>像素化</button>
+                  <button type="button" title="删除这张立绘" className="is-danger"
+                    onClick={() => setDeleting(p)}>删除</button>
+                </div>
+              </div>
             ))}
           </div>
           {totalPages > 1 && (
@@ -433,6 +451,14 @@ export function PortraitPane({
         </>
       )}
       {zoom && <Lightbox url={zoom} name={character} onClose={() => setZoom(null)} />}
+      {tool && (
+        <PortraitProcessDialog character={character} item={tool.item} op={tool.op}
+          onClose={() => setTool(null)} onChanged={changed} />
+      )}
+      {deleting && (
+        <PortraitDeleteDialog character={character} item={deleting}
+          onClose={() => setDeleting(null)} onChanged={changed} />
+      )}
     </aside>
   )
 }

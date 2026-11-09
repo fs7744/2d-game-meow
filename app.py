@@ -90,6 +90,7 @@ from workflows import metadb
 from workflows import motiontemplates
 from workflows import matte
 from workflows import matte_screen
+from workflows import pixelfy
 from workflows import paths
 from workflows import poselib
 from workflows import playtest
@@ -1970,6 +1971,139 @@ def character_portraits_api(name: str, stage: str = "") -> Dict[str, Any]:
             "mtime": p["mtime"],
         })
     return {"count": len(items), "items": items}
+
+
+class PortraitProcessReq(BaseModel):
+    path: str
+    #: matte = 扣背景，pixel = 完美像素化
+    op: str = "matte"
+    params: Dict[str, Any] = Field(default_factory=dict)
+
+
+class PortraitDeleteReq(BaseModel):
+    path: str
+    #: 删除必须显式确认：前端弹窗确认后才会传 true，避免脚本/误触直接删
+    confirm: bool = False
+
+
+def _checked_portrait(safe: str, raw: str) -> str:
+    """把客户端给的立绘路径限制在这个角色 Portraits/ 目录内（挡 .. 与软链）。"""
+    root = characters.portraits_dir(safe)
+    target = os.path.realpath(str(raw or ""))
+    if not target or not characters.is_path_under(root, target):
+        raise HTTPException(400, "只能处理这个角色 Portraits/ 下的立绘")
+    if not os.path.isfile(target):
+        raise HTTPException(404, "这张立绘不存在")
+    return target
+
+
+@app.post("/characters/{name}/portraits/process")
+def process_portrait_api(name: str, req: PortraitProcessReq) -> Dict[str, Any]:
+    """对一张立绘做扣背景 / 完美像素化，**生成新的一份**，绝不改原图。
+
+    返回处理前后的 url，供弹窗做滑动比对；新文件落在原图同目录，因此自动
+    继承同一个生命阶段 / 服装 / 表情。两个算法都是纯确定性后处理，不跑模型。
+    """
+    try:
+        safe = characters.ensure_safe_name(name, "角色名")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not characters.character_exists(safe):
+        raise HTTPException(404, f"没有这个角色：{safe}")
+    src_path = _checked_portrait(safe, req.path)
+    op = str(req.op or "").strip().lower()
+    if op not in ("matte", "pixel"):
+        raise HTTPException(400, f"不支持的处理：{op}")
+    p = req.params or {}
+    try:
+        with Image.open(src_path) as im:
+            im.load()
+            src = im.convert("RGBA")
+    except (OSError, ValueError) as exc:
+        raise HTTPException(400, f"读不了这张立绘：{exc}") from exc
+
+    meta: Dict[str, Any] = {"op": op}
+    try:
+        if op == "matte":
+            backend = str(p.get("backend") or "auto").lower()
+            if backend not in ("auto", "color", "u2net", "ai", "isnet", "birefnet"):
+                backend = "auto"
+            tol = max(8, min(120, int(p.get("tol", 32))))
+            fringe = bool(p.get("fringe", True))
+            holes = bool(p.get("holes", True))
+            # 「自动」跟着全局抠图方式走（与角色中心其它抠图路径一致）
+            eff = backend
+            if eff == "auto":
+                gb = matte_screen.global_backend()
+                if gb != "auto":
+                    eff = gb
+            info: Dict[str, Any] = {}
+            out = matte.matte_auto(
+                src, backend=eff, model_dir=paths.MODELS_DIR / "matte",
+                info=info, tol=tol, fringe=fringe, holes=holes)
+            meta.update({"backend": eff, "tol": tol, "fringe": fringe,
+                         "holes": holes, **info})
+            suffix = "bg"
+        else:
+            raw_target = p.get("target")
+            target = None
+            if isinstance(raw_target, (list, tuple)) and len(raw_target) == 2:
+                target = (max(16, min(512, int(raw_target[0]))),
+                          max(16, min(512, int(raw_target[1]))))
+            colors = max(0, min(128, int(p.get("colors", 32))))
+            sample = str(p.get("sample_method") or "median")
+            if sample not in ("median", "majority", "center"):
+                sample = "median"
+            grid_snap = bool(p.get("grid_snap", True))
+            transparent_bg = bool(p.get("transparent_bg", False))
+            pre_enhance = float(p.get("pre_enhance", 0.0))
+            pre_enhance = max(0.0, min(2.0, pre_enhance))
+            edge_rebuild = bool(p.get("edge_rebuild", False))
+            res = pixelfy.refine_batch(
+                [src], grid_snap=grid_snap, grid_size=None,
+                target_size=target, sample_method=sample, colors=colors,
+                transparent_bg=transparent_bg, snap_to=16,
+                pre_enhance=pre_enhance, edge_rebuild=edge_rebuild)
+            out = res["items"][0]["image"]
+            meta.update({
+                "target": list(target) if target else None,
+                "colors": colors, "grid_snap": grid_snap,
+                "sample_method": sample, "transparent_bg": transparent_bg,
+                "pre_enhance": pre_enhance, "edge_rebuild": edge_rebuild,
+                "output_size": [out.width, out.height],
+            })
+            suffix = "px"
+    except HTTPException:
+        raise
+    except Exception as exc:                    # noqa: BLE001
+        raise HTTPException(400, f"处理失败：{exc}") from exc
+
+    new_path = characters.portrait_variant_path(src_path, suffix)
+    os.makedirs(os.path.dirname(new_path), exist_ok=True)
+    out.save(new_path, format="PNG")
+    return {
+        "before": _asset_url(src_path),
+        "after": _asset_url(new_path),
+        "path": new_path,
+        "name": os.path.basename(new_path),
+        "meta": meta,
+    }
+
+
+@app.post("/characters/{name}/portraits/delete")
+def delete_portrait_api(name: str, req: PortraitDeleteReq) -> Dict[str, Any]:
+    """删一张立绘。前端弹窗确认 + 这里再验一次 `confirm`，双保险防手抖。"""
+    try:
+        safe = characters.ensure_safe_name(name, "角色名")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not characters.character_exists(safe):
+        raise HTTPException(404, f"没有这个角色：{safe}")
+    if not req.confirm:
+        raise HTTPException(400, "删除需要确认")
+    target = _checked_portrait(safe, req.path)
+    ok = characters.delete_portrait_file(target)
+    return {"ok": ok, "deleted": os.path.basename(target)}
 
 
 @app.post("/characters/{name}/prompt")

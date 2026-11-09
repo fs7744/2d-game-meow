@@ -409,6 +409,24 @@ function makeFetch() {
       }) }
     }
     // 立绘列表（Portraits/，跟动作帧分开）。带 ?stage= 也要命中
+    // 立绘悬浮工具箱：处理（生成新的一份）/ 删除。
+    // **必须排在 /portraits 之前**，否则会被 includes('/portraits') 抢走当列表请求
+    if (String(url).includes('/portraits/process')) {
+      let b = {}
+      try { b = JSON.parse(init.body || '{}') } catch { /* 忽略坏 body */ }
+      const op = String(b.op || 'matte')
+      const suffix = op === 'pixel' ? 'px' : 'bg'
+      return { ok: true, json: async () => ({
+        before: '/files/p3.png',
+        after: `/files/processed_${suffix}.png`,
+        path: `/p/processed_${suffix}.png`,
+        name: `portrait_x_${suffix}.png`,
+        meta: { op, output_size: [16, 16] },
+      }) }
+    }
+    if (String(url).includes('/portraits/delete')) {
+      return { ok: true, json: async () => ({ ok: true, deleted: 'portrait_3.png' }) }
+    }
     if (String(url).includes('/characters/') && String(url).includes('/portraits')) {
       if (portraitsOverride) {
         return { ok: true, json: async () => ({
@@ -4576,7 +4594,9 @@ async function ccCreate(doc, win) {
   check('右栏没有服装 / 表情下拉（那是动作帧的维度）',
     !doc.querySelector('.cc-preview-pick'))
   check('右栏没有翻帧按钮（立绘不是动画）', !doc.querySelector('.sprite-nav'))
-  cards[0]?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  // 卡片外层已改成 div（要容纳工具箱按钮），看大图在里面的 .cc-portrait-view
+  cards[0]?.querySelector('.cc-portrait-view')
+    ?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
   await ccWait(200)
   check('点立绘能打开大图', !!doc.querySelector('.lightbox'))
   win.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
@@ -5434,6 +5454,102 @@ async function ccCreate(doc, win) {
   check('原导出内容仍在（导出图集）',
     [...doc.querySelectorAll('button')].some((b) => (b.textContent || '').includes('导出图集')))
   check('生命阶段场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 65) 立绘悬浮工具箱：三个动作 / 参数弹窗 / 滑动比对 / 删除确认
+{
+  const { dom, doc, win, errors, c0 } = await ccBoot()
+  await ccCreate(doc, win)
+  ccStep(doc, win, 2)              // 进入角色设定页，右栏立绘才出现
+  await ccWait(400)
+  const card = () => doc.querySelector('.cc-portrait')
+  const clickEl = (el) => el?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  const tools = () => [...(card()?.querySelectorAll('.cc-portrait-tools button') || [])]
+  const dlgBtn = (t) => [...doc.querySelectorAll('.cc-tool-dialog button')]
+    .find((b) => (b.textContent || '').includes(t))
+  const dlgText = () => doc.querySelector('.cc-tool-dialog')?.textContent || ''
+
+  check('每张立绘都有悬浮工具箱', !!card()?.querySelector('.cc-portrait-tools'))
+  check('工具箱是 扣背景 / 像素化 / 删除',
+    tools().length === 3
+    && tools()[0].textContent.includes('扣背景')
+    && tools()[1].textContent.includes('像素化')
+    && tools()[2].textContent.includes('删除'),
+    tools().map((b) => b.textContent).join('/'))
+  check('点图仍然是看大图（工具箱不抢点击）',
+    !!card()?.querySelector('.cc-portrait-view'))
+
+  // ---- 扣背景：弹窗里挑参数 ----
+  clickEl(tools()[0])
+  await ccWait(200)
+  check('扣背景在弹窗里处理', !!doc.querySelector('.cc-tool-dialog')
+    && dlgText().includes('扣背景'))
+  check('弹窗有参数让用户选',
+    doc.querySelectorAll('.cc-tool-form select, .cc-tool-form input').length >= 3,
+    String(doc.querySelectorAll('.cc-tool-form select, .cc-tool-form input').length))
+  check('明确写了生成新立绘、原图不变',
+    dlgText().includes('新立绘') && dlgText().includes('原图保持不变'))
+
+  clickEl(dlgBtn('处理并比对'))
+  await ccWait(250)
+  check('处理后出现滑动比对', !!doc.querySelector('.cc-compare'))
+  check('比对有可拖动的 range', !!doc.querySelector('.cc-compare-range'))
+  check('左右分别是处理前 / 处理后',
+    !!doc.querySelector('.cc-compare-tag.is-before')
+    && !!doc.querySelector('.cc-compare-tag.is-after'))
+  const range = doc.querySelector('.cc-compare-range')
+  Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value')
+    .set.call(range, '25')
+  range.dispatchEvent(new win.Event('input', { bubbles: true }))
+  range.dispatchEvent(new win.Event('change', { bubbles: true }))
+  await ccWait(150)
+  check('拖动分割线会改变裁切位置',
+    (doc.querySelector('.cc-compare-divider')?.getAttribute('style') || '').includes('25%'),
+    doc.querySelector('.cc-compare-divider')?.getAttribute('style'))
+  check('处理请求带 op=matte 与参数',
+    calls.slice(c0).some((c) => c.url.includes('/portraits/process')
+      && c.method === 'POST' && String(c.body || '').includes('"op":"matte"')))
+  check('有完成 / 放弃这份', !!dlgBtn('完成') && !!dlgBtn('放弃这份'))
+  clickEl(dlgBtn('完成'))
+  await ccWait(150)
+  check('完成后弹窗关闭', !doc.querySelector('.cc-tool-dialog'))
+
+  // ---- 完美像素化：另一组参数 ----
+  clickEl(tools()[1])
+  await ccWait(200)
+  check('像素化弹窗有目标尺寸 / 色数 / 网格吸附',
+    dlgText().includes('目标像素尺寸')
+    && dlgText().includes('色板色数')
+    && dlgText().includes('网格吸附'))
+  clickEl(dlgBtn('处理并比对'))
+  await ccWait(250)
+  check('像素化请求带 op=pixel',
+    calls.slice(c0).some((c) => c.url.includes('/portraits/process')
+      && String(c.body || '').includes('"op":"pixel"')))
+  clickEl(dlgBtn('放弃这份'))
+  await ccWait(200)
+
+  // ---- 删除：必须确认 ----
+  const before = calls.slice(c0).filter((c) => c.url.includes('/portraits/delete')).length
+  clickEl(tools()[2])
+  await ccWait(200)
+  check('删除先弹确认框', !!doc.querySelector('.cc-tool-dialog.is-small')
+    && !!dlgBtn('确认删除'))
+  check('确认框写明不能撤销', dlgText().includes('不能撤销'))
+  clickEl(dlgBtn('取消'))
+  await ccWait(150)
+  check('点取消不会发删除请求',
+    calls.slice(c0).filter((c) => c.url.includes('/portraits/delete')).length === before)
+  clickEl(tools()[2])
+  await ccWait(200)
+  clickEl(dlgBtn('确认删除'))
+  await ccWait(250)
+  const dels = calls.slice(c0).filter((c) => c.url.includes('/portraits/delete'))
+  check('确认后才发删除请求', dels.length === before + 1, String(dels.length))
+  check('删除请求带 confirm=true',
+    String(dels[dels.length - 1]?.body || '').includes('"confirm":true'))
+  check('工具箱场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 

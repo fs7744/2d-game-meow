@@ -4472,3 +4472,145 @@ body.is-resizing, body.is-resizing * { cursor: col-resize !important; user-selec
 .chars.cc .chars-body.cc-panel { padding-left: 24px; padding-right: 24px; }
 .chars.cc .cc-main > .cc-next { margin-left: 24px; margin-right: 24px; }
 .chars.cc .chars-err { margin-left: 24px; margin-right: 24px; }
+
+/* ---------- 立绘悬浮工具箱 / 处理弹窗 / 滑动比对（2026-11-09，统一层内） ---------- */
+/* 卡片外层改成纯容器，边框/背景交给里面的「看大图」按钮 */
+.cc-portrait {
+  position: relative; display: block; min-width: 0;
+  padding: 0; border: 0; background: transparent; cursor: default;
+}
+.cc-portrait-view {
+  display: flex; flex-direction: column; gap: 4px; width: 100%; min-width: 0;
+  padding: 5px; border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--bg-3); cursor: zoom-in;
+}
+.cc-portrait-view:hover { border-color: var(--cyan); }
+/* 悬浮工具箱：hover 或键盘聚焦才出现，按钮不能嵌套在 button 里 */
+.cc-portrait-tools {
+  display: none; position: absolute; left: 5px; right: 5px; bottom: 5px;
+  gap: 3px; justify-content: center; flex-wrap: wrap; padding: 4px;
+  border: 1px solid var(--line-strong); border-radius: 4px;
+  background: rgba(10, 12, 18, 0.9);
+}
+.cc-portrait:hover .cc-portrait-tools,
+.cc-portrait:focus-within .cc-portrait-tools { display: flex; }
+.cc-portrait-tools button {
+  flex: 1; min-width: 0; padding: 4px 2px;
+  border: 1px solid var(--line); border-radius: 3px;
+  background: var(--bg-2); color: var(--white);
+  font: inherit; font-size: 9.5px; cursor: pointer; white-space: nowrap;
+}
+.cc-portrait-tools button:hover { border-color: var(--cyan); color: var(--cyan); }
+.cc-portrait-tools button.is-danger:hover { border-color: var(--pink); color: var(--pink); }
+
+/* 处理弹窗 */
+.cc-tool-mask {
+  position: fixed; inset: 0; z-index: 60;
+  display: flex; align-items: center; justify-content: center; padding: 20px;
+  background: rgba(6, 8, 12, 0.78);
+}
+.cc-tool-dialog {
+  display: flex; flex-direction: column; gap: 12px;
+  width: min(760px, 100%); max-height: 88vh; overflow: auto; padding: 16px;
+  border: 1px solid var(--line-strong); border-radius: var(--r);
+  background: var(--bg-1);
+}
+.cc-tool-dialog.is-small { width: min(460px, 100%); }
+.cc-tool-head {
+  display: flex; align-items: center; gap: 10px;
+  padding-bottom: 8px; border-bottom: 1px solid var(--line);
+}
+.cc-tool-head b { font-size: 14px; color: var(--white); }
+.cc-tool-file {
+  max-width: 320px; font-family: var(--mono); font-size: 10px;
+  color: var(--muted-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cc-tool-x {
+  border: 0; background: transparent; color: var(--muted-2);
+  font-size: 13px; cursor: pointer;
+}
+.cc-tool-body {
+  display: grid; grid-template-columns: minmax(150px, 240px) minmax(0, 1fr); gap: 14px;
+}
+.cc-tool-preview { display: flex; flex-direction: column; gap: 6px; }
+.cc-tool-preview img {
+  width: 100%; max-height: 300px; object-fit: contain;
+  background: var(--bg-4); border: 1px solid var(--line); border-radius: var(--r-sm);
+}
+.cc-tool-preview span { font-size: 10px; color: var(--muted-2); text-align: center; }
+.cc-tool-form { display: flex; flex-direction: column; gap: 9px; }
+.cc-tool-field {
+  display: flex; flex-direction: column; gap: 4px;
+  font-size: 11px; color: var(--muted);
+}
+.cc-tool-field > span { display: flex; justify-content: space-between; gap: 8px; }
+.cc-tool-field i {
+  font-style: normal; font-family: var(--mono); font-size: 10px; color: var(--muted-2);
+}
+.cc-tool-field select, .cc-tool-field input[type="range"] {
+  width: 100%; padding: 5px 7px; border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm); background: var(--bg-3); color: var(--white);
+  font: inherit; font-size: 11px;
+}
+.cc-tool-field input[type="range"] { height: 20px; padding: 0; accent-color: var(--cyan); }
+.cc-tool-check {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px; color: var(--muted); cursor: pointer;
+}
+.cc-tool-check input { accent-color: var(--cyan); }
+.cc-tool-hint { margin: 0; font-size: 10.5px; line-height: 1.6; color: var(--muted-2); }
+.cc-tool-hint strong { color: var(--cyan); }
+.cc-tool-actions { display: flex; align-items: center; gap: 7px; padding-top: 4px; }
+.cc-tool-err {
+  margin: 0; padding: 7px 9px; border: 1px solid var(--pink);
+  border-radius: var(--r-sm); color: var(--pink); font-size: 11px;
+}
+.cc-tool-warn { margin: 0 0 6px; font-size: 12px; color: var(--white); }
+.cc-tool-sub { margin: 0; font-size: 10.5px; line-height: 1.6; color: var(--muted-2); }
+.cc-tool-delbody { display: flex; align-items: flex-start; gap: 12px; }
+.cc-tool-delbody img {
+  width: 92px; height: 120px; flex: none; object-fit: contain;
+  background: var(--bg-4); border: 1px solid var(--line); border-radius: var(--r-sm);
+}
+
+/* 滑动比对：左原图 / 右结果，range 覆盖整幅，拖动分割线看差异 */
+.cc-compare {
+  position: relative; width: 100%; height: 340px; overflow: hidden;
+  border: 1px solid var(--line-strong); border-radius: var(--r-sm);
+  background-color: var(--bg-4);
+  background-image:
+    linear-gradient(45deg, #26262e 25%, transparent 25%, transparent 75%, #26262e 75%),
+    linear-gradient(45deg, #26262e 25%, transparent 25%, transparent 75%, #26262e 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 8px 8px;
+}
+.cc-compare-img {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  object-fit: contain; image-rendering: pixelated;
+}
+.cc-compare-clip { position: absolute; inset: 0; }
+.cc-compare-divider {
+  position: absolute; top: 0; bottom: 0; width: 2px;
+  background: var(--cyan); transform: translateX(-1px); pointer-events: none;
+}
+.cc-compare-knob {
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  display: flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; border-radius: 50%;
+  background: var(--cyan); color: var(--bg); font-size: 14px; font-weight: 700;
+}
+.cc-compare-tag {
+  position: absolute; top: 8px; padding: 2px 7px; border-radius: 3px;
+  background: rgba(10, 12, 18, 0.8); font-size: 10px;
+  color: var(--white); pointer-events: none;
+}
+.cc-compare-tag.is-before { left: 8px; }
+.cc-compare-tag.is-after { right: 8px; }
+.cc-compare-range {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  margin: 0; opacity: 0; cursor: ew-resize;
+}
+@media (max-width: 720px) {
+  .cc-tool-body { grid-template-columns: minmax(0, 1fr); }
+  .cc-compare { height: 260px; }
+}

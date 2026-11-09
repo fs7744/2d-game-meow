@@ -22,6 +22,47 @@
 
 ---
 
+## 2026-11-09 · 立绘悬浮工具箱（扣背景 / 完美像素化 / 删除）
+
+用户要求：立绘图上 hover 出工具箱；两个处理都在弹窗里给参数，处理完有
+**滑动比对**看差异；处理结果是**新的一份**而不是改原图；删除要确认防手抖。
+
+### 后端
+
+新增两个端点（都走 `characters.portraits_dir()` 做 realpath 校验，挡 `..` 与软链）：
+
+- `POST /characters/{name}/portraits/process`：`op=matte` 走
+  `matte.matte_auto`（方式 / 容差 / 去白边 / 补洞；「自动」跟随全局抠图设置），
+  `op=pixel` 走 `pixelfy.refine_batch`（目标尺寸 / 色数 / 网格吸附 / 每格取色 /
+  量化前增强 / 透明背景 / 描边重建）。两个算法都是**纯确定性后处理，不跑模型**。
+  结果返回 `{before, after, path, name, meta}`，前后 url 供弹窗比对。
+- `POST /characters/{name}/portraits/delete`：必须带 `confirm=true`，后端再验一次。
+
+`characters.portrait_variant_path()` 生成**同目录、不覆盖**的新文件，名字带
+`_bg` / `_px` 后缀（刻意不用 `_matte.png` 结尾——`list_portraits` 会把它当
+publish 时生成的副本跳过）。文件名带 4 位随机码，同一秒连续派生两份也不会撞。
+新文件落在原图所在目录，所以自动继承同一个生命阶段 / 服装 / 表情。
+
+### 前端
+
+- `PortraitPane` 的卡片外层由 `<button>` 改成 `<div>`（按钮不能嵌套），
+  里面 `.cc-portrait-view` 负责看大图，`.cc-portrait-tools` 在 hover / 键盘
+  聚焦时浮出三个按钮。
+- 新组件 `characters/PortraitTools.tsx`：`PortraitProcessDialog`（参数表单 +
+  处理并比对 + `CompareSlider` 拖动分割线 + 改参数重做 / 放弃这份 / 完成）与
+  `PortraitDeleteDialog`（写明不能撤销，取消与确认分开）。弹窗走 Portal 到 body。
+- 「放弃这份」和「改参数重做」会自动删掉刚生成的预览版本，不留垃圾文件。
+- `CharactersPage` 传 `onChanged`，处理/删除后只刷画廊，不重启整页数据流。
+
+### 验证
+
+`tsc -b` / `vite build` ✓、`check-hints` 34/34、**`node smoke.mjs` 813/813**
+（新增用例 65：工具箱三项 / 参数弹窗 / 滑动比对拖动 / op 请求体 / 删除取消不发请求 /
+确认才带 `confirm:true`）、新增 `tests/test_portrait_tools.py` **7 例**（原图字节不变、
+新文件不覆盖、抠图角透明主体保留、像素化 16×16、越界路径 400、删除需确认）、
+后端回归 **112 passed / 5 skipped**。截图工具同步到新导航并新增 hover 截图
+`23e-portrait-tools`。
+
 ## 2026-11-09 · 角色中心：修掉顶部贴边
 
 用户反馈「左边太靠边了，不好看」。根因：`.chars.cc .chars-detail.cc-main` 是

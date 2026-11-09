@@ -229,6 +229,12 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
     return d
   }, [reload, stageId])
 
+  /** 悬浮工具箱新增 / 删除立绘后只刷画廊，不重启整页数据流。 */
+  const refreshPortraits = useCallback(async () => {
+    if (!sel) return
+    setPortraits(await fetchPortraits(sel, stageId).catch(() => []))
+  }, [sel, stageId])
+
   /**
    * 重新拼 prompt（**不跑 PE**）。
    *
@@ -1349,7 +1355,8 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
           {sel && detail ? (
             <PortraitPane
               character={detail.name} portraits={portraits}
-              task={task} doneFlash={doneFlash} onDismissFlash={() => setDoneFlash(null)} />
+              task={task} doneFlash={doneFlash} onDismissFlash={() => setDoneFlash(null)}
+              onChanged={() => void refreshPortraits()} />
           ) : (
             <aside className="cc-preview cc-preview-idle">
               <div className="cc-preview-head"><b>立绘</b></div>

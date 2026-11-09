@@ -901,6 +901,33 @@ export async function fetchPortraits(name: string, stage = ''): Promise<Portrait
   return r.items || []
 }
 
+/** 立绘悬浮工具箱的处理结果：新文件已经落盘，before/after 用来做滑动比对。 */
+export type PortraitProcessResult = {
+  before: string
+  after: string
+  path: string
+  name: string
+  meta: Record<string, unknown>
+}
+export type PortraitOp = 'matte' | 'pixel'
+
+/** 扣背景 / 完美像素化。后端生成新的一份，绝不改原图。 */
+export function processPortrait(name: string, body: {
+  path: string
+  op: PortraitOp
+  params: Record<string, unknown>
+}): Promise<PortraitProcessResult> {
+  return req(`/characters/${encodeURIComponent(name)}/portraits/process`,
+    { method: 'POST', body: JSON.stringify(body) })
+}
+
+/** 删一张立绘。`confirm` 必须为真，后端还会再验一次，防手抖误删。 */
+export function deletePortrait(name: string, path: string,
+  confirm = true): Promise<{ ok: boolean; deleted: string }> {
+  return req(`/characters/${encodeURIComponent(name)}/portraits/delete`,
+    { method: 'POST', body: JSON.stringify({ path, confirm }) })
+}
+
 /* ---------------- 角色生命阶段 ---------------- */
 
 /** 一个阶段 = 一套独立角色设定 + 自己的立绘。数组顺序即展示顺序。 */

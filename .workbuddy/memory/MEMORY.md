@@ -63,6 +63,7 @@
 
 ## 资料库 / SQLite / 工作台
 - 角色中心（2026-11-09 重构 + 二次修正，**别写回四步工作台**）：四层 `library / stages / stage / pending`。默认全屏库 → 点卡片进**生命阶段列表** → 点阶段进**角色设定**（原定形象内容）→ 另有「待处理」页放原出素材/导出内容（用户说后面再参考，内容一字不动）。UI 上「项目」叫**画布**（内部 `/projects` 不变）。
+- 立绘悬浮工具箱（2026-11-09）：hover 出「扣背景 / 完美像素化 / 删除」。两个处理走 `POST /characters/{n}/portraits/process`（`matte.matte_auto` / `pixelfy.refine_batch`，纯确定性不跑模型），弹窗给参数 + 拖动分割线滑动比对，**永远生成新的一份**、不改原图；`portrait_variant_path()` 同目录不覆盖、后缀 `_bg`/`_px`（别用 `_matte.png`，会被 list_portraits 当副本跳过）。删除走 `POST .../portraits/delete` 且必须 `confirm=true`，前端还有确认弹窗。卡片外层是 div（按钮不能嵌套），`.cc-portrait-view` 负责看大图。组件在 `characters/PortraitTools.tsx`。
 - 角色中心左边距（2026-11-09）：`cc-main` 是 `padding:0`，顶部栏/面包屑/导航作为它的直接子元素会贴边；统一层末尾把 `.cc-topbar/.cc-crumb/.cc-viewnav/.cc-panel/.cc-next/.chars-err` 左右边距统一到 **24px**（只改统一层），否则左边界参差。
 - 角色中心层级（2026-11-09，用户按截图逐条钉过）：顶部只有**角色名 + 更小描述 + 修改 + 编辑时间**，不许出现「当前服装/画风」行；导航**只有「生命阶段」与「待处理」两项**，「角色设定」属于某个生命阶段、不是同级入口；进入阶段后才出现面包屑 `角色名 / 阶段名`。**列表页没有右栏与拖动条**（`.is-stages` 单列），也不塞待处理卡片/角色档案（前者走导航、后者走「修改」弹窗）；每行以立绘为主（58×82 缩略图最多 5 张），文字用紧凑单行输入。右栏立绘只在阶段编辑/待处理页出现，因为它是角色设定的一部分。
 - `workflows/metadb.py`（标准库 sqlite3 / WAL / `library/meta.sqlite3`）是角色与画布元数据权威：tags、创建编辑时间、自定义标签、备注、任务历史（`GET /character-tasks` 已有，**展示 UI 还没做**）、封面。用户明确不必再顾官方目录互通。

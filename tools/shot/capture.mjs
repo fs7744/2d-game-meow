@@ -437,6 +437,16 @@ async function main() {
           ],
         })
         // 带 ?stage= 也要命中（阶段编辑页只取该阶段的立绘）
+        // 立绘悬浮工具箱（必须排在 /portraits 之前，否则被 includes 抢走）
+        if (u.includes('/portraits/process')) {
+          let b = {}
+          try { b = JSON.parse(init.body || '{}') } catch { /* 忽略 */ }
+          const op = String(b.op || 'matte')
+          return json({ before: '/icon.png', after: '/icon.png',
+            path: '/icon.png', name: `portrait_x_${op === 'pixel' ? 'px' : 'bg'}.png`,
+            meta: { op } })
+        }
+        if (u.includes('/portraits/delete')) return json({ ok: true, deleted: 'x.png' })
         if (u.includes('/characters/') && u.includes('/portraits')) return json({
           count: 3,
           items: ['最新一版', 'Knight', 'Naked'].map((c, i) => ({
@@ -549,9 +559,24 @@ async function main() {
     await fp.evaluate(() => document.querySelector('.charlib-card')?.click())
     await sleep(800)
     await fshot('23-cc-workspace')
-    // ② 定形象：「外貌与基础设定」那行（性别 / 年龄 / 底色）高度要齐平
-    await fp.evaluate(() => document.querySelector('.cc-step[data-step="2"]')?.click())
+    // 进入某个生命阶段的「角色设定」（不再有四步步骤条）
+    await fp.evaluate(() => {
+      const row = document.querySelector('.cc-stage-row')
+      ;[...(row?.querySelectorAll('button') || [])]
+        .find((b) => (b.textContent || '').includes('进入设定'))?.click()
+    })
     await fshot('23b-cc-step2')
+    // 立绘悬浮工具箱：真实 hover 第一张卡，三个动作应该浮出来
+    const portraitBox = await fp.evaluate(() => {
+      const r = document.querySelector('.cc-portrait-view')?.getBoundingClientRect()
+      return r ? { x: r.x + r.width / 2, y: r.y + r.height / 2 } : null
+    })
+    if (portraitBox) {
+      await fp.mouse.move(portraitBox.x, portraitBox.y)
+      await fshot('23e-portrait-tools', 350)
+    } else {
+      console.log('  ✗ 没找到立绘卡片')
+    }
     // 右栏可拖：往左拖 160px，成果区应变宽（真实 pointer 事件走一遍）
     const sideBefore = await fp.evaluate(() =>
       document.querySelector('.cc-preview')?.getBoundingClientRect().width || 0)
@@ -581,13 +606,14 @@ async function main() {
     await fshot('23c-cc-style-dialog', 900)
     await fp.evaluate(() => document.querySelector('.cc-style-close')?.click())
     await sleep(200)
-    await fp.evaluate(() => document.querySelector('.cc-step[data-step="3"]')?.click())
+    // 出素材 / 导出都原样保留在「待处理」页（同一页同时渲染两段内容）
+    await fp.evaluate(() => [...document.querySelectorAll('.cc-viewnav button')]
+      .find((b) => (b.textContent || '').includes('待处理'))?.click())
     await fshot('24-cc-step3')
     await fp.evaluate(() => {
       document.querySelectorAll('.cc-adv').forEach((d) => { d.open = true })
     })
     await fshot('25-cc-step3-adv')
-    await fp.evaluate(() => document.querySelector('.cc-step[data-step="4"]')?.click())
     await fshot('26-cc-step4')
     // 试玩验收台：横板 → 八方向双键 → 横板跳跃
     const ptDiag = await fp.evaluate(() => ({
