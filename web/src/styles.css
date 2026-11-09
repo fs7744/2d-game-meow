@@ -4631,7 +4631,8 @@ body.is-resizing, body.is-resizing * { cursor: col-resize !important; user-selec
 
 /* ---------- 拆部件页（与角色设定同级；统一层内） ---------- */
 /* 拆部件只要单列：选图 + 分层预览占满宽度，右边不再挂立绘 */
-.chars.cc.is-workspace.is-parts { grid-template-columns: minmax(0, 1fr); }
+.chars.cc.is-workspace.is-parts,
+.chars.cc.is-workspace.is-sequence { grid-template-columns: minmax(0, 1fr); }
 .cc-parts { display: flex; flex-direction: column; gap: 16px; }
 .cc-parts-head h2 { margin: 0 0 5px; font-size: 15px; color: var(--white); }
 .cc-parts-head p { margin: 0; font-size: 11px; line-height: 1.7; color: var(--muted); }
@@ -4825,7 +4826,8 @@ body.is-resizing, body.is-resizing * { cursor: col-resize !important; user-selec
 .cc-parts-item-ops { display: flex; align-items: center; gap: 5px; flex: none; }
 
 /* ---- 角色中心 · 骨骼动画（与拆部件同级，同样单列、不挂右栏） ---- */
-.chars.cc.is-workspace.is-riganim { grid-template-columns: minmax(0, 1fr); }
+.chars.cc.is-workspace.is-riganim,
+.chars.cc.is-workspace.is-sequence { grid-template-columns: minmax(0, 1fr); }
 .cc-rig { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 .cc-rig-head h2 { margin: 0 0 5px; font-size: 15px; color: var(--white); }
 .cc-rig-head p { margin: 0; font-size: 11px; line-height: 1.7; color: var(--muted); }
@@ -5094,3 +5096,82 @@ body.is-resizing, body.is-resizing * { cursor: col-resize !important; user-selec
   font-size: 10px; color: var(--white); }
 .rig-filelist em { font-style: normal; color: var(--muted-2); font-family: var(--mono); }
 .rig-warnlist { margin: 0; padding-left: 18px; font-size: 10px; color: #e4c07a; }
+
+/* ==========================================================================
+   角色中心 · 序列帧动画（3D 人偶 → 抽帧 → 参考图批量帧）
+   --------------------------------------------------------------------------
+   两块内容常驻（人偶 iframe 37MB，切子页不能卸载），只用 `.is-hidden` 切。
+   ========================================================================== */
+.cc-seq { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.cc-seq-head { display: flex; align-items: flex-end; gap: 16px; flex-wrap: wrap; }
+.cc-seq-head h2 { margin: 0 0 3px; font-size: 15px; color: var(--white); }
+.cc-seq-head p { margin: 0; font-size: 11.5px; color: var(--muted-2); line-height: 1.6; }
+.cc-seq-counts { margin-left: auto; display: flex; gap: 6px; }
+.cc-seq-counts span { padding: 3px 9px; border: 1px solid var(--line); border-radius: 999px;
+  font-size: 10px; color: var(--muted); background: var(--bg-2); }
+.cc-seq-tabs { display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
+  padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+.cc-seq-tabs button { padding: 5px 12px; border: 1px solid transparent; border-radius: 6px;
+  background: transparent; color: var(--muted); font-size: 11.5px; cursor: pointer; }
+.cc-seq-tabs button:hover { color: var(--white); }
+.cc-seq-tabs button.is-on { border-color: var(--cyan); color: var(--cyan);
+  background: rgba(108, 196, 239, .12); }
+.cc-seq-tabs .spacer { flex: 1; }
+.cc-seq-hint { font-size: 10.5px; color: var(--muted-2); }
+.cc-seq-pane { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.cc-seq-pane.is-hidden { display: none; }
+
+/* 人偶舞台：页面里别用 1:1 的正方形（满宽会顶到 1000px 高） */
+.cc-seq .pose-stage { aspect-ratio: auto; height: min(66vh, 680px); }
+.cc-seq .pose-editor { margin-bottom: 4px; }
+
+.cc-seq-mannequins { display: flex; flex-direction: column; gap: 6px;
+  padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--bg-2); }
+.cc-seq-mannequins > b { font-size: 11px; color: var(--white); }
+.cc-seq-thumbs { display: flex; gap: 6px; flex-wrap: wrap; }
+.cc-seq-thumbs button { padding: 0; border: 1px solid var(--line); border-radius: 5px;
+  background: var(--bg-4); cursor: pointer; overflow: hidden; line-height: 0; }
+.cc-seq-thumbs button:hover { border-color: var(--cyan); }
+.cc-seq-thumbs img { display: block; width: 64px; height: 86px; object-fit: cover; }
+
+/* 批量页的设置条：一行放得下就一行，放不下自动换行 */
+.cc-seq-cfg { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap;
+  padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--bg-2); }
+.cc-seq-cfg > label { display: flex; flex-direction: column; gap: 4px;
+  font-size: 10px; color: var(--muted-2); }
+.cc-seq-cfg select, .cc-seq-cfg input[type="number"] {
+  padding: 4px 7px; border: 1px solid var(--line); border-radius: 5px;
+  background: var(--bg-4); color: var(--white); font-size: 11px; }
+.cc-seq-cfg input[type="number"] { width: 68px; }
+.cc-seq-cfg .cc-seq-prompt { flex: 1 1 260px; min-width: 200px; }
+.cc-seq-cfg .cc-seq-prompt input { width: 100%; box-sizing: border-box;
+  padding: 5px 8px; border: 1px solid var(--line); border-radius: 5px;
+  background: var(--bg-4); color: var(--white); font-size: 11.5px; }
+.cc-seq-cfg .cc-seq-check { flex-direction: row; align-items: center; gap: 5px;
+  font-size: 11px; color: var(--muted); padding-bottom: 5px; }
+
+.cc-seq-history { display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 8px 12px; border: 1px dashed var(--line); border-radius: var(--r-sm); }
+.cc-seq-history > b { font-size: 10.5px; color: var(--muted); margin-right: 4px; }
+.cc-seq-history button { display: flex; align-items: center; gap: 6px;
+  padding: 3px 8px 3px 3px; border: 1px solid var(--line); border-radius: 999px;
+  background: var(--bg-4); color: var(--white); font-size: 10.5px; cursor: pointer; }
+.cc-seq-history button:hover { border-color: var(--line-strong); }
+.cc-seq-history button.is-on { border-color: var(--cyan); color: var(--cyan); }
+.cc-seq-history img { width: 22px; height: 22px; border-radius: 50%; object-fit: cover; }
+.cc-seq-history em { font-style: normal; color: var(--muted-2); font-family: var(--mono); }
+
+/* 批量面板在页面里没有节点宽度限制，铺满 */
+.cc-seq .pose-batch { max-width: none; }
+
+/* 批量任务进度：画布节点有底部状态条，这一页没有节点壳，就地给一条 */
+.cc-seq-progress { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 7px 12px; border: 1px solid var(--cyan); border-radius: var(--r-sm);
+  background: rgba(108, 196, 239, .08); font-size: 11px; }
+.cc-seq-progress b { color: var(--cyan); font-family: var(--mono); }
+.cc-seq-progress span { color: var(--muted); }
+.cc-seq-bar { flex: 1 1 180px; height: 4px; border-radius: 999px;
+  background: rgba(255, 255, 255, .08); overflow: hidden; }
+.cc-seq-bar i { display: block; height: 100%; background: var(--cyan); transition: width .3s; }

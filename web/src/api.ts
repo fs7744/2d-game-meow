@@ -635,6 +635,31 @@ export function fetchCharacters(): Promise<{ count: number; items: CharacterSumm
  * `assets/projects/<项目>/pose_frames/<名字>/`。
  * ------------------------------------------------------------------ */
 
+/**
+ * 姿势集 / 成片集的作用域。
+ *
+ * 同一个实现有两个入口：画布项目（`assets/projects/<id>/`）和角色中心的
+ * 「序列帧动画」（`assets/characters/<角色>/Sequence[/s_<阶段>]/`）。
+ * 直接传字符串 = 画布项目 id（老调用方不用改）。
+ */
+export type PoseScope = string | { character: string; stage?: string }
+
+function poseBase(scope: PoseScope): string {
+  if (typeof scope === 'string') return `/projects/${encodeURIComponent(scope)}`
+  return `/characters/${encodeURIComponent(scope.character)}/sequence`
+}
+
+function poseStageQuery(scope: PoseScope): string {
+  if (typeof scope === 'string') return ''
+  const st = scope.stage || ''
+  return st ? `stage=${encodeURIComponent(st)}` : ''
+}
+
+function poseUrl(scope: PoseScope, path: string): string {
+  const q = poseStageQuery(scope)
+  return `${poseBase(scope)}${path}${q ? `?${q}` : ''}`
+}
+
 export type ProjectPoseSetFrame = {
   index: number; t: number; yaw: number; url: string
 }
@@ -677,12 +702,12 @@ export type PoseRenderSummary = {
   total: number; done: number; cover: string
 }
 
-export function fetchProjectPoseSets(project: string): Promise<{ count: number; items: ProjectPoseSet[] }> {
-  return req(`/projects/${encodeURIComponent(project)}/pose_sets`)
+export function fetchProjectPoseSets(scope: PoseScope): Promise<{ count: number; items: ProjectPoseSet[] }> {
+  return req(poseUrl(scope, '/pose_sets'))
 }
 
 export function createProjectPoseSet(
-  project: string,
+  scope: PoseScope,
   name: string,
   frames: {
     t: number; yaw: number; pose: unknown; png: string
@@ -691,38 +716,38 @@ export function createProjectPoseSet(
   }[],
   source: Record<string, unknown> = {},
 ): Promise<{ set: ProjectPoseSet; items: ProjectPoseSet[] }> {
-  return req(`/projects/${encodeURIComponent(project)}/pose_sets`, {
+  return req(poseUrl(scope, '/pose_sets'), {
     method: 'POST',
     body: JSON.stringify({ name, frames, source }),
   })
 }
 
-export function fetchProjectPoseSet(project: string, name: string): Promise<{ set: ProjectPoseSet }> {
-  return req(`/projects/${encodeURIComponent(project)}/pose_sets/${encodeURIComponent(name)}`)
+export function fetchProjectPoseSet(scope: PoseScope, name: string): Promise<{ set: ProjectPoseSet }> {
+  return req(poseUrl(scope, `/pose_sets/${encodeURIComponent(name)}`))
 }
 
-export function fetchPoseRenders(project: string): Promise<{ count: number; items: PoseRenderSummary[] }> {
-  return req(`/projects/${encodeURIComponent(project)}/pose_renders`)
+export function fetchPoseRenders(scope: PoseScope): Promise<{ count: number; items: PoseRenderSummary[] }> {
+  return req(poseUrl(scope, '/pose_renders'))
 }
 
 export function createPoseRender(
-  project: string, name: string, poseSet: string,
+  scope: PoseScope, name: string, poseSet: string,
   prompt = '', params: Record<string, unknown> = {},
 ): Promise<{ render: PoseRender; items: PoseRenderSummary[] }> {
-  return req(`/projects/${encodeURIComponent(project)}/pose_renders`, {
+  return req(poseUrl(scope, '/pose_renders'), {
     method: 'POST',
     body: JSON.stringify({ name, poseSet, prompt, params }),
   })
 }
 
-export function fetchPoseRender(project: string, name: string): Promise<{ render: PoseRender; items: PoseRenderSummary[] }> {
-  return req(`/projects/${encodeURIComponent(project)}/pose_renders/${encodeURIComponent(name)}`)
+export function fetchPoseRender(scope: PoseScope, name: string): Promise<{ render: PoseRender; items: PoseRenderSummary[] }> {
+  return req(poseUrl(scope, `/pose_renders/${encodeURIComponent(name)}`))
 }
 
 export function selectPoseCandidate(
-  project: string, name: string, frame: number, candidate: number,
+  scope: PoseScope, name: string, frame: number, candidate: number,
 ): Promise<{ render: PoseRender }> {
-  return req(`/projects/${encodeURIComponent(project)}/pose_renders/${encodeURIComponent(name)}/select`, {
+  return req(poseUrl(scope, `/pose_renders/${encodeURIComponent(name)}/select`), {
     method: 'POST',
     body: JSON.stringify({ frame, candidate }),
   })
@@ -743,20 +768,20 @@ export type PoseGif = {
 
 /** 把原始姿势集合成 GIF */
 export function exportPoseSetGif(
-  project: string, name: string, frameMs = 125, maxSide = 512,
+  scope: PoseScope, name: string, frameMs = 125, maxSide = 512,
 ): Promise<{ gif: PoseGif }> {
-  const q = `?frame_ms=${frameMs}&max_side=${maxSide}`
-  return req(`/projects/${encodeURIComponent(project)}/pose_sets/${encodeURIComponent(name)}/gif${q}`,
-    { method: 'POST' })
+  const base = poseUrl(scope, `/pose_sets/${encodeURIComponent(name)}/gif`)
+  const q = `${base.includes('?') ? '&' : '?'}frame_ms=${frameMs}&max_side=${maxSide}`
+  return req(base + q, { method: 'POST' })
 }
 
 /** 把成片集合成 GIF（每帧取**当前选中的**候选） */
 export function exportPoseRenderGif(
-  project: string, name: string, frameMs = 125, maxSide = 512,
+  scope: PoseScope, name: string, frameMs = 125, maxSide = 512,
 ): Promise<{ gif: PoseGif }> {
-  const q = `?frame_ms=${frameMs}&max_side=${maxSide}`
-  return req(`/projects/${encodeURIComponent(project)}/pose_renders/${encodeURIComponent(name)}/gif${q}`,
-    { method: 'POST' })
+  const base = poseUrl(scope, `/pose_renders/${encodeURIComponent(name)}/gif`)
+  const q = `${base.includes('?') ? '&' : '?'}frame_ms=${frameMs}&max_side=${maxSide}`
+  return req(base + q, { method: 'POST' })
 }
 
 /**
@@ -785,7 +810,7 @@ export type GodotBundle = {
 }
 
 export function exportPoseRenderGodot(
-  project: string, name: string,
+  scope: PoseScope, name: string,
   opts: { stem?: string; anim?: string; fps?: number; loop?: boolean
     folder?: string; origin?: string } = {},
 ): Promise<{ bundle: GodotBundle }> {
@@ -796,14 +821,17 @@ export function exportPoseRenderGodot(
   if (opts.loop != null) q.set('loop', String(opts.loop))
   if (opts.folder) q.set('folder', opts.folder)
   if (opts.origin) q.set('origin', opts.origin)
-  const qs = q.toString()
-  return req(`/projects/${encodeURIComponent(project)}/pose_renders/${encodeURIComponent(name)}/godot${qs ? `?${qs}` : ''}`,
-    { method: 'POST' })
+  const base = poseUrl(scope, `/pose_renders/${encodeURIComponent(name)}/godot`)
+  const joined = q.toString()
+  const qs = joined
+    ? `${base.includes('?') ? '&' : '?'}${joined}`
+    : ''
+  return req(base + qs, { method: 'POST' })
 }
 
 /** 跑成片集（`frames` 为空 = 整个姿势集；给一帧就是单独重生成那一帧） */
 export function runPoseRender(
-  project: string, name: string,
+  scope: PoseScope, name: string,
   body: {
     frames?: number[]
     candidates?: number
@@ -827,12 +855,79 @@ export function runPoseRender(
     model?: string
   },
 ): Promise<{ job_id: string; status: string; total: number; frames: number[] }> {
-  return req(`/projects/${encodeURIComponent(project)}/pose_renders/${encodeURIComponent(name)}/run`, {
+  return req(poseUrl(scope, `/pose_renders/${encodeURIComponent(name)}/run`), {
     method: 'POST',
     body: JSON.stringify(body),
   })
 }
 
+
+/* ------------------------------------------------------------------ *
+ * 角色中心 · 序列帧动画（3D 人偶 → 抽帧 → 参考图批量帧）
+ *
+ * 产物属于「角色的某个生命阶段」：`assets/characters/<角色>/Sequence[/s_<阶段>]/`。
+ * 姿势集 / 成片集复用上面同一组接口，作用域传 `{character, stage}`。
+ * ------------------------------------------------------------------ */
+
+export type SequenceStudio = {
+  pose?: unknown
+  yaw?: number
+  scene?: unknown
+  /** 前端写的时间戳（只用来判断"比本地旧"，不参与业务） */
+  updatedAt?: number
+}
+
+export type SequenceMannequin = { name: string; url: string; mtime: number }
+
+export type SequenceSummary = {
+  root: string
+  character: string
+  stage: string
+  poseSets: ProjectPoseSet[]
+  renders: PoseRenderSummary[]
+  mannequins: SequenceMannequin[]
+}
+
+export function fetchSequence(character: string, stage = ''): Promise<SequenceSummary> {
+  const q = stage ? `?stage=${encodeURIComponent(stage)}` : ''
+  return req(`/characters/${encodeURIComponent(character)}/sequence${q}`)
+}
+
+export function fetchSequenceStudio(character: string, stage = ''): Promise<{ studio: SequenceStudio }> {
+  const q = stage ? `?stage=${encodeURIComponent(stage)}` : ''
+  return req(`/characters/${encodeURIComponent(character)}/sequence/studio${q}`)
+}
+
+export function saveSequenceStudio(
+  character: string, stage: string, studio: SequenceStudio,
+): Promise<{ studio: SequenceStudio }> {
+  const q = stage ? `?stage=${encodeURIComponent(stage)}` : ''
+  return req(`/characters/${encodeURIComponent(character)}/sequence/studio${q}`, {
+    method: 'PUT',
+    body: JSON.stringify(studio),
+  })
+}
+
+/** 「导出人偶图」：白底灰 3D 人偶 PNG 收进本阶段，返回 /files/ URL。 */
+export async function uploadSequenceMannequin(
+  character: string, stage: string, blob: Blob,
+): Promise<SequenceMannequin> {
+  const q = stage ? `?stage=${encodeURIComponent(stage)}` : ''
+  const r = await fetch(`${base}/characters/${encodeURIComponent(character)}/sequence/mannequin${q}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'image/png' },
+    body: blob,
+  })
+  if (!r.ok) {
+    let msg = `上传失败：HTTP ${r.status}`
+    try {
+      const j = await r.json()
+      if (j?.detail) msg = String(j.detail)
+    } catch { /* 非 JSON 用状态码兜底 */ }
+    throw new Error(msg)
+  }
+  return r.json() as Promise<SequenceMannequin>
+}
 
 /** 创建角色：只要名字 + 可选描述（用户 2026-11-09 明确不要参考图了）。 */
 export function createCharacter(name: string,

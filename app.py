@@ -94,6 +94,7 @@ from workflows import matte_screen
 from workflows import pixelfy
 from workflows import paths
 from workflows import poselib
+from workflows import sequence
 from workflows import playtest
 from workflows import posesubjects
 from workflows import partsplit
@@ -3656,6 +3657,250 @@ def project_pose_render_run(scope: str, name: str, req: PoseRenderRunReq
     _prune(_jobs, JOB_KEEP)
     return {"job_id": job_id, "status": "queued", "total": total,
             "render": name, "frames": planned, "position": _q.qsize()}
+
+
+# ---------------------------------------------------------------- 角色中心 · 序列帧动画
+#
+# 「3D 人偶 → 抽帧 → 参考图批量帧」原来只长在画布的两个节点里。角色中心这一页
+# 是同一套东西，但产物属于**这个角色的这个生命阶段**：`Sequence[/s_<阶段>]/`。
+# 底下仍是 `poseset` / `posebatch` / `godotexport` 同一份实现（只把根目录换成
+# 角色阶段），所以候选只增不删、GIF / Godot 导出这些语义完全一致。
+
+
+@app.get("/characters/{name}/sequence")
+def character_sequence(name: str, stage: str = "") -> Dict[str, Any]:
+    """这一页的概览：本阶段的姿势集 / 成片集 / 最近导出的人偶图。"""
+    try:
+        return sequence.summary(name, stage)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/characters/{name}/sequence/studio")
+def character_sequence_studio(name: str, stage: str = "") -> Dict[str, Any]:
+    """人偶编辑器的存档（pose / yaw / scene）。没有就是空对象。"""
+    return {"studio": sequence.load_studio(name, stage)}
+
+
+@app.put("/characters/{name}/sequence/studio")
+async def character_sequence_studio_save(name: str, request: Request,
+                                         stage: str = "") -> Dict[str, Any]:
+    """整包覆盖 studio.json。前端 debounce 后提交，失败不回滚界面（下次再存）。"""
+    try:
+        doc = await request.json()
+    except Exception as exc:                       # noqa: BLE001
+        raise HTTPException(400, "studio 不是合法 JSON") from exc
+    try:
+        return {"studio": sequence.save_studio(name, stage, doc)}
+    except sequence.SequenceError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/characters/{name}/sequence/mannequin")
+async def character_sequence_mannequin(name: str, request: Request,
+                                       stage: str = "") -> Dict[str, Any]:
+    """「导出人偶图」收进本阶段（白底灰 3D 人偶 PNG）。"""
+    data = await request.body()
+    if len(data) > MAX_UPLOAD:
+        raise HTTPException(413, f"人偶图太大（上限 {MAX_UPLOAD // 2**20}MB）")
+    try:
+        return sequence.save_mannequin(name, stage, data)
+    except sequence.SequenceError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/characters/{name}/sequence/pose_sets")
+def character_sequence_pose_sets(name: str, stage: str = "") -> Dict[str, Any]:
+    try:
+        items = poseset.list_pose_sets("", character=name, stage=stage)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"character": name, "stage": stage or "default",
+            "count": len(items), "items": items}
+
+
+@app.post("/characters/{name}/sequence/pose_sets")
+def character_sequence_pose_set_create(name: str, req: PoseSetCreateReq,
+                                       stage: str = "") -> Dict[str, Any]:
+    try:
+        one = poseset.save_pose_set(
+            "", req.name, [f.model_dump() for f in req.frames],
+            source=req.source, character=name, stage=stage)
+    except poseset.PoseSetExists as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except poseset.PoseSetError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"set": one,
+            "items": poseset.list_pose_sets("", character=name, stage=stage)}
+
+
+@app.get("/characters/{name}/sequence/pose_sets/{pose_set}")
+def character_sequence_pose_set(name: str, pose_set: str,
+                                stage: str = "") -> Dict[str, Any]:
+    try:
+        return {"set": poseset.load_pose_set("", pose_set,
+                                            character=name, stage=stage)}
+    except poseset.PoseSetError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/characters/{name}/sequence/pose_renders")
+def character_sequence_pose_renders(name: str, stage: str = "") -> Dict[str, Any]:
+    try:
+        items = poseset.list_renders("", character=name, stage=stage)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"character": name, "stage": stage or "default",
+            "count": len(items), "items": items}
+
+
+@app.post("/characters/{name}/sequence/pose_renders")
+def character_sequence_pose_render_create(name: str, req: PoseRenderCreateReq,
+                                          stage: str = "") -> Dict[str, Any]:
+    try:
+        one = poseset.create_render("", req.name, req.poseSet,
+                                    prompt=req.prompt, params=req.params,
+                                    character=name, stage=stage)
+    except poseset.PoseSetExists as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except poseset.PoseSetError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"render": one,
+            "items": poseset.list_renders("", character=name, stage=stage)}
+
+
+@app.get("/characters/{name}/sequence/pose_renders/{render_name}")
+def character_sequence_pose_render(name: str, render_name: str,
+                                   stage: str = "") -> Dict[str, Any]:
+    try:
+        return {"render": poseset.load_render("", render_name,
+                                             character=name, stage=stage),
+                "items": poseset.list_renders("", character=name, stage=stage)}
+    except poseset.PoseSetError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/characters/{name}/sequence/pose_renders/{render_name}/select")
+def character_sequence_pose_render_select(name: str, render_name: str,
+                                          req: PoseRenderSelectReq,
+                                          stage: str = "") -> Dict[str, Any]:
+    try:
+        return {"render": poseset.select_candidate(
+            "", render_name, req.frame, req.candidate,
+            character=name, stage=stage)}
+    except poseset.PoseSetError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/characters/{name}/sequence/pose_sets/{pose_set}/gif")
+def character_sequence_pose_set_gif(name: str, pose_set: str,
+                                    frame_ms: int = 125,
+                                    max_side: int = 512,
+                                    stage: str = "") -> Dict[str, Any]:
+    try:
+        return {"gif": poseset.export_gif(
+            "", poseset.POSES_DIR, pose_set, frame_ms=frame_ms,
+            max_side=max_side, character=name, stage=stage)}
+    except poseset.PoseSetError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/characters/{name}/sequence/pose_renders/{render_name}/gif")
+def character_sequence_pose_render_gif(name: str, render_name: str,
+                                       frame_ms: int = 125,
+                                       max_side: int = 512,
+                                       stage: str = "") -> Dict[str, Any]:
+    try:
+        return {"gif": poseset.export_gif(
+            "", poseset.RENDERS_DIR, render_name, frame_ms=frame_ms,
+            max_side=max_side, character=name, stage=stage)}
+    except poseset.PoseSetError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/characters/{name}/sequence/pose_renders/{render_name}/godot")
+def character_sequence_pose_render_godot(
+    name: str, render_name: str,
+    stem: str = "", anim: str = "",
+    fps: Optional[float] = None, loop: Optional[bool] = None,
+    folder: str = "sprites", origin: str = "bottom",
+    texture_filter: str = "nearest", stage: str = "",
+) -> Dict[str, Any]:
+    """成片集 → Godot 4 工程包，落在本阶段的 `Sequence/s_*/exports/` 下。"""
+    from workflows import godotexport
+    try:
+        return {"bundle": godotexport.export_bundle(
+            "", render_name, stem=stem, anim_name=anim, fps=fps, loop=loop,
+            folder=folder, origin=origin, texture_filter=texture_filter,
+            character=name, stage=stage)}
+    except godotexport.GodotExportError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/characters/{name}/sequence/pose_renders/{render_name}/run")
+def character_sequence_pose_render_run(name: str, render_name: str,
+                                       req: PoseRenderRunReq,
+                                       stage: str = "") -> Dict[str, Any]:
+    """生成（或补生成）成片：和画布那条走同一个队列，立刻返回 job_id。"""
+    if not req.char_image and req.char_images:
+        req.char_image = req.char_images[0]
+    if not req.char_image:
+        raise HTTPException(400, "先选一张角色图（这个阶段的立绘）")
+    params: Dict[str, Any] = {
+        "character": name, "stage": stage,
+        "render": render_name,
+        "frames": [int(v) for v in req.frames],
+        "candidates": int(req.candidates),
+        "engine": req.engine,
+        "char_image": req.char_image,
+        "char_images": list(req.char_images),
+        "prompt": req.prompt, "negative": req.negative,
+        "steps": int(req.steps), "cfg": float(req.cfg),
+        "width": int(req.width), "height": int(req.height),
+        "seed": int(req.seed), "ref_mode": req.ref_mode, "bg": req.bg,
+        "matte": bool(req.matte), "matte_backend": req.matte_backend,
+        "pixel": int(req.pixel), "palette": int(req.palette),
+        "model": req.model or None,
+    }
+    try:
+        detail = poseset.load_render("", render_name,
+                                     character=name, stage=stage)
+    except poseset.PoseSetError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    params["pose_set"] = str(detail.get("poseSet") or "")
+    if not params["pose_set"]:
+        raise HTTPException(400, "这个成片集没记着属于哪套姿势集（render.json 被改过？）")
+    planned = params["frames"] or [f["index"] for f in detail["frames"]]
+    total = max(1, len(planned) * max(1, params["candidates"]))
+
+    job_id = uuid.uuid4().hex[:12]
+    _jobs[job_id] = {"job_id": job_id, "workflow": "wpcbatch", "params": params,
+                     "status": "queued", "created": time.time(),
+                     "progress": {"done": 0, "total": total, "current": ""}}
+    _q.put((job_id, "wpcbatch", params))
+    _prune(_jobs, JOB_KEEP)
+    return {"job_id": job_id, "status": "queued", "total": total,
+            "render": render_name, "frames": planned, "position": _q.qsize()}
 
 
 @app.post("/projects/export")

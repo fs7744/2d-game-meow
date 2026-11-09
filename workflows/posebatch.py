@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -45,10 +46,17 @@ def run_batch(engine: Any, params: Dict[str, Any],
 
     `params`：
       project / render / pose_set / frames（要跑哪几帧，缺省=全部）
+      character / stage（角色中心「序列帧动画」用：产物落角色的生命阶段目录，
+                        此时忽略 project）
       candidates（每帧几个候选）/ char_image / char_images / prompt / negative
       engine（wvnccs|wpc）/ steps / cfg / seed / width / height / ref_mode / bg / …
     """
-    project = _sanitize(str(params.get("project") or ""))
+    character = str(params.get("character") or "").strip()
+    stage = str(params.get("stage") or "").strip()
+    project = "" if character else _sanitize(str(params.get("project") or ""))
+    if character:
+        from workflows import characters as _chars
+        character = _chars.ensure_safe_name(character, "角色名")
     render = str(params.get("render") or "").strip()
     pose_set = str(params.get("pose_set") or "").strip()
     if not render or not pose_set:
@@ -56,7 +64,38 @@ def run_batch(engine: Any, params: Dict[str, Any],
 
     from workflows import generate as gen        # 延迟 import：这个模块要 torch
 
-    all_idx = poseset.frame_indexes(project, pose_set)
+    # 角色阶段的产物没有「项目目录」。生成函数只认 scope 字符串，所以把
+    # scope 临时指到阶段目录下的 `_tmp/`，任务结束再摘掉；候选搬进成片集后
+    # 残留的 sidecar / raw 也一起清掉，别让阶段目录里堆一堆中间文件。
+    seq_scope = project
+    tmp_dir: Optional[Path] = None
+    if character:
+        seq_scope = f"seq_{uuid.uuid4().hex[:10]}"
+        tmp_dir = poseset._root(character=character, stage=stage) / "_tmp"   # noqa: SLF001
+        gen.register_scope_root(seq_scope, tmp_dir)
+
+    try:
+        return _run_indexes(
+            gen, engine, params, job, project=project, character=character,
+            stage=stage, seq_scope=seq_scope, render=render, pose_set=pose_set)
+    finally:
+        if character:
+            gen.unregister_scope_root(seq_scope)
+            if tmp_dir is not None:
+                try:
+                    if tmp_dir.is_dir() and not any(tmp_dir.iterdir()):
+                        tmp_dir.rmdir()
+                except OSError:
+                    pass
+
+
+def _run_indexes(gen: Any, engine: Any, params: Dict[str, Any],
+                 job: Optional[Dict[str, Any]], *,
+                 project: str, character: str, stage: str,
+                 seq_scope: str, render: str, pose_set: str) -> Dict[str, Any]:
+    """`run_batch` 的主体：真正排帧、逐张生成、把候选写回成片集。"""
+    all_idx = poseset.frame_indexes(project, pose_set,
+                                   character=character, stage=stage)
     wanted = params.get("frames")
     if isinstance(wanted, (list, tuple)) and wanted:
         want = {int(v) for v in wanted}
@@ -145,16 +184,17 @@ def run_batch(engine: Any, params: Dict[str, Any],
                 pixel=common["pixel"], palette=common["palette"],
                 matte=common["matte"], matte_backend=common["matte_backend"],
                 denoise=common["denoise"], clean_iso=common["clean_iso"],
-                scope=project, tag="wpcb")
+                scope=seq_scope, tag="wpcb")
         return gen.pose_clone(
             engine, pose_image=pose_path, char_image=char_image, seed=seed,
-            scope=project, tag="wpcb", **common)
+            scope=seq_scope, tag="wpcb", **common)
 
     done = 0
     failed: List[Dict[str, Any]] = []
     started = time.time()
     for idx in indexes:
-        pose_path = poseset.frame_source_path(project, pose_set, idx)
+        pose_path = poseset.frame_source_path(project, pose_set, idx,
+                                              character=character, stage=stage)
         for c in range(candidates):
             if job is not None:
                 job["progress"] = {
@@ -175,7 +215,8 @@ def run_batch(engine: Any, params: Dict[str, Any],
             src = Path(str(res.get("file") or ""))
             try:
                 poseset.add_candidate(project, render, idx, src,
-                                      seed=(res.get("meta") or {}).get("seed"))
+                                      seed=(res.get("meta") or {}).get("seed"),
+                                      character=character, stage=stage)
             except poseset.PoseSetError as exc:
                 failed.append({"frame": idx, "candidate": c + 1, "error": str(exc)})
             # `pose_clone` 会顺手写 sidecar / raw，候选已经搬进成片集，

@@ -39,6 +39,7 @@ from typing import Any, Dict, List, Optional
 from workflows import characters
 from workflows import paths
 from workflows import projectstore
+from workflows import sequence
 
 #: 项目目录下的两个子目录
 POSES_DIR = "poses"
@@ -92,9 +93,22 @@ def _project_root(project: str) -> Path:
     return d
 
 
-def _sub(project: str, kind: str, name: str) -> Path:
-    """`<项目>/<kind>/<name>`，并挡住路径穿越。"""
-    root = _project_root(project)
+def _root(project: str = "", *, character: str = "", stage: str = "") -> Path:
+    """产物根目录：画布项目，或角色中心「序列帧动画」的生命阶段目录。
+
+    `character` 非空时忽略 `project` —— 两个入口共用同一套姿势集/成片集实现，
+    只是根不一样（`assets/projects/<id>/` vs
+    `assets/characters/<角色>/Sequence[/s_<阶段>]/`）。
+    """
+    if character:
+        return sequence.root(character, stage)
+    return _project_root(project)
+
+
+def _sub(project: str, kind: str, name: str, *,
+         character: str = "", stage: str = "") -> Path:
+    """`<根>/<kind>/<name>`，并挡住路径穿越。"""
+    root = _root(project, character=character, stage=stage)
     safe = characters.ensure_safe_name(name, "名字")
     target = Path(characters.safe_join_under(str(root), kind, safe))
     return target
@@ -164,7 +178,8 @@ def _frame_extras(item: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def save_pose_set(project: str, name: str, frames: List[Dict[str, Any]],
-                  source: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                  source: Optional[Dict[str, Any]] = None, *,
+                  character: str = "", stage: str = "") -> Dict[str, Any]:
     """新建一个姿势集文件夹（**同名直接报错，不覆盖**）。
 
     `frames`：`[{t, yaw, pose, png}]`，`png` 是 dataURL / base64。
@@ -174,7 +189,7 @@ def save_pose_set(project: str, name: str, frames: List[Dict[str, Any]],
     if len(frames) > MAX_FRAMES:
         raise PoseSetError(f"一次最多存 {MAX_FRAMES} 帧（收到 {len(frames)}）")
 
-    target = _sub(project, POSES_DIR, name)
+    target = _sub(project, POSES_DIR, name, character=character, stage=stage)
     if target.exists() and any(target.iterdir()):
         raise PoseSetExists(f"项目里已经有同名的姿势集「{name}」，换个名字")
 
@@ -242,9 +257,10 @@ def _set_summary(folder: Path, doc: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def list_pose_sets(project: str) -> List[Dict[str, Any]]:
-    """项目里的全部姿势集（新的在前）。"""
-    root = _project_root(project) / POSES_DIR
+def list_pose_sets(project: str = "", *, character: str = "",
+                   stage: str = "") -> List[Dict[str, Any]]:
+    """项目（或角色阶段）里的全部姿势集（新的在前）。"""
+    root = _root(project, character=character, stage=stage) / POSES_DIR
     if not root.is_dir():
         return []
     out = []
@@ -259,12 +275,13 @@ def list_pose_sets(project: str) -> List[Dict[str, Any]]:
     return out
 
 
-def load_pose_set(project: str, name: str) -> Dict[str, Any]:
+def load_pose_set(project: str, name: str, *, character: str = "",
+                  stage: str = "") -> Dict[str, Any]:
     """一个姿势集的帧表（带 URL）。**不回传 pose JSON**：前端只用来出图和翻看，
     一份 17 根骨的 JSON 乘 30 帧会把响应撑到几百 KB，而它只在重新编辑时才需要。
     但 `camera`/`characters`/`scene` 这类额外字段会原样回传（存什么读什么）。
     """
-    folder = _sub(project, POSES_DIR, name)
+    folder = _sub(project, POSES_DIR, name, character=character, stage=stage)
     doc = _read_json(folder / SET_FILE)
     if not doc.get("frames"):
         raise PoseSetError(f"没有这个姿势集：{name}")
@@ -328,7 +345,8 @@ def _gif_frames(paths: List[Path], max_side: int) -> List[Any]:
 
 def export_gif(project: str, kind: str, name: str,
                frame_ms: int = DEFAULT_FRAME_MS,
-               max_side: int = DEFAULT_GIF_SIDE) -> Dict[str, Any]:
+               max_side: int = DEFAULT_GIF_SIDE, *,
+               character: str = "", stage: str = "") -> Dict[str, Any]:
     """把一个姿势集 / 成片集合成 GIF，写给团队审核用。
 
     `kind`：`"poses"`（原始姿势集）或 `"renders"`（成片）。成片只取**每帧当前
@@ -341,7 +359,7 @@ def export_gif(project: str, kind: str, name: str,
 
     if kind not in (POSES_DIR, RENDERS_DIR):
         raise PoseSetError(f"不认识的类型：{kind}")
-    folder = _sub(project, kind, name)
+    folder = _sub(project, kind, name, character=character, stage=stage)
     doc = _read_json(folder / (SET_FILE if kind == POSES_DIR else RENDER_FILE))
     if not doc:
         raise PoseSetError(f"没有这个{'姿势集' if kind == POSES_DIR else '成片集'}：{name}")
@@ -400,11 +418,12 @@ def export_gif(project: str, kind: str, name: str,
 
 
 def create_render(project: str, name: str, pose_set: str,
-                  prompt: str = "", params: Optional[Dict[str, Any]] = None
+                  prompt: str = "", params: Optional[Dict[str, Any]] = None, *,
+                  character: str = "", stage: str = ""
                   ) -> Dict[str, Any]:
     """新建一个成片集文件夹（同名报错），帧表先建好空的。"""
-    src = load_pose_set(project, pose_set)          # 不存在会抛
-    target = _sub(project, RENDERS_DIR, name)
+    src = load_pose_set(project, pose_set, character=character, stage=stage)
+    target = _sub(project, RENDERS_DIR, name, character=character, stage=stage)
     if target.exists() and any(target.iterdir()):
         raise PoseSetExists(f"项目里已经有同名的成片集「{name}」，换个名字")
 
@@ -422,12 +441,13 @@ def create_render(project: str, name: str, pose_set: str,
     with _LOCK:
         target.mkdir(parents=True, exist_ok=True)
         _write_json(target / RENDER_FILE, doc)
-    return load_render(project, name)
+    return load_render(project, name, character=character, stage=stage)
 
 
-def load_render(project: str, name: str) -> Dict[str, Any]:
+def load_render(project: str, name: str, *, character: str = "",
+                stage: str = "") -> Dict[str, Any]:
     """成片集详情：每帧的候选（带 URL）+ 当前选中。"""
-    folder = _sub(project, RENDERS_DIR, name)
+    folder = _sub(project, RENDERS_DIR, name, character=character, stage=stage)
     doc = _read_json(folder / RENDER_FILE)
     if not doc:
         raise PoseSetError(f"没有这个成片集：{name}")
@@ -460,8 +480,9 @@ def load_render(project: str, name: str) -> Dict[str, Any]:
     }
 
 
-def list_renders(project: str) -> List[Dict[str, Any]]:
-    root = _project_root(project) / RENDERS_DIR
+def list_renders(project: str = "", *, character: str = "",
+                 stage: str = "") -> List[Dict[str, Any]]:
+    root = _root(project, character=character, stage=stage) / RENDERS_DIR
     if not root.is_dir():
         return []
     out = []
@@ -500,9 +521,10 @@ def _frame_entry(doc: Dict[str, Any], index: int) -> Dict[str, Any]:
 
 
 def add_candidate(project: str, name: str, index: int, src: Path,
-                  seed: Optional[int] = None) -> Dict[str, Any]:
+                  seed: Optional[int] = None, *, character: str = "",
+                  stage: str = "") -> Dict[str, Any]:
     """把生成好的一张图**追加**成该帧的候选，并选中它。旧候选原地保留。"""
-    folder = _sub(project, RENDERS_DIR, name)
+    folder = _sub(project, RENDERS_DIR, name, character=character, stage=stage)
     with _LOCK:
         doc = _read_json(folder / RENDER_FILE)
         if not doc:
@@ -537,13 +559,13 @@ def add_candidate(project: str, name: str, index: int, src: Path,
         })
         frame["selected"] = len(cands) - 1
         _write_json(folder / RENDER_FILE, doc)
-    return load_render(project, name)
+    return load_render(project, name, character=character, stage=stage)
 
 
-def select_candidate(project: str, name: str, index: int, candidate: int
-                     ) -> Dict[str, Any]:
+def select_candidate(project: str, name: str, index: int, candidate: int, *,
+                     character: str = "", stage: str = "") -> Dict[str, Any]:
     """选第 N 个候选。**任何旧候选都还能选回来**（这就是不删它们的理由）。"""
-    folder = _sub(project, RENDERS_DIR, name)
+    folder = _sub(project, RENDERS_DIR, name, character=character, stage=stage)
     with _LOCK:
         doc = _read_json(folder / RENDER_FILE)
         if not doc:
@@ -556,12 +578,13 @@ def select_candidate(project: str, name: str, index: int, candidate: int
             raise PoseSetError(f"第 {index} 帧没有第 {candidate} 个候选")
         frame["selected"] = pos
         _write_json(folder / RENDER_FILE, doc)
-    return load_render(project, name)
+    return load_render(project, name, character=character, stage=stage)
 
 
-def frame_source_path(project: str, pose_set: str, index: int) -> str:
+def frame_source_path(project: str, pose_set: str, index: int, *,
+                      character: str = "", stage: str = "") -> str:
     """取姿势集里第 index 帧的**磁盘路径**（生成时当条件图用）。"""
-    folder = _sub(project, POSES_DIR, pose_set)
+    folder = _sub(project, POSES_DIR, pose_set, character=character, stage=stage)
     doc = _read_json(folder / SET_FILE)
     for f in doc.get("frames") or []:
         if int(f.get("index") or 0) == int(index):
@@ -571,7 +594,8 @@ def frame_source_path(project: str, pose_set: str, index: int) -> str:
     raise PoseSetError(f"姿势集「{pose_set}」里没有第 {index} 帧")
 
 
-def frame_indexes(project: str, pose_set: str) -> List[int]:
-    folder = _sub(project, POSES_DIR, pose_set)
+def frame_indexes(project: str, pose_set: str, *, character: str = "",
+                  stage: str = "") -> List[int]:
+    folder = _sub(project, POSES_DIR, pose_set, character=character, stage=stage)
     doc = _read_json(folder / SET_FILE)
     return [int(f.get("index") or 0) for f in doc.get("frames") or []]

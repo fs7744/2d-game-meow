@@ -285,7 +285,8 @@ def verify_bundle(root: Path, folder: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------- 主流程
 
 
-def _render_entries(project: str, render: str
+def _render_entries(project: str, render: str, *, character: str = "",
+                    stage: str = ""
                     ) -> Tuple[Dict[str, Any], List[Tuple[Path, Dict[str, Any]]], int]:
     """成片集里**每帧当前选中的那张**，连同帧表条目一起返回。
 
@@ -294,7 +295,8 @@ def _render_entries(project: str, render: str
     """
     from workflows import poseset
 
-    folder = poseset._sub(project, poseset.RENDERS_DIR, render)   # noqa: SLF001
+    folder = poseset._sub(project, poseset.RENDERS_DIR, render,   # noqa: SLF001
+                          character=character, stage=stage)
     doc = poseset._read_json(folder / poseset.RENDER_FILE)       # noqa: SLF001
     if not doc:
         raise GodotExportError(f"没有这个成片集：{render}")
@@ -311,13 +313,16 @@ def _render_entries(project: str, render: str
     return doc, out, skipped
 
 
-def frame_files(project: str, render: str) -> Tuple[List[Path], int]:
+def frame_files(project: str, render: str, *, character: str = "",
+                stage: str = "") -> Tuple[List[Path], int]:
     """老入口：只要路径（顺序 = 成片集帧序），行为保持一字不变。"""
-    _, entries, skipped = _render_entries(project, render)
+    _, entries, skipped = _render_entries(project, render,
+                                          character=character, stage=stage)
     return [p for p, _ in entries], skipped
 
 
-def _direction_index(project: str, pose_set: str) -> Dict[int, str]:
+def _direction_index(project: str, pose_set: str, *, character: str = "",
+                     stage: str = "") -> Dict[int, str]:
     """读关联姿势集的 ``set.json``，建立 ``帧 index → 方向``。
 
     方向是多机位抽帧时宿主写上去的（``poseset.EXTRA_FRAME_KEYS`` 透传）。
@@ -327,7 +332,8 @@ def _direction_index(project: str, pose_set: str) -> Dict[int, str]:
 
     if not pose_set:
         return {}
-    folder = poseset._sub(project, poseset.POSES_DIR, pose_set)   # noqa: SLF001
+    folder = poseset._sub(project, poseset.POSES_DIR, pose_set,   # noqa: SLF001
+                          character=character, stage=stage)
     doc = poseset._read_json(folder / poseset.SET_FILE)          # noqa: SLF001
     out: Dict[int, str] = {}
     for f in doc.get("frames") or []:
@@ -342,7 +348,8 @@ def _direction_index(project: str, pose_set: str) -> Dict[int, str]:
     return out
 
 
-def frame_groups(project: str, render: str
+def frame_groups(project: str, render: str, *, character: str = "",
+                 stage: str = ""
                  ) -> Tuple[List[Dict[str, Any]], int]:
     """按方向把成片分组；无方向信息时只有一组（老行为）。
 
@@ -350,8 +357,10 @@ def frame_groups(project: str, render: str
     ``topdown-8`` 表，混合了老帧的无方向组排最后，保证 autoplay 落在
     真正的方向动画上。
     """
-    doc, entries, skipped = _render_entries(project, render)
-    idx_dir = _direction_index(project, str(doc.get("poseSet") or ""))
+    doc, entries, skipped = _render_entries(project, render,
+                                            character=character, stage=stage)
+    idx_dir = _direction_index(project, str(doc.get("poseSet") or ""),
+                               character=character, stage=stage)
     order_rank = {d: i for i, d in enumerate(directions.DIRECTIONS["topdown-8"])}
     groups: Dict[str, Dict[str, Any]] = {}
     for path, frame in entries:
@@ -369,7 +378,8 @@ def export_bundle(project: str, render: str, *,
                   fps: Optional[float] = None, loop: Optional[bool] = None,
                   template_action: str = "", folder: str = "sprites",
                   origin: str = "bottom",
-                  texture_filter: str = "nearest") -> Dict[str, Any]:
+                  texture_filter: str = "nearest",
+                  character: str = "", stage: str = "") -> Dict[str, Any]:
     """成片集 → `exports/<stem>/`（文件夹）+ `exports/<stem>.zip`。
 
     同名重导整目录重建（顺手清掉上一次多出来的帧文件），不产生一堆历史包。
@@ -380,7 +390,8 @@ def export_bundle(project: str, render: str, *,
     """
     from PIL import Image
 
-    groups, skipped = frame_groups(project, render)
+    groups, skipped = frame_groups(project, render,
+                                   character=character, stage=stage)
     files = [p for g in groups for p in g["files"]]
     if not files:
         raise GodotExportError("这套成片还没有选中的帧：先生成并挑好图再导出")
@@ -404,10 +415,12 @@ def export_bundle(project: str, render: str, *,
         from workflows import poseset
 
         render_doc = poseset._read_json(                                 # noqa: SLF001
-            poseset._sub(project, poseset.RENDERS_DIR, render)          # noqa: SLF001
+            poseset._sub(project, poseset.RENDERS_DIR, render,          # noqa: SLF001
+                         character=character, stage=stage)
             / poseset.RENDER_FILE) or {}
         tpl = motiontemplates.template_for_pose_set(
-            project, str(render_doc.get("poseSet") or ""))
+            project, str(render_doc.get("poseSet") or ""),
+            character=character, stage=stage)
         if tpl:
             pb = motiontemplates.playback(tpl, template_action)
             template_id = tpl["id"]
@@ -422,8 +435,11 @@ def export_bundle(project: str, render: str, *,
     origin_ = origin if origin in ("bottom", "center", "top") else "bottom"
     filt = texture_filter if texture_filter in _FILTER_VALUE else "nearest"
 
-    project_root = paths.PROJECTS_DIR / _scope(project)
-    out_root = project_root / EXPORT_DIR
+    if character:
+        # 角色中心：导出包留在角色的生命阶段目录里，跟成片集在一起
+        out_root = poseset._root(character=character, stage=stage) / EXPORT_DIR
+    else:
+        out_root = paths.PROJECTS_DIR / _scope(project) / EXPORT_DIR
     out_dir = out_root / stem_
     if out_dir.is_dir():
         shutil.rmtree(out_dir, ignore_errors=True)

@@ -870,7 +870,7 @@ export default function PoseStudio({
                   placeholder={`姿势集名（默认 ${clipLabel(anim.clips[anim.index]?.name, anim.index)}）`}
                   disabled={savingSet}
                   onChange={(e) => setSetName(e.target.value)}
-                  title="存到本项目的 poses/<这个名字>/ 下。**同名会被拒绝**（不会覆盖上一次的）"
+                  title="存到 poses/<这个名字>/ 下。**同名会被拒绝**（不会覆盖上一次的）"
                 />
                 <button
                   type="button" className="pose-batch-btn"
@@ -879,7 +879,7 @@ export default function PoseStudio({
                     setErr('')
                     const name = (setName.trim()
                       || clipLabel(anim.clips[anim.index]?.name, anim.index)).trim()
-                    if (!projectId) { setErr('没有项目 id，存不了（先保存项目）'); return }
+                    if (!projectId) { setErr('没有保存位置，存不了'); return }
                     const items: PoseSetFrameIn[] = pickedFrames.map((p) => ({
                       t: p.frame.t,
                       // 多机位抽帧时每帧带自己的 yaw / direction，别统一盖成当前机位

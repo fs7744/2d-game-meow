@@ -47,6 +47,7 @@ import CharacterLibrary, { tagLabel } from './CharacterLibrary'
 import CharacterPlaytest from './CharacterPlaytest'
 import { PartsPanel } from './characters/PartsPanel'
 import { RigAnimPanel } from './characters/RigAnimPanel'
+import SequenceAnimPanel from './characters/SequenceAnimPanel'
 import PromptZoom from './PromptZoom'
 import TagPicker from './TagPicker'
 import {
@@ -95,9 +96,10 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState('')
   /** library=全屏角色库；stages=生命阶段列表；stage=角色设定；
-   *  parts=拆部件、riganim=骨骼动画（都与角色设定同级）；pending=待处理页 */
+   *  sequence=序列帧动画、parts=拆部件、riganim=骨骼动画（都与角色设定同级）；
+   *  pending=待处理页 */
   const [view, setView] = useState<
-    'library' | 'stages' | 'stage' | 'parts' | 'riganim' | 'pending'>('library')
+    'library' | 'stages' | 'stage' | 'sequence' | 'parts' | 'riganim' | 'pending'>('library')
   const [sel, setSel] = useState<string | null>(null)
   const [detail, setDetail] = useState<CharacterDetail | null>(null)
   const [styles, setStyles] = useState<StyleCatalog | null>(null)
@@ -766,6 +768,7 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
 
   return (
     <div className={`chars cc is-workspace${view === 'stages' ? ' is-stages' : ''}`
+      + `${view === 'sequence' ? ' is-sequence' : ''}`
       + `${view === 'parts' ? ' is-parts' : ''}`
       + `${view === 'riganim' ? ' is-riganim' : ''}`}
       style={{ '--cc-side-w': `${sideW}px` } as CSSProperties}>
@@ -790,8 +793,9 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
               onClick={() => setView('stages')}>{detail?.name || sel || ''}</button>
             <span className="cc-crumb-sep">/</span>
             <b>{view === 'stage' ? (currentStage?.title || '角色设定')
-              : view === 'parts' ? '拆部件'
-                : view === 'riganim' ? '骨骼动画' : '待处理'}</b>
+              : view === 'sequence' ? '序列帧动画'
+                : view === 'parts' ? '拆部件'
+                  : view === 'riganim' ? '骨骼动画' : '待处理'}</b>
           </div>
         )}
         {err && <div className="chars-err">⚠ {err}</div>}
@@ -808,6 +812,9 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
               : '生命阶段列表'}>
             {view === 'stage' ? '角色设定' : '生命阶段'}
           </button>
+          <button type="button" className={view === 'sequence' ? 'is-on' : ''}
+            disabled={!stageId}
+            onClick={() => stageId && setView('sequence')}>序列帧动画</button>
           <button type="button" className={view === 'parts' ? 'is-on' : ''}
             disabled={!stageId}
             onClick={() => stageId && setView('parts')}>拆部件</button>
@@ -899,6 +906,15 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
               </div>
               {/* 生命阶段列表页只放阶段本身：待处理在导航里，角色档案在「修改」弹窗里 */}
             </>
+          )}
+
+          {/* ===== 序列帧动画：3D 人偶 → 抽帧 → 参考图批量帧（按生命阶段归档） ===== */}
+          {view === 'sequence' && sel && detail && (
+            <SequenceAnimPanel key={`${detail.name}:${stageId}`}
+              character={detail.name} stage={stageId}
+              stageTitle={currentStage?.title || ''}
+              portraits={portraits} matteBackend={matteBackend}
+              onNotice={onNotice} />
           )}
 
           {/* ===== 拆部件：选图 → 选拆法 → 分层 PSD + 预览（与角色设定同级） ===== */}
@@ -1374,7 +1390,8 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
           再放一个全局立绘面板反而分不清属于哪个阶段。
           立绘是「角色设定」的一部分，只在进入某个阶段后出现。 */}
       {/* 拆部件页也要单列：选图 + 分层预览占满宽度，右边不再挂立绘 */}
-      {view !== 'stages' && view !== 'parts' && view !== 'riganim' && (
+      {view !== 'stages' && view !== 'sequence' && view !== 'parts'
+        && view !== 'riganim' && (
         <>
           <div ref={splitRef} className="cc-split" role="separator" aria-orientation="vertical"
             aria-label="拖动调整成果区宽度" title="拖动调整宽度（双击恢复默认）"

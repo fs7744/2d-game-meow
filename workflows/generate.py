@@ -90,6 +90,27 @@ def _eff_steps(eng: Engine, steps: int, fast: bool = True) -> int:
     return n
 
 
+#: 非项目作用域的产物根（角色中心「序列帧动画」的批量生成用）。
+#:
+#: 那条产线不在画布项目里（产物归角色的生命阶段），但 `vnccs_pose` /
+#: `pose_clone` 只认一个 `scope` 字符串去拼落盘目录。与其给几十个函数加一个
+#: 「输出目录」参数，不如注册一张临时表：任务开始时把 scope 指向阶段目录下的
+#: `_tmp/`，任务结束摘掉。**只在单个生成任务内有效**，别拿它做长期配置。
+_SCOPE_ROOTS: Dict[str, Path] = {}
+
+
+def register_scope_root(scope: str, root: str | Path) -> None:
+    """把某个 scope 临时指到别的目录（见 `_SCOPE_ROOTS`）。"""
+    key = str(scope or "").strip()
+    if not key:
+        raise ValueError("scope 不能为空")
+    _SCOPE_ROOTS[key] = Path(root)
+
+
+def unregister_scope_root(scope: str) -> None:
+    _SCOPE_ROOTS.pop(str(scope or "").strip(), None)
+
+
 def scope_dir(scope: str = "") -> Path:
     """项目产物目录：assets/projects/<scope>/。
 
@@ -100,6 +121,11 @@ def scope_dir(scope: str = "") -> Path:
     **清洗规则不在本文件实现**：调 `projectstore.safe_scope`（全项目唯一一份），
     否则产物和 `project.json` 会因两套规则算出不同目录名而分家。
     """
+    key = str(scope or "")
+    override = _SCOPE_ROOTS.get(key)
+    if override is not None:
+        override.mkdir(parents=True, exist_ok=True)
+        return override
     d = PROJECTS_DIR / projectstore.safe_scope(scope)
     d.mkdir(parents=True, exist_ok=True)
     return d

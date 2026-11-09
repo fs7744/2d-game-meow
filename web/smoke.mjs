@@ -124,6 +124,24 @@ function makeFetch() {
     godot: null,
   })
   let partsSplitDone = false
+  // 角色中心「序列帧动画」：人偶存档 / 概览 / 是否存过人偶图
+  let seqStudio = { pose: { bones: { head: [0, 0, 0] } }, yaw: 90, scene: null }
+  let seqStudioSaved = false
+  let seqMannequin = false
+  const seqSummary = () => ({
+    root: 'Sequence', character: 'Alice', stage: 'default',
+    poseSets: [{
+      name: '走路', count: 4, cover: '/files/seq/s1.png', created: 1794220000,
+      source: {},
+    }],
+    renders: [{
+      name: '走路-成片', poseSet: '走路', created: 1794220100,
+      total: 4, done: 2, cover: '/files/seq/r1.png',
+    }],
+    mannequins: seqMannequin
+      ? [{ name: 'mannequin_1.png', url: '/files/seq/m1.png', mtime: 1794220200 }]
+      : [],
+  })
   /** 最近一次拆件提交的 stage / 删除的产物 id */
   let partsStage = ''
   let partsDeleted = ''
@@ -665,6 +683,40 @@ function makeFetch() {
             'side-2': vm(['left', 'right'], ['right']),
           },
         }),
+      }
+    }
+    // 角色中心「序列帧动画」：概览 / 人偶存档 / 人偶图上传。
+    // **必须排在按角色名读详情的宽泛 GET 前面**，否则会被当成 CharacterDetail。
+    {
+      const u = String(url).split('?')[0]
+      const method = init.method || 'GET'
+      if (/\/characters\/[^/]+\/sequence$/.test(u)) {
+        return { ok: true, json: async () => seqSummary() }
+      }
+      if (u.endsWith('/sequence/studio')) {
+        if (method === 'PUT') {
+          try { seqStudio = JSON.parse(init.body || '{}') } catch { /* 忽略坏 body */ }
+          seqStudioSaved = true
+        }
+        return { ok: true, json: async () => ({ studio: seqStudio }) }
+      }
+      if (u.endsWith('/sequence/mannequin') && method === 'POST') {
+        seqMannequin = true
+        return { ok: true, json: async () => ({
+          name: 'mannequin_1.png', url: '/files/seq/m1.png', mtime: 1794220200,
+        }) }
+      }
+      if (/\/characters\/[^/]+\/sequence\/pose_sets$/.test(u)) {
+        return { ok: true, json: async () => ({
+          character: 'Alice', stage: 'default', count: 1,
+          items: seqSummary().poseSets,
+        }) }
+      }
+      if (/\/characters\/[^/]+\/sequence\/pose_renders$/.test(u)) {
+        return { ok: true, json: async () => ({
+          character: 'Alice', stage: 'default', count: 1,
+          items: seqSummary().renders,
+        }) }
       }
     }
     if (String(url).includes('/characters/') && (init.method || 'GET') === 'GET') {
@@ -4319,9 +4371,15 @@ async function ccCreate(doc, win) {
     (doc.querySelector('.chars.cc.is-workspace')?.getAttribute('style') || '')
       .includes('--cc-side-w'))
   const navs = [...doc.querySelectorAll('.cc-viewnav button')]
-  check('导航四项：生命阶段 / 拆部件 / 骨骼动画 / 待处理',
-    navs.length === 4 && navs.map((x) => x.textContent).join('/').includes('骨骼动画'),
-    navs.map((x) => x.textContent).join('/'))
+  const navText = navs.map((x) => (x.textContent || '').trim()).join('/')
+  check('导航五项：生命阶段 / 序列帧动画 / 拆部件 / 骨骼动画 / 待处理',
+    navs.length === 5
+    && navText === '生命阶段/序列帧动画/拆部件/骨骼动画/待处理 · 出素材 / 导出',
+    navText)
+  check('序列帧动画排在角色设定之后、拆部件之前',
+    navText.indexOf('序列帧动画') > navText.indexOf('生命阶段')
+    && navText.indexOf('序列帧动画') < navText.indexOf('拆部件'),
+    navText)
   check('列表页没有「角色设定」入口（它属于某个生命阶段）',
     !navs.map((x) => x.textContent).join('|').includes('角色设定')
     && navs.map((x) => x.textContent).join('|').includes('生命阶段')
@@ -5885,6 +5943,67 @@ async function ccCreate(doc, win) {
     genpy.includes('def portrait_expression') && genpy.includes('eg.crop_generate'))
 
   check('换装换表情场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 66b) 序列帧动画页：排在角色设定之后、拆部件之前 / 两块内容 / 设置条 / 归档列表
+{
+  const { dom, doc, win, errors, c0 } = await ccBoot()
+  await ccCreate(doc, win)
+  ccStep(doc, win, 2)
+  await ccWait(600)
+  const navs = () => [...doc.querySelectorAll('.cc-viewnav button')]
+  const navBtn = (t) => navs().find((b) => (b.textContent || '').includes(t))
+  const click = (el) => el?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+
+  check('导航里有序列帧动画（与角色设定同级）', !!navBtn('序列帧动画'))
+  click(navBtn('序列帧动画'))
+  await ccWait(900)
+
+  check('切到序列帧动画页', !!doc.querySelector('.cc-seq'))
+  check('序列帧动画页是单列布局（不挂立绘右栏）',
+    !!doc.querySelector('.chars.cc.is-workspace.is-sequence')
+    && !doc.querySelector('.cc-preview') && !doc.querySelector('.cc-split'))
+  check('面包屑是 角色名 / 序列帧动画',
+    (doc.querySelector('.cc-crumb')?.textContent || '').includes('序列帧动画'))
+  check('两块内容都在：3D 人偶 + 参考图批量帧',
+    doc.querySelectorAll('.cc-seq-tabs button').length === 2
+    && (doc.querySelector('.cc-seq-tabs')?.textContent || '').includes('3D 人偶')
+    && (doc.querySelector('.cc-seq-tabs')?.textContent || '').includes('参考图批量帧'))
+  check('默认停在 3D 人偶（第一块）',
+    (doc.querySelector('.cc-seq-tabs button.is-on')?.textContent || '').includes('3D 人偶'))
+  check('人偶编辑器与批量面板都常驻（切页只隐藏、不卸载）',
+    doc.querySelectorAll('.cc-seq-pane').length === 2
+    && doc.querySelectorAll('.cc-seq-pane.is-hidden').length === 1
+    && !!doc.querySelector('.cc-seq .pose-editor')
+    && !!doc.querySelector('.cc-seq .pose-batch'))
+
+  click([...doc.querySelectorAll('.cc-seq-tabs button')]
+    .find((b) => (b.textContent || '').includes('参考图批量帧')))
+  await ccWait(400)
+  check('切到批量帧：设置条 + 姿势集面板都在',
+    !!doc.querySelector('.cc-seq-cfg') && !!doc.querySelector('.pose-batch'))
+  const cfg = doc.querySelector('.cc-seq-cfg')
+  check('设置条有角色图 / 引擎 / 底色 / 抠图 / 像素块',
+    (cfg?.textContent || '').includes('角色图')
+    && (cfg?.textContent || '').includes('引擎')
+    && (cfg?.textContent || '').includes('底色')
+    && (cfg?.textContent || '').includes('抠图')
+    && (cfg?.textContent || '').includes('像素块'))
+  check('角色图下拉用的是本阶段立绘', (cfg?.querySelectorAll('select option').length || 0) >= 1)
+  check('本阶段的成片列表在（按生命阶段归档）',
+    (doc.querySelector('.cc-seq-history')?.textContent || '').includes('本阶段的成片')
+    && (doc.querySelector('.cc-seq-history')?.textContent || '').includes('走路-成片'))
+  check('概览显示姿势集 / 成片数量',
+    (doc.querySelector('.cc-seq-counts')?.textContent || '').includes('1 套姿势集')
+    && (doc.querySelector('.cc-seq-counts')?.textContent || '').includes('1 套成片'))
+
+  const seqCalls = calls.slice(c0).map((c) => c.url)
+  check('概览 / 人偶存档 / 姿势集都按 ?stage= 取（属于生命阶段）',
+    seqCalls.some((u) => u.includes('/characters/Alice/sequence?stage=default'))
+    && seqCalls.some((u) => u.includes('/sequence/studio?stage=default'))
+    && seqCalls.some((u) => u.includes('/sequence/pose_sets?stage=default')))
+  check('序列帧动画场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 

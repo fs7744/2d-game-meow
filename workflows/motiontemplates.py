@@ -367,7 +367,8 @@ def playback(template: Dict[str, Any], action: str = "") -> Dict[str, Any]:
             "viewMode": t["viewMode"]}
 
 
-def template_for_pose_set(project: str, pose_set: str) -> Optional[Dict[str, Any]]:
+def template_for_pose_set(project: str, pose_set: str, *,
+                          character: str = "", stage: str = "") -> Optional[Dict[str, Any]]:
     """顺着画布项目里的 ``poses/<集>/set.json`` 找 ``source.templateId``。
 
     抽帧面板选了模板就把 id 写进 ``set.json.source``；成片集又记着 ``poseSet``，
@@ -375,10 +376,11 @@ def template_for_pose_set(project: str, pose_set: str) -> Optional[Dict[str, Any
     """
     from . import poseset
 
-    if not project or not pose_set:
+    if not pose_set or not (project or character):
         return None
     doc = poseset._read_json(                                  # noqa: SLF001
-        poseset._sub(project, poseset.POSES_DIR, pose_set)    # noqa: SLF001
+        poseset._sub(project, poseset.POSES_DIR, pose_set,    # noqa: SLF001
+                     character=character, stage=stage)
         / poseset.SET_FILE)
     source = doc.get("source") if isinstance(doc, dict) else {}
     tid = str((source or {}).get("templateId") or "") if isinstance(source, dict) else ""

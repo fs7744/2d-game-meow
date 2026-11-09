@@ -25,12 +25,19 @@ import {
   fetchPoseRender, fetchProjectPoseSet, fetchProjectPoseSets, runPoseRender,
   selectPoseCandidate,
   type GodotBundle, type PoseGif, type PoseRender, type ProjectPoseSet,
+  type PoseScope,
 } from '../api'
 import type { GenNode } from '../types'
 import type { NodePatch } from '../nodes/GenNodeCard'
 
 type Props = {
-  projectId: string
+  /** 画布项目 id（老入口）。给了 `character` 时忽略它。 */
+  projectId?: string
+  /** 角色中心「序列帧动画」：产物落这个角色 / 生命阶段。 */
+  character?: string
+  stage?: string
+  /** 「本项目 / 本阶段」这类文案里的那个词 */
+  scopeLabel?: string
   node: GenNode
   onPatch: (p: NodePatch) => void
   /** 底模 / 抠图后端是全局设置 */
@@ -47,8 +54,14 @@ type Props = {
 const PLAY_MS = 125
 
 export default function PoseBatchPanel({
-  projectId, node, onPatch, model, matteBackend, charPaths, hasChar, onPreview,
+  projectId, character, stage, scopeLabel = '本项目',
+  node, onPatch, model, matteBackend, charPaths, hasChar, onPreview,
 }: Props) {
+  /** 作用域是对象，但只在角色 / 阶段 / 项目变了才换引用（否则每个 effect 都会重跑） */
+  const scope = useMemo<PoseScope>(
+    () => (character ? { character, stage } : (projectId || '')),
+    [character, stage, projectId])
+
   const [sets, setSets] = useState<ProjectPoseSet[]>([])
   const [setName, setSetName] = useState(node.params.pcPoseSet || '')
   const [outName, setOutName] = useState(node.params.pcOut || '')
@@ -86,35 +99,35 @@ export default function PoseBatchPanel({
   const renderName = node.poseRender || ''
 
   const loadSets = useCallback(async () => {
-    if (!projectId) return
+    if (!scope) return
     try {
-      const r = await fetchProjectPoseSets(projectId)
+      const r = await fetchProjectPoseSets(scope)
       setSets(r.items || [])
     } catch (e) {
       setErr(e instanceof Error ? e.message : '读姿势集失败')
     }
-  }, [projectId])
+  }, [scope])
 
   /** 拉源帧：选完姿势集立刻能看到这套动作长什么样 */
   const loadSource = useCallback(async (name: string) => {
-    if (!projectId || !name) { setSource(null); return }
+    if (!scope || !name) { setSource(null); return }
     try {
-      const r = await fetchProjectPoseSet(projectId, name)
+      const r = await fetchProjectPoseSet(scope, name)
       setSource(r.set)
     } catch {
       setSource(null)
     }
-  }, [projectId])
+  }, [scope])
 
   const loadRender = useCallback(async () => {
-    if (!projectId || !renderName) { setRender(null); return }
+    if (!scope || !renderName) { setRender(null); return }
     try {
-      const r = await fetchPoseRender(projectId, renderName)
+      const r = await fetchPoseRender(scope, renderName)
       setRender(r.render)
     } catch {
       setRender(null)          // 还没生成过 / 文件夹被删：不当作错误
     }
-  }, [projectId, renderName])
+  }, [scope, renderName])
 
   useEffect(() => { void loadSets() }, [loadSets])
   useEffect(() => { void loadSource(setName) }, [loadSource, setName])
@@ -129,7 +142,7 @@ export default function PoseBatchPanel({
   }, [])
 
   const run = useCallback(async (frames: number[]) => {
-    if (!projectId) { setErr('没有项目 id'); return }
+    if (!scope) { setErr('没有项目 id'); return }
     const set = (setName || '').trim()
     const out = (outName || '').trim() || `${set}-成片`
     if (!set) { setErr('先选一个姿势集'); return }
@@ -141,17 +154,17 @@ export default function PoseBatchPanel({
       // 同名先当成"继续往这个文件夹里加候选"；但如果里面是**另一套姿势集**的
       // 成片，帧表对不上，必须让用户换个名字（否则会张冠李戴）
       try {
-        await createPoseRender(projectId, out, set, node.params.prompt || '',
+        await createPoseRender(scope, out, set, node.params.prompt || '',
           { model, matteBackend })
       } catch (e) {
-        const cur = await fetchPoseRender(projectId, out).catch(() => null)
+        const cur = await fetchPoseRender(scope, out).catch(() => null)
         if (!cur) throw e
         if (cur.render.poseSet !== set) {
           throw new Error(`「${out}」这个文件夹是姿势集「${cur.render.poseSet}」的成片，`
             + '换一个输出名，或者把姿势集选回那一套')
         }
       }
-      const r = await runPoseRender(projectId, out, {
+      const r = await runPoseRender(scope, out, {
         frames,
         candidates,
         char_image: charPaths[0],
@@ -190,30 +203,30 @@ export default function PoseBatchPanel({
     } finally {
       setBusy(false)
     }
-  }, [projectId, setName, outName, charPaths, candidates, node.params,
+  }, [scope, setName, outName, charPaths, candidates, node.params,
     model, matteBackend, onPatch, stopPlay])
 
   const onSelect = useCallback(async (frame: number, cand: number) => {
-    if (!projectId || !renderName) return
+    if (!scope || !renderName) return
     try {
-      const r = await selectPoseCandidate(projectId, renderName, frame, cand)
+      const r = await selectPoseCandidate(scope, renderName, frame, cand)
       setRender(r.render)
     } catch (e) {
       setErr(e instanceof Error ? e.message : '选择失败')
     }
-  }, [projectId, renderName])
+  }, [scope, renderName])
 
   /** 导出 GIF：`kind` 决定导原始帧还是成片（成片取当前选中的候选） */
   const exportGif = useCallback(async (kind: 'src' | 'res') => {
-    if (!projectId) return
+    if (!scope) return
     const name = kind === 'src' ? (setName || '').trim() : renderName
     if (!name) { setErr(kind === 'src' ? '先选一个姿势集' : '还没有成片可导'); return }
     setErr('')
     setGifBusy(kind)
     try {
       const r = kind === 'src'
-        ? await exportPoseSetGif(projectId, name)
-        : await exportPoseRenderGif(projectId, name)
+        ? await exportPoseSetGif(scope, name)
+        : await exportPoseRenderGif(scope, name)
       if (kind === 'src') setSrcGif(r.gif)
       else setResGif(r.gif)
       if (r.gif.skipped > 0) {
@@ -224,15 +237,15 @@ export default function PoseBatchPanel({
     } finally {
       setGifBusy('')
     }
-  }, [projectId, setName, renderName])
+  }, [scope, setName, renderName])
 
   /** 导出 Godot 4 工程包：解到工程根目录就能播，不用在引擎里拼 */
   const exportGodot = useCallback(async () => {
-    if (!projectId || !renderName) return
+    if (!scope || !renderName) return
     setErr('')
     setGodotBusy(true)
     try {
-      const r = await exportPoseRenderGodot(projectId, renderName, {
+      const r = await exportPoseRenderGodot(scope, renderName, {
         stem: renderName, anim: renderName, fps: gifFps, loop: true,
       })
       setGodot(r.bundle)
@@ -242,7 +255,7 @@ export default function PoseBatchPanel({
     } finally {
       setGodotBusy(false)
     }
-  }, [projectId, renderName, gifFps])
+  }, [scope, renderName, gifFps])
 
   const frames = render?.frames || []
   const srcFrames = source?.frames || []
@@ -284,7 +297,7 @@ export default function PoseBatchPanel({
   /** 只有两边都有、且勾了对照，才并排；否则单栏（不摆一个空相框） */
   const paired = !!render && srcFrames.length > 0 && compare
 
-  if (!projectId) {
+  if (!scope) {
     return <div className="src-note">需要项目 id（先把项目保存一次）</div>
   }
 
@@ -297,14 +310,14 @@ export default function PoseBatchPanel({
           onChange={(e) => { stopPlay(); setSetName(e.target.value) }}
           title="人偶编辑器里「存为姿势集」存下来的那一套"
         >
-          <option value="">{sets.length ? '（选姿势集）' : '（这个项目还没有姿势集）'}</option>
+          <option value="">{sets.length ? '（选姿势集）' : `（${scopeLabel}还没有姿势集）`}</option>
           {sets.map((s) => (
             <option key={s.name} value={s.name}>{s.name}（{s.count} 帧）</option>
           ))}
         </select>
         <button
           type="button" className="pose-batch-btn" onClick={() => void loadSets()}
-          disabled={running} title="重新扫一遍项目里的姿势集"
+          disabled={running} title="重新扫一遍本地的姿势集"
         >刷新</button>
       </div>
 
@@ -412,7 +425,7 @@ export default function PoseBatchPanel({
           value={outName}
           placeholder={setName ? `${setName}-成片` : '输出文件夹名'}
           onChange={(e) => setOutName(e.target.value)}
-          title={'存到本项目的 pose_frames/<这个名字>/。已存在就**接着往里加**（候选只增不删）'}
+          title={`存到${scopeLabel}的 pose_frames/<这个名字>/。已存在就接着往里加（候选只增不删）`}
         />
         <label className="pose-batch-n" title="每帧出几个候选（多了能挑，但每张约 25 秒）">
           候选
