@@ -75,6 +75,16 @@
 后端回归 **125 passed / 5 skipped**。真机截图
 `tests/_out/ui_review/parts/23f-cc-parts.png`。
 
+> 真机实测（1024px / 25 步 / seed 42，动漫立绘）：See-Through **147.2 秒**产出
+> **20 层**（back hair / face / topwear / legwear / handwear-l/r / eyewhite /
+> irides / eyelash / eyebrow / ears / neck / mouth / nose / front hair），
+> PSD **5463 KB / 1024×1024**，psd_tools 逐层读回层名与顺序正确；
+> 爆炸图路线切 6 块 + 合成 PSD 约 4 秒。
+>
+> ⚠️ 取舍：这里的「爆炸图」是**几何切件**（按人形比例切 6 块）。pixelforge 里
+> 另有一条 Qwen 生成「爆炸拆解图」再按连通域切块的路线（约 45s/张，头部更准、
+> 但有概率漏件），还没接进来；接口按「层 + 画布坐标」设计，换来源不用改前端。
+
 ## 2026-11-09 · 立绘工具箱：真换装 / 真换表情
 
 用户要求把「换装 / 换表情」也做成立绘悬浮工具箱里的动作，形态跟扣背景 /
