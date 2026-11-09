@@ -76,6 +76,7 @@ from PIL import Image
 from workflows import generate as gen
 from workflows import assetdb
 from workflows import characters
+from workflows import stages
 from workflows import charactergen
 from workflows import clothesgen
 from workflows import directions
@@ -316,11 +317,14 @@ def _run(job_id: str, workflow: str, params: Dict[str, Any]) -> None:
                 publish = (characters.publish_portrait
                            if str(pub.get("kind") or "") == "portrait"
                            else characters.publish_image)
+                is_portrait = str(pub.get("kind") or "") == "portrait"
+                extra = ({"stage_id": str(pub.get("stage") or "")}
+                         if is_portrait else {})
                 job["result"]["published"] = publish(
                     name=str(pub.get("character") or ""), src=str(src),
                     costume=str(pub.get("costume") or "Naked"),
                     emotion=str(pub.get("emotion") or "neutral"),
-                    matte=bool(pub.get("matte")),
+                    matte=bool(pub.get("matte")), **extra,
                 )
             except Exception as pexc:                     # noqa: BLE001
                 # 落盘失败**不能**把整个任务判失败：图已经生成出来了，
@@ -1284,6 +1288,8 @@ def _asset_url(path: str) -> str:
 class CharacterCreateReq(BaseModel):
     name: str
     info: Dict[str, Any] = Field(default_factory=dict)
+    #: 角色级描述（创建时可选）。用户明确不要参考图了。
+    description: str = ""
 
 
 class CharacterRenameReq(BaseModel):
@@ -1347,7 +1353,8 @@ def recent_character_tasks_api(limit: int = 50) -> Dict[str, Any]:
 def create_character_api(req: CharacterCreateReq) -> Dict[str, Any]:
     """建角色。已存在 → 409（不静默覆盖）。"""
     try:
-        cfg = characters.create_character(req.name, req.info or None)
+        cfg = characters.create_character(req.name, req.info or None,
+                                          req.description)
     except characters.CharacterConflict as exc:
         # **必须先判冲突**：CharacterConflict 是 ValueError 的子类，
         # 顺序反了的话 409 会被 400 吃掉，前端就只能拿到一句"名字不合法"
@@ -1400,10 +1407,81 @@ def update_character_info(name: str, req: Dict[str, Any]) -> Dict[str, Any]:
         cfg = characters.load_config(safe, strict=True)
         if cfg is None:
             raise HTTPException(404, f"没有这个角色：{safe}")
-        info = cfg.setdefault("character_info", {})
-        info.update({k: v for k, v in (req or {}).items() if k != "name"})
+        stages.normalize(cfg)
+        stages.update_info(cfg, {k: v for k, v in (req or {}).items() if k != "name"})
         characters.save_config(safe, cfg)
-    return {"name": safe, "character_info": info}
+    return {"name": safe, "character_info": cfg["character_info"]}
+
+
+class StagesSaveReq(BaseModel):
+    #: 前端提交**完整数组**，数组顺序就是展示顺序（拖拽排序直接落这个）
+    stages: List[Dict[str, Any]] = Field(default_factory=list)
+    active_stage: str = ""
+    description: Optional[str] = None
+
+
+def _stages_payload(safe: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """阶段列表 + 每阶段几张立绘缩略图，列表页一行一条直接铺。"""
+    items = []
+    for st in cfg.get("stages") or []:
+        ps = characters.list_portraits(safe, stage_id=st["id"])
+        items.append({
+            "id": st["id"],
+            "title": st.get("title") or "",
+            "description": st.get("description") or "",
+            "info": st.get("info") or {},
+            "portrait_count": len(ps),
+            "portraits": [{"url": _asset_url(x["file"]), "name": x["name"]}
+                          for x in ps[:5]],
+        })
+    return {
+        "name": safe, "stages": items,
+        "active_stage": cfg.get("active_stage") or "",
+        "description": cfg.get("description") or "",
+    }
+
+
+@app.get("/characters/{name}/stages")
+def character_stages_api(name: str) -> Dict[str, Any]:
+    """生命阶段列表。老角色第一次进来会补一个「初始设定」阶段并落盘。"""
+    try:
+        safe = characters.ensure_safe_name(name, "角色名")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not characters.character_exists(safe):
+        raise HTTPException(404, f"没有这个角色：{safe}")
+    with characters.storage_lock(characters.character_dir(safe)):
+        cfg = stages.normalize(characters.load_config(safe) or {})
+        characters.save_config(safe, cfg)
+    return _stages_payload(safe, cfg)
+
+
+@app.put("/characters/{name}/stages")
+def save_character_stages_api(name: str, req: StagesSaveReq) -> Dict[str, Any]:
+    """全量保存阶段（新建 / 改名 / 描述 / 拖拽排序 / 删除 / 切换激活）。
+
+    **只删列表里的条目，不删磁盘立绘** —— 用户可能还想找回那段设定图。
+    切换激活阶段会把它的 info 写回顶层 `character_info`，现有全部出图链路
+    不需要带 stage 参数就自动跟着当前阶段走。
+    """
+    try:
+        safe = characters.ensure_safe_name(name, "角色名")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    with characters.storage_lock(characters.character_dir(safe)):
+        cfg = characters.load_config(safe, strict=True)
+        if cfg is None:
+            raise HTTPException(404, f"没有这个角色：{safe}")
+        stages.normalize(cfg)
+        new_list = stages.sanitize(req.stages)
+        if not new_list:
+            raise HTTPException(400, "至少要保留一个生命阶段")
+        cfg["stages"] = new_list
+        stages.set_active(cfg, req.active_stage or new_list[0]["id"])
+        if req.description is not None:
+            cfg["description"] = str(req.description).strip()[:1000]
+        characters.save_config(safe, cfg)
+    return _stages_payload(safe, cfg)
 
 
 @app.put("/characters/{name}/rename")
@@ -1869,7 +1947,7 @@ def character_from_image_api(req: CharacterFromImageReq) -> Dict[str, Any]:
 
 
 @app.get("/characters/{name}/portraits")
-def character_portraits_api(name: str) -> Dict[str, Any]:
+def character_portraits_api(name: str, stage: str = "") -> Dict[str, Any]:
     """这个角色的**全部立绘**（新的在前）。
 
     立绘以前混在 `Sprites/<服装>/neutral/` 里，被当成第 1 帧播进试玩台。
@@ -1882,7 +1960,7 @@ def character_portraits_api(name: str) -> Dict[str, Any]:
     if not characters.character_exists(safe):
         raise HTTPException(404, f"没有这个角色：{safe}")
     items = []
-    for p in characters.list_portraits(safe):
+    for p in characters.list_portraits(safe, stage_id=stage or None):
         items.append({
             "url": _asset_url(p["file"]),
             "path": p["file"],
@@ -1953,8 +2031,9 @@ def character_generate_api(name: str, req: CharacterGenerateReq) -> Dict[str, An
     if req.workflow not in allowed:
         raise HTTPException(400, f"角色出图只支持 {'/'.join(allowed)}")
 
-    cfg = characters.load_config(safe) or {}
+    cfg = stages.normalize(characters.load_config(safe) or {})
     info = cfg.get("character_info") or {}
+    active_stage = str(cfg.get("active_stage") or "")
     if req.prompt.strip():
         prompt = req.prompt.strip()
     else:
@@ -1982,6 +2061,8 @@ def character_generate_api(name: str, req: CharacterGenerateReq) -> Dict[str, An
         "transparent": str(info.get("background_color") or "").lower()
         == "transparent",
         "publish": {"character": safe, "costume": costume, "emotion": emotion,
+                    # 立绘归到当前生命阶段；阶段编辑页的右栏只显示这一阶段的图
+                    "stage": active_stage,
                     # 立绘是「长什么样」，跟动作帧不是一类东西
                     "kind": "portrait",
                     # 没给就按幕布色决定：绿/蓝/品红自动抠，白/灰不动
@@ -1992,7 +2073,7 @@ def character_generate_api(name: str, req: CharacterGenerateReq) -> Dict[str, An
     if req.workflow == "w2":
         # 换装：底图优先用这套服装的**最新立绘**（立绘才是定妆图），
         # 没有立绘的老角色再退回动作帧。
-        all_p = characters.list_portraits(safe)          # 新的在前
+        all_p = characters.list_portraits(safe, active_stage)   # 本阶段的立绘，新的在前
         same = [p["file"] for p in all_p if p["costume"] == costume]
         base = (same or [p["file"] for p in all_p] or [""])[0]
         if not base:

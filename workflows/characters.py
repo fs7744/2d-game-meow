@@ -39,6 +39,7 @@ import tempfile
 import threading
 import time
 import uuid
+from workflows import stages as stages_mod
 from contextlib import contextmanager
 from typing import Any, Dict, Iterator, List, Optional
 
@@ -189,14 +190,21 @@ def sheets_dir(name: str, costume: str = "Naked", emotion: str = "neutral") -> s
                            ensure_safe_name(emotion, "表情名"))
 
 
-def portraits_dir(name: str, costume: str = "", emotion: str = "") -> str:
-    """**立绘**目录（跟动作帧分开）。
+def portraits_dir(name: str, costume: str = "", emotion: str = "",
+                  stage_id: str = "") -> str:
+    """**立绘**目录（跟动作帧分开），按生命阶段分目录。
 
     为什么必须分开（用户 2026-11-08 明确要求）：立绘是「这个角色长什么样」的定妆图，
     动作帧是「这个角色怎么动」的素材。以前立绘被当成 `Sprites/<服装>/neutral/` 里的
     第 1 帧，于是试玩台会把一张站桩图当动画播、图集导出里也混着它。
+
+    `stage_id="default"`（或空）走老位置 `Portraits/<服装>/<表情>/`，已有立绘
+    原地不动；其它阶段落 `Portraits/s_<id>/<服装>/<表情>/`。
     """
     parts = [character_dir(name), "Portraits"]
+    sub = stages_mod.stage_dir_name(stage_id) if stage_id else ""
+    if sub:
+        parts.append(sub)
     if costume:
         parts.append(ensure_safe_name(costume, "服装名"))
     if emotion:
@@ -382,6 +390,7 @@ def character_exists(name: str) -> bool:
 
 def create_character(
     name: str, info: Optional[Dict[str, Any]] = None,
+    description: str = "",
 ) -> Dict[str, Any]:
     """建一个角色：建目录 + 写 config。
 
@@ -398,9 +407,11 @@ def create_character(
         "character_path": character_dir(n),
         "folder_structure": {"main_directories": MAIN_DIRS, "emotions": list(EMOTIONS)},
         "config_version": "2.0",
+        # 角色级描述（用户 2026-11-09：创建角色只要名字 + 可选描述，不要参考图）
+        "description": str(description or "").strip()[:1000],
     }
     ensure_character_structure(n)
-    save_config(n, cfg)
+    save_config(n, stages_mod.normalize(cfg))
     return cfg
 
 
@@ -758,9 +769,9 @@ def publish_image(
 
 def publish_portrait(
     name: str, src: str, costume: str = "Naked", emotion: str = "neutral",
-    matte: bool = False, set_cover: bool = True,
+    matte: bool = False, set_cover: bool = True, stage_id: str = "",
 ) -> Dict[str, Any]:
-    """把一张**立绘**存进 `Portraits/<服装>/<表情>/`。
+    """把一张**立绘**存进该阶段的 `Portraits/<服装>/<表情>/`。
 
     跟 `publish_image`（动作帧）的区别是**不覆盖**：同一套服装可以连出好几版立绘，
     右边「立绘」栏要能看见全部，所以文件名带时间戳递增。
@@ -770,7 +781,7 @@ def publish_portrait(
     e = ensure_safe_name(emotion, "表情名")
     if not os.path.isfile(src):
         raise FileNotFoundError(f"要收编的立绘不存在：{src}")
-    target = portraits_dir(n, c, e)
+    target = portraits_dir(n, c, e, stage_id=stage_id)
     os.makedirs(target, exist_ok=True)
     index = len(_images_in(target)) + 1
     stamp = time.strftime("%Y%m%d_%H%M%S")
@@ -800,22 +811,27 @@ def publish_portrait(
             cover = ""
     return {
         "character": n, "costume": c, "emotion": e, "kind": "portrait",
+        "stage": str(stage_id or ""),
         "path": out, "file": fname, "index": index, "cover": cover,
         "matte": matte_path or "", "matte_error": matte_err or "",
     }
 
 
-def list_portraits(name: str) -> List[Dict[str, Any]]:
-    """这个角色的**全部立绘**（新的在前）。
+def list_portraits(name: str, stage_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """立绘列表（新的在前）。`stage_id=None` 扫全部阶段，给了就只看那一个。
 
-    返回带服装/表情与落盘时间，前端右边「立绘」栏直接铺成画廊。
+    默认阶段（"default"）用的是 `Portraits/` 老位置，遍历时要跳过别的阶段
+    目录（`s_*`），否则会把其它阶段的设定图混进来。
     """
     n = ensure_safe_name(name, "角色名")
-    root = portraits_dir(n)
+    root = portraits_dir(n, stage_id=stage_id or "")
     if not os.path.isdir(root):
         return []
+    legacy_only = (stage_id == stages_mod.DEFAULT_ID)
     out: List[Dict[str, Any]] = []
-    for dirpath, _dirs, files in os.walk(root):
+    for dirpath, dirs, files in os.walk(root):
+        if legacy_only and os.path.abspath(dirpath) == os.path.abspath(root):
+            dirs[:] = [d for d in dirs if not d.startswith("s_")]
         for f in files:
             if os.path.splitext(f)[1].lower() not in IMAGE_EXTS:
                 continue

@@ -2,7 +2,7 @@
  * 角色库 —— 角色中心的**默认首页**，占满整个页面。
  *
  * 旧版把角色库挤在左边 220px 的窄栏里，一进角色中心看到的是一堆表单；
- * 现在先看到所有角色：大图、名字、贴在图片上的标签，再点卡片进四步工作台。
+ * 现在先看到所有角色：大图、名字、贴在图片上的标签，再点卡片进该角色的生命阶段列表。
  *
  * 数据分工：
  *   磁盘   = 封面 / 精灵帧 / 属性 config（生成产线用）
@@ -15,7 +15,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   type CharacterSummary,
-  createCharacter, createCharacterFromImage, uploadImage,
+  createCharacter,
   getLibrary, savePrefsApi, updateCharacterMeta,
 } from '../api'
 import { COSTUME_LABEL, STYLE_LABEL, TAG_LABEL, zh } from '../labels'
@@ -27,7 +27,7 @@ type Props = {
   items: CharacterSummary[]
   loading: boolean
   err: string
-  /** 点卡片进四步工作台 */
+  /** 点卡片进该角色的生命阶段列表 */
   onOpen: (name: string) => void
   /** 创建成功后：主组件刷新列表并进入工作台 */
   onCreated: (name: string) => void | Promise<void>
@@ -99,8 +99,7 @@ export default function CharacterLibrary({
   /* ---------------- 创建角色 ---------------- */
   const [createOpen, setCreateOpen] = useState(false)
   const [newName, setNewName] = useState('')
-  const [cloneFile, setCloneFile] = useState<File | null>(null)
-  const [clonePreview, setClonePreview] = useState('')
+  const [newDesc, setNewDesc] = useState('')
   const [busy, setBusy] = useState(false)
   const [createErr, setCreateErr] = useState('')
 
@@ -109,21 +108,14 @@ export default function CharacterLibrary({
     setCreateOpen(true)
   }
   const closeCreate = () => {
-    setCreateOpen(false); setCloneFile(null); setClonePreview('')
+    setCreateOpen(false); setNewDesc('')
   }
   const doCreate = async () => {
     const name = newName.trim()
     if (!name || busy) return
     setBusy(true); setCreateErr('')
     try {
-      if (cloneFile) {
-        const up = await uploadImage(cloneFile)
-        await createCharacterFromImage({
-          name, image: up.path, background_color: 'green',
-        })
-      } else {
-        await createCharacter(name)
-      }
+      await createCharacter(name, undefined, newDesc.trim())
       setNewName(''); closeCreate()
       onNotice(`已建角色「${name}」`)
       await onCreated(name)
@@ -209,7 +201,7 @@ export default function CharacterLibrary({
         <div className="charlib-head-title">
           <h1>角色库</h1>
           <span className="charlib-count">{items.length} 个角色</span>
-          <span className="charlib-head-sub">点卡片进入四步工作台 · 素材按角色归档</span>
+          <span className="charlib-head-sub">点卡片进入生命阶段列表 · 素材按角色归档</span>
         </div>
         <button type="button" className="cc-btn primary charlib-new"
           onClick={openCreate}>＋ 新建角色</button>
@@ -343,23 +335,17 @@ export default function CharacterLibrary({
         <div className="charlib-mask" onClick={closeCreate}>
           <div className="charlib-create" onClick={(e) => e.stopPropagation()}>
             <h2>新建角色</h2>
-            <p>角色会存成一个独立档案，之后所有素材都挂在它下面。</p>
+            <p>只需一个名字。进去后再按「生命阶段」分别做角色设定与立绘。</p>
             <label className="charlib-field">角色名
               <input value={newName} placeholder="例：白色猫骑士"
                 onChange={(e) => setNewName(e.target.value)}
                 onKeyDown={(e) => { if (e.key === 'Enter') void doCreate() }} />
             </label>
-            <label className="charlib-field">参考图（可选）
-              <input type="file" accept="image/png,image/jpeg,image/webp,image/bmp"
-                onChange={(e) => {
-                  const f = e.target.files?.[0] ?? null
-                  setCloneFile(f)
-                  setClonePreview(f ? URL.createObjectURL(f) : '')
-                }} />
+            <label className="charlib-field">描述（可选）
+              <textarea rows={3} value={newDesc}
+                placeholder="例：白毛猫耳骑士，幼年与成年是两套不同设定"
+                onChange={(e) => setNewDesc(e.target.value)} />
             </label>
-            {clonePreview && (
-              <img className="charlib-clone-preview" src={clonePreview} alt="参考图" />
-            )}
             {createErr && <p className="charlib-err">{createErr}</p>}
             <div className="charlib-dialog-actions">
               <button type="button" className="cc-btn ghost" onClick={closeCreate}>取消</button>

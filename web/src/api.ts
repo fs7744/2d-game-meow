@@ -834,9 +834,11 @@ export function runPoseRender(
 }
 
 
+/** 创建角色：只要名字 + 可选描述（用户 2026-11-09 明确不要参考图了）。 */
 export function createCharacter(name: string,
-  info?: Record<string, unknown>): Promise<{ name: string; config: unknown }> {
-  return req('/characters', { method: 'POST', body: JSON.stringify({ name, info: info || {} }) })
+  info?: Record<string, unknown>, description = ''): Promise<{ name: string; config: unknown }> {
+  return req('/characters', { method: 'POST',
+    body: JSON.stringify({ name, info: info || {}, description }) })
 }
 
 export function fetchCharacter(name: string): Promise<CharacterDetail> {
@@ -892,10 +894,43 @@ export type PortraitItem = {
   mtime: number
 }
 
-export async function fetchPortraits(name: string): Promise<PortraitItem[]> {
+export async function fetchPortraits(name: string, stage = ''): Promise<PortraitItem[]> {
+  const q = stage ? `?stage=${encodeURIComponent(stage)}` : ''
   const r = await req<{ count: number; items: PortraitItem[] }>(
-    `/characters/${encodeURIComponent(name)}/portraits`)
+    `/characters/${encodeURIComponent(name)}/portraits${q}`)
   return r.items || []
+}
+
+/* ---------------- 角色生命阶段 ---------------- */
+
+/** 一个阶段 = 一套独立角色设定 + 自己的立绘。数组顺序即展示顺序。 */
+export type StageItem = {
+  id: string
+  title: string
+  description: string
+  info: Record<string, unknown>
+  portrait_count: number
+  portraits: Array<{ url: string; name: string }>
+}
+export type StagesPayload = {
+  name: string
+  stages: StageItem[]
+  active_stage: string
+  description: string
+}
+
+export function fetchStages(name: string): Promise<StagesPayload> {
+  return req(`/characters/${encodeURIComponent(name)}/stages`)
+}
+
+/** 全量保存：新建 / 改名 / 描述 / 拖拽排序 / 删除 / 切换激活都走这一条。 */
+export function saveStages(name: string, body: {
+  stages: StageItem[]
+  active_stage: string
+  description?: string
+}): Promise<StagesPayload> {
+  return req(`/characters/${encodeURIComponent(name)}/stages`,
+    { method: 'PUT', body: JSON.stringify(body) })
 }
 
 /** 给角色出图；出完后端自动按官方命名收进角色目录 */

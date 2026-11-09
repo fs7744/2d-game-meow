@@ -22,6 +22,70 @@
 
 ---
 
+## 2026-11-09 · 角色中心重构：生命阶段（一个角色多套设定）
+
+用户明确四点：① 创建角色只要名字 + 可选描述，**不要参考图**；② 进角色后是
+**生命阶段列表页**，每行 title / 描述 / 几张立绘设定图，可新建、拖拽排序、点击
+进入编辑；③ 阶段编辑页 = 原「定形象」内容 + 立绘，改名「**角色设定**」，并加
+「从已有阶段导入设定」快捷方式（**不导入立绘**）；④ 原「出素材 / 导出」内容
+一字不动，整体挪到单独的「**待处理 · 供参考**」页，后面再定。
+用户还说「现有的测试数据都不管」，所以不迁就旧角色数据与旧用例。
+
+### 数据模型（`workflows/stages.py`）
+
+阶段列表、顺序、角色描述放在角色自己的 `config.json` 里，**数组顺序即展示顺序**，
+不额外建表：
+
+```json
+{ "description": "...", "active_stage": "default",
+  "stages": [{"id": "default", "title": "初始设定", "description": "", "info": {...}}],
+  "character_info": {...} }
+```
+
+- `character_info` 始终是**当前激活阶段 info 的镜像**：现有全部出图 API
+  （`/prompt`、`/generate`、姿势/表情/图集）都不用带 stage 参数，切换阶段就等于
+  切换「当前设定」。`update_character_info` 也同步写回阶段，避免下次 normalize 吞掉改动。
+- 立绘按阶段分目录：`Portraits/<服装>/<表情>/` 是默认阶段的老位置（已有立绘原地不动），
+  其它阶段落 `Portraits/s_<id>/...`；`list_portraits(name, stage_id)` 过滤，默认阶段
+  遍历时跳过 `s_*`。删阶段只从列表移除，**不删磁盘文件**。
+- 老角色第一次读 stages 自动补一个「初始设定」阶段（info = 原 character_info）。
+- 新端点：`GET/PUT /characters/{name}/stages`（PUT 是全量数组：新建 / 改名 / 描述 /
+  排序 / 删除 / 激活都走它，服务端 sanitize 限 50 条、去重 id）；`POST /characters`
+  收 `description`；`/portraits?stage=` 按阶段取；`/generate` 的 publish 带
+  `stage`，worker 按阶段目录收编立绘。
+
+### 前端四层
+
+`CharactersPage` 的 `view` 从 `library/workspace` 改成
+`library / stages / stage / pending`，四步 `StepBar`、`activeStep`、`computeProgress`
+整套删除，换成 `.cc-viewnav` 三个入口：
+
+- **stages**：`.cc-stage-row` 一行一阶段，可编辑 title / 描述（blur 保存）、拖拽
+  ⠿ 排序（`dropStage` 整包 PUT）、显示该阶段最多 4 张立绘缩略图与张数、
+  「进入设定 →」、删除；「＋ 新建阶段」弹表单。角色档案（改名/删除/标签/备注）
+  收进 `<details>` 折叠区。
+- **stage**：标题「角色设定」，原定形象的画风/属性/prompt/生成立绘内容一字不动；
+  新增「从其它阶段导入设定」下拉 + 导入按钮，明确标注「只复制角色设定，不导入立绘」。
+  右栏 `PortraitPane` 只显示当前阶段的立绘（分页 8 张）。
+- **pending**：原第 ③ ④ 步 JSX 原样搬进来，顶部一条「待处理 · 供参考」说明。
+  右栏在 stage / pending 都常驻，任务条不会因为换页失联。
+
+`CharacterLibrary` 新建弹窗删掉参考图上传，只留名字 + 描述 textarea；
+`model.ts` 的 `STEPS[2]` 标签、App 标题、各处「定形象 / 四步 / 第 ② 步」文案
+全部改成新架构的说法。阶段样式只加在 `styles.css` 末尾统一层。
+
+### 验证
+
+`tsc -b` / `vite build` ✓、`check-hints` 34/34、**`node smoke.mjs` 784/784**
+（用例 46 重写为三层导航与阶段列表断言；新增用例 64：3 阶段列表 → 新建第 4 个 →
+拖拽把新阶段挪到首位 → 进入角色设定 → 导入其它阶段 info 且立绘张数/缩略图不变 →
+待处理页仍有出素材与导出）；新增 `tests/test_stages.py` **10 例**；
+后端 `test_stages + test_characters + test_api + test_style_neutral +
+test_qwen_workflows + test_labels` **153 passed / 5 skipped**。
+
+> 拖拽回归踩过一个坑：`dragId` 是 React state，`dragstart` 后必须等一次重渲染再
+> `drop`，否则闭包里读到的还是 null（冒烟里为此加了 120ms 等待）。
+
 ## 2026-11-09 · 画风中立：公共提示词不碰画风 + 右栏画廊限量 / 进度条常驻
 
 用户反馈「Q 版画风生成效果不对，其他画风也不能被影响，公用的提示词应该不影响

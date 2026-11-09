@@ -380,7 +380,7 @@ export function PortraitPane({
         <span className="cc-preview-count">{portraits.length} 张</span>
       </div>
       <p className="cc-preview-note">
-        立绘是「这个角色长什么样」的定妆图；动作帧在第 ③ 步产出，两者互不混用。
+        立绘是「这个角色长什么样」的定妆图；动作帧在待处理页产出，两者互不混用。
       </p>
 
       {/* 任务状态必须排在画廊**之前**：放底下时立绘一多就被挤出视口，
@@ -398,7 +398,7 @@ export function PortraitPane({
         <div className="cc-preview-empty">
           <span className="cc-preview-empty-icon">◧</span>
           <p>还没有立绘。</p>
-          <p>第 ② 步点「生成立绘」，出的每一张都会留在这里。</p>
+          <p>在「角色设定」里点「生成立绘」，出的每一张都会留在这里。</p>
         </div>
       ) : (
         <>

@@ -37,7 +37,8 @@ import {
   fetchCharacterPrompt, generateForCharacter, fetchJob, fetchCharacterTags,
   detectEmotionFaces, generateEmotions, type EmotionFrame,
   analyzeCharacter, wizardCharacter, designClothes, clothesWizard, uploadImage,
-  fetchPortraits, type PortraitItem,
+  fetchPortraits, fetchStages, saveStages,
+  type PortraitItem, type StageItem, type StagesPayload,
   generatePoses, fetchPoseDirs, exportAtlas, fetchAtlasInfo, designUnderwear,
   runPipeline, type PoseDir, type AtlasInfo,
   type CharacterPrompt, type TagCatalog,
@@ -51,13 +52,13 @@ import {
 } from '../labels'
 import {
   Adv, Blocker, Card, CostumeForm, EmotionGrid, FieldChips, PortraitPane,
-  StepBar, StepHead, StylePicker,
+  StylePicker,
   type EmotionOption, type StyleOption,
 } from './characters/Controls'
 import {
-  BG_COLORS, INFO_ADV_FIELDS, INFO_FIELDS, STEPS,
-  computeProgress, estimateSeconds, explainError,
-  type StepId, type TaskState,
+  BG_COLORS, INFO_ADV_FIELDS, INFO_FIELDS,
+  estimateSeconds, explainError,
+  type TaskState,
 } from './characters/model'
 
 type Props = {
@@ -91,8 +92,9 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
   const [items, setItems] = useState<CharacterSummary[]>([])
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState('')
-  /** 'library' = 全屏角色库（默认首页）；'workspace' = 某个角色的四步工作台 */
-  const [view, setView] = useState<'library' | 'workspace'>('library')
+  /** library=全屏角色库；stages=生命阶段列表；stage=角色设定；pending=待处理页 */
+  /** 四层：全屏库 → 生命阶段列表 → 阶段编辑（角色设定）→ 待处理页。 */
+  const [view, setView] = useState<'library' | 'stages' | 'stage' | 'pending'>('library')
   const [sel, setSel] = useState<string | null>(null)
   const [detail, setDetail] = useState<CharacterDetail | null>(null)
   const [styles, setStyles] = useState<StyleCatalog | null>(null)
@@ -115,6 +117,16 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
   const [costume, setCostume] = useState('Naked')
   /** 全部立绘（右侧「立绘」栏）。立绘在 Portraits/，跟动作帧分开。 */
   const [portraits, setPortraits] = useState<PortraitItem[]>([])
+
+  /* ---------------- 生命阶段 ---------------- */
+  const [stageData, setStageData] = useState<StagesPayload | null>(null)
+  const [stageId, setStageId] = useState('')
+  const [stageNewOpen, setStageNewOpen] = useState(false)
+  const [stageNewTitle, setStageNewTitle] = useState('')
+  const [stageNewDesc, setStageNewDesc] = useState('')
+  const [dragId, setDragId] = useState<string | null>(null)
+  const [importFrom, setImportFrom] = useState('')
+  const [stageErr, setStageErr] = useState('')
   /** 单一「抠背景」开关，默认关 —— 模型自带透明底，跑分割是用户的选择。
    *  旧版出图 / 表情 / 流水线 / 后端四处默认值各不相同。 */
   const [matte, setMatte] = useState(false)
@@ -135,7 +147,6 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
   }, [sel, enhancing, onNotice])
 
   /* ------------------------------------------------------- 步骤与任务 */
-  const [userStep, setUserStep] = useState<StepId | null>(null)
   /** 唯一任务状态，常驻右栏；替代旧版 9 个 xxxMsg + 一闪而过的 toast。 */
   const [task, setTask] = useState<TaskState | null>(null)
   const [doneFlash, setDoneFlash] = useState<{ text: string; at: number } | null>(null)
@@ -205,16 +216,16 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
   /** 刷新当前角色的全部服务端事实（配置 / 图集 / 列表），但不覆盖用户手改的 prompt，
    *  也不改当前服装 —— 新建服装后立刻刷新若把选择弹回 Naked，用户会以为没建成功。
    *  服装的合法性只在「切角色」时校验（见下面的 useEffect）。 */
-  const refresh = useCallback(async (name: string) => {
+  const refresh = useCallback(async (name: string, stage = stageId) => {
     const d = await fetchCharacter(name)
     setDetail(d)
     setDraft(d.config.character_info ?? {})
     const info = await fetchAtlasInfo(name).catch(() => null)
     setAtlasInfo(info)
-    setPortraits(await fetchPortraits(name).catch(() => []))
+    setPortraits(await fetchPortraits(name, stage).catch(() => []))
     await reload()
     return d
-  }, [reload])
+  }, [reload, stageId])
 
   /**
    * 重新拼 prompt（**不跑 PE**）。
@@ -245,7 +256,7 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
       return
     }
     let alive = true
-    setUserStep(null); setTask(null); setDoneFlash(null); setAnaResult(null)
+    setTask(null); setDoneFlash(null); setAnaResult(null)
     setEmoFrames(null); setEmoSel([])
     void fetchCharacter(sel)
       .then((d) => {
@@ -256,10 +267,19 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
       .catch((e) => { if (alive) setErr(explainError(e)) })
     refreshPrompt(sel)
     void fetchAtlasInfo(sel).then((i) => { if (alive) setAtlasInfo(i) }).catch(() => {})
-    void fetchPortraits(sel).then((p) => { if (alive) setPortraits(p) }).catch(() => {})
-    void fetchPortraits(sel).then((p) => { if (alive) setPortraits(p) }).catch(() => {})
+    void fetchPortraits(sel, stageId).then((p) => { if (alive) setPortraits(p) }).catch(() => {})
     return () => { alive = false }
-  }, [sel, refreshPrompt])
+  }, [sel, stageId, refreshPrompt])
+
+  /** 阶段列表只在换角色时拉一次；排序 / 改名由本地改完后整包 PUT。 */
+  useEffect(() => {
+    if (!sel) { setStageData(null); setStageId(''); return }
+    let alive = true
+    void fetchStages(sel)
+      .then((d) => { if (alive) { setStageData(d); setStageId(d.active_stage) } })
+      .catch((e) => { if (alive) setStageErr(explainError(e)) })
+    return () => { alive = false }
+  }, [sel])
 
   // 服装字段草稿：换角色 / 换服装时从 config 载入（AI 拆服装要能直接灌进来）
   useEffect(() => {
@@ -313,14 +333,6 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
     return { frames, groups }
   }, [detail])
 
-  const progress = useMemo(() => computeProgress({
-    hasCharacter: !!sel && !!detail,
-    portraits: portraits.length,
-    frames: assetStats.frames,
-    groups: assetStats.groups,
-    hasAtlas: !!atlasInfo?.exists,
-  }), [sel, detail, portraits, assetStats, atlasInfo])
-  const activeStep: StepId = userStep ?? progress.firstUndone
   /** 「有立绘」= 能拿它当底图（换装 / 出姿势 / 白内衣起稿）。 */
   const hasPortrait = portraits.length > 0
   /** 「有动作帧」= 表情叠加 / 导出图集 / 试玩台才有东西可看。立绘不算动作帧。 */
@@ -360,7 +372,6 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
           // onDone 放在统一成功消息之后：个别任务（表情批量）要补「N 张失败」的话术
           onDone?.(j, result)
           // 回到自动推导的步骤：刚完成的这一步会自然把主线推进一格
-          setUserStep(null)
           return
         }
         if (j.status === 'failed') {
@@ -404,17 +415,107 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
   /** 创建动作只在全屏角色库里发生；这里只负责「选中谁、进不进工作台」。 */
   const openWorkspace = useCallback((name: string) => {
     setSel(name)
-    setView('workspace')
-    setUserStep(null)
+    setView('stages')
   }, [])
 
   const backToLibrary = useCallback(() => {
     setView('library')
     setSel(null)
-    setUserStep(null)
     setTask(null)
     setDoneFlash(null)
+    setStageData(null); setStageId(''); setStageErr('')
   }, [])
+
+  /** 整包保存阶段数组（数组顺序 = 展示顺序），顺带同步激活阶段。 */
+  const persistStages = useCallback(async (next: StageItem[], active?: string) => {
+    if (!sel || !stageData) return
+    try {
+      const r = await saveStages(sel, {
+        stages: next,
+        active_stage: active ?? stageData.active_stage,
+        description: stageData.description,
+      })
+      setStageData(r); setStageErr('')
+    } catch (e) { setStageErr(explainError(e)) }
+  }, [sel, stageData])
+
+  /** 进入阶段编辑：先设为激活阶段，后端会把它的设定写回顶层
+   *  `character_info`，现有全部出图链路自动跟着这个阶段走。 */
+  const openStage = useCallback(async (id: string) => {
+    if (!sel || !stageData) return
+    try {
+      const r = await saveStages(sel, {
+        stages: stageData.stages, active_stage: id,
+        description: stageData.description,
+      })
+      setStageData(r); setStageId(id); setView('stage'); setStageErr('')
+      await refresh(sel, id)
+      refreshPrompt(sel)
+    } catch (e) { setStageErr(explainError(e)) }
+  }, [sel, stageData, refresh, refreshPrompt])
+
+  const addStage = useCallback(async () => {
+    if (!stageData) return
+    const base = stageData.stages.find((x) => x.id === stageData.active_stage)
+    const item: StageItem = {
+      id: `stage_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+      title: stageNewTitle.trim() || `生命阶段 ${stageData.stages.length + 1}`,
+      description: stageNewDesc.trim(),
+      // 从当前阶段设定起步；进编辑页还能用「导入设定」换成别的阶段
+      info: { ...(base?.info || {}) },
+      portrait_count: 0, portraits: [],
+    }
+    await persistStages([...stageData.stages, item])
+    setStageNewOpen(false); setStageNewTitle(''); setStageNewDesc('')
+  }, [stageData, stageNewTitle, stageNewDesc, persistStages])
+
+  const patchStage = useCallback((id: string, patch: Partial<StageItem>) => {
+    setStageData((d) => d ? {
+      ...d, stages: d.stages.map((x) => x.id === id ? { ...x, ...patch } : x),
+    } : d)
+  }, [])
+
+  const commitStage = useCallback(async () => {
+    if (stageData) await persistStages(stageData.stages)
+  }, [stageData, persistStages])
+
+  const removeStage = useCallback(async (id: string) => {
+    if (!stageData) return
+    if (stageData.stages.length <= 1) {
+      setStageErr('至少要保留一个生命阶段'); return
+    }
+    const next = stageData.stages.filter((x) => x.id !== id)
+    const active = stageData.active_stage === id ? next[0].id : stageData.active_stage
+    await persistStages(next, active)
+    if (stageId === id) setView('stages')
+  }, [stageData, stageId, persistStages])
+
+  /** 拖拽手柄落点：把源项挪到目标项位置，整包提交新顺序。 */
+  const dropStage = useCallback(async (targetId: string) => {
+    if (!stageData || !dragId || dragId === targetId) return
+    const arr = [...stageData.stages]
+    const from = arr.findIndex((x) => x.id === dragId)
+    const to = arr.findIndex((x) => x.id === targetId)
+    if (from < 0 || to < 0) return
+    const [moved] = arr.splice(from, 1)
+    arr.splice(to, 0, moved)
+    await persistStages(arr)
+    setDragId(null)
+  }, [stageData, dragId, persistStages])
+
+  /** 从别的阶段导入角色设定：**只复制 info，绝不碰立绘**。 */
+  const importSettings = useCallback(async () => {
+    if (!sel || !stageData || !stageId || !importFrom) return
+    const src = stageData.stages.find((x) => x.id === importFrom)
+    if (!src) return
+    const next = stageData.stages.map((x) => x.id === stageId
+      ? { ...x, info: { ...src.info } } : x)
+    await persistStages(next, stageId)
+    await refresh(sel, stageId)
+    refreshPrompt(sel)
+    onNotice(`已导入「${src.title}」的设定（立绘不导入）`)
+    setImportFrom('')
+  }, [sel, stageData, stageId, importFrom, persistStages, refresh, refreshPrompt, onNotice])
 
   const doRename = useCallback(async () => {
     if (!sel || !renameText.trim() || renameText.trim() === sel) return
@@ -445,7 +546,7 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
     } catch (e) { setErr(`保存失败：${explainError(e)}`) }
   }, [sel, refreshPrompt])
 
-  /* --------------------------------------------------- 第 ② 步：定形象 */
+  /* --------------------------------------------------- 阶段编辑：角色设定 */
   const doWizard = useCallback(async () => {
     const text = wizText.trim()
     if (!sel || !text || busy) return
@@ -506,7 +607,7 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
       () => {})
   }, [sel, runTask, costume, cPrompt, matte])
 
-  /* --------------------------------------------------- 第 ③ 步：出素材 */
+  /* --------------------------------------------------- 待处理：出素材（内容保留） */
   const doCreateCostume = useCallback(async () => {
     const name = newCostume.trim()
     if (!sel || !name || busy) return
@@ -569,7 +670,7 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
       const r = await detectEmotionFaces(sel, { costume })
       setEmoFrames(r.items)
       const hit = r.items.filter((f) => f.detected).length
-      if (r.count === 0) return '没有动作帧：表情是在动作帧上只改脸，先在第 ③ 步出素材'
+      if (r.count === 0) return '没有动作帧：表情是在动作帧上只改脸，先在待处理页出素材'
       return `${r.count} 张源帧，${hit} 张检出脸框`
         + (hit < r.count ? '（没检出的会整图重画）' : '')
     })
@@ -606,18 +707,16 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
     }))
   }, [sel, runTask, costume, pipeUnderwear, poseDir, pipeEmotions, matte])
 
-  /* ----------------------------------------------------- 第 ④ 步：导出 */
+  /* ----------------------------------------------------- 待处理：导出（内容保留） */
   const doExportAtlas = useCallback(() => {
     if (!sel) return
     void runTask('导出图集', () => exportAtlas(sel, { frame_rate: atlasFrameRate }))
   }, [sel, runTask, atlasFrameRate])
 
   /* ================================================================== 渲染 */
-  /** 下一步永远指向第一个真正没做完的步骤（不是简单的 activeStep+1：
-   *  用户手动回头看第 ② 步时，主线仍应指向真正缺的那一步）。 */
-  const nextStep = progress.firstUndone
-  const allDone = progress.done.every(Boolean)
   const currentSummary = items.find((c) => c.name === sel)
+  const stageList = stageData?.stages ?? []
+  const currentStage = stageList.find((x) => x.id === stageId)
 
   /* 默认首页：整个页面就是角色库。工作台只是「点开某个角色」之后的第二层。 */
   if (view === 'library') {
@@ -639,7 +738,11 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
       <main className="chars-detail cc-main">
         <div className="cc-backbar">
           <button type="button" className="cc-btn ghost" onClick={backToLibrary}>← 角色库</button>
-          <span>角色库 / <b>{sel || ''}</b></span>
+          <span>角色库 / <b>{sel || ''}</b>
+            {view === 'stages' && ' / 生命阶段'}
+            {view === 'stage' && ` / ${currentStage?.title || '角色设定'}`}
+            {view === 'pending' && ' / 待处理'}
+          </span>
           <span className="spacer" />
           {currentSummary?.updated_at ? (
             <span className="cc-backbar-meta">
@@ -648,7 +751,16 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
           ) : null}
         </div>
         {err && <div className="chars-err">⚠ {err}</div>}
-        <StepBar done={progress.done} active={activeStep} onPick={setUserStep} />
+        {stageErr && <div className="chars-err">⚠ {stageErr}</div>}
+        <div className="cc-viewnav">
+          <button type="button" className={view === 'stages' ? 'is-on' : ''}
+            onClick={() => setView('stages')}>生命阶段</button>
+          <button type="button" className={view === 'stage' ? 'is-on' : ''}
+            disabled={!stageId}
+            onClick={() => stageId && setView('stage')}>角色设定</button>
+          <button type="button" className={view === 'pending' ? 'is-on' : ''}
+            onClick={() => setView('pending')}>待处理 · 出素材 / 导出</button>
+        </div>
 
         {sel && detail && (
           <div className="cc-charhead">
@@ -672,58 +784,142 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
         )}
 
         <div className="chars-body cc-panel">
-          {/* ============================ ① 角色档案（创建已在全屏库完成） ============================ */}
-          {activeStep === 1 && sel && detail && (
+          {/* ============================ 生命阶段列表 ============================ */}
+          {view === 'stages' && (
             <>
-              <StepHead step={1} sub="角色已在角色库里建好。这里能改名、删除、查看标签与备注；要编辑标签，回角色库点卡片上的 ✎。" />
-              <Card title="角色档案"
-                note="标签、时间、自定义标签与备注来自本地 SQLite 元数据；生成用的属性 config 与所有图片仍在磁盘上。"
-                tone="primary">
-                <div className="cc-profile">
-                  <div><span>名字</span><b>{detail.name}</b></div>
-                  <div><span>创建时间</span><b>{fmtStamp(currentSummary?.created_at)}</b></div>
-                  <div><span>最后编辑</span><b>{fmtStamp(currentSummary?.updated_at)}</b></div>
-                  <div><span>服装</span><b>{detail.costumes.map((c) => zh(COSTUME_LABEL, c)).join(' / ') || '—'}</b></div>
-                  <div><span>已有素材</span><b>{assetStats.frames} 帧</b></div>
-                  <div><span>标签</span><b className="cc-profile-tags">
-                    {[...(currentSummary?.tags || []), ...(currentSummary?.custom_tags || [])]
-                      .map(tagLabel).join('、') || '—'}
-                  </b></div>
+              <div className="cc-stages-head">
+                <div>
+                  <h2>生命阶段</h2>
+                  <p>一个角色可以有多套设定（幼年 / 成年 / 战损…）。每行是一个阶段，
+                    拖拽 ⠿ 调整顺序，点「进入设定」编辑它的角色设定与立绘。</p>
                 </div>
-                {currentSummary?.note && <p className="cc-profile-note">备注：{currentSummary.note}</p>}
-                <div className="cc-actions">
-                  <button type="button" className="cc-btn primary cc-cta"
-                    onClick={() => setUserStep(2)}>去定形象 →</button>
-                  <button type="button" className="cc-btn ghost"
-                    onClick={() => { setRenameText(detail.name); setRenameOpen(true) }}>改名</button>
-                  <button type="button" className="cc-btn ghost"
-                    onClick={() => setPendingDelete(detail.name)}>删除角色</button>
-                </div>
-              </Card>
-              {pendingDelete && (
-                <div className="cc-confirm">
-                  <p>删掉「{pendingDelete}」？所有立绘、服装、表情会一起删。</p>
-                  <button type="button" className="cc-btn ghost"
-                    onClick={() => setPendingDelete(null)}>取消</button>
-                  <button type="button" className="cc-btn danger"
-                    onClick={() => void doDelete(pendingDelete)}>确认删除</button>
+                <button type="button" className="cc-btn primary"
+                  onClick={() => setStageNewOpen(true)}>＋ 新建阶段</button>
+              </div>
+              {stageData?.description && (
+                <p className="cc-char-desc">角色描述：{stageData.description}</p>
+              )}
+              {stageNewOpen && (
+                <div className="cc-stage-new">
+                  <label>阶段名称
+                    <input value={stageNewTitle} placeholder="例：成年 / 觉醒"
+                      onChange={(e) => setStageNewTitle(e.target.value)} />
+                  </label>
+                  <label>阶段描述（可选）
+                    <textarea rows={2} value={stageNewDesc}
+                      onChange={(e) => setStageNewDesc(e.target.value)} />
+                  </label>
+                  <div className="cc-actions">
+                    <button type="button" className="cc-btn primary"
+                      onClick={() => void addStage()}>创建阶段</button>
+                    <button type="button" className="cc-btn ghost"
+                      onClick={() => setStageNewOpen(false)}>取消</button>
+                  </div>
                 </div>
               )}
-              <div className="cc-how">
-                <b>接下来会发生什么</b>
-                <ol>
-                  <li>定形象：选外貌与画风，生成立绘</li>
-                  <li>出素材：一键生成整套姿势、表情、换装</li>
-                  <li>导出：打包图集，直接进游戏引擎</li>
-                </ol>
+              <div className="cc-stage-list">
+                {stageList.map((st, i) => (
+                  <div className="cc-stage-row" key={st.id}
+                    onDragOver={(e) => e.preventDefault()}
+                    onDrop={() => void dropStage(st.id)}>
+                    <span className="cc-stage-drag" draggable
+                      onDragStart={() => setDragId(st.id)}
+                      onDragEnd={() => setDragId(null)} title="拖拽排序">⠿</span>
+                    <span className="cc-stage-idx">{i + 1}</span>
+                    <div className="cc-stage-fields">
+                      <input value={st.title} aria-label="阶段名称"
+                        onChange={(e) => patchStage(st.id, { title: e.target.value })}
+                        onBlur={() => void commitStage()} />
+                      <textarea rows={2} value={st.description} aria-label="阶段描述"
+                        placeholder="这个阶段的描述…"
+                        onChange={(e) => patchStage(st.id, { description: e.target.value })}
+                        onBlur={() => void commitStage()} />
+                    </div>
+                    <div className="cc-stage-thumbs">
+                      {st.portraits.slice(0, 4).map((img) => (
+                        <img key={img.url} src={img.url} alt={img.name} loading="lazy" />
+                      ))}
+                      <span>{st.portrait_count} 张立绘</span>
+                    </div>
+                    <div className="cc-stage-ops">
+                      <button type="button" className="cc-btn primary"
+                        onClick={() => void openStage(st.id)}>进入设定 →</button>
+                      {stageData?.active_stage === st.id && (
+                        <span className="cc-stage-active">当前阶段</span>
+                      )}
+                      <button type="button" className="cc-btn ghost"
+                        onClick={() => void removeStage(st.id)}>删除</button>
+                    </div>
+                  </div>
+                ))}
+                {!stageList.length && (
+                  <div className="cc-preview-empty">
+                    <p>还没有生命阶段，点右上角「＋ 新建阶段」开始。</p>
+                  </div>
+                )}
               </div>
+              <Card title="待处理：出素材 / 导出"
+                note="这两块内容先原样保留在单独的待处理页，后面再参考调整。">
+                <button type="button" className="cc-btn ghost"
+                  onClick={() => setView('pending')}>打开待处理页 →</button>
+              </Card>
+              <details className="cc-stage-archive">
+                <summary>角色档案（改名 / 删除 / 标签 / 备注）</summary>
+                <Card title="角色档案"
+                  note="标签、时间、备注来自本地 SQLite 元数据；生成用的属性 config 与图片仍在磁盘上。">
+                  <div className="cc-profile">
+                    <div><span>名字</span><b>{detail?.name}</b></div>
+                    <div><span>创建时间</span><b>{fmtStamp(currentSummary?.created_at)}</b></div>
+                    <div><span>最后编辑</span><b>{fmtStamp(currentSummary?.updated_at)}</b></div>
+                    <div><span>服装</span><b>{detail?.costumes.map((c) => zh(COSTUME_LABEL, c)).join(' / ') || '—'}</b></div>
+                    <div><span>已有素材</span><b>{assetStats.frames} 帧</b></div>
+                    <div><span>标签</span><b className="cc-profile-tags">
+                      {[...(currentSummary?.tags || []), ...(currentSummary?.custom_tags || [])]
+                        .map(tagLabel).join('、') || '—'}
+                    </b></div>
+                  </div>
+                  {currentSummary?.note && <p className="cc-profile-note">备注：{currentSummary.note}</p>}
+                  <div className="cc-actions">
+                    <button type="button" className="cc-btn ghost"
+                      onClick={() => { setRenameText(detail?.name || ''); setRenameOpen(true) }}>改名</button>
+                    <button type="button" className="cc-btn ghost"
+                      onClick={() => setPendingDelete(detail?.name || '')}>删除角色</button>
+                  </div>
+                </Card>
+                {pendingDelete && (
+                  <div className="cc-confirm">
+                    <p>删掉「{pendingDelete}」？所有立绘、服装、表情会一起删。</p>
+                    <button type="button" className="cc-btn ghost"
+                      onClick={() => setPendingDelete(null)}>取消</button>
+                    <button type="button" className="cc-btn danger"
+                      onClick={() => void doDelete(pendingDelete)}>确认删除</button>
+                  </div>
+                )}
+              </details>
             </>
           )}
 
-          {/* ============================ ② 定形象 ============================ */}
-          {activeStep === 2 && sel && detail && (
+          {/* ===== 阶段编辑：角色设定（原「定形象」内容，用户要求改名） ===== */}
+          {view === 'stage' && sel && detail && (
             <>
-              <StepHead step={2} sub="这一步定的是「这个角色长什么样」。立绘是定妆图，会一直留在右边；动作素材在第 ③ 步才产出。" />
+              <div className="cc-stagehead">
+                <div>
+                  <h2>角色设定</h2>
+                  <p>阶段「{currentStage?.title || ''}」的外貌、画风与提示词；立绘在右栏。</p>
+                </div>
+                <div className="cc-import">
+                  <select value={importFrom} aria-label="选择要导入的阶段"
+                    onChange={(e) => setImportFrom(e.target.value)}>
+                    <option value="">从其它阶段导入设定…</option>
+                    {stageList.filter((x) => x.id !== stageId).map((x) => (
+                      <option key={x.id} value={x.id}>{x.title}</option>
+                    ))}
+                  </select>
+                  <button type="button" className="cc-btn" disabled={!importFrom}
+                    onClick={() => void importSettings()}>导入</button>
+                  <span className="cc-import-note">只复制角色设定，不导入立绘</span>
+                </div>
+              </div>
               <Card title="不想一项项选？直接说一句话" note="AI 会拆成结构化设定，先给你看，确认后才写进角色。">
                 <div className="cc-row">
                   <input className="chars-wizard-input" value={wizText}
@@ -920,18 +1116,20 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
                 <span className="cc-cost">单张约 25 秒 · 显存峰值 11~15GB</span>
               </div>
               {!hasPortrait && (
-                <p className="cc-tip">还没有立绘。第 ③ 步的整套动作素材都要以它为基准，先立一张。</p>
+                <p className="cc-tip">还没有立绘。待处理页的整套动作素材都要以它为基准，先立一张。</p>
               )}
             </>
           )}
 
-          {/* ============================ ③ 出素材 ============================ */}
-          {activeStep === 3 && sel && detail && (
+          {/* ===== 待处理页：原「出素材」内容原样保留 ===== */}
+          {view === 'pending' && sel && detail && (
             <>
-              <StepHead step={3} sub="所有素材都从刚才那张立绘出发，自动落到这个角色的档案里，任何一步都能单独重跑。" />
+              <div className="cc-pending-note">
+                待处理 · 供参考：出素材与导出的内容先原样放在这一页，暂不并入角色主线。
+              </div>
               {!hasSprite && (
                 <Blocker text="还没有立绘，整套姿势、换装、表情都没有基准。"
-                  action="去生成立绘" onAction={() => setUserStep(2)} />
+                  action="去角色设定" onAction={() => setView('stage')} />
               )}
               <Card title="一键出全套" tone="primary"
                 note={`按固定顺序跑完「干净起稿 → 整套姿势 → 表情」，不用自己记步骤。`}>
@@ -1089,10 +1287,10 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
             </>
           )}
 
-          {/* ============================= ④ 导出 ============================= */}
-          {activeStep === 4 && sel && detail && (
+          {/* ===== 待处理页：原「导出」内容原样保留 ===== */}
+          {view === 'pending' && sel && detail && (
             <>
-              <StepHead step={4} sub="先把素材放进场景里跑一遍，再打包成图集和坐标表，直接拿进 Godot / Unity / Aseprite。" />
+              <h2 className="cc-pending-title">导出（待处理）</h2>
               <Card title="导出前试玩验收" tone="plain"
                 note="俯视四方向 / 俯视八方向 / 横板三种视角都能试；缺哪些方向、对应白模哪个机位，会直接列在下面。">
                 <CharacterPlaytest character={sel} onApplyFps={setAtlasFrameRate} />
@@ -1150,17 +1348,11 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
           )}
         </div>
 
-        {/* 下一步：永远给一个明确的落点 */}
-        {sel && !allDone && (
+        {view !== 'stages' && (
           <div className="cc-next">
-            <span>下一步：<b>{STEPS[nextStep - 1].label}</b> · {STEPS[nextStep - 1].goal}</span>
-            <button type="button" className="cc-btn" onClick={() => setUserStep(nextStep)}>
-              前往 →
-            </button>
+            <button type="button" className="cc-btn ghost"
+              onClick={() => setView('stages')}>← 返回生命阶段</button>
           </div>
-        )}
-        {sel && allDone && (
-          <div className="cc-next is-done">✓ 这个角色已经走完全部四步，图集可以直接进游戏。</div>
         )}
       </main>
 
@@ -1174,7 +1366,7 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
         onDoubleClick={() => { setSideW(420); localStorage.setItem('meow.cc.sideW', '420') }} />
 
       {/* ---------------- 右：常驻成果 + 统一任务状态 ------------- */}
-      {sel && detail ? (
+      {(view === 'stage' || view === 'pending') && sel && detail ? (
         <PortraitPane
           character={detail.name} portraits={portraits}
           task={task} doneFlash={doneFlash} onDismissFlash={() => setDoneFlash(null)} />
@@ -1184,12 +1376,14 @@ export default function CharactersPage({ onNotice, matteBackend = 'auto' }: Prop
           <div className="cc-preview-empty">
             <span className="cc-preview-empty-icon">◧</span>
             <p>立绘是角色的定妆图，跟动作帧分开。</p>
-            <p>选定一个角色后，这里会列出它全部的立绘，点开能看大图。</p>
+            <p>进入某个生命阶段后，这里只显示该阶段的立绘设定图。</p>
           </div>
           <div className="cc-how">
-            <b>四步做出一整套素材</b>
+            <b>角色中心的三层</b>
             <ol>
-              {STEPS.map((s) => <li key={s.id}>{s.label} —— {s.result}</li>)}
+              <li>生命阶段：一个角色多套设定，可拖拽排序</li>
+              <li>角色设定：外貌、画风、提示词与该阶段立绘</li>
+              <li>待处理：出素材 / 导出（内容保留，后面再定）</li>
             </ol>
           </div>
         </aside>

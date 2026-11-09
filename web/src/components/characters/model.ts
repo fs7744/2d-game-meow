@@ -62,7 +62,7 @@ export const STEPS: StepDef[] = [
     result: '得到一个可反复使用的角色档案',
   },
   {
-    id: 2, label: '定形象',
+    id: 2, label: '角色设定',
     goal: '选外貌标签与画风，生成立绘（可以连着出好几版）。',
     result: '立绘，后面所有动作素材都以它为准',
   },
@@ -97,7 +97,7 @@ export function explainError(raw: unknown): string {
   if (msg.includes('TIMEOUT')) return `${msg}（模型还占着显存，等半分钟再试）`
   if (msg.includes('PARSE_ERROR') || msg.includes('INVALID_RESPONSE')) return `${msg}（模型这次没答成结构化结果，重试一次通常就好）`
   if (msg.includes('NO_BASE') || msg.includes('NO_SOURCE') || msg.includes('没有')) {
-    return `${msg}。先回到第 ② 步生成立绘，再来做这一步。`
+    return `${msg}。先到「角色设定」生成立绘，再来做这一步。`
   }
   return msg
 }
@@ -106,7 +106,7 @@ export function explainError(raw: unknown): string {
  *  不靠用户自己记得点到哪了。 */
 export function computeProgress(o: {
   hasCharacter: boolean
-  /** 立绘张数（`Portraits/`）。第 ② 步只看这个 —— 立绘不是动作帧。 */
+  /** 立绘张数（`Portraits/`）。角色设定只看这个 —— 立绘不是动作帧。 */
   portraits: number
   frames: number
   groups: number

@@ -121,7 +121,7 @@ export default function SpritePreview({ character, costume, emotion, onMeta }: P
           <p className="sprite-missing">
             这个角色还没有立绘。
             <br />
-            在第 ② 步「定形象」生成第一张，这里就能翻看了。
+            在「角色设定」里生成第一张，这里就能翻看了。
           </p>
         ) : state === 'idle' || !src ? (
           <p className="sprite-missing">读取素材…</p>

@@ -1811,7 +1811,7 @@ export default function App() {
               的唯一提示；视图 tab 只是加在旁边，不能把它挤出 brand。 */}
           <span className="sub">
             {view === 'characters'
-              ? '角色中心 · 四步做出一整套角色素材'
+              ? '角色中心 · 生命阶段 / 角色设定 / 待处理'
               : canvasView === 'library'
                 ? `画布库 · ${projectMeta.length} 张画布`
                 : `${projectMeta.find((p) => p.id === currentId)?.name ?? '画布'} · 节点编辑器`}
@@ -1828,7 +1828,7 @@ export default function App() {
           <button
             className={`view-tab${view === 'characters' ? ' on' : ''}`}
             onClick={() => setView('characters')}
-            title="角色中心：创建角色 → 定形象 → 出素材 → 导出图集"
+            title="角色中心：生命阶段 → 角色设定 → 待处理（出素材 / 导出）"
           >
             角色中心
           </button>

@@ -78,6 +78,20 @@ function makeFetch() {
   let canvasesOverride = null
   /** 用例可注入任意数量的立绘，用来验「不一次性全铺」 */
   let portraitsOverride = null
+  /** 生命阶段（每个 fetch 一份），PUT 全量覆盖 */
+  let stagesOverride = null
+  const defaultStages = () => ({
+    name: 'Alice', description: '一只白毛猫耳骑士',
+    active_stage: 'default',
+    stages: [{
+      id: 'default', title: '初始设定', description: '', info: {},
+      portrait_count: 3,
+      portraits: [
+        { url: '/files/p1.png', name: 'portrait_1.png' },
+        { url: '/files/p2.png', name: 'portrait_2.png' },
+      ],
+    }],
+  })
   // 全局设置（服务端权威副本）：用例可注入，用来验「重开应用不丢」
   let settings = { base_model: 'qwen-image-2.1', matte_backend: 'auto',
     loras: [], fast_mode: false }
@@ -378,8 +392,24 @@ function makeFetch() {
         }),
       }
     }
-    // 立绘列表（Portraits/，跟动作帧分开）
-    if (String(url).includes('/characters/') && String(url).endsWith('/portraits')) {
+    // 生命阶段：GET 列表 / PUT 全量保存（排序、新建、删除、激活）
+    if (String(url).includes('/characters/') && String(url).includes('/stages')) {
+      if (!stagesOverride) stagesOverride = defaultStages()
+      if ((init.method || 'GET') === 'PUT') {
+        try {
+          const body = JSON.parse(init.body || '{}')
+          if (Array.isArray(body.stages)) stagesOverride.stages = body.stages
+          if (body.active_stage) stagesOverride.active_stage = body.active_stage
+          if (body.description !== undefined) stagesOverride.description = body.description
+        } catch { /* 忽略坏 body */ }
+      }
+      return { ok: true, json: async () => ({
+        ...stagesOverride,
+        stages: stagesOverride.stages.map((x) => ({ ...x })),
+      }) }
+    }
+    // 立绘列表（Portraits/，跟动作帧分开）。带 ?stage= 也要命中
+    if (String(url).includes('/characters/') && String(url).includes('/portraits')) {
       if (portraitsOverride) {
         return { ok: true, json: async () => ({
           count: portraitsOverride.length, items: portraitsOverride }) }
@@ -1062,6 +1092,8 @@ function makeFetch() {
   fetchFn.getLastLoraCommit = () => lastLoraCommit
   fetchFn.setCanvases = (v) => { canvasesOverride = v }
   fetchFn.setPortraits = (v) => { portraitsOverride = v }
+  fetchFn.setStages = (v) => { stagesOverride = v }
+  fetchFn.getStages = () => JSON.parse(JSON.stringify(stagesOverride || defaultStages()))
   return fetchFn
 }
 
@@ -4027,9 +4059,13 @@ function ccClick(doc, win, text, sel = 'button') {
   if (el) el.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
   return !!el
 }
+/** 旧用例按步骤号切页：现在映射到三层导航。
+ *  ① / ② 是生命阶段列表与角色设定，③ / ④ 的内容都在待处理页（原样保留）。 */
 function ccStep(doc, win, id) {
-  const b = doc.querySelector(`.cc-step[data-step="${id}"]`)
-  if (b) b.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  const label = { 1: '生命阶段', 2: '角色设定', 3: '待处理', 4: '待处理' }[id]
+  const b = [...doc.querySelectorAll('.cc-viewnav button')]
+    .find((x) => (x.textContent || '').includes(label))
+  if (b && !b.disabled) b.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
   return !!b
 }
 async function ccCreate(doc, win) {
@@ -4046,7 +4082,7 @@ async function ccCreate(doc, win) {
   await ccWait(500)
 }
 
-// 46) 角色中心：一进来就是全屏角色库，点角色才进四步工作台
+// 46) 角色中心：一进来就是全屏角色库，点角色先进生命阶段列表
 {
   const { dom, doc, win, errors, c0 } = await ccBoot()
   const tabs = [...doc.querySelectorAll('.view-tab')]
@@ -4087,24 +4123,28 @@ async function ccCreate(doc, win) {
   check('右栏宽度由 CSS 变量控制（拖动条改它）',
     (doc.querySelector('.chars.cc.is-workspace')?.getAttribute('style') || '')
       .includes('--cc-side-w'))
-  const steps = [...doc.querySelectorAll('.cc-step')]
-  check('只有 4 个步骤（旧版 5 个并列 tab 已收编）',
-    steps.length === 4, steps.map((x) => x.textContent).join('/'))
-  check('步骤顺序是 创建角色 → 定形象 → 出素材 → 导出',
-    steps.map((x) => x.textContent).join('|').includes('创建角色')
-    && steps.map((x) => x.textContent).join('|').includes('定形象')
-    && steps.map((x) => x.textContent).join('|').includes('出素材')
-    && steps.map((x) => x.textContent).join('|').includes('导出'))
-  check('步骤条有完成标记（状态由真实产物推导）',
-    doc.querySelectorAll('.cc-step.is-done').length > 0,
-    String(doc.querySelectorAll('.cc-step.is-done').length))
-  check('有明确的「下一步」落点',
-    (doc.querySelector('.cc-next')?.textContent || '').includes('下一步')
-    || !!doc.querySelector('.cc-next.is-done'))
+  const navs = [...doc.querySelectorAll('.cc-viewnav button')]
+  check('三层导航：生命阶段 / 角色设定 / 待处理',
+    navs.length === 3, navs.map((x) => x.textContent).join('/'))
+  check('导航里是「角色设定」，不再叫定形象',
+    navs.map((x) => x.textContent).join('|').includes('角色设定')
+    && navs.map((x) => x.textContent).join('|').includes('生命阶段')
+    && navs.map((x) => x.textContent).join('|').includes('待处理'))
+  check('进角色后默认停在生命阶段列表',
+    !!doc.querySelector('.cc-stages-head') && !!doc.querySelector('.cc-stage-list'))
+  const row = doc.querySelector('.cc-stage-row')
+  check('每行含标题、描述、立绘缩略图与进入按钮',
+    (row?.querySelector('input')?.value || '').includes('初始设定')
+    && !!row?.querySelector('.cc-stage-fields textarea')
+    && !!row?.querySelector('.cc-stage-thumbs')
+    && [...(row?.querySelectorAll('button') || [])]
+      .some((b) => (b.textContent || '').includes('进入设定')))
+  check('有「新建阶段」入口',
+    [...doc.querySelectorAll('button')].some((b) => (b.textContent || '').includes('新建阶段')))
 
-  check('手动点步骤 ② 能回到定形象', ccStep(doc, win, 2))
+  check('点导航能进角色设定', ccStep(doc, win, 2))
   await ccWait(250)
-  check('定形象页有画风区', (doc.querySelector('.chars-style')?.textContent || '').includes('画风'))
+  check('角色设定页有画风区', (doc.querySelector('.chars-style')?.textContent || '').includes('画风'))
   check('主流程每步只有一个主按钮',
     doc.querySelectorAll('.cc-cta').length <= 1,
     String(doc.querySelectorAll('.cc-cta').length))
@@ -4491,6 +4531,7 @@ async function ccCreate(doc, win) {
 {
   const { dom, doc, win, errors, c0 } = await ccBoot()
   await ccCreate(doc, win)
+  ccStep(doc, win, 2)
   await ccWait(400)
   check('打开角色就拉立绘列表',
     calls.slice(c0).some((c) => c.url.includes('/characters/Alice/portraits')))
@@ -5205,6 +5246,7 @@ async function ccCreate(doc, win) {
     setupFetch: (f) => f.setPortraits(many),
   })
   await ccCreate(doc, win)
+  ccStep(doc, win, 2)
   await ccWait(400)
   const cards = () => [...doc.querySelectorAll('.cc-portrait')]
   const firstSrc = () => cards()[0]?.querySelector('img')?.getAttribute('src') || ''
@@ -5256,6 +5298,109 @@ async function ccCreate(doc, win) {
   check('任务条在右栏滚动时 sticky 常驻',
     /\.chars\.cc \.cc-preview > \.cc-task \{[^}]*position: sticky/.test(css))
   check('分页场景无脚本错误', errors.length === 0, errors[0] || '')
+  dom.window.close()
+}
+
+// 64) 生命阶段：列表 / 新建 / 拖拽排序 / 导入设定（不导入立绘）/ 待处理页
+{
+  const mk = (id, title, description, urls = []) => ({
+    id, title, description, info: { hair: `${id} hair` },
+    portrait_count: urls.length,
+    portraits: urls.map((u, i) => ({ url: u, name: `p_${i}.png` })),
+  })
+  const stages = [
+    mk('default', '初始设定', '', ['/files/a1.png']),
+    mk('child', '幼年', '短发', ['/files/b1.png', '/files/b2.png']),
+    mk('adult', '成年', '铠甲', []),
+  ]
+  const { dom, doc, win, errors, c0 } = await ccBoot({
+    setupFetch: (f) => f.setStages({
+      name: 'Alice', description: '一只白毛猫耳骑士',
+      active_stage: 'default', stages,
+    }),
+  })
+  await ccCreate(doc, win)
+  await ccWait(400)
+  const rows = () => [...doc.querySelectorAll('.cc-stage-row')]
+  const titles = () => rows().map((r) => r.querySelector('input')?.value || '')
+  const puts = () => calls.slice(c0)
+    .filter((c) => c.url.includes('/stages') && c.method === 'PUT')
+    .map((c) => { try { return JSON.parse(c.body || '{}') } catch { return {} } })
+
+  check('阶段列表一行一个（3 个阶段 3 行）', rows().length === 3, String(rows().length))
+  check('顺序就是后端数组顺序', titles().join('|') === '初始设定|幼年|成年',
+    titles().join('|'))
+  check('每行显示该阶段的立绘缩略图与张数',
+    rows()[1].querySelectorAll('.cc-stage-thumbs img').length === 2
+    && (rows()[1].textContent || '').includes('2 张立绘'))
+  check('每行有可拖拽手柄', rows().every((r) => !!r.querySelector('.cc-stage-drag[draggable]')))
+
+  // 新建阶段
+  ccClick(doc, win, '＋ 新建阶段')
+  await ccWait(150)
+  ccSetInput(win, doc.querySelector('.cc-stage-new input'), '觉醒')
+  const descEl = doc.querySelector('.cc-stage-new textarea')
+  Object.getOwnPropertyDescriptor(win.HTMLTextAreaElement.prototype, 'value')
+    .set.call(descEl, '金瞳')
+  descEl?.dispatchEvent(new win.Event('input', { bubbles: true }))
+  ccClick(doc, win, '创建阶段')
+  await ccWait(300)
+  check('新建阶段后多一行', rows().length === 4, String(rows().length))
+  check('新建阶段的标题与描述都写进 PUT 请求',
+    puts().some((b) => (b.stages || []).some((x) => x.title === '觉醒' && x.description === '金瞳')))
+
+  // 拖拽排序：把最后一行拖到第一行
+  const before = titles().join('|')
+  const last = rows()[rows().length - 1]
+  last.querySelector('.cc-stage-drag')?.dispatchEvent(
+    new win.Event('dragstart', { bubbles: true }))
+  // dragId 是 React state：必须等一次重渲染，否则 drop 闭包里读到的还是 null
+  await ccWait(120)
+  rows()[0].dispatchEvent(new win.Event('dragover', { bubbles: true }))
+  rows()[0].dispatchEvent(new win.Event('drop', { bubbles: true }))
+  await ccWait(300)
+  const reordered = titles().join('|')
+  check('拖拽后顺序真的变了', reordered !== before && reordered.startsWith('觉醒'),
+    `${before} → ${reordered}`)
+  check('排序落到 PUT 请求体里（数组顺序即展示顺序）',
+    puts().some((b) => (b.stages || [])[0]?.title === '觉醒'))
+
+  // 进入角色设定页：导入其它阶段的设定
+  const stageCountBefore = rows().length
+  const enter = [...rows()[0].querySelectorAll('button')]
+    .find((b) => (b.textContent || '').includes('进入设定'))
+  enter?.dispatchEvent(new win.MouseEvent('click', { bubbles: true }))
+  await ccWait(400)
+  check('阶段编辑页标题是「角色设定」',
+    (doc.querySelector('.cc-stagehead h2')?.textContent || '').includes('角色设定'))
+  check('有「从其它阶段导入设定」快捷方式',
+    (doc.querySelector('.cc-import select')?.textContent || '').includes('从其它阶段导入设定'))
+  check('明确写了不导入立绘',
+    (doc.querySelector('.cc-import-note')?.textContent || '').includes('不导入立绘'))
+  ccSetSelect(win, doc.querySelector('.cc-import select'), 'child')
+  ccClick(doc, win, '导入', '.cc-import button')
+  await ccWait(350)
+  const importPut = puts().filter((b) => (b.stages || []).some(
+    (x) => x.info?.hair === 'child hair' && x.title === '觉醒')).pop()
+  check('导入只复制 info（目标阶段 hair 变成源阶段的）', !!importPut,
+    JSON.stringify(puts().slice(-1)))
+  const moved = importPut?.stages.find((x) => x.title === '觉醒')
+  check('导入不碰立绘：张数与缩略图保持原样',
+    !!moved && moved.portrait_count === 0
+    && (moved.portraits || []).length === 0)
+  check('导入没有增删阶段', importPut?.stages?.length === stageCountBefore,
+    String(importPut?.stages?.length))
+
+  // 待处理页：出素材 / 导出内容原样保留
+  ccStep(doc, win, 3)
+  await ccWait(300)
+  check('待处理页有「供参考」标注',
+    (doc.querySelector('.cc-pending-note')?.textContent || '').includes('待处理'))
+  check('原出素材内容仍在（一键出全套）',
+    (doc.querySelector('.chars-body')?.textContent || '').includes('一键出全套'))
+  check('原导出内容仍在（导出图集）',
+    [...doc.querySelectorAll('button')].some((b) => (b.textContent || '').includes('导出图集')))
+  check('生命阶段场景无脚本错误', errors.length === 0, errors[0] || '')
   dom.window.close()
 }
 
