@@ -68,6 +68,16 @@ export default function RigStudioPage({ onNotice }: { onNotice: (s: string) => v
 
   const stageTitle = stages.find((s) => s.id === stage)?.title || ''
 
+  // 自动化核对的探针：只有 `?rigdebug=1` 才挂到 window，页面自身从不读它。
+  // `tools/rig_drag.mjs` 用真鼠标事件拖演员，靠它读锚骨世界坐标与选中态 ——
+  // 比在截图里猜坐标可靠（也不必给产品加任何测试专用 API）。
+  useEffect(() => {
+    if (!new URLSearchParams(window.location.search).has('rigdebug')) return
+    const w = window as unknown as { __rig?: unknown }
+    w.__rig = rig
+    return () => { delete w.__rig }
+  })
+
   const newBlank = () => {
     rig.resetDoc(character || 'untitled', { kind: 'blank', label: '空白工程', name: '' })
     rig.say('新建空白工程：导入分层素材后点 AutoRig')
